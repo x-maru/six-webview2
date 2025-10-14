@@ -1,0 +1,21 @@
+/* six-webview2 minimal layout */
+:root { --lh: 20px; --gw: 56px; }
+html, body { height: 100%; margin: 0; background: #0b0d12; color: #e6e6e6; }
+body { font: 13px/var(--lh) Consolas, 'Courier New', monospace; overflow: hidden; }
+
+#tabbar { height: 24px; background: #0f1117; color: #a6accd; display:flex; align-items:center; padding:0 8px; border-bottom:1px solid #1c2230; }
+#cmdbar { height: 24px; background: #0f1117; color: #a6accd; display:flex; align-items:center; padding:0 8px; border-top:1px solid #1c2230; }
+
+#pane { position: absolute; top: 24px; bottom: 24px; left: 0; right: 0; display:flex; }
+#editorViewport { position: relative; flex: 1; background: #0f1117; overflow: auto; }
+
+#editWrap { position:absolute; inset:0; display:flex; }
+#gutter { width: var(--gw); flex: 0 0 var(--gw); background: linear-gradient(#141821, #0f1117); color:#57607a; text-align:right; padding-right:6px; box-sizing:border-box; }
+#editor { flex: 1; background: transparent; color:#e6e6e6; border:0; outline:0; resize:none; font: inherit; line-height: var(--lh); tab-size: 4; white-space: pre; }
+
+/* caret overlay placeholder */
+#caretLayer { position:absolute; top:0; left:var(--gw); right:0; bottom:0; pointer-events:none; }
+.caret { position:absolute; width:2px; background: #f0f3ff; }
+
+/* active line band */
+#edstripe { position:absolute; left:0; right:0; height: var(--lh); background:#1b2231; opacity:0.7; pointer-events:none; }
