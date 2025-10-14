@@ -1,35 +1,81 @@
-# six-webview2 (skeleton)
+# six-webview2
 
-This is a minimal scaffold to prototype the six editor UI in a modern WebView (Edge/Chromium). It mirrors the HTA layout with:
+six エディタを WebView (Edge app mode 代替) 上で最小構成で再現するための最小ランチャとクライアント実装です。  
+HTA 版 six のレイアウト / THEME キーを踏襲しつつ、管理者権限不要・ローカル API なし（ブラウザピッカーのみ）で動作します。
 
-- `_six.html` – Shell HTML (tabbar, editorViewport with gutter + textarea, caret overlay, cmdbar)
-- `_six.css` – Minimal layout and theme-friendly CSS variables
-- `_six.js` – Tiny bootstrap implementing gutter, scroll, and an active-line band with j/k navigation and scrolloff=2
-- `_six-theme.js` – Theme object matching the HTA THEME API shape
-- `six.ps1` – Convenience launcher using Edge app mode as a stand-in for a native WebView2 host
+## 構成
 
-## Quick start (Windows)
+- `_six.html` : シェル (tabbar / editorViewport / gutter / textarea / caretLayer / cmdbar)
+- `_six.css` : レイアウト + THEME 反映用 CSS Variables
+- `_six.js` : 基本ロジック（`ensureScrolloff`, `updateGutter`, 行ロック骨子, :N ジャンプ）
+- `_six-theme.js` : THEME 定義 (HTA 版キー近似)
+- `six.ps1` : Edge app mode ランチャ（引数でファイル指定可、管理者権限不要）
 
-1. Open PowerShell in this folder
-2. Run: `./six.ps1`
-3. The app window opens. Click into the editor area, then use `j` / `k` to move the caret. Gutter scrolls with the text.
+## 使い方
 
-Note: This uses Edge in app mode, not a compiled WebView2 host. Replace with your native host later.
+PowerShell を本フォルダで開き:
 
-## Notes
+```
+./six.ps1                       # デモテキストを開く
+./six.ps1 sample.txt            # sample.txt を読み込み（_six.html と同じ場所を相対基点に解決）
+./six.ps1 sample.txt _six.html  # HTML を明示しつつ sample.txt を開く（Position=0: Doc, Position=1: Html）
+# または名前付き: ./six.ps1 sample.txt -Html _six.html
+```
 
-- Line-height and gutter width are parameterized via CSS variables (`--lh`, `--gw`).
-- The viewport height is clamped to whole lines using padding adjustment to avoid reflow.
-- EOF gutter area is filled using `THEME.eofGutterFillColor`.
-- The code intentionally stays minimal and independent from HTA-specific APIs.
+起動後エディタをクリックしフォーカス。`j` / `k` で行移動。`:` を押して `100` 入力で `:100` ジャンプ。
 
-## Next steps
+## 外部ファイル読み込み
 
-- Port command layer and more accurate ensureScrolloff logic
-- Implement caret overlay drawing and selection
-- Add file loading and persistence hooks
-- Migrate from Edge app mode to native WebView2 host
-移植元: HTA版six (https://github.com/x-maru/six.git)
+ランチャが `#doc=<相対パス>&name=<ファイル名>[&data=<base64>]` を付与。  
+[`_six.js`](_six.js) 内の `_loadDocFromQuery()` が fetch → 成功時テキストを LF 正規化して表示。失敗または未指定ならデモシード。  
+ブラウザ file:// 制約上、同ディレクトリ相対が安定。絶対パスは直接 fetch できない場合があるため、失敗時はピッカーをご利用ください。
 
-移植ガイド: migration-prompt-webview2.md
+### ファイルピッカー（ブラウザのみ）
+
+ローカル API やネイティブファイルダイアログは使用しません。読み込み失敗時や明示的ピック時は、ブラウザの `<input type="file">` を用います。
+
+- `:pick` … 即ブラウザピッカーを開く
+- `:pick!` … `:pick` と同等（ネイティブ専用モードは無し）
+- `:e ./`, `:e ../foo/` などのディレクトリ指定ヒントも、即ブラウザピッカーを開きます（初期ディレクトリ指定は不可）。
+
+起動後の外部ファイル読み込みは `file://`（XHR → fetch フォールバック）により行われ、失敗した場合はブラウザピッカーを案内します。
+
+## テーマ / スタイル
+
+THEME オブジェクト（[`_six-theme.js`](_six-theme.js)）を起動時に [`_applyTheme`](_six.js) が CSS Variables へ反映。  
+主変数:  
+- `--bodyBGColor`, `--lineBaseFill`  
+- `--gutterGradientStart`, `--gutterGradientEnd`  
+- `--activeLineBg`, `--gutterNumberColor`, `--activeLineNumberColor`  
+- `--eofGutterFillColor`, `--caretColor`, `--tabBarBg`, `--tabBarFg`  
+
+## 実装メモ
+
+- 行高/ガター幅: `--lh`, `--gw`（JS 側 LINE_HEIGHT と一致必須）
+- ビューポート整数行クランプ: [`clampViewportExactLines`](_six.js) が水平スクロール必要時のみ予約領域差し引き
+- スクロールオフ: [`ensureScrolloff`](_six.js) が方向別 / 中央寄せ条件 / EOF 下部余白 (+1行) を処理
+- ガター: [`updateGutter`](_six.js) が可視行だけ仮想描画 + EOF 埋め
+- キャレット帯: [`_repositionCaret`](_six.js) がアクティブ行 stripe を配置
+- :N ジャンプ: [`runCommand`](_six.js) で `:N` → 一度だけ中央寄せ
+
+## 既知の制限
+
+- WebView2 ネイティブホスト未実装（Edge app mode 仮）
+- caret 本体、選択描画、保存/再読み込み、エンコード切替未対応
+- 大容量ファイル最適化（遅延ロード / 差分再描画）未実装
+- ensureScrolloff 仕様は HTA 版完全再現の一部のみ（微調整余地）
+
+## 今後の改善候補
+
+- WebView2 (WPF / WinForms) ホスト化
+- caret / selection overlay 実装
+- ファイル保存 / 外部変更検知
+- 高度な scrolloff 中央固定モード (scrolloff=99999)
+- 行ロック安定化 (`_exactLineLockAdjust` 具体化)
+- テーマ拡張 (caret gradient / shrink / active line gradient)
+
+## ライセンス / 出典
+
+移植元: HTA 版 six (/home/ymaru/work/HTA/six/six.hta, https://github.com/x-maru/six.git)  
+ガイド: `migration-prompt-webview2.md`
 

@@ -13,14 +13,14 @@
 
 ## 成果物（受け渡し物）
 
-- PowerShell スクリプト: `app.ps1`
-  - WebView2（WinForms または WPF ホスト）を起動し、同梱の `index.html` を表示。
-- フロントエンド: `index.html`, `styles.css`, `app.js`, `theme.js`
-  - 可能な限り既存の `_six.html`, `_six.css`, `_six.run-command.js`, `_six.overlay.js` に対応。
+- PowerShell スクリプト: `six.ps1`
+  - WebView2（WinForms または WPF ホスト）を起動し、同梱の `_six.html` を表示。
+- フロントエンド: `_six.html`, `_six.css`, `_six.js`, `_six-theme.js`
 - オプション（簡易テスト用）: `spec-migration.md`（チェックリストと既知の注意点）
 
 ## 技術スタックとホスティング
 
+- Windows11標準のまま追加インストールやレジストリ変更なしの環境で動作させる
 - WebView2 ホストは以下のどちらでも可（選択理由を README に記載）
   - WPF + WebView2（推奨）
   - WinForms + WebView2
@@ -31,20 +31,20 @@
 
 ```
 / (プロジェクトルート)
-  app.ps1               # WebView2 ホスト（PowerShell）
-  index.html            # メインビュー
-  styles.css            # スタイル（エディタ・ガター・オーバーレイ等）
-  app.js                # メインロジック（ensureScrolloff, updateGutter など）
-  theme.js              # THEME 定義（bodyBGColor 等）
+  six.ps1               # WebView2 ホスト（PowerShell）
+  _six.html            # メインビュー
+  _six.css            # スタイル（エディタ・ガター・オーバーレイ等）
+  _six.js                # メインロジック（ensureScrolloff, updateGutter など）
+  _six-theme.js              # THEME 定義（bodyBGColor 等）
   README.md             # 実行方法、要件
 ```
 
 ## 初期化フロー（必須）
 
-1. ホスト（PowerShell）で WebView2 を起動し、`index.html` をロード。
-2. `index.html` 側で DOM 要素を構築（エディタ、ガター、ストライプ等）。
-3. `theme.js` で THEME を定義し、起動時に body 背景などへ適用。
-4. `app.js` 初期化: 初期高速描画 → ビューポート行数クランプ（HSB 予約込み） → ラインロック開始。
+1. ホスト（PowerShell）で WebView2 を起動し、`_six.html` をロード。
+2. `_six.html` 側で DOM 要素を構築（エディタ、ガター、ストライプ等）。
+3. `_six-theme.js` で THEME を定義し、起動時に body 背景などへ適用。
+4. `_six.js` 初期化: 初期高速描画 → ビューポート行数クランプ（HSB 予約込み） → ラインロック開始。
 5. イベント束縛（scroll/input/keyup/click）でガター/キャレット/リスト等の同期を開始。
 
 ## DOM 構成（対応関係）
@@ -56,8 +56,8 @@
 - 上部 UI
   - `#tabbar`（タブ表示）
   - `#cmdbar`（コマンド表示/入力）
-
-必要に応じて HTA 時代の id 名を踏襲。スクロールは `#editorViewport` に集約。
+- フロートパネル（#editorの右下の上にoverlay表示）
+  - `#buttonblock`（ヘルプボタン/文字コード変換などのボタンが横3 x 縦2で並ぶ）
 
 ## CSS の要点
 
@@ -74,7 +74,7 @@
 - lineBaseFill
 - caretGradient*, caretPadRem, caretShrinkRem
 
-`theme.js` で定義し、`app.js` で参照して適用。
+`_six-theme.js` で定義し、`_six.js` で参照して適用。
 
 ## コアロジック移植（関数ごとの要件）
 
@@ -174,7 +174,7 @@
 > 以下は概念例です。実装ではプロジェクトに合わせて DLL 参照や初期化を調整してください。
 
 ```powershell
-# app.ps1（概念例）
+# six.ps1（概念例）
 Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase
 # WebView2 .NET 参照を用意（プロジェクトに同梱 or 事前配置）
 
@@ -191,14 +191,14 @@ $reader = (New-Object System.Xml.XmlNodeReader $xml)
 $window = [Windows.Markup.XamlReader]::Load($reader)
 $grid   = $window.FindName('Root')
 
-# TODO: WebView2 コントロールを生成し、Source を index.html に設定
-# ex. $webview.Source = (Resolve-Path './index.html').Path
+# TODO: WebView2 コントロールを生成し、Source を _six.html に設定
+# ex. $webview.Source = (Resolve-Path './_six.html').Path
 # JS との通信用にポストメッセージやホストオブジェクトを準備
 
 $window.ShowDialog() | Out-Null
 ```
 
-## index.html（骨子）
+## _six.html（骨子）
 
 ```html
 <!doctype html>
@@ -206,9 +206,9 @@ $window.ShowDialog() | Out-Null
 <head>
   <meta charset="utf-8" />
   <title>six</title>
-  <link rel="stylesheet" href="styles.css" />
-  <script defer src="theme.js"></script>
-  <script defer src="app.js"></script>
+  <link rel="stylesheet" href="_six.css" />
+  <script defer src="_six-theme.js"></script>
+  <script defer src="_six.js"></script>
 </head>
 <body>
   <div id="tabbar"></div>
@@ -222,7 +222,7 @@ $window.ShowDialog() | Out-Null
 </html>
 ```
 
-## styles.css（骨子）
+## _six.css（骨子）
 
 ```css
 html, body { height: 100%; margin: 0; background: var(--body-bg, #111); }
@@ -232,7 +232,7 @@ html, body { height: 100%; margin: 0; background: var(--body-bg, #111); }
 #editor { position: absolute; left: 48px; right: 0; top: 0; bottom: 0; font-family: monospace; line-height: 20px; white-space: pre; overflow: hidden; }
 ```
 
-## theme.js（骨子）
+## _six-theme.js（骨子）
 
 ```javascript
 const THEME = {
@@ -246,7 +246,7 @@ document.addEventListener('DOMContentLoaded', () => {
 });
 ```
 
-## app.js（重要ロジックの骨子）
+## _six.js（重要ロジックの骨子）
 
 ```javascript
 (function(){
@@ -314,8 +314,9 @@ document.addEventListener('DOMContentLoaded', () => {
 
 ## README に記載すべき項目
 
+- 識別子や簡単な英単語を除いて日本語で書く
 - 実行要件（PowerShell バージョン、WebView2 ランタイム）
-- 実行方法（`app.ps1` の起動）
+- 実行方法（`six.ps1` の起動）
 - 既知の注意点と将来の改善項目
 
 ---

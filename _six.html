@@ -1,4 +1,4 @@
-<!doctype html>
+﻿<!doctype html>
 <html>
 <head>
   <meta charset="utf-8" />
@@ -17,13 +17,13 @@
     <div id="editorViewport">
       <div id="editWrap">
         <div id="gutter"></div>
-        <textarea id="editor" spellcheck="false"></textarea>
+  <textarea id="editor" spellcheck="false" autofocus></textarea>
         <div id="caretLayer"></div>
         <div id="edstripe" style="display:none"></div>
       </div>
     </div>
   </div>
-  <div id="cmdbar">:</div>
+  <div id="cmdbar"><span id="modestatus">[NORMAL]</span><span id="cmdprefix">:</span><input id="cmdinput" type="text" spellcheck="false" placeholder="command" /></div>
 
   <script src="_six.js"></script>
 </body>

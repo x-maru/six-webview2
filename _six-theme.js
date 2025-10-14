@@ -1,6 +1,4 @@
-// six-webview2 theme placeholder
-// Keep API surface similar to existing HTA THEME object
-
+﻿// six-webview2 theme placeholder (clean)
 window.THEME = {
   bodyBGColor: "#0b0d12",
   lineBaseFill: "#0f1117",
@@ -12,6 +10,9 @@ window.THEME = {
   activeLineNumberColor: "#a6accd",
   gutterNumberColor: "#57607a",
   caretColor: "#f0f3ff",
+  caretGradientStart: "#ff5b5b",
+  caretGradientEnd: "#d90000",
+  caretWidthPx: 2,
   tabBarBg: "#0f1117",
   tabBarFg: "#a6accd"
 };
