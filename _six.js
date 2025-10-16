@@ -20,6 +20,7 @@
   const edstripe = document.getElementById('edstripe');
   const cmdinput = document.getElementById('cmdinput');
   const modestatus = document.getElementById('modestatus');
+  const tabbarTabs = document.querySelector('#tabbar .tabs');
   // caret measure helper
   const _measureSpan = document.createElement('span');
   _measureSpan.style.cssText = 'position:absolute;visibility:hidden;white-space:pre;font:inherit;line-height:var(--lh);';
@@ -35,7 +36,24 @@
   let _mode = 'NORMAL';
   let _pendingNormal = null; // for multi-key sequences like 'gg'
   let _pendingTimer = null;
-  const buffer = { name: null, path: null, modified: false };
+  // multi-buffer model
+  const buffers = [];
+  let currentIdx = -1;
+
+  function currentBuffer(){ return (currentIdx>=0 && currentIdx<buffers.length) ? buffers[currentIdx] : null; }
+  function _addBuffer(buf){ buffers.push(buf); currentIdx = buffers.length-1; return currentBuffer(); }
+  function _switchToBuffer(i){
+    if (i<0 || i>=buffers.length) return false;
+    currentIdx = i;
+    const b = buffers[i];
+    // 反映
+    editor.value = b.text || '';
+    caretRow = 0; caretCol = 0; editor.scrollTop = 0;
+    _centerScrolloffOnce = true; ensureScrolloff({centerOnce:true});
+    _repositionCaret(); updateGutter();
+    _setTitle(); _renderTabbar();
+    return true;
+  }
 
   /*********************************************************
    * Utility
@@ -75,8 +93,10 @@
   }
 
   function _setTitle(){
-    const mark = buffer.modified ? ' *' : '';
-    if (buffer.name){ document.title = buffer.name + mark; }
+  // Windows タイトルバー（タスクバー名）にはバッファ名を出さない
+  // 透明色は使えないため不可視文字で擬似的に空表示にする
+  document.title = '\u2063';
+    _renderTabbar();
   }
 
   function _basename(p){
@@ -140,6 +160,62 @@
     } catch { return _htmlBaseURL(); }
   }
 
+  function _bufferNumberLabel(n){
+    // 1..20 => ①..⑳ (U+2460..U+2473), それ以外は素の数字
+    if (!Number.isFinite(n) || n <= 0) return ''+n;
+    if (n >= 1 && n <= 20) {
+      const code = 0x2460 + (n - 1);
+      return String.fromCharCode(code);
+    }
+    return String(n);
+  }
+
+  
+
+  function _relativeDisplayPath(full){
+    if (!full) return '';
+    try {
+      const base = new URL('.', location.href).toString();
+      const u = new URL(full, base).toString();
+      if (u.startsWith(base)) return decodeURIComponent(u.substring(base.length));
+      return full;
+    } catch { return full; }
+  }
+
+  function _renderTabbar(){
+    if (!tabbarTabs) return;
+    tabbarTabs.innerHTML = '';
+    if (buffers.length === 0){
+      const div = document.createElement('div');
+      div.className = 'tab active';
+      const nameSpan = document.createElement('span');
+      nameSpan.className = 'name';
+      nameSpan.textContent = 'six-webview2';
+      div.appendChild(nameSpan);
+      tabbarTabs.appendChild(div);
+      return;
+    }
+    buffers.forEach((b, i)=>{
+      const div = document.createElement('div');
+      div.className = 'tab' + (i===currentIdx ? ' active' : '');
+      let label = '';
+      if (b.path && /^file:\/\//i.test(b.path)){
+        label = (i===currentIdx ? (_relativeDisplayPath(b.path) || (b.name||'')) : (b.name||''));
+      } else {
+        label = b.name || '';
+      }
+      const nameSpan = document.createElement('span');
+      nameSpan.className = 'name';
+      const numLabel = _bufferNumberLabel(i+1);
+      const baseText = label || 'untitled';
+      nameSpan.textContent = (numLabel ? (numLabel + ' ') : '') + baseText;
+      div.appendChild(nameSpan);
+      if (b.modified){ const mod = document.createElement('span'); mod.className='mod'; mod.textContent='*'; div.appendChild(mod); }
+      div.addEventListener('click', ()=>{ _switchToBuffer(i); });
+      tabbarTabs.appendChild(div);
+    });
+  }
+
   function _isDirHint(s){
     if (!s) return false;
     if (s === '.' || s === '..') return true;
@@ -193,11 +269,18 @@
       const base = baseForRelative || _htmlBaseURL();
       const urlStr = _normalizeToURLString(path, base);
       const txt = await _fetchTextSmart(urlStr);
-      editor.value = txt.replace(/\r\n?/g,'\n');
+      const t = txt.replace(/\r\n?/g,'\n');
+    editor.value = t;
       caretRow = 0; caretCol = 0; editor.scrollTop = 0;
       _centerScrolloffOnce = true; ensureScrolloff({centerOnce:true});
       _repositionCaret(); updateGutter();
-      buffer.path = urlStr; buffer.name = _basename(path); buffer.modified = false; _setTitle();
+      const mode = opts.mode || (buffers.length===0 ? 'new' : 'replace');
+      if (mode === 'new'){
+        _addBuffer({ name: _basename(path), path: urlStr, text: t, modified:false });
+      } else {
+        const b=currentBuffer(); if (b){ b.path = urlStr; b.name = _basename(path); b.text=t; b.modified=false; }
+      }
+    _setTitle(); _renderTabbar();
       return true;
     } catch (e){
       console.error('open failed', e);
@@ -206,7 +289,7 @@
     }
   }
 
-  function _pickAndLoadFile(){
+  function _pickAndLoadFile(opts={}){
     return new Promise((resolve)=>{
       const inp = document.createElement('input');
       inp.type = 'file';
@@ -222,7 +305,13 @@
           caretRow = 0; caretCol = 0; editor.scrollTop = 0;
           _centerScrolloffOnce = true; ensureScrolloff({centerOnce:true});
           _repositionCaret(); updateGutter();
-          buffer.path = null; buffer.name = f.name; buffer.modified = false; _setTitle();
+          const mode = opts.mode || (buffers.length===0 ? 'new' : 'replace');
+          if (mode === 'new'){
+            _addBuffer({ name: f.name, path: null, text: txt, modified:false });
+          } else {
+            const b=currentBuffer(); if (b){ b.path = null; b.name = f.name; b.text = txt; b.modified=false; }
+          }
+          _setTitle(); _renderTabbar();
           document.body.removeChild(inp);
           resolve(true);
         };
@@ -238,7 +327,7 @@
    *********************************************************/
   function _loadDocFromQuery(){
     // search (?doc=) と hash (#doc=) の両対応 + data(base64) 直接受信
-    let doc = null, name = null, dataB64 = null, api = null;
+    let doc = null, name = null, dataB64 = null, api = null, bundleB64 = null;
     if (location.search) {
       const q = new URLSearchParams(location.search);
       doc = q.get('doc');
@@ -253,21 +342,56 @@
       name = name || qh.get('name');
       dataB64 = dataB64 || qh.get('data');
       api = api || qh.get('api');
+      bundleB64 = qh.get('bundle');
     }
   // ネイティブ API は非対応とする
+    // bundle (複数ドキュメント) 優先
+    if (bundleB64){
+      try {
+        const json = atob(bundleB64);
+        const arr = JSON.parse(json);
+        if (Array.isArray(arr) && arr.length){
+          buffers.length = 0; currentIdx = -1;
+          // data が無い場合は後段で file:// 読み込み
+          const promises = arr.map(async (it)=>{
+            const nameIt = it && it.name || null;
+            const docIt  = it && it.doc  || null;
+            let t = '';
+            if (it && typeof it.data === 'string' && it.data.length){
+              try { t = new TextDecoder('utf-8').decode(Uint8Array.from(atob(it.data), c=>c.charCodeAt(0))); } catch{}
+            } else if (docIt) {
+              try { t = await _fetchTextSmart(docIt); } catch { t = ''; }
+            }
+            t = String(t||'').replace(/\r\n?/g,'\n');
+            _addBuffer({ name: nameIt, path: docIt, text: t, modified:false });
+          });
+          return Promise.all(promises).then(()=>{
+            _switchToBuffer(0);
+            _setTitle(); _renderTabbar();
+            return true;
+          });
+        }
+      } catch { /* ignore and fallthrough */ }
+    }
     if (dataB64 !== null && dataB64 !== undefined) {
       try {
         const bin = dataB64.length ? Uint8Array.from(atob(dataB64), c=>c.charCodeAt(0)) : new Uint8Array();
         const txt = new TextDecoder('utf-8').decode(bin);
-        editor.value = txt.replace(/\r\n?/g,'\n');
-        buffer.name = name || buffer.name; buffer.path = doc || buffer.path; buffer.modified = false; _setTitle();
+  const t = txt.replace(/\r\n?/g,'\n');
+  editor.value = t;
+  if (buffers.length===0){ _addBuffer({ name: name||null, path: doc||null, text: t, modified:false }); }
+  else { const b=currentBuffer(); b.name = name||b.name; b.path = doc||b.path; b.text=t; b.modified=false; }
+  _setTitle(); _renderTabbar();
         return Promise.resolve(true);
       } catch { /* fallthrough */ }
     }
     if (!doc) return Promise.resolve(false);
     return _fetchTextSmart(doc).then(txt=>{
-      editor.value = txt.replace(/\r\n?/g,'\n');
-      if (name) buffer.name = name; buffer.path = doc; buffer.modified = false; _setTitle();
+  const t = txt.replace(/\r\n?/g,'\n');
+  editor.value = t;
+  if (buffers.length===0){ _addBuffer({ name: name||null, path: doc||null, text: t, modified:false }); }
+  else { const b=currentBuffer(); if(name) b.name = name; b.path = doc; b.text=t; b.modified=false; }
+  _setTitle(); _renderTabbar();
       return true;
     }).catch(()=>{
       return false;
@@ -431,6 +555,40 @@
    * runCommand (:N)
    *********************************************************/
   function runCommand(cmd){
+    // :b [N|query] — Enter で確定（数字のみは優先）
+    if (/^:b/i.test(cmd)){
+      const mNum = cmd.match(/^:b\s*(\d+)\s*$/i);
+      if (mNum){
+        const nArg = parseInt(mNum[1],10);
+        if (Number.isFinite(nArg) && nArg>=1 && nArg<=buffers.length){
+          _switchToBuffer(nArg-1);
+          _bufPopupHide();
+          _setMode('NORMAL');
+          return;
+        }
+      }
+      if (_bufPopupVisible()){
+        // 現在の可視リストから選択アイテムの絶対インデックスへマップ
+        const list = _bufPopupComputeList ? _bufPopupComputeList() : buffers.map((b,i)=>({b,i}));
+        if (list.length === 0){
+          // 無該当
+          const q = (_bufFilter||'').trim();
+          if (q) toast('No such buffer: ' + q);
+          _bufPopupHide();
+          _setMode('NORMAL');
+          return;
+        }
+        const visIdx = Math.max(0, Math.min(list.length-1, _bufSel));
+        const absIdx = (list[visIdx] ? list[visIdx].i : currentIdx);
+        if (Number.isFinite(absIdx)) _switchToBuffer(absIdx);
+        _bufPopupHide();
+        _setMode('NORMAL');
+        return;
+      } else {
+        _bufPopupShow();
+        return; // ここで待機し、Enter で確定
+      }
+    }
     // :N jump
     const numOnly = cmd.match(/^:?(\d+)$/);
     if (numOnly){
@@ -462,28 +620,30 @@
       const arg = (em[1]||'').trim();
       if (!arg){
         // no-arg: 現バッファの再読込（pathがない場合はファイルピッカー）
-        if (buffer.path){
-          _loadFromPath(buffer.path, null, {silentOnFail:true}).then(ok=>{
+        const b = currentBuffer();
+        if (b && b.path){
+          _loadFromPath(b.path, null, {silentOnFail:true, mode:'replace'}).then(ok=>{
             if(!ok){
-              const cwd = _dirnameURL(buffer.path);
-              _pickNative(cwd, buffer.name).then(chosen=>{
-                if (chosen){ _loadFromPath(chosen); }
-                else { _pickAndLoadFile(); }
+              const cwd = _dirnameURL(b.path);
+              _pickNative(cwd, b.name).then(chosen=>{
+                if (chosen){ _loadFromPath(chosen, null, {mode:'replace'}); }
+                else { _pickAndLoadFile({mode:'replace'}); }
               });
             }
           });
         } else {
           const base = _htmlBaseURL();
           _pickNative(base, '').then(chosen=>{
-            if (chosen){ _loadFromPath(chosen); }
-            else { _pickAndLoadFile(); }
+            if (chosen){ _loadFromPath(chosen, null, {mode:'new'}); }
+            else { _pickAndLoadFile({mode:'new'}); }
           });
         }
       } else {
         // 相対は現バッファのディレクトリ、なければ _six.html の場所を基点
         let base = null;
-        if (buffer.path){
-          const dir = _dirnameURL(buffer.path);
+        const cur = currentBuffer();
+        if (cur && cur.path){
+          const dir = _dirnameURL(cur.path);
           base = dir;
         } else {
           base = _htmlBaseURL();
@@ -497,10 +657,11 @@
         }
 
         // まずは直接 file:// 読み込みを試す（XHR + fetch フォールバック）
-        _loadFromPath(arg, base, {silentOnFail:true}).then(ok=>{
+        // 引数ありは新規バッファとして追加
+        _loadFromPath(arg, base, {silentOnFail:true, mode:'new'}).then(ok=>{
           if (ok) return;
           // 失敗時は直ちにブラウザピッカー
-          _pickAndLoadFile();
+          _pickAndLoadFile({mode:'new'});
         });
       }
       return;
@@ -535,6 +696,18 @@
     if (modestatus) modestatus.textContent = '['+_mode+']';
   }
 
+  // toast
+  const _toastEl = document.getElementById('toast');
+  const _toastMsg = _toastEl ? _toastEl.querySelector('.msg') : null;
+  let _toastTimer = null;
+  function toast(msg, ms=5000){
+    if (!_toastEl || !_toastMsg) { try{ alert(msg); }catch{} return; }
+    _toastMsg.textContent = String(msg||'');
+    _toastEl.style.display = '';
+    if (_toastTimer) { clearTimeout(_toastTimer); _toastTimer = null; }
+    _toastTimer = setTimeout(()=>{ _toastEl.style.display='none'; }, Math.max(300, ms));
+  }
+
   function _clearPending(){
     _pendingNormal = null;
     if (_pendingTimer){ clearTimeout(_pendingTimer); _pendingTimer = null; }
@@ -554,7 +727,8 @@
     });
     editor.addEventListener('input', ()=>{
       if (_mode === 'INSERT'){
-        buffer.modified = true; _setTitle();
+        const b = currentBuffer(); if (b){ b.modified = true; b.text = editor.value; }
+        _setTitle(); _renderTabbar();
       }
       _exactLineLockAdjust(); _repositionCaret(); updateGutter();
     });
@@ -608,17 +782,151 @@
           if (raw){ runCommand(raw.startsWith(':')?raw:(':'+raw)); }
           cmdinput.value = '';
           _setMode('NORMAL');
+          _bufPopupHide();
           // Enter の keyup が editor に落ちないよう、フォーカス復帰を遅延
           setTimeout(()=>editor.focus(), 0);
         } else if (e.key==='Escape'){
           e.preventDefault(); e.stopPropagation();
           cmdinput.value = '';
           _setMode('NORMAL');
+          _bufPopupHide();
           setTimeout(()=>editor.focus(), 0);
+        } else if (e.key==='ArrowDown' || e.key==='ArrowUp'){
+          // buf popup navigation
+          if (_bufPopupVisible()){
+            e.preventDefault(); e.stopPropagation();
+            _bufPopupMove(e.key==='ArrowDown'?1:-1);
+          }
         }
+      });
+      cmdinput.addEventListener('input', ()=>{
+        const vRaw = cmdinput.value;
+        const v = vRaw; // keep spaces for parsing
+        // 1) 完全一致 ":bN"（空白なし、末尾に他文字なし）を検出し、即確定ルール適用
+        let m;
+        if ((m = v.match(/^\s*:?[\s]*b([0-9]+)$/i))){
+          const n = parseInt(m[1],10);
+          const total = buffers.length;
+          const ambiguousOne = (total>=10 && total<=19 && n===1);
+          if (!Number.isNaN(n)){
+            if (!ambiguousOne && n>=1 && n<=total){
+              // 即確定
+              _switchToBuffer(n-1);
+              _bufPopupHide();
+              _setMode('NORMAL');
+              cmdinput.value = '';
+              setTimeout(()=>editor.focus(), 0);
+              return;
+            }
+            // あいまい（10〜19 で :b1）や範囲外はフィルタとして扱う
+            _bufFilterKind = 'text';
+            _bufFilter = String(n);
+            _bufSelAbs = null;
+            if (!_bufPopupVisible()) _bufPopupShow(); else _bufPopupRender();
+            return;
+          }
+        }
+
+        // 2) ":b N"（bの後に空白あり+数字）→ 選択のみ変更（確定はしない）
+        if ((m = v.match(/^\s*:?[\s]*b\s+([0-9]+)\s*$/i))){
+          const n = parseInt(m[1],10);
+          if (!Number.isNaN(n)){
+            _bufFilterKind = 'numPrefix';
+            _bufFilter = String(n);
+            _bufSelAbs = Math.max(0, Math.min(buffers.length-1, n-1));
+            if (!_bufPopupVisible()) _bufPopupShow(); else _bufPopupRender();
+            return;
+          }
+        }
+
+        // 3) ":b <query>"（テキスト）→ インクリメンタル絞り込み
+        if ((m = v.match(/^\s*:?[\s]*b\s+(.*)$/i))){
+          _bufFilterKind = 'text';
+          _bufFilter = (m[1]||'');
+          _bufSelAbs = null;
+          if (!_bufPopupVisible()) _bufPopupShow(); else _bufPopupRender();
+          return;
+        }
+
+        // 4) まだ ":b" 入力途中 → ポップアップを出して待機
+        if (/^\s*:?[\s]*b\s*$/i.test(v)){
+          _bufFilterKind = 'text';
+          _bufFilter = '';
+          _bufSelAbs = null;
+          if (!_bufPopupVisible()) _bufPopupShow(); else _bufPopupRender();
+          return;
+        }
+
+        // 5) それ以外は非表示
+        _bufPopupHide();
       });
     }
   }
+
+  /*********************************************************
+   * Buffer popup (:b ...)
+   *********************************************************/
+  const bufpopup = document.getElementById('bufpopup');
+  const bufpopupInner = bufpopup ? bufpopup.querySelector('.inner') : null;
+  let _bufSel = 0;              // 可視リスト内の選択インデックス
+  let _bufSelAbs = null;        // 絶対バッファインデックス（必要時）
+  let _bufFilter = '';
+  let _bufFilterKind = 'text';  // 'text' | 'numPrefix'
+  function _bufPopupVisible(){ return bufpopup && bufpopup.style.display !== 'none'; }
+  function _bufPopupComputeList(){
+    const q = (_bufFilter||'').trim().toLowerCase();
+    const kind = _bufFilterKind;
+    return buffers
+      .map((b,i)=>({b,i}))
+      .filter(({b,i})=>{
+        if (!q) return true;
+        if (kind === 'numPrefix'){
+          // 番号プレフィックス一致（"2" → 2,20,21...）
+          const idxStr = String(i+1);
+          return idxStr.startsWith(q);
+        }
+        // text: 先頭一致（ファイル名/パス/装飾ラベル）
+        const name = (b.name||'').toLowerCase();
+        const path = (b.path||'').toLowerCase();
+        const decorated = (_bufferNumberLabel(i+1) + ' ' + (b.name||'')).toLowerCase();
+        return name.startsWith(q) || path.startsWith(q) || decorated.startsWith(q);
+      });
+  }
+  function _bufPopupRender(){
+    if (!bufpopup || !bufpopupInner) return;
+    bufpopupInner.innerHTML = '';
+    const list = _bufPopupComputeList();
+    // 絶対指定があれば可視インデックスへ変換
+    if (_bufSelAbs != null){
+      const visIdx = list.findIndex(({i})=> i === _bufSelAbs);
+      _bufSel = (visIdx >= 0 ? visIdx : 0);
+    }
+    // _bufSel は可視リストの範囲に収める
+    if (list.length===0) { _bufSel = 0; }
+    else { _bufSel = Math.max(0, Math.min(list.length-1, _bufSel)); }
+    const items = list.map(({b,i},visIdx)=>{
+      const div = document.createElement('div');
+      div.className = 'item'+(visIdx===_bufSel?' active':'');
+      const num = document.createElement('span'); num.className='num'; num.textContent = _bufferNumberLabel(i+1);
+      const name = document.createElement('span'); name.className='name'; name.textContent = b.name || '(untitled)';
+      div.appendChild(num); div.appendChild(name);
+      div.addEventListener('click', ()=>{ _switchToBuffer(i); _bufPopupHide(); _setMode('NORMAL'); setTimeout(()=>editor.focus(),0); });
+      return div;
+    });
+    items.forEach(el=>bufpopupInner.appendChild(el));
+  }
+  function _bufPopupShow(){ if (!bufpopup) return; bufpopup.style.display=''; if (!(_bufSel>=0)) _bufSel=Math.max(0,Math.min(buffers.length-1,currentIdx)); _bufPopupRender(); }
+  function _bufPopupHide(){ if (!bufpopup) return; bufpopup.style.display='none'; }
+  function _bufPopupMove(d){ if (!bufpopup) return; _bufSel=_bufSel+d; if (_bufSel<0) _bufSel=0; _bufPopupRender(); }
+
+  function _extractBufQuery(){
+    if (!cmdinput) return '';
+    const v = cmdinput.value.trim();
+    const m = v.match(/^:?[\s]*b\s+(.*)$/i);
+    return m ? m[1] : '';
+  }
+
+  // runCommand へのフック（Enter確定）
 
   /*********************************************************
    * Seed demo
@@ -626,7 +934,9 @@
   function _seedDemo(){
     if (editor.value) return;
     const arr=[]; for(let i=1;i<=400;i++) arr.push(String(i).padStart(4,' ')+'  The quick brown fox jumps over the lazy dog.');
-    editor.value = arr.join('\n');
+    const t = arr.join('\n');
+    editor.value = t;
+    if (buffers.length===0){ _addBuffer({ name: null, path: null, text: t, modified:false }); }
   }
 
   /*********************************************************
@@ -647,6 +957,7 @@
       ensureScrolloff({centerOnce:false});
       _repositionCaret();
       updateGutter();
+      _renderTabbar();
       // フォーカス強制（タイミング競合を避ける）
       setTimeout(()=>editor.focus(), 0);
     });

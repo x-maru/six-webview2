@@ -1,9 +1,16 @@
 ﻿/* six-webview2 minimal layout */
 :root { --lh: 20px; --gw: 56px; }
 html, body { height: 100%; margin: 0; background: #0b0d12; color: #e6e6e6; }
-body { font: 13px/var(--lh) Consolas, 'Courier New', monospace; overflow: hidden; }
+body { font: 18px/var(--lh) Consolas, 'Courier New', monospace; overflow: hidden; }
 
-#tabbar { height: 24px; background: #0f1117; color: #a6accd; display:flex; align-items:center; padding:0 8px; border-bottom:1px solid #1c2230; }
+#tabbar { height: 24px; background: #0f1117; color: #a6accd; display:flex; align-items:center; padding:0 4px; border-bottom:1px solid #1c2230; overflow:hidden; }
+#tabbar .tabs { display:flex; gap:4px; align-items:stretch; width:100%; overflow:hidden; }
+#tabbar .tab { max-width: 28%; min-width: 80px; padding:0 10px; height: 18px; line-height: 18px; margin: 2px 0; border-radius:4px 4px 0 0; background:#131722; color:#a6accd; display:flex; align-items:center; border:1px solid #1c2230; border-bottom-color:#0f1117; box-sizing:border-box; cursor:pointer; }
+#tabbar .tab:hover { filter: brightness(1.05); }
+#tabbar .tab.active { background:#1a2030; color:#e6e6e6; border-bottom-color:#1a2030; font-weight:600; }
+#tabbar .tab .name { white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+#tabbar .tab .name::first-letter { font-size: 1.1em; vertical-align: -1px; }
+#tabbar .tab .mod { color:#ff5b5b; margin-left:6px; font-weight:700; }
 #cmdbar { position:fixed; left:0; right:0; bottom:0; height: 24px; background: var(--tabBarBg); color: var(--tabBarFg); display:flex; align-items:center; padding:0 8px; border-top:1px solid #1c2230; gap:8px; z-index: 9999; }
 #modestatus { font-weight:600; opacity:0.9; }
 #cmdprefix { opacity: 0.85; }
@@ -28,3 +35,16 @@ body { font: 13px/var(--lh) Consolas, 'Courier New', monospace; overflow: hidden
 
 /* active line band */
 #edstripe { position:absolute; left:0; right:0; height: var(--lh); background:var(--activeLineBg); opacity:0.7; pointer-events:none; z-index:1; }
+
+/* buffer popup */
+#bufpopup { position: fixed; left: 80px; right: 80px; top: 80px; max-height: 60vh; background:#0f1117; color:#e6e6e6; border:1px solid #2a3244; box-shadow: 0 10px 24px rgba(0,0,0,0.4); z-index: 10000; border-radius: 6px; overflow: hidden; }
+#bufpopup .inner { max-height: 60vh; overflow: auto; }
+#bufpopup .item { display:flex; gap:8px; align-items:center; padding:6px 10px; cursor: default; }
+#bufpopup .item.active { background:#1a2030; }
+#bufpopup .num { min-width: 20px; color:#a6accd; }
+#bufpopup .num { font-size: 1.15em; }
+#bufpopup .name { flex:1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+/* toast */
+#toast { position: fixed; left: 50%; transform: translateX(-50%); bottom: 48px; background: rgba(26,32,48,0.96); color:#e6e6e6; border:1px solid #2a3244; border-radius: 6px; padding:8px 12px; z-index:10001; box-shadow: 0 8px 18px rgba(0,0,0,0.35); max-width: 80vw; }
+#toast .msg { white-space: nowrap; }

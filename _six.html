@@ -12,7 +12,7 @@
   </style>
 </head>
 <body>
-  <div id="tabbar">six-webview2</div>
+  <div id="tabbar"><div class="tabs"></div></div>
   <div id="pane">
     <div id="editorViewport">
       <div id="editWrap">
@@ -24,6 +24,12 @@
     </div>
   </div>
   <div id="cmdbar"><span id="modestatus">[NORMAL]</span><span id="cmdprefix">:</span><input id="cmdinput" type="text" spellcheck="false" placeholder="command" /></div>
+
+  <div id="bufpopup" style="display:none">
+    <div class="inner"></div>
+  </div>
+
+  <div id="toast" style="display:none"><span class="msg"></span></div>
 
   <script src="_six.js"></script>
 </body>

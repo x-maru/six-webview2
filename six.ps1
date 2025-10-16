@@ -1,11 +1,10 @@
 ﻿# six-webview2 launcher (Edge app mode replacement)
 param(
-  # Positional arg 0: document to open (even if .html)
-  [Parameter(Position=0)]
-  [string]$Doc,
+  # Positional arg(s): one or more documents to open (even if .html)
+  [Parameter(Position=0, ValueFromRemainingArguments=$true)]
+  [string[]]$Docs,
 
-  # Positional arg 1 (or -Html): layout HTML (default _six.html)
-  [Parameter(Position=1)]
+  # Layout HTML (default _six.html). Named parameter only (no positional)
   [string]$Html = "_six.html",
 
   # Development only: widen CORS (do not use for distribution)
@@ -34,71 +33,78 @@ if (-not (Test-Path $index)) {
 }
 
 # Normalize Doc to relative from script folder (for file:// fetch convenience)
-$DocRel = $null
-if ($Doc) {
-  try {
-    $docPath = (Resolve-Path $Doc -ErrorAction Stop).Path
-  } catch {
-    $docPath = $Doc
+function Convert-ToFileUrl([string]$p){
+  if ([string]::IsNullOrWhiteSpace($p)) { return $null }
+  if ($p -match '^[a-zA-Z]:\\') { # ドライブ直下
+    $norm = $p -replace '\\','/'
+    return 'file:///' + $norm.Substring(0,1) + ':' + $norm.Substring(2)
   }
-  # 絶対パス(ドライブ/UNC)は相対化せず file:// URL として渡す
-  function Convert-ToFileUrl([string]$p){
-    if ([string]::IsNullOrWhiteSpace($p)) { return $null }
-    if ($p -match '^[a-zA-Z]:\\') { # ドライブ直下
-      $norm = $p -replace '\\','/'
-      return 'file:///' + $norm.Substring(0,1) + ':' + $norm.Substring(2)
-    }
-    if ($p -like '\\*') { # UNC
-      $noPrefix = $p.TrimStart('\\') -replace '\\','/'
-      return 'file://' + $noPrefix
-    }
-    return $null
+  if ($p -like '\\*') { # UNC
+    $noPrefix = $p.TrimStart('\\') -replace '\\','/'
+    return 'file://' + $noPrefix
   }
-  $fileUrl = $null
-  try { if ([System.IO.Path]::IsPathRooted($docPath)) { $fileUrl = Convert-ToFileUrl $docPath } } catch {}
-  if ($fileUrl) {
-    $DocRel = $fileUrl
-  } else {
-    try {
-      $pathType = [System.IO.Path]
-      if ($pathType.GetMethod('GetRelativePath')) {
-        $DocRel = [System.IO.Path]::GetRelativePath($here, $docPath)
-      } else {
-        $baseUri = [System.Uri]::new((Join-Path $here ''))
-        $docUri  = [System.Uri]::new($docPath)
-        $DocRel  = [System.Uri]::UnescapeDataString($baseUri.MakeRelativeUri($docUri).ToString())
+  return $null
+}
+
+$DocItems = @()
+if ($Docs -and $Docs.Count -gt 0) {
+  foreach($d in $Docs){
+    $docPath = $d
+    try { $docPath = (Resolve-Path $d -ErrorAction Stop).Path } catch { $docPath = $d }
+    $fileUrl = $null
+    try { if ([System.IO.Path]::IsPathRooted($docPath)) { $fileUrl = Convert-ToFileUrl $docPath } } catch {}
+    $docRel = $null
+    if ($fileUrl) {
+      $docRel = $fileUrl
+    } else {
+      try {
+        $pathType = [System.IO.Path]
+        if ($pathType.GetMethod('GetRelativePath')) {
+          $docRel = [System.IO.Path]::GetRelativePath($here, $docPath)
+        } else {
+          $baseUri = [System.Uri]::new((Join-Path $here ''))
+          $docUri  = [System.Uri]::new($docPath)
+          $docRel  = [System.Uri]::UnescapeDataString($baseUri.MakeRelativeUri($docUri).ToString())
+        }
+      } catch {
+        $docRel = [System.IO.Path]::GetFileName($docPath)
       }
-    } catch {
-      $DocRel = [System.IO.Path]::GetFileName($docPath)
     }
+
+    # 単一ファイル時のみ data を埋め込む。複数は URL を短く保つため省略（フロント側で file:// 読み込み）
+    $item = [pscustomobject]@{
+      doc  = $docRel
+      name = [System.IO.Path]::GetFileName($docPath)
+    }
+    $DocItems += $item
   }
 }
 
 # Build file:/// URL for the layout html
 $indexAbs = (Resolve-Path $index).Path
 $indexUri = [System.Uri]::new($indexAbs)
-if ($DocRel) {
-  # 指定ファイルの中身を UTF-8 として読み込み、base64 でフラグメントに埋め込む（小～中規模ファイル想定）
-  # If Doc provided: embed UTF-8 content as base64 fragment (small/medium files only)
+if ($DocItems.Count -ge 2) {
+  # 複数ドキュメントは bundle=Base64(JSON) で渡す（data は含めない）
+  $json = $DocItems | ConvertTo-Json -Depth 2 -Compress
+  $b64  = [System.Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes($json))
+  $qsBundle = [System.Uri]::EscapeDataString($b64)
+  $targetUrl = $indexUri.AbsoluteUri + "#bundle=" + $qsBundle
+} elseif ($DocItems.Count -eq 1) {
+  # 互換の単一ドキュメント経路（doc/name/data）
+  $one = $DocItems[0]
   $text = $null
   try {
-    if ($docPath -and (Test-Path $docPath)) { $text = Get-Content -LiteralPath $docPath -Raw -Encoding UTF8 }
-    else { $text = '' } # 存在しない場合は空バッファとして開く
-  } catch { $text = $null }
-
-  $qsDoc  = [System.Uri]::EscapeDataString($DocRel)
-  $qsName = [System.Uri]::EscapeDataString([System.IO.Path]::GetFileName($docPath))
-
-  $parts = New-Object System.Collections.Generic.List[string]
-  $parts.Add("doc=" + $qsDoc)
-  $parts.Add("name=" + $qsName)
-  if ($null -ne $text) {
-    $bytes = [System.Text.Encoding]::UTF8.GetBytes($text)
-    $b64   = [System.Convert]::ToBase64String($bytes)
-    $qsData = [System.Uri]::EscapeDataString($b64)
-    $parts.Add("data=" + $qsData)
-  }
-  $frag = [string]::Join('&', $parts)
+    $resolved = $null
+    try { $resolved = (Resolve-Path $one.doc -ErrorAction Stop).Path } catch {}
+    $candidate = if ($resolved) { $resolved } else { $one.doc }
+    if ($candidate -and (Test-Path $candidate)) { $text = Get-Content -LiteralPath $candidate -Raw -Encoding UTF8 } else { $text = '' }
+  } catch { $text = '' }
+  $bytes = [System.Text.Encoding]::UTF8.GetBytes($text)
+  $b64   = [System.Convert]::ToBase64String($bytes)
+  $qsDoc  = [System.Uri]::EscapeDataString($one.doc)
+  $qsName = [System.Uri]::EscapeDataString($one.name)
+  $qsData = [System.Uri]::EscapeDataString($b64)
+  $frag = "doc=$qsDoc&name=$qsName&data=$qsData"
   $targetUrl = $indexUri.AbsoluteUri + "#" + $frag
 } else {
   $targetUrl = $indexUri.AbsoluteUri
