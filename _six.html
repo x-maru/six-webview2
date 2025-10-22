@@ -23,7 +23,7 @@
       </div>
     </div>
   </div>
-  <div id="cmdbar"><span id="modestatus">[NORMAL]</span><span id="cmdprefix">:</span><input id="cmdinput" type="text" spellcheck="false" placeholder="command" /></div>
+  <div id="cmdbar"><span id="modestatus">[NORMAL]</span><span id="cmdprefix"></span><input id="cmdinput" type="text" spellcheck="false" placeholder="command" /></div>
 
   <div id="bufpopup" style="display:none">
     <div class="inner"></div>
@@ -31,6 +31,27 @@
 
   <div id="toast" style="display:none"><span class="msg"></span></div>
 
-  <script src="_six.js"></script>
+  <!-- boot sentinel: shows if JS bootstrap didn't run -->
+  <div id="bootwarn" style="display:none;position:fixed;left:8px;bottom:8px;z-index:99999;padding:6px 10px;border-radius:4px;background:#3b1f1f;color:#ffdede;font:12px/1.4 system-ui, sans-serif;box-shadow:0 1px 3px rgba(0,0,0,.4)"></div>
+  <script>
+    // If _six.js didn't initialize within ~1.8s, show a small hint.
+    setTimeout(function(){
+      try{
+        if (!window.six){
+          var el = document.getElementById('bootwarn');
+          if (el){
+            el.style.display='';
+            if (window.__sixLoadError){
+              el.textContent = 'six: _six.js の読み込みに失敗しました。ファイルの場所/権限/パスを確認してください。';
+            } else {
+              el.textContent = 'six: JavaScript の初期化に失敗しました。F12でコンソールを開き、Ctrl+F5 で再読込してください。';
+            }
+          }
+        }
+      }catch{}
+    }, 1800);
+  </script>
+
+  <script id="sixjs" src="_six.js" onload="try{window.__sixLoaded=true; var bw=document.getElementById('bootwarn'); if(bw) bw.style.display='none';}catch{}" onerror="(function(){window.__sixLoadError=true; var el=document.getElementById('bootwarn'); if(el){ el.style.display=''; el.textContent='six: _six.js の読み込みに失敗しました（ファイル参照/権限/パスを確認）'; }})()"></script>
 </body>
 </html>

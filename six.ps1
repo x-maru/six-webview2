@@ -51,6 +51,8 @@ if ($Docs -and $Docs.Count -gt 0) {
   foreach($d in $Docs){
     $docPath = $d
     try { $docPath = (Resolve-Path $d -ErrorAction Stop).Path } catch { $docPath = $d }
+    $absPath = $null
+    try { if ($docPath -and (Test-Path $docPath) -and [System.IO.Path]::IsPathRooted($docPath)) { $absPath = (Resolve-Path $docPath -ErrorAction SilentlyContinue).Path } } catch {}
     $fileUrl = $null
     try { if ([System.IO.Path]::IsPathRooted($docPath)) { $fileUrl = Convert-ToFileUrl $docPath } } catch {}
     $docRel = $null
@@ -75,39 +77,87 @@ if ($Docs -and $Docs.Count -gt 0) {
     $item = [pscustomobject]@{
       doc  = $docRel
       name = [System.IO.Path]::GetFileName($docPath)
+      abs  = $absPath
     }
     $DocItems += $item
   }
 }
 
+# Start a minimal loopback HTTP API (TcpListener) for directory listing
+# Returns JSON { entries: [ { name, isDir, url } ] }
+function Start-NanoApi([int]$Port){
+  # ランタイムごとに一意なクラス名を使って型名衝突を回避（常に最新コードを利用）
+  $className = "NanoApi_" + ([Guid]::NewGuid().ToString('N').Substring(0,8))
+  # 外部 C# ファイルを読み込み（__CLASSNAME__ を実クラス名に置換）。見つからない場合はインライン定義にフォールバック。
+  $csPath = Join-Path $here "_six.cs"
+  if (-not (Test-Path $csPath)) { throw "_six.cs not found: $csPath" }
+  $code = Get-Content -LiteralPath $csPath -Raw -Encoding UTF8
+  $code = $code.Replace('__CLASSNAME__', $className)
+
+  # 毎回ユニークな型名を使うため基本はコンパイルする（同一名再利用時のみスキップ）
+  if (-not ($className -as [type])) {
+    Add-Type -TypeDefinition $code -Language CSharp -IgnoreWarnings -ErrorAction Stop
+  }
+
+  $global:_nano = New-Object $className $Port
+  $global:_nano.Start()
+}
+
+function Test-NanoApi([string]$Base){
+  try {
+    $hc = [System.Net.Http.HttpClient]::new()
+    $hc.Timeout = [System.TimeSpan]::FromMilliseconds(1200)
+    $resp = $hc.GetAsync($Base + 'ping').GetAwaiter().GetResult()
+    return ($resp -and $resp.IsSuccessStatusCode)
+  } catch { return $false }
+}
+
 # Build file:/// URL for the layout html
 $indexAbs = (Resolve-Path $index).Path
 $indexUri = [System.Uri]::new($indexAbs)
+# Pick a loopback port and start API
+$apiPort = Get-Random -Minimum 20000 -Maximum 60000
+Start-NanoApi -Port $apiPort
+$apiBase = "http://127.0.0.1:$apiPort/"
+# Warm-up: retry /ping briefly (max ~1.2s)
+for($i=0; $i -lt 8; $i++){
+  if (Test-NanoApi -Base $apiBase) { break }
+  Start-Sleep -Milliseconds 150
+}
 if ($DocItems.Count -ge 2) {
   # 複数ドキュメントは bundle=Base64(JSON) で渡す（data は含めない）
   $json = $DocItems | ConvertTo-Json -Depth 2 -Compress
   $b64  = [System.Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes($json))
   $qsBundle = [System.Uri]::EscapeDataString($b64)
-  $targetUrl = $indexUri.AbsoluteUri + "#bundle=" + $qsBundle
+  $targetUrl = $indexUri.AbsoluteUri + "#bundle=" + $qsBundle + "&api=" + ([System.Uri]::EscapeDataString($apiBase))
 } elseif ($DocItems.Count -eq 1) {
   # 互換の単一ドキュメント経路（doc/name/data）
   $one = $DocItems[0]
   $text = $null
   try {
-    $resolved = $null
-    try { $resolved = (Resolve-Path $one.doc -ErrorAction Stop).Path } catch {}
-    $candidate = if ($resolved) { $resolved } else { $one.doc }
-    if ($candidate -and (Test-Path $candidate)) { $text = Get-Content -LiteralPath $candidate -Raw -Encoding UTF8 } else { $text = '' }
+    $candidate = $null
+    if ($one.PSObject.Properties.Name -contains 'abs' -and $one.abs) {
+      $candidate = $one.abs
+    } elseif ($one.doc -and $one.doc.StartsWith('file:', 'InvariantCultureIgnoreCase')) {
+      try { $candidate = ([System.Uri]::new($one.doc)).LocalPath } catch {}
+    } else {
+      try { $candidate = (Resolve-Path $one.doc -ErrorAction Stop).Path } catch { $candidate = $one.doc }
+    }
+    if ($candidate -and (Test-Path -LiteralPath $candidate)) {
+      $text = Get-Content -LiteralPath $candidate -Raw -Encoding UTF8
+    } else {
+      $text = ''
+    }
   } catch { $text = '' }
   $bytes = [System.Text.Encoding]::UTF8.GetBytes($text)
   $b64   = [System.Convert]::ToBase64String($bytes)
   $qsDoc  = [System.Uri]::EscapeDataString($one.doc)
   $qsName = [System.Uri]::EscapeDataString($one.name)
   $qsData = [System.Uri]::EscapeDataString($b64)
-  $frag = "doc=$qsDoc&name=$qsName&data=$qsData"
+  $frag = "doc=$qsDoc&name=$qsName&data=$qsData&api=" + ([System.Uri]::EscapeDataString($apiBase))
   $targetUrl = $indexUri.AbsoluteUri + "#" + $frag
 } else {
-  $targetUrl = $indexUri.AbsoluteUri
+  $targetUrl = $indexUri.AbsoluteUri + "#api=" + ([System.Uri]::EscapeDataString($apiBase))
 }
 
 if ($ShowUrl) { Write-Host "Launching URL: $targetUrl" }
@@ -138,8 +188,16 @@ if (Test-Path $edge) {
         if ($gp -and $gp.MainWindowHandle -ne 0) { $withWindow += $gp }
       } catch {}
     }
-    if ($withWindow.Count -gt 0) { $seenWindow = $true; $lastHadWindow = Get-Date }
-    elseif ($seenWindow) { if ((Get-Date) -gt $lastHadWindow.AddSeconds(1)) { break } }
+    if ($withWindow.Count -gt 0) {
+      $seenWindow = $true; $lastHadWindow = Get-Date
+    } elseif ($seenWindow) {
+      # 以前はウィンドウがあった → 1秒以上なければ終了
+      if ((Get-Date) -gt $lastHadWindow.AddSeconds(1)) { break }
+    } else {
+      # まだウィンドウを検知していない → Edge 親プロセスが死んでいたら終了
+      try { $parent = Get-Process -Id $p.Id -ErrorAction SilentlyContinue } catch { $parent = $null }
+      if (-not $parent) { break }
+    }
     Start-Sleep -Milliseconds 300
   }
 } else {

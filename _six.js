@@ -2,162 +2,102 @@
 (function(){
   'use strict';
 
-  /*********************************************************
-   * Constants / Config
-   *********************************************************/
-  const LINE_HEIGHT = 20;                 // px (must match CSS --lh)
-  const ROUND_THRESH = 0.985;
-  const HSCROLL_RESERVE = 18;
-  let scrolloff = 2;
-
-  /*********************************************************
-   * DOM References
-   *********************************************************/
-  const editor   = document.getElementById('editor');
-  const viewport = document.getElementById('editorViewport');
-  const gutter   = document.getElementById('gutter');
+  // DOM elements
+  const viewport   = document.getElementById('editorViewport');
+  const editor     = document.getElementById('editor');
+  const gutter     = document.getElementById('gutter');
   const caretLayer = document.getElementById('caretLayer');
-  const edstripe = document.getElementById('edstripe');
-  const cmdinput = document.getElementById('cmdinput');
+  const edstripe   = document.getElementById('edstripe');
+  const tabbarEl   = document.getElementById('tabbar');
+  const tabbarTabs = tabbarEl ? tabbarEl.querySelector('.tabs') : null;
+  const cmdinput   = document.getElementById('cmdinput');
   const modestatus = document.getElementById('modestatus');
-  const tabbarTabs = document.querySelector('#tabbar .tabs');
-  // caret measure helper
-  const _measureSpan = document.createElement('span');
-  _measureSpan.style.cssText = 'position:absolute;visibility:hidden;white-space:pre;font:inherit;line-height:var(--lh);';
-  document.body.appendChild(_measureSpan);
 
-  /*********************************************************
-   * State
-   *********************************************************/
-  let caretRow = 0, caretCol = 0;
-  let _centerScrolloffOnce = false;
-  let _lineLockActive = false;
-  let _cachedVisibleCount = 0;
-  let _mode = 'NORMAL';
-  let _pendingNormal = null; // for multi-key sequences like 'gg'
-  let _pendingTimer = null;
-  // multi-buffer model
-  const buffers = [];
+
+  // layout constants (should match CSS)
+  const LINE_HEIGHT = 20;        // px
+  const HSCROLL_RESERVE = 0;     // px
+  const ROUND_THRESH = 0.5;      // fraction
+
+  // editor state
+  let buffers = [];
   let currentIdx = -1;
+  let caretRow = 0;
+  let caretCol = 0;
+  let scrolloff = 3;
+  let _cachedVisibleCount = 0;
+  let _lineLockActive = false;
+  let _centerScrolloffOnce = false;
+  let _mode = 'NORMAL';
+  let _pendingNormal = null;
+  let _pendingTimer = null;
 
-  function currentBuffer(){ return (currentIdx>=0 && currentIdx<buffers.length) ? buffers[currentIdx] : null; }
-  function _addBuffer(buf){ buffers.push(buf); currentIdx = buffers.length-1; return currentBuffer(); }
-  function _switchToBuffer(i){
-    if (i<0 || i>=buffers.length) return false;
-    currentIdx = i;
-    const b = buffers[i];
-    // 反映
-    editor.value = b.text || '';
-    caretRow = 0; caretCol = 0; editor.scrollTop = 0;
-    _centerScrolloffOnce = true; ensureScrolloff({centerOnce:true});
-    _repositionCaret(); updateGutter();
-    _setTitle(); _renderTabbar();
-    return true;
+  // measurement span (for caret x position)
+  const _measureSpan = (function(){
+    const s = document.createElement('span');
+    s.style.position = 'fixed';
+    s.style.left = '-99999px';
+    s.style.top = '-99999px';
+    s.style.whiteSpace = 'pre';
+    // Keep in sync with editor font if changed via CSS
+    s.style.font = '14px/20px ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", Menlo, monospace';
+    document.body.appendChild(s);
+    return s;
+  })();
+
+  // buffers helpers expected by later code
+  function currentBuffer(){
+    return (currentIdx>=0 && currentIdx<buffers.length) ? buffers[currentIdx] : null;
+  }
+  function _findBufferByURL(u){
+    try{
+      const s = String(u||'');
+      if (!s) return -1;
+      for (let i=0;i<buffers.length;i++){
+        const b = buffers[i];
+        if (b && String(b.path||'') === s) return i;
+      }
+      return -1;
+    }catch{ return -1; }
   }
 
-  /*********************************************************
-   * Utility
-   *********************************************************/
-  function _splitLines(){ return editor.value.split('\n'); }
-  function _totalLines(){ return _splitLines().length; }
-  function _topLine(){ return Math.floor(editor.scrollTop / LINE_HEIGHT) + 1; } // 1-based
-  function _visibleLinesExact(){
-    const h = viewport.clientHeight;
-    const raw = h / LINE_HEIGHT;
-    const v = (raw - Math.floor(raw) >= ROUND_THRESH ? Math.ceil(raw) : Math.floor(raw));
-    return Math.max(1, v);
+  function _toFileURLFromWinPath(p){
+    try{
+      let s = String(p).replace(/\\/g,'/');
+      if (!/^[A-Za-z]:\//.test(s)) return s; // not a drive root style, return as-is
+      // Ensure leading slash for URL path: C:/... -> /C:/...
+      if (!s.startsWith('/')) s = '/' + s;
+      const u = new URL('file://' + s);
+      return u.toString();
+    }catch{ return String(p); }
   }
-  function _needsHScrollReserve(){
-    return editor.scrollWidth > editor.clientWidth;
+
+  function _isLikelyURL(s){
+    try{ const t = String(s||''); return /^([a-z][a-z0-9+.-]*:)/i.test(t); }catch{ return false; }
   }
-  function _applyTheme(){
-    const r = document.documentElement;
-    const t = window.THEME || {};
-    const map = {
-      '--bodyBGColor': t.bodyBGColor,
-      '--lineBaseFill': t.lineBaseFill,
-      '--gutterGradientStart': t.gutterGradientStart,
-      '--gutterGradientEnd': t.gutterGradientEnd,
-      '--activeLineBg': t.activeLineBg,
-      '--gutterNumberColor': t.gutterNumberColor,
-      '--activeLineNumberColor': t.activeLineNumberColor,
-      '--eofGutterFillColor': t.eofGutterFillColor,
-      '--caretColor': t.caretColor,
-      '--caretGradStart': t.caretGradientStart,
-      '--caretGradEnd': t.caretGradientEnd,
-      '--caretWidth': t.caretWidthPx != null ? (t.caretWidthPx+'px') : undefined,
-      '--tabBarBg': t.tabBarBg,
-      '--tabBarFg': t.tabBarFg
-    };
-    Object.entries(map).forEach(([k,v])=>{ if(v) r.style.setProperty(k,v); });
+
+  function _basename(pathLike){
+    try{
+      if (_isLikelyURL(pathLike)){
+        const u = new URL(pathLike, _htmlBaseURL());
+        const pathname = u.pathname || '';
+        const trimmed = pathname.endsWith('/') ? pathname.slice(0,-1) : pathname;
+        const parts = trimmed.split('/');
+        return decodeURIComponent(parts.pop() || '') || pathLike;
+      }
+      const s = String(pathLike).replace(/\\/g,'/');
+      const t = s.endsWith('/') ? s.slice(0,-1) : s;
+      return t.substring(t.lastIndexOf('/')+1) || t;
+    }catch{ return String(pathLike||''); }
   }
 
   function _setTitle(){
-  // Windows タイトルバー（タスクバー名）にはバッファ名を出さない
-  // 透明色は使えないため不可視文字で擬似的に空表示にする
-  document.title = '\u2063';
-    _renderTabbar();
-  }
-
-  function _basename(p){
-    if (!p) return '';
-    const parts = p.replace(/\\/g,'/').split('/');
-    return parts[parts.length-1] || p;
-  }
-
-  function _htmlBaseURL(){
-    try { return new URL('.', location.href); } catch { return null; }
-  }
-
-  function _isLikelyURL(s){ return /^([a-z][a-z0-9+.-]*:)/i.test(s); }
-
-  function _toFileURLFromWinPath(p){
-    // C:\foo\bar.txt -> file:///C:/foo/bar.txt
-    const norm = p.replace(/\\/g,'/');
-    const raw = 'file:///' + norm.replace(/^([a-zA-Z]):\//, '$1:/');
-    try { return new URL(raw).toString(); } catch { return raw; }
-  }
-
-  function _normalizeToURLString(pathLike, baseURL){
-    if (!pathLike) return null;
-    // Windows 絶対パス
-    if (/^[a-zA-Z]:[\\/]/.test(pathLike)){
-      return _toFileURLFromWinPath(pathLike);
-    }
-    // UNC パス（例: \\server\share\path または \\wsl.localhost\...）
-    if (/^\\\\/.test(pathLike)){
-      const noPrefix = pathLike.replace(/^\\\\/, '');
-      const asPosix = noPrefix.replace(/\\/g,'/');
-      // Edge/XHR 互換のため 'file:////server/share/..' 形式を用いる
-      const raw = 'file:////' + asPosix;
-      try { return new URL(raw).toString(); } catch { return raw; }
-    }
-    // WSL/UNC 風（例: //wsl.localhost/Ubuntu/home/...）
-    if (/^\/\//.test(pathLike)){
-      const noPrefix = pathLike.replace(/^\/\//, '');
-      // 同様に 'file:////wsl.localhost/Ubuntu/..' 形式へ
-      const raw = 'file:////' + noPrefix;
-      try { return new URL(raw).toString(); } catch { return raw; }
-    }
-    // POSIX 絶対パス
-    if (pathLike.startsWith('/')){
-      const raw = 'file://' + pathLike;
-      try { return new URL(raw).toString(); } catch { return raw; }
-    }
-    // 既に URL
-    if (_isLikelyURL(pathLike)){
-      try { return new URL(pathLike).toString(); } catch { /* fallthrough */ }
-    }
-    // 相対: baseURL に対して解決
-    try { return new URL(pathLike, baseURL || _htmlBaseURL()).toString(); } catch { return pathLike; }
-  }
-
-  function _dirnameURL(urlStr){
-    try {
-      const u = new URL(urlStr);
-      u.pathname = u.pathname.replace(/\/[^\/]*$/, '/');
-      return u;
-    } catch { return _htmlBaseURL(); }
+    try{
+      const b = currentBuffer();
+      const mod = (b && b.modified) ? '*' : '';
+      // OS ウインドウタイトルにはパスを出さない（file:/// を隠す）
+      document.title = `six-webview2${mod ? ' ' + mod : ''}`;
+    }catch{}
   }
 
   function _bufferNumberLabel(n){
@@ -182,6 +122,255 @@
     } catch { return full; }
   }
 
+  function _prettyFileUrlLabel(full){
+    if (!full) return '';
+    try{
+      const u = new URL(full);
+      if (u.protocol !== 'file:') return full;
+      let p = decodeURIComponent(u.pathname || '');
+      const host = u.host || '';
+      // Windows ドライブ表記の先頭スラッシュを落とす: /C:/foo → C:/foo
+      p = p.replace(/^\/([A-Za-z]:\/)/, '$1');
+      // UNC/WSL: host があれば //host を付ける
+      if (host) {
+        // pathname は先頭に /share の形なので二重スラッシュを調整
+        if (p.startsWith('/')) p = p.substring(1);
+        p = '//' + host + '/' + p;
+      }
+      // ディレクトリ末尾のスラッシュは維持
+      if ((u.pathname||'').endsWith('/') && !p.endsWith('/')) p += '/';
+      return p || full;
+    }catch{ return full; }
+  }
+
+  // URL を :e の入力欄にそのまま貼れるディレクトリ表記へ（//host/... または C:/... など）
+  function _inputDirRawFromURL(urlObj){
+    try{
+      const u = (urlObj instanceof URL) ? urlObj : new URL(String(urlObj||''), _htmlBaseURL());
+      let s = _prettyFileUrlLabel(u.toString());
+      if (s && !s.endsWith('/')) s += '/';
+      return s;
+    }catch{ return ''; }
+  }
+
+  // ---- Missing foundational helpers (restored) ----
+  function _htmlBaseURL(){
+    try{
+      // _six.html の場所を基点とする（new URL('.', href) は末尾スラッシュ付きのディレクトリを返す）
+      const u = new URL('.', (document.baseURI || location.href));
+      if (!u.pathname.endsWith('/')){ try{ u.pathname = u.pathname + '/'; }catch{} }
+      return u;
+    } catch {
+      try { return new URL(location.href); } catch { return new URL('about:blank'); }
+    }
+  }
+
+  function _dirnameURL(pathLike){
+    try{
+      const u = new URL(pathLike, _htmlBaseURL());
+      // ディレクトリに正規化
+      const p = u.pathname;
+      if (/\/$/.test(p)) return u.toString();
+      const x = new URL(u.toString());
+      x.pathname = x.pathname.replace(/\/[^\/]*$/, '/');
+      return x.toString();
+    }catch{ return _htmlBaseURL(); }
+  }
+
+  function _normalizeToURLString(path, base){
+    try{
+      if (!path) return new URL('.', base||_htmlBaseURL()).toString();
+      // Windows 風 C:\ を file:/// へ
+      if (/^[A-Za-z]:[\\\/]/.test(path)){ return _toFileURLFromWinPath(path); }
+      // すでにスキームあり
+      if (/^([a-z][a-z0-9+.-]*:)/i.test(path)) return new URL(path).toString();
+      return new URL(path, base||_htmlBaseURL()).toString();
+    }catch{ try{ return new URL(String(path||''), base||_htmlBaseURL()).toString(); }catch{ return String(path||''); } }
+  }
+
+  function _splitLines(){ return String(editor.value||'').split(/\n/); }
+  function _totalLines(){ return _splitLines().length; }
+  function _topLine(){ return Math.floor((editor.scrollTop||0) / LINE_HEIGHT) + 1; }
+  function _visibleLinesExact(){ return _cachedVisibleCount || Math.max(1, Math.floor(viewport.clientHeight/LINE_HEIGHT)); }
+  function _needsHScrollReserve(){ return false; }
+
+  function _applyTheme(){
+    try{
+      // no-op for now; hooks to CSS variables if needed later
+    }catch{}
+  }
+
+  // Host root detection (file:////host/ with no share path)
+  function _isHostRoot(u){
+    try{ const x = (u instanceof URL) ? u : new URL(u); return x.protocol==='file:' && !!x.host && (x.pathname==='' || x.pathname==='/'); }catch{ return false; }
+  }
+
+  // Load shares for a host (e.g., wsl.localhost) into popup entries
+  async function _loadSharesForHost(host, selectName){
+    if (!_apiIsEnabled()){
+      // APIが使えない場合は shares を列挙できない → '********' で停止
+      _fileInvalid = true; _fileLoading = false; _fileEntries = []; if (_filePopupVisible()) _filePopupRender();
+      return false;
+    }
+    try{
+      _fileInvalid = false; _fileLoading = true; _fileEntries = []; _fileSel = 0;
+      if (_filePopupVisible()) _filePopupRender();
+      const apiUrl = _apiBase + 'shares?host=' + encodeURIComponent(host);
+      const j = await _fetchJSONWithTimeout(apiUrl, 4000);
+      try{ _apiNoteSuccess(); }catch{}
+      const raw = (j && Array.isArray(j.shares)) ? j.shares : [];
+      const seen = new Set();
+      const clean = (s)=>{ try{ let t=String(s||''); t=t.replace(/[\u200B-\u200D\u2060\u00A0]/g,''); t=t.replace(/[\u0000-\u001F]/g,''); return t.trim(); }catch{ return String(s||''); } };
+      const entries = [];
+      for (const e of raw){ const n0=e&&e.name; const n1=clean(n0); if(!n1) continue; if(n1==='.'||n1==='..'||n1.includes('/')) continue; const key=n1.toLowerCase(); if(seen.has(key)) continue; seen.add(key); const url=(e&&e.url)?String(e.url):('file:////'+host+'/'+encodeURIComponent(n1)+'/'); entries.push({ name:n1, isDir:true, url }); }
+      entries.sort((a,b)=> a.name.localeCompare(b.name));
+      _fileEntries = entries;
+      try{
+        if (selectName){ const idx = entries.findIndex(e=>e && e.name===selectName); if (idx>=0) _fileSel = idx; }
+      }catch{}
+      try{ const curKey = _ensureSlash(_fileBaseURL)?.toString()||null; _fileStableEntries = entries.slice(); _fileStableBaseKey = curKey; }catch{}
+      _fileInvalid = false; _fileLoading = false; if (_filePopupVisible()) _filePopupRender();
+      return true;
+    }catch{
+      _fileLoading = false; return false;
+    }
+  }
+
+  function _addBuffer(b){
+    try{ buffers.push({ name: b.name||'(untitled)', path: b.path||null, text: b.text||'', modified: !!b.modified }); if (currentIdx<0) currentIdx=0; }catch{}
+  }
+  function _switchToBuffer(i){
+    try{
+      if (!(i>=0 && i<buffers.length)) return;
+      currentIdx = i;
+      const b = buffers[i];
+      editor.value = String(b.text||'');
+      caretRow = 0; caretCol = 0; editor.scrollTop = 0;
+      _centerScrolloffOnce = true; ensureScrolloff({centerOnce:true});
+      _repositionCaret(); updateGutter();
+      _setTitle(); _renderTabbar();
+    }catch{}
+  }
+
+  // Enter/Tab 確定統合（:e ファイルポップアップ用）
+  function _confirmFilePopupSelection(){
+    try{
+      if (!_filePopupVisible()) return false;
+      const list = _filePopupComputeList();
+      if (list.length === 0){
+        const q = (_fileFilter||'').trim();
+        if (!q) return true;
+        // UNC配下での部分入力時（例: //wsl.localhost/Ubuntu/ + "hom"）は、新規バッファを開かずフィルタ継続
+        try{
+          const uBase = _ensureSlash(_fileBaseURL);
+          const underUnc = !!(uBase && uBase.protocol==='file:' && uBase.host);
+          const looksPartialSeg = /^[^\\/:*?"<>|]+$/.test(q);
+          if (underUnc && looksPartialSeg){
+            return true;
+          }
+        }catch{}
+        if (q === '..'){
+          // 親へ移動（フィルタは使わず、入力欄は末尾セグメントを残した表示に）
+          try{
+            const parent = _ensureSlash(new URL('../', _fileBaseURL));
+            // 末尾セグメント（元いたフォルダ名）を抽出
+            let s = (_fileTypedDirRaw||'').replace(/\\/g,'/').replace(/\/+$/,'');
+            const idx = s.lastIndexOf('/');
+            const prevSeg = (idx>=0 ? s.slice(idx+1) : s);
+            // 親一覧で直前セグメントをハイライトするため保持
+            _filePostSelectName = prevSeg || null;
+            _fileBaseURL = parent; _fileTypedDirRaw = (idx>=0? s.slice(0,idx+1) : ''); _fileFilter='';
+            const parentNow = _ensureSlash(_fileBaseURL);
+            if (parentNow && _isHostRoot(parentNow)){
+              // 親がホスト直下: 入力は //host/ に置換し、shares を再読込（".." は非表示）。選択は直前セグメント名に。
+              _fileTypedDirRaw = '//' + parentNow.host + '/'; _fileFilter=''; _filePopupNoUp = true;
+              _fileEntries = []; _fileSel = 0; _fileLoading = true; if (_filePopupVisible()) _filePopupRender();
+              _loadSharesForHost(parentNow.host, prevSeg).finally(()=>{
+                try{ if (cmdinput){ cmdinput.value=':e ' + _fileTypedDirRaw; const pos=(cmdinput.value||'').length; cmdinput.setSelectionRange(pos,pos); } }catch{}
+              });
+            } else {
+              const reqKey = (function(){ try{ return _ensureSlash(_fileBaseURL)?.toString()||null; }catch{ return null; } })();
+              _listDirEntries(_fileBaseURL).then(list2=>{
+                try{
+                  const curKey = _ensureSlash(_fileBaseURL)?.toString()||null;
+                  if (!reqKey || curKey===reqKey){
+                    _fileEntries = Array.isArray(list2) ? list2 : [];
+                    if (Array.isArray(list2) && list2.length>0){ _fileStableEntries = list2.slice(); _fileStableBaseKey = curKey; }
+                    let sel = 0; const idx2 = _fileEntries.findIndex(e=> e && e.name===prevSeg); if (idx2>=0) sel = idx2 + (_filePopupNoUp?0:1); _fileSel = sel;
+                  }
+                }catch{}
+                _filePopupRender();
+              }).finally(()=>{ try{ if (cmdinput){ cmdinput.value=':e ' + _collapseDotDotPath(_fileTypedDirRaw + prevSeg); const pos = (cmdinput.value||'').length; cmdinput.setSelectionRange(pos, pos); } }catch{} });
+            }
+            return true;
+          }catch{}
+        }
+        // 入力をそのまま開く
+        (async()=>{
+          const ok = await _loadFromPath(q, _fileBaseURL, { silentOnFail:true, mode:'new' });
+          if (!ok){ let finalURL = null; try{ finalURL = new URL(q, _fileBaseURL).toString(); }catch{} _addBuffer({ name: q, path: finalURL, text: '', modified:false }); _switchToBuffer(buffers.length-1); }
+          _filePopupHide(); _bufPopupHide(); _setMode('NORMAL'); cmdinput.value=''; setTimeout(()=>editor.focus(),0);
+        })();
+        return true;
+      }
+      const sel = Math.max(0, Math.min(list.length-1, _fileSel));
+      const it = list[sel];
+      if (it.isDir){
+        // ポップアップは補完専用: 入力欄を更新し、あとは input ハンドラに任せる
+        try{
+          const nextBase = _ensureSlash(new URL(it.url, _fileBaseURL));
+          _fileJustNavAt = Date.now();
+          _fileNavRetryCount = 0; // 遷移直後の短期リトライを毎回リセット
+          _fileTypedDirRaw = it._up
+            ? (function(){
+                // 表示上は 1 段戻す
+                    let s = (_fileTypedDirRaw||'').replace(/\\/g,'/').replace(/\/+$/,'');
+                    const idx = s.lastIndexOf('/');
+                    if (!s){
+                      // 入力欄に基底パスが無い場合、URL から親ディレクトリの絶対表記を生成
+                      return _inputDirRawFromURL(nextBase);
+                    }
+                    const parent = (idx>=0? s.slice(0,idx+1) : '');
+                    return parent;
+              })()
+            : (function(){
+                // ホスト直下（file:////host/）が次ベースの場合は //host/ にする
+                try{ if (nextBase && _isHostRoot(nextBase)) return '//' + nextBase.host + '/'; }catch{}
+                return (_fileTypedDirRaw||'') + it.name + '/';
+              })();
+          _fileFilter = '';
+          if (cmdinput){
+            // 「..」選択時は直前セグメントを表示位置に残しつつ caret を合わせる仕様を維持
+            if (it._up){
+              // 直前セグメントは baseURL から頑健に取得（子の名前 = 今の base の末尾）
+              let prevSeg = '';
+              try{
+                const b = _ensureSlash(_fileBaseURL);
+                let p = decodeURIComponent((b && b.pathname) || '');
+                p = p.replace(/\/+$/,'');
+                const i2 = p.lastIndexOf('/');
+                prevSeg = (i2>=0 ? p.slice(i2+1) : p);
+              }catch{}
+              // 親へ戻った後、親一覧でこのフォルダをハイライトする
+              _filePostSelectName = prevSeg || null;
+              cmdinput.value = ':e ' + _collapseDotDotPath(_fileTypedDirRaw + prevSeg);
+            } else {
+              cmdinput.value = ':e ' + _collapseDotDotPath(_fileTypedDirRaw);
+            }
+            // 補完は入力欄への貼り付けのみ。即時列挙バイパスキーは設定しない（手入力と同一経路に統一）
+            _fileNavPendingKey = null;
+            try { cmdinput.dispatchEvent(new Event('input', { bubbles:true })); } catch {}
+          }
+          return true;
+        }catch{}
+      } else {
+        _loadFromPath(it.url, null, {mode:'new'});
+      }
+      _filePopupHide(); _bufPopupHide(); _setMode('NORMAL'); cmdinput.value=''; setTimeout(()=>editor.focus(),0);
+      return true;
+    }catch{ return false; }
+  }
+
   function _renderTabbar(){
     if (!tabbarTabs) return;
     tabbarTabs.innerHTML = '';
@@ -195,12 +384,20 @@
       tabbarTabs.appendChild(div);
       return;
     }
+    let activeEl = null;
     buffers.forEach((b, i)=>{
       const div = document.createElement('div');
       div.className = 'tab' + (i===currentIdx ? ' active' : '');
       let label = '';
       if (b.path && /^file:\/\//i.test(b.path)){
-        label = (i===currentIdx ? (_relativeDisplayPath(b.path) || (b.name||'')) : (b.name||''));
+        if (i===currentIdx){
+          const rel = _relativeDisplayPath(b.path);
+          label = rel && rel !== b.path ? rel : _prettyFileUrlLabel(b.path);
+          if (!label) label = (b.name||'');
+        } else {
+          // 非アクティブタブは常にファイル名のみ（WSL含む）
+          try{ label = _basename(b.path); }catch{ label = (b.name||''); }
+        }
       } else {
         label = b.name || '';
       }
@@ -211,9 +408,16 @@
       nameSpan.textContent = (numLabel ? (numLabel + ' ') : '') + baseText;
       div.appendChild(nameSpan);
       if (b.modified){ const mod = document.createElement('span'); mod.className='mod'; mod.textContent='*'; div.appendChild(mod); }
-      div.addEventListener('click', ()=>{ _switchToBuffer(i); });
+  // クリックでフォーカスを奪わない（mousedown 既定動作を抑止）
+  div.addEventListener('mousedown', (ev)=>{ ev.preventDefault(); });
+  div.addEventListener('click', ()=>{ _switchToBuffer(i); setTimeout(()=>editor.focus(),0); });
       tabbarTabs.appendChild(div);
+      if (i===currentIdx) activeEl = div;
     });
+    // アクティブタブがスクロール領域に見えるように調整
+    if (activeEl && typeof activeEl.scrollIntoView === 'function'){
+      activeEl.scrollIntoView({block:'nearest', inline:'nearest'});
+    }
   }
 
   function _isDirHint(s){
@@ -256,7 +460,7 @@
     return fetch(urlStr).then(r=>{ if(!r.ok) throw new Error('fetch fail'); return r.text(); });
   }
 
-  function _fetchTextWithTimeout(url, timeoutMs=1500){
+  function _fetchTextWithTimeout(url, timeoutMs=2500){
     const ac = (window.AbortController ? new AbortController() : null);
     const to = setTimeout(()=>{ try{ ac && ac.abort(); } catch{} }, timeoutMs);
     const opts = ac ? { signal: ac.signal } : {};
@@ -264,27 +468,103 @@
       .finally(()=>{ try{ clearTimeout(to); }catch{} });
   }
 
+  function _fetchJSONWithTimeout(url, timeoutMs=5000){
+    const ac = (window.AbortController ? new AbortController() : null);
+    const to = setTimeout(()=>{ try{ ac && ac.abort(); } catch{} }, timeoutMs);
+    const opts = ac ? { signal: ac.signal } : {};
+    return fetch(url, opts).then(r=>{ if(!r.ok) throw new Error('fetch fail'); return r.json(); })
+      .finally(()=>{ try{ clearTimeout(to); }catch{} });
+  }
+
+  // API base injected by launcher via #api=...
+  let _apiBase = null;
+  // ローカルAPIのサーキットブレーカー（大量の接続拒否スパム回避）
+  let _apiDisabledUntil = 0;
+  let _apiFailCount = 0;
+  function _apiIsEnabled(){ return !!_apiBase && Date.now() > _apiDisabledUntil; }
+  function _apiNoteFailure(){ try{ _apiFailCount++; if (_apiFailCount >= 2){ _apiDisabledUntil = Date.now() + 60*1000; try{ console.warn && console.warn('Disabling local API temporarily'); }catch{} } }catch{} }
+  function _apiNoteSuccess(){ _apiFailCount = 0; _apiDisabledUntil = 0; }
+  function _readApiFromHash(){
+    try{
+      if (location.hash){
+        const h = location.hash.replace(/^#/, '');
+        const q = new URLSearchParams(h);
+        const a = q.get('api');
+        if (a) _apiBase = a.endsWith('/') ? a : (a + '/');
+        _apiDisabledUntil = 0; _apiFailCount = 0;
+      }
+    }catch{}
+  }
+
   async function _loadFromPath(path, baseForRelative, opts={}){
+    // 例外が途中で発生しても、本文が読み込めているなら確実にバッファを作成/切替するためのフェイルセーフ
+    let urlStr = null;
+    let txt; let t;
+    let loadedIntoEditor = false;
     try {
       const base = baseForRelative || _htmlBaseURL();
-      const urlStr = _normalizeToURLString(path, base);
-      const txt = await _fetchTextSmart(urlStr);
-      const t = txt.replace(/\r\n?/g,'\n');
-    editor.value = t;
+      urlStr = _normalizeToURLString(path, base); // Normalize the URL string
+      // UNC/WSL (file://host/...) は最初に API /read を優先して試す（fetch/XHR が CORS/権限で失敗しやすいため）
+      try {
+        const uProbe = new URL(urlStr);
+        if (_apiIsEnabled() && uProbe.protocol==='file:' && uProbe.host){
+          const fsPath0 = ('\\\\' + uProbe.host + decodeURIComponent(uProbe.pathname).replace(/\//g,'\\'));
+          const apiRead0 = _apiBase + 'read?fs=' + encodeURIComponent(fsPath0);
+          try{ txt = await _fetchTextWithTimeout(apiRead0, 8000); _apiNoteSuccess(); } catch(e){ _apiNoteFailure(); }
+        }
+      } catch { /* not UNC/WSL or no API */ }
+      // それでも未取得なら通常経路（XHR/fetch）
+      if (txt === undefined){
+        try { txt = await _fetchTextSmart(urlStr); }
+        catch(eFetch){
+          // 最後の手段として API /read（再試行）
+          try{
+            const u2 = new URL(urlStr);
+            if (_apiIsEnabled() && u2.protocol==='file:' && u2.host){
+              const fsPath2 = ('\\\\' + u2.host + decodeURIComponent(u2.pathname).replace(/\//g,'\\'));
+              const apiRead2 = _apiBase + 'read?fs=' + encodeURIComponent(fsPath2);
+              try{ txt = await _fetchTextWithTimeout(apiRead2, 8000); _apiNoteSuccess(); }catch(e2){ _apiNoteFailure(); throw eFetch; }
+            } else {
+              throw eFetch;
+            }
+          } catch(eApi){ throw eFetch; }
+        }
+      }
+      t = txt.replace(/\r\n?/g,'\n');
+      editor.value = t;
+      loadedIntoEditor = true;
       caretRow = 0; caretCol = 0; editor.scrollTop = 0;
       _centerScrolloffOnce = true; ensureScrolloff({centerOnce:true});
-      _repositionCaret(); updateGutter();
+      try{ _repositionCaret(); updateGutter(); }catch{}
       const mode = opts.mode || (buffers.length===0 ? 'new' : 'replace');
       if (mode === 'new'){
-        _addBuffer({ name: _basename(path), path: urlStr, text: t, modified:false });
+        const exist = _findBufferByURL(urlStr);
+        if (exist >= 0){ _switchToBuffer(exist); }
+        else { _addBuffer({ name: _basename(path), path: urlStr, text: t, modified:false }); _switchToBuffer(buffers.length-1); }
       } else {
-        const b=currentBuffer(); if (b){ b.path = urlStr; b.name = _basename(path); b.text=t; b.modified=false; }
+        const b=currentBuffer(); if (b){ b.path = urlStr; b.name = _basename(path); b.text = t; b.modified=false; }
       }
-    _setTitle(); _renderTabbar();
+      try{ _setTitle(); _renderTabbar(); }catch{}
       return true;
     } catch (e){
       console.error('open failed', e);
-      if (!opts.silentOnFail) alert('open failed: '+path);
+      // 本文は読み込めている → バッファだけ確実に作り、致命的扱いにしない
+      if (loadedIntoEditor){
+        try{
+          const mode = opts.mode || (buffers.length===0 ? 'new' : 'replace');
+          if (mode === 'new'){
+            const exist = _findBufferByURL(urlStr||path);
+            if (exist >= 0){ _switchToBuffer(exist); }
+            else { _addBuffer({ name: _basename(path), path: urlStr||path, text: t||editor.value||'', modified:false }); _switchToBuffer(buffers.length-1); }
+          } else {
+            const b=currentBuffer(); if (b){ b.path = urlStr||b.path; b.name = _basename(path); b.text = t||editor.value||b.text; b.modified=false; }
+          }
+          try{ _setTitle(); _renderTabbar(); }catch{}
+          // ユーザーに不要なトーストは出さない
+          return true;
+        }catch(e2){ /* fallthrough */ }
+      }
+      if (!opts.silentOnFail) toast('open failed: '+path);
       return false;
     }
   }
@@ -344,7 +624,8 @@
       api = api || qh.get('api');
       bundleB64 = qh.get('bundle');
     }
-  // ネイティブ API は非対応とする
+    if (api) { try{ _apiBase = api.endsWith('/') ? api : (api + '/'); }catch{} }
+    // ネイティブ API は非対応とする
     // bundle (複数ドキュメント) 優先
     if (bundleB64){
       try {
@@ -355,7 +636,9 @@
           // data が無い場合は後段で file:// 読み込み
           const promises = arr.map(async (it)=>{
             const nameIt = it && it.name || null;
-            const docIt  = it && it.doc  || null;
+            let docIt  = it && it.doc  || null;
+            // six.ps1 は相対のまま渡すことがあるので _six.html の場所に対して解決
+            try { if (docIt && !/^([a-z][a-z0-9+.-]*:)/i.test(docIt)) { docIt = new URL(docIt, _htmlBaseURL()).toString(); } } catch {}
             let t = '';
             if (it && typeof it.data === 'string' && it.data.length){
               try { t = new TextDecoder('utf-8').decode(Uint8Array.from(atob(it.data), c=>c.charCodeAt(0))); } catch{}
@@ -377,21 +660,23 @@
       try {
         const bin = dataB64.length ? Uint8Array.from(atob(dataB64), c=>c.charCodeAt(0)) : new Uint8Array();
         const txt = new TextDecoder('utf-8').decode(bin);
-  const t = txt.replace(/\r\n?/g,'\n');
-  editor.value = t;
-  if (buffers.length===0){ _addBuffer({ name: name||null, path: doc||null, text: t, modified:false }); }
-  else { const b=currentBuffer(); b.name = name||b.name; b.path = doc||b.path; b.text=t; b.modified=false; }
-  _setTitle(); _renderTabbar();
+    const t = txt.replace(/\r\n?/g,'\n');
+    editor.value = t;
+    if (buffers.length===0){ _addBuffer({ name: name||null, path: doc||null, text: t, modified:false }); }
+    else { const b=currentBuffer(); b.name = name||b.name; b.path = doc||b.path; b.text=t; b.modified=false; }
+    _setTitle(); _renderTabbar();
         return Promise.resolve(true);
       } catch { /* fallthrough */ }
     }
-    if (!doc) return Promise.resolve(false);
-    return _fetchTextSmart(doc).then(txt=>{
-  const t = txt.replace(/\r\n?/g,'\n');
-  editor.value = t;
-  if (buffers.length===0){ _addBuffer({ name: name||null, path: doc||null, text: t, modified:false }); }
-  else { const b=currentBuffer(); if(name) b.name = name; b.path = doc; b.text=t; b.modified=false; }
-  _setTitle(); _renderTabbar();
+  if (!doc) return Promise.resolve(false);
+  // Resolve doc relative to _six.html base when not absolute
+  try { if (doc && !/^([a-z][a-z0-9+.-]*:)/i.test(doc)) { doc = new URL(doc, _htmlBaseURL()).toString(); } } catch {}
+  return _fetchTextSmart(doc).then(txt=>{
+    const t = txt.replace(/\r\n?/g,'\n');
+    editor.value = t;
+    if (buffers.length===0){ _addBuffer({ name: name||null, path: doc||null, text: t, modified:false }); }
+    else { const b=currentBuffer(); if(name) b.name = name; b.path = doc; b.text=t; b.modified=false; }
+    _setTitle(); _renderTabbar();
       return true;
     }).catch(()=>{
       return false;
@@ -573,7 +858,7 @@
         if (list.length === 0){
           // 無該当
           const q = (_bufFilter||'').trim();
-          if (q) toast('No such buffer: ' + q);
+              if (q) toast('No such buffer: ' + q);
           _bufPopupHide();
           _setMode('NORMAL');
           return;
@@ -614,30 +899,49 @@
       if (!Number.isNaN(n)) window.six.setScrolloff(n);
       return;
     }
-    // :e [path]  / :e で現バッファ再読込
-    const em = cmd.match(/^:e!?\s*(.*)$/);
+    // :e [path]  / :e! で現バッファ再読込（:e はポップアップ表示）
+    const em = cmd.match(/^:(e!?)(?:\s*(.*))?$/i);
     if (em){
-      const arg = (em[1]||'').trim();
+      const bang = (em[1] && em[1].toLowerCase()==='e!');
+      const arg = (em[2]||'').trim();
       if (!arg){
-        // no-arg: 現バッファの再読込（pathがない場合はファイルピッカー）
-        const b = currentBuffer();
-        if (b && b.path){
-          _loadFromPath(b.path, null, {silentOnFail:true, mode:'replace'}).then(ok=>{
-            if(!ok){
-              const cwd = _dirnameURL(b.path);
-              _pickNative(cwd, b.name).then(chosen=>{
-                if (chosen){ _loadFromPath(chosen, null, {mode:'replace'}); }
-                else { _pickAndLoadFile({mode:'replace'}); }
-              });
-            }
-          });
-        } else {
-          const base = _htmlBaseURL();
-          _pickNative(base, '').then(chosen=>{
-            if (chosen){ _loadFromPath(chosen, null, {mode:'new'}); }
-            else { _pickAndLoadFile({mode:'new'}); }
-          });
+        // 引数なし
+        if (bang){
+          // :e! は再読込
+          const b = currentBuffer();
+          if (b && b.path){ _loadFromPath(b.path, null, { mode:'replace' }); }
+          _setMode('NORMAL');
+          return;
         }
+    // :e はファイル候補ポップアップを開く（先に表示→ローディングのち反映）
+  // 開始基点は常に現バッファのディレクトリ。Esc 記憶の一時基点は使わない（#178）。
+  _fileBaseURL = _currentDirBase();
+  _fileStartBaseURL = _ensureSlash(_fileBaseURL);
+  _fileNextStartBaseURL = null;
+        _fileTypedDirRaw = '';
+        _fileFilter = '';
+        _fileInvalid = false;
+        _filePopupNoUp = false;
+        _fileLoading = true;
+        _filePopupShow();
+        (function(){
+          const reqKey = (function(){ try{ return _ensureSlash(_fileBaseURL)?.toString()||null; }catch{ return null; } })();
+          _listDirEntries(_fileBaseURL)
+            .then(list=>{
+              try{
+                const curKey = _ensureSlash(_fileBaseURL)?.toString()||null;
+                if (!reqKey || curKey === reqKey){
+                  _fileEntries = Array.isArray(list) ? list : [];
+                  if (Array.isArray(list) && list.length>0){
+                    _fileStableEntries = list.slice();
+                    _fileStableBaseKey = curKey;
+                  }
+                }
+              }catch{}
+            })
+            .catch((e)=>{ console.warn('dir list (argless :e) failed', e); /* keep previous entries */ })
+            .finally(()=>{ _fileLoading=false; _filePopupRender(); });
+        })();
       } else {
         // 相対は現バッファのディレクトリ、なければ _six.html の場所を基点
         let base = null;
@@ -649,19 +953,51 @@
           base = _htmlBaseURL();
         }
 
-        // ディレクトリ指定ヒントの場合は、読み込みを試さずにピッカーを開く
+        // ディレクトリ指定ヒントの場合は、そのディレクトリでポップアップを開く
         if (_isDirHint(arg)){
-          // ディレクトリ指定時は即ブラウザピッカー（初期ディレクトリ指定は不可）
-          _pickAndLoadFile();
+          try{
+            const dirUrl = _ensureSlash(new URL(arg.replace(/\\/g,'/'), base));
+            _fileBaseURL = dirUrl;
+            _fileStartBaseURL = _ensureSlash(_fileBaseURL);
+            _fileTypedDirRaw = '';
+            _fileFilter = '';
+            _fileInvalid = false;
+            _fileLoading = true;
+            _filePopupShow();
+            (function(){
+              const reqKey = (function(){ try{ return _ensureSlash(_fileBaseURL)?.toString()||null; }catch{ return null; } })();
+              _listDirEntries(_fileBaseURL)
+                .then(list=>{
+                  try{
+                    const curKey = _ensureSlash(_fileBaseURL)?.toString()||null;
+                    if (!reqKey || curKey === reqKey){
+                      _fileEntries = Array.isArray(list) ? list : [];
+                      if (Array.isArray(list) && list.length>0){
+                        _fileStableEntries = list.slice();
+                        _fileStableBaseKey = curKey;
+                      }
+                    }
+                  }catch{}
+                })
+                .catch((e)=>{ console.warn('dir list (dir hint) failed', e); /* keep previous entries */ })
+                .finally(()=>{ _fileLoading=false; _filePopupRender(); });
+            })();
+          }catch{
+            _fileBaseURL = base; _fileTypedDirRaw=''; _fileFilter=''; _filePopupShow();
+          }
           return;
         }
 
         // まずは直接 file:// 読み込みを試す（XHR + fetch フォールバック）
         // 引数ありは新規バッファとして追加
-        _loadFromPath(arg, base, {silentOnFail:true, mode:'new'}).then(ok=>{
+        _loadFromPath(arg, base, {silentOnFail:true, mode:'new'}).then(async ok=>{
           if (ok) return;
-          // 失敗時は直ちにブラウザピッカー
-          _pickAndLoadFile({mode:'new'});
+          // 失敗時は新規バッファを作成（ピッカーは開かない）
+          let finalURL = null;
+          try { finalURL = new URL(arg, base).toString(); } catch {}
+          const exist = _findBufferByURL(finalURL);
+          if (exist >= 0){ _switchToBuffer(exist); }
+          else { _addBuffer({ name: _basename(arg), path: finalURL, text: '', modified:false }); _switchToBuffer(buffers.length-1); }
         });
       }
       return;
@@ -686,7 +1022,7 @@
 
     // :api? -> 現在の #api を表示
     if (cmd === ':api?' || cmd === ':echo api'){
-      alert('api = (none)');
+      toast('api = ' + (_apiBase || '(none)'));
       return;
     }
   }
@@ -742,7 +1078,19 @@
         return; // テキスト入力はデフォルトに委ねる
       }
       // NORMAL
-      if (e.key===':' && !e.ctrlKey){ e.preventDefault(); _setMode('CMD'); _clearPending(); if (cmdinput){ cmdinput.value=''; Promise.resolve().then(()=>cmdinput.focus()); } return; }
+      if (e.key===':' && !e.ctrlKey){
+        e.preventDefault();
+        _setMode('CMD');
+        _clearPending();
+        if (cmdinput){
+          // コロンは入力欄にそのまま見えるようにする
+          cmdinput.value = ':';
+          Promise.resolve().then(()=>{
+            try{ cmdinput.focus(); const pos = (cmdinput.value||'').length; cmdinput.setSelectionRange(pos,pos); }catch{}
+          });
+        }
+        return;
+      }
       if (e.key==='j'){ e.preventDefault(); _moveCaretLines(1); _repositionCaret(); updateGutter(); return; }
       if (e.key==='k'){ e.preventDefault(); _moveCaretLines(-1); _repositionCaret(); updateGutter(); return; }
       if (e.key==='h'){ e.preventDefault(); _moveCaretCols(-1); _repositionCaret(); return; }
@@ -779,6 +1127,225 @@
         if (e.key==='Enter'){
           e.preventDefault(); e.stopPropagation();
           const raw = cmdinput.value.trim();
+          // まず、:e のファイルポップアップが表示中なら Enter はポップアップに対する確定/ドリルダウンとして扱う
+          if (_filePopupVisible()){
+            // #164: 入力欄が '/' で終わっていない場合は、入力文字列を優先して確定
+            try{
+              const vNow = cmdinput.value;
+              const parsed = _eParseInput(vNow);
+              const typed = String(parsed.typedDirRaw||'');
+              const filt = String(parsed.filter||'');
+              const endsWithSlash = (filt.length === 0);
+              if (!endsWithSlash){
+                const q = filt.trim();
+                if (q === '..'){
+                  // 親ディレクトリへ（入力優先の Enter でも有効）
+                  try{
+                    const parent = _ensureSlash(new URL('../', _fileBaseURL));
+                    // 直前ディレクトリ名は baseURL から頑健に取得
+                    let prevSeg = '';
+                    try{
+                      const b = _ensureSlash(_fileBaseURL);
+                      let p = decodeURIComponent((b && b.pathname) || '');
+                      p = p.replace(/\/+$/,'');
+                      const i2 = p.lastIndexOf('/');
+                      prevSeg = (i2>=0 ? p.slice(i2+1) : p);
+                    }catch{}
+                    // 入力表示上の typed は現在の _fileTypedDirRaw から 1 段戻す
+                    let s = (_fileTypedDirRaw||'').replace(/\\/g,'/').replace(/\/+$/,'');
+                    const idx = s.lastIndexOf('/');
+                    let newTyped = (idx>=0 ? s.slice(0, idx+1) : '');
+                    if (!newTyped){ newTyped = _inputDirRawFromURL(parent); }
+                    // 親一覧で直前セグメントをハイライトするため保持
+                    _filePostSelectName = prevSeg || null;
+                    _fileBaseURL = parent; _fileTypedDirRaw = newTyped; _fileFilter = ''; _fileSelMuted = false;
+                    const reqKey = (function(){ try{ return _ensureSlash(_fileBaseURL)?.toString()||null; }catch{ return null; } })();
+                    _listDirEntries(_fileBaseURL).then(list2=>{
+                      try{
+                        const curKey = _ensureSlash(_fileBaseURL)?.toString()||null;
+                        if (!reqKey || curKey===reqKey){
+                          _fileEntries = Array.isArray(list2) ? list2 : [];
+                          if (Array.isArray(list2) && list2.length>0){ _fileStableEntries = list2.slice(); _fileStableBaseKey = curKey; }
+                          let sel = 0; const idx2 = _fileEntries.findIndex(e=> e && e.name===prevSeg); if (idx2>=0) sel = idx2 + (_filePopupNoUp?0:1); _fileSel = sel;
+                        }
+                      }catch{}
+                      _filePopupRender();
+                    }).finally(()=>{ try{ if (cmdinput){ cmdinput.value=':e ' + _collapseDotDotPath(_fileTypedDirRaw + prevSeg); const pos = (cmdinput.value||'').length; cmdinput.setSelectionRange(pos, pos); } }catch{} });
+                    return;
+                  }catch{}
+                }
+                // ディレクトリ/ファイル判定は現在の一覧で判定
+                try{
+                  let caseSensitive = false;
+                  try{ const b = _ensureSlash(_fileBaseURL); if (b && b.protocol==='file:' && b.host && b.host.toLowerCase()==='wsl.localhost') caseSensitive = true; }catch{}
+                  const eq = (a,b)=> caseSensitive ? (a===b) : (String(a||'').toLowerCase()===String(b||'').toLowerCase());
+                  const ent = (_fileEntries||[]).find(e=> e && eq(String(e.name||''), q));
+                  if (ent && ent.isDir){
+                    // ドリルダウン（補完専用）
+                    _fileJustNavAt = Date.now(); _fileNavRetryCount = 0; _fileFilter = ''; _fileSelMuted = false;
+                    _fileTypedDirRaw = (_fileTypedDirRaw||'') + q + '/';
+                    if (cmdinput){ cmdinput.value=':e ' + _collapseDotDotPath(_fileTypedDirRaw); try { cmdinput.dispatchEvent(new Event('input', { bubbles:true })); } catch {} }
+                    return;
+                  }
+                  if (ent && !ent.isDir){
+                    // ファイルを開く（確定）
+                    _loadFromPath(ent.url, null, {mode:'new'});
+                    _filePopupHide(); _bufPopupHide(); _setMode('NORMAL'); cmdinput.value=''; setTimeout(()=>editor.focus(), 0);
+                    return;
+                  }
+                  // 追加仕様(#176): 正確一致が無くても、先頭一致候補が1つだけならそれを確定対象にする
+                  const startsWith = (name,q2)=> caseSensitive ? name.startsWith(q2) : name.toLowerCase().startsWith(q2.toLowerCase());
+                  const cand = (_fileEntries||[]).filter(e=> e && !e._up && startsWith(String(e.name||''), q));
+                  if (cand.length === 1){
+                    const one = cand[0];
+                    if (one.isDir){
+                      _fileJustNavAt = Date.now(); _fileNavRetryCount = 0; _fileFilter = ''; _fileSelMuted = false;
+                      _fileTypedDirRaw = (_fileTypedDirRaw||'') + String(one.name||'') + '/';
+                      if (cmdinput){ cmdinput.value=':e ' + _collapseDotDotPath(_fileTypedDirRaw); try { cmdinput.dispatchEvent(new Event('input', { bubbles:true })); } catch {} }
+                      return;
+                    } else {
+                      _loadFromPath(one.url, null, {mode:'new'});
+                      _filePopupHide(); _bufPopupHide(); _setMode('NORMAL'); cmdinput.value=''; setTimeout(()=>editor.focus(), 0);
+                      return;
+                    }
+                  }
+                  // 未一致 → 入力優先で開く（無ければ新規）
+                  (async()=>{
+                    const ok = await _loadFromPath(q, _fileBaseURL, { silentOnFail:true, mode:'new' });
+                    if (!ok){
+                      let finalURL = null;
+                      try{ finalURL = new URL(q, _fileBaseURL).toString(); }catch{}
+                      _addBuffer({ name: q, path: finalURL, text: '', modified:false });
+                      _switchToBuffer(buffers.length-1);
+                    }
+                    _filePopupHide(); _bufPopupHide(); _setMode('NORMAL'); cmdinput.value=''; setTimeout(()=>editor.focus(), 0);
+                  })();
+                  return;
+                }catch{}
+              }
+            }catch{}
+            const list = _filePopupComputeList();
+            if (list.length === 0){
+              // 候補無し
+              const q = (_fileFilter||'').trim();
+              if (!q){
+                // 入力が空 → なにもしない（ポップアップ維持）
+                return;
+              }
+              // 以前は UNC 配下の部分入力を Enter でブロックしていたが、
+              // 「補完→入力ハンドラ→確定」に一本化するため撤去。ここで確定を試みる。
+              // '..' を単独入力→ 親ディレクトリへ
+              if (q === '..'){
+                try{
+                  const parent = _ensureSlash(new URL('../', _fileBaseURL));
+                  // 直前ディレクトリ名は baseURL から頑健に取得
+                  let prevSeg = '';
+                  try{
+                    const b = _ensureSlash(_fileBaseURL);
+                    let p = decodeURIComponent((b && b.pathname) || '');
+                    p = p.replace(/\/+$/,'');
+                    const i2 = p.lastIndexOf('/');
+                    prevSeg = (i2>=0 ? p.slice(i2+1) : p);
+                  }catch{}
+                  // 入力表示上の typed は現在の _fileTypedDirRaw から 1 段戻す
+                  let s = (_fileTypedDirRaw||'').replace(/\\/g,'/').replace(/\/+$/,'');
+                  const idx = s.lastIndexOf('/');
+                  let newTyped = (idx>=0 ? s.slice(0, idx+1) : '');
+                  if (!newTyped){ newTyped = _inputDirRawFromURL(parent); }
+                  // 親一覧で直前セグメントをハイライトするため保持（Enter専用経路も網羅）
+                  _filePostSelectName = prevSeg || null;
+                  _fileBaseURL = parent; _fileTypedDirRaw = newTyped; _fileFilter = '';
+                  const reqKey = (function(){ try{ return _ensureSlash(_fileBaseURL)?.toString()||null; }catch{ return null; } })();
+                  _listDirEntries(_fileBaseURL).then(list2=>{
+                    try{
+                      const curKey = _ensureSlash(_fileBaseURL)?.toString()||null;
+                      if (!reqKey || curKey===reqKey){
+                        _fileEntries = Array.isArray(list2) ? list2 : [];
+                        if (Array.isArray(list2) && list2.length>0){ _fileStableEntries = list2.slice(); _fileStableBaseKey = curKey; }
+                        let sel = 0; const idx2 = _fileEntries.findIndex(e=> e && e.name===prevSeg); if (idx2>=0) sel = idx2 + (_filePopupNoUp?0:1); _fileSel = sel;
+                      }
+                    }catch{}
+                    _filePopupRender();
+                  }).finally(()=>{ try{ if (cmdinput){ cmdinput.value=':e ' + _collapseDotDotPath(_fileTypedDirRaw + prevSeg); const pos = (cmdinput.value||'').length; cmdinput.setSelectionRange(pos, pos); } }catch{} });
+                  return;
+                }catch{}
+              }
+              // 入力がある → 直接読み込みを試み、失敗したら新規作成
+              (async()=>{
+                const ok = await _loadFromPath(q, _fileBaseURL, { silentOnFail:true, mode:'new' });
+                if (!ok){
+                  let finalURL = null;
+                  try{ finalURL = new URL(q, _fileBaseURL).toString(); }catch{}
+                  _addBuffer({ name: q, path: finalURL, text: '', modified:false });
+                  _switchToBuffer(buffers.length-1);
+                }
+                _filePopupHide();
+                _bufPopupHide();
+                _setMode('NORMAL');
+                cmdinput.value = '';
+                setTimeout(()=>editor.focus(), 0);
+              })();
+              return;
+            } else {
+              const sel = Math.max(0, Math.min(list.length-1, _fileSel));
+              const it = list[sel];
+              if (it.isDir){
+                // ディレクトリは補完専用: 入力欄更新→input ハンドラに統一委譲
+                try{
+                  const nextBase = _ensureSlash(new URL(it.url, _fileBaseURL));
+                  _fileJustNavAt = Date.now();
+                  _fileNavRetryCount = 0; // 遷移直後の短期リトライを毎回リセット
+                  _fileFilter = '';
+                  if (it._up){
+                    // 親へ戻るとき: 直前セグメントは現在の baseURL から取得（頑健）
+                    let sTyped = (_fileTypedDirRaw||'').replace(/\\/g,'/').replace(/\/+$/,'');
+                    const idxTyped = sTyped.lastIndexOf('/');
+                    _fileTypedDirRaw = (idxTyped>=0? sTyped.slice(0,idxTyped+1) : '');
+                    let prevSeg = '';
+                    try{
+                      const b = _ensureSlash(_fileBaseURL);
+                      let p = decodeURIComponent((b && b.pathname) || '');
+                      p = p.replace(/\/+$/,'');
+                      const i2 = p.lastIndexOf('/');
+                      prevSeg = (i2>=0 ? p.slice(i2+1) : p);
+                    }catch{}
+                    _filePostSelectName = prevSeg || null;
+                    // ここで基点を確実に親へ更新（入力解析に依存しない）
+                    _fileBaseURL = nextBase;
+                    if (cmdinput){ cmdinput.value=':e ' + _collapseDotDotPath(_fileTypedDirRaw + prevSeg); }
+                  } else {
+                    // 子へ進む: ホスト直下へ進む場合は //host/ を直接設定
+                    try{ const nb = nextBase; if (nb && _isHostRoot(nb)){ _fileTypedDirRaw = '//' + nb.host + '/'; }
+                    else { _fileTypedDirRaw = (_fileTypedDirRaw||'') + it.name + '/'; } }catch{ _fileTypedDirRaw = (_fileTypedDirRaw||'') + it.name + '/'; }
+                    if (cmdinput){ cmdinput.value=':e ' + _collapseDotDotPath(_fileTypedDirRaw); }
+                    // 基点も進める（入力解析待ちで遅延しないように）
+                    _fileBaseURL = nextBase;
+                  }
+                  _fileNavPendingKey = null;
+                  if (cmdinput){ try { cmdinput.dispatchEvent(new Event('input', { bubbles:true })); } catch {} }
+                  return; // ポップアップ維持
+                }catch{}
+              } else {
+                _loadFromPath(it.url, null, {mode:'new'});
+              }
+            }
+            _filePopupHide();
+            _bufPopupHide();
+            _setMode('NORMAL');
+            cmdinput.value = '';
+            setTimeout(()=>editor.focus(), 0);
+            return;
+          }
+          // bare ":e"（スペースなし）は何もしない。":e!" は通常どおり runCommand に流す。
+          // 先頭コロンの重複は不正扱い（"::e" などはヒットさせない）
+          if (/^:?\s*e\s*$/i.test(raw)){
+            return; // 入力は維持し CMD 継続
+          }
+          // 明示的無効コマンド（::e）にトーストを出す（CMD 継続）
+          if (/^\s*:{2,}\s*e\b/i.test(raw)){
+            toast('invalid command');
+            return;
+          }
           if (raw){ runCommand(raw.startsWith(':')?raw:(':'+raw)); }
           cmdinput.value = '';
           _setMode('NORMAL');
@@ -787,21 +1354,102 @@
           setTimeout(()=>editor.focus(), 0);
         } else if (e.key==='Escape'){
           e.preventDefault(); e.stopPropagation();
+          // :e 入力をキャンセルした際、基点をオープン時点へ復元（#174）
+          try{
+            if (_filePopupVisible()){
+              if (_fileStartBaseURL){ _fileBaseURL = _ensureSlash(_fileStartBaseURL); }
+              else { _fileBaseURL = _currentDirBase(); }
+              // 次回の引数なし :e はこの復元基点から開始（親にずれないようにする）
+              try{ _fileNextStartBaseURL = _ensureSlash(_fileBaseURL); }catch{ _fileNextStartBaseURL = _fileBaseURL; }
+            }
+          }catch{}
+          _fileStartBaseURL = null;
+          _fileTypedDirRaw = '';
+          _fileFilter = '';
           cmdinput.value = '';
           _setMode('NORMAL');
-          _bufPopupHide();
+          _bufPopupHide(); _filePopupHide();
           setTimeout(()=>editor.focus(), 0);
+        } else if (e.key==='Tab'){
+          // :e ファイルポップアップ中の Tab の仕様変更
+          if (_filePopupVisible()){
+            e.preventDefault(); e.stopPropagation();
+            try{
+              const vNow = cmdinput.value;
+              const parsed = _eParseInput(vNow);
+              const typed = String(parsed.typedDirRaw||'');
+              const filt = String(parsed.filter||'');
+              const list = _filePopupComputeList();
+              const sel = Math.max(0, Math.min(list.length-1, _fileSel));
+              const it = list[sel];
+              // 末尾スラ判定は「直近セグメントが空（=filter空）」で判定
+              const endsWithSlash = (filt.length === 0);
+              if (endsWithSlash){
+                // 例外: '../' 以外の候補が1つだけ（または'../'ともう1つだけ）のとき、その候補名まで補完
+                // 仕様 #163: 末尾が '/' のときに ".." 上での Tab = Enter 相当は廃止。
+                // よって、候補が単一のときのみ補完し、それ以外は何もしない。
+                try{
+                  const nonUp = list.filter(e=> e && !e._up);
+                  if (nonUp.length === 1){
+                    const only = nonUp[0];
+                    const next = ':e ' + _collapseDotDotPath(typed + String(only.name||''));
+                    cmdinput.value = next;
+                    try{ const pos=(cmdinput.value||'').length; cmdinput.setSelectionRange(pos,pos); }catch{}
+                    try { cmdinput.dispatchEvent(new Event('input', { bubbles:true })); } catch {}
+                    return;
+                  }
+                }catch{}
+                // 候補が '../' のみ、または '../' 以外が複数のときは Tab は何もしない
+                return;
+              }
+              // 末尾が '/' でない → 現在セグメントに対して共通プレフィックス補完
+              // 大小文字感度: wsl.localhost は区別、それ以外は非区別
+              let caseSensitive = false;
+              try{ const b = _ensureSlash(_fileBaseURL); if (b && b.protocol==='file:' && b.host && b.host.toLowerCase()==='wsl.localhost') caseSensitive = true; }catch{}
+              const startsWith = (name, q)=> caseSensitive ? name.startsWith(q) : name.toLowerCase().startsWith(q.toLowerCase());
+              const names = (_fileEntries||[]).map(e=> String(e&&e.name||'')).filter(n=> n && startsWith(n, filt));
+              if (!filt || names.length===0){ return; }
+              // 最長共通接頭辞
+              const lcp = (arr)=>{
+                if (arr.length===0) return '';
+                let prefix = arr[0];
+                for (let i=1;i<arr.length;i++){
+                  let j=0; const s = arr[i];
+                  const a = caseSensitive ? prefix : prefix.toLowerCase();
+                  const b = caseSensitive ? s : s.toLowerCase();
+                  while (j<Math.min(a.length,b.length) && a[j]===b[j]) j++;
+                  prefix = prefix.slice(0, j);
+                  if (!prefix) break;
+                }
+                return prefix;
+              };
+              const common = lcp(names);
+              if (common && common.length > filt.length){
+                const next = ':e ' + _collapseDotDotPath(typed + common);
+                cmdinput.value = next;
+                try{ const pos=(cmdinput.value||'').length; cmdinput.setSelectionRange(pos,pos); }catch{}
+                // 反映後は input ハンドラへ委譲（一覧はフィルタしないが選択が移動する）
+                try { cmdinput.dispatchEvent(new Event('input', { bubbles:true })); } catch {}
+              }
+            }catch{}
+            return;
+          }
         } else if (e.key==='ArrowDown' || e.key==='ArrowUp'){
           // buf popup navigation
           if (_bufPopupVisible()){
             e.preventDefault(); e.stopPropagation();
             _bufPopupMove(e.key==='ArrowDown'?1:-1);
+          } else if (_filePopupVisible()){
+            e.preventDefault(); e.stopPropagation();
+            _filePopupMove(e.key==='ArrowDown'?1:-1);
           }
         }
       });
       cmdinput.addEventListener('input', ()=>{
         const vRaw = cmdinput.value;
-        const v = vRaw; // keep spaces for parsing
+        // NBSP/ゼロ幅スペースなどの不可視を除去（貼り付け時の "U\u00A0b\u00A0u..." 問題の回避）
+        const vSan = vRaw.replace(/[\u200B-\u200D\u2060\u00A0]/g, '');
+        const v = vSan; // keep visible spaces for parsing
         // 1) 完全一致 ":bN"（空白なし、末尾に他文字なし）を検出し、即確定ルール適用
         let m;
         if ((m = v.match(/^\s*:?[\s]*b([0-9]+)$/i))){
@@ -857,8 +1505,307 @@
           return;
         }
 
-        // 5) それ以外は非表示
+        // ---- :e 入力に応じたファイルポップアップ処理（":e " の時点で発火）----
+        let me;
+        // :e の検出は先頭コロンを1個のみ許容（"::e" は不正扱い）
+        if ((me = v.match(/^\s*:?\s*e\s+.*$/i))){
+          // :e 入力時のポップアップ
+          // 新規に :e 入力を開始したときの基点は常に「現バッファのディレクトリ」。
+          // 以前のセッション由来の一時基点は使わずクリアしておく（#178）。
+          try{
+            if (!_filePopupVisible()){
+              _fileBaseURL = _currentDirBase();
+              _fileStartBaseURL = _ensureSlash(_fileBaseURL);
+              _fileNextStartBaseURL = null;
+              // '..' 抑止フラグも現在地で初期化
+              try{ const b=_ensureSlash(_fileBaseURL); _filePopupNoUp = !!(b && (_isHostRoot(b) || _isUncShareRoot(b))); }catch{ _filePopupNoUp=false; }
+              // 初期表示直後の空振りに備え、短期再試行の猶予を開始
+              _fileJustNavAt = Date.now(); _fileNavRetryCount = 0;
+            }
+          }catch{}
+          const parsed = _eParseInput(v);
+          // ちょうど ":e "（スペースのみ、ディレクトリ未入力）の場合も、
+          // 既存のポップアップ表示の有無に関わらず基点を現バッファに固定し猶予を開始
+          try{
+            const mAfter = v.match(/^\s*:?[\s]*e\s+(.*)$/i);
+            const afterE = (mAfter ? mAfter[1] : '');
+            if ((afterE||'').trim() === ''){
+              _fileBaseURL = _currentDirBase();
+              _fileStartBaseURL = _ensureSlash(_fileBaseURL);
+              try{ const b=_ensureSlash(_fileBaseURL); _filePopupNoUp = !!(b && (_isHostRoot(b) || _isUncShareRoot(b))); }catch{ _filePopupNoUp=false; }
+              _fileJustNavAt = Date.now(); _fileNavRetryCount = 0;
+            }
+          }catch{}
+          const mAfter = v.match(/^\s*:?\s*e\s+(.*)$/i);
+          const afterE = (mAfter ? mAfter[1] : '');
+          const afterNorm = afterE.replace(/\\/g,'/');
+          // UNCの未確定を広く無効扱い: "//", "//host", "//host/", さらに "//host/share"（末尾スラ無し）
+          const isUnc = afterNorm.startsWith('//');
+          const hostOnly = /^\/\/[^/]*$/.test(afterNorm);
+          const hostRootOnly = /^\/\/[^/]+\/$/.test(afterNorm);
+          let shareNoTrail = false;
+          if (isUnc){
+            const body = afterNorm.slice(2);
+            const segs = body.split('/').filter(s=>s.length>0);
+            const endsSlash = afterNorm.endsWith('/');
+            // セグメントが2つ(=host,share)だが末尾スラ無し → まだ共有直下未確定
+            if (segs.length === 2 && !endsSlash) shareNoTrail = true;
+            // セグメントが2未満 → 未確定
+            if (segs.length < 2) shareNoTrail = true;
+          }
+          // 先頭のスキーム or ドライブ指定を取り除いてから禁止文字/コロンをチェック
+          let rest = afterNorm;
+          if (/^[a-z][a-z0-9+.-]*:/i.test(rest)){
+            rest = rest.replace(/^[a-z][a-z0-9+.-]*:/i, '');
+          } else if (/^[A-Za-z]:/.test(rest)){
+            rest = rest.replace(/^[A-Za-z]:/, '');
+          }
+          const hasNtfsBad = /[<>:"|?*]/.test(rest);
+          const hasExtraColon = rest.includes(':');
+          const hasDoubleColon = /:{2,}/.test(afterNorm);
+          const hasTripleDot = /\.{3,}/.test(afterNorm);
+          // 共有（host/share/）まで確定している場合は、以降の下位ディレクトリ入力で shareNoTrail の無効判定を適用しない
+          let hostShareFixed = false;
+          if (isUnc){
+            const segs = afterNorm.slice(2).split('/').filter(s=>s.length>0);
+            const endsSlash = afterNorm.endsWith('/');
+            hostShareFixed = (segs.length >= 2) && endsSlash; // "//host/share/" までは確定
+          }
+          const looksInvalid = !!(
+            hostOnly || hostRootOnly ||
+            (!hostShareFixed && shareNoTrail) ||
+            hasNtfsBad || hasExtraColon || hasDoubleColon || hasTripleDot
+          );
+
+          // 入力の反映（まずは typed/filter の可視化）
+          _fileTypedDirRaw = parsed.typedDirRaw || '';
+          _fileFilter = parsed.filter || '';
+          if (!_filePopupVisible()) _filePopupShow(); else _filePopupRender();
+
+          // 無効なら '********' 表示
+          // ただし "//host/"（hostRootOnly）や "//host/<partial>"（共有名プレフィックス）では shares API を試す
+          // 備考: "//host"（末尾にスラなし）は引き続き '********' とする設計。
+          //       ":e //" → Tab で "wsl.localhost" を補完した直後に '********' になるのはこのため（#163）。
+          if (looksInvalid){
+            // 追加: ":e //" 直後は擬似候補として "wsl.localhost/" を常に提示（Tab で補完しやすく）
+            if (/^\/\/$/.test(afterNorm)){
+              _fileInvalid = false; _fileLoading = false;
+              _filePopupNoUp = true;
+              _fileEntries = [ { name:'wsl.localhost', isDir:true, url:'file:////wsl.localhost/' } ];
+              _fileSel = 0; if (!_filePopupVisible()) _filePopupShow(); else _filePopupRender();
+              return;
+            }
+            const mh = afterNorm.match(/^\/\/([^/]+)\/(.*)?$/);
+            const hostMaybe = mh ? mh[1] : '';
+            const sharePrefix = mh ? (mh[2]||'').replace(/\/+/g,'/').split('/')[0] : '';
+            const isPartialShare = (!!hostMaybe && !!sharePrefix && !afterNorm.endsWith('/'));
+            if ((hostRootOnly || isPartialShare) && _apiIsEnabled()){
+                try{
+                  const host = hostMaybe;
+                  // host 直下を基点として設定
+                  try{ _fileBaseURL = _ensureSlash(new URL('file:////' + host + '/', _htmlBaseURL())); }catch{}
+                  // 入力欄側も //host/ を厳密に保持（スラッシュ欠落防止）
+                  _fileTypedDirRaw = '//' + host + '/';
+                // 共有名のフィルタ（"//host/U" 入力中なら "U"）
+                _fileFilter = parsed.filter || '';
+                _fileInvalid = false; _fileLoading = true;
+                _fileEntries = []; _fileSel = 0; if (!_filePopupVisible()) _filePopupShow(); else _filePopupRender();
+                const apiUrl = _apiBase + 'shares?host=' + encodeURIComponent(host);
+                _fetchJSONWithTimeout(apiUrl, 4000).then(j=>{
+                  const raw = (j && Array.isArray(j.shares)) ? j.shares : [];
+                  const seen = new Set();
+                  const clean = (s)=>{
+                    try{
+                      let t = String(s||'');
+                      // ゼロ幅系や制御っぽい不可視を除去（表示/一致の安定化）
+                      t = t.replace(/[\u200B-\u200D\u2060\u00A0]/g, '');
+                      t = t.replace(/[\u0000-\u001F]/g, '');
+                      return t.trim();
+                    }catch{ return String(s||''); }
+                  };
+                  const entries = [];
+                  for (const e of raw){
+                    const n0 = (e && e.name);
+                    const n1 = clean(n0);
+                    if (!n1) continue;
+                    if (n1 === '.' || n1 === '..' || n1.includes('/')) continue;
+                    const key = n1.toLowerCase(); if (seen.has(key)) continue; seen.add(key);
+                    const url = (e && e.url) ? String(e.url) : ('file:////' + host + '/' + encodeURIComponent(n1) + '/');
+                    entries.push({ name: n1, isDir: true, url });
+                  }
+                  entries.sort((a,b)=> a.name.localeCompare(b.name));
+                  _fileEntries = entries;
+                  try{ const curKey = _ensureSlash(_fileBaseURL)?.toString()||null; _fileStableEntries = entries.slice(); _fileStableBaseKey = curKey; }catch{}
+                  _fileInvalid = false;
+                }).catch(()=>{
+                  _fileInvalid = true;
+                }).finally(()=>{ _fileLoading = false; /* keep _filePopupNoUp as-is for shares */ _filePopupRender(); });
+              }catch{
+                _fileInvalid = true; _fileLoading = false; _filePopupRender();
+              }
+              return;
+            }
+            _fileInvalid = true; _fileLoading = false; _filePopupRender();
+            return;
+          }
+
+          // 有効になったら列挙（この時点で base を更新）。
+          // ベース変更時のみ列挙。フィルタ変更のみは描画のみ（デバウンス）。
+          const prevKey = (function(){ try{ return _ensureSlash(_fileBaseURL)?.toString()||null; }catch{ return null; } })();
+          if (parsed.baseURL){ _fileBaseURL = parsed.baseURL; }
+          let newKey = null; try{ newKey = _ensureSlash(_fileBaseURL)?.toString()||null; }catch{}
+          _fileInvalid = false;
+          if (newKey !== prevKey){
+            // ベースが変わったら ".." 抑止フラグを現在地に合わせて再計算
+            try{
+              const baseNow = _ensureSlash(_fileBaseURL);
+              _filePopupNoUp = !!(baseNow && (_isHostRoot(baseNow) || _isUncShareRoot(baseNow)));
+            }catch{ _filePopupNoUp = false; }
+            // 新ベースへ切り替えたら一覧をクリアしてローディングへ（親一覧のまま止まらないようにする）
+            _fileEntries = [];
+            _fileSel = 0; _fileLoading = true; _fileFilter = '';
+            // 選択ドリルダウン直後の追加再試行カウンタをリセット
+            _fileNavRetryCount = 0;
+            if (_fileListTimer){ try{ clearTimeout(_fileListTimer); }catch{} _fileListTimer=null; }
+            if (_filePopupVisible()) _filePopupRender();
+            const doList = ()=>{
+              const reqKey = (function(){ try{ return _ensureSlash(_fileBaseURL)?.toString()||null; }catch{ return null; } })();
+              _listDirEntriesWithQuickRetry(_fileBaseURL)
+                .then(list=>{
+                  try{
+                    const curKey = _ensureSlash(_fileBaseURL)?.toString()||null;
+                    if (!reqKey || curKey === reqKey){
+                      // 取得結果が非空のときのみ上書き。空のときは直前の一覧を維持し、
+                      // 一時的に "../" だけになる・"(no entries)" に振れる瞬間を避ける。
+                      if (Array.isArray(list) && list.length>0){
+                        _fileEntries = list;
+                        _fileStableEntries = list.slice();
+                        _fileStableBaseKey = curKey;
+                        // 親へ戻った直後の選択フォーカス（".." 経由）
+                        if (_filePostSelectName){
+                          try{
+                            const baseNow = _ensureSlash(_fileBaseURL);
+                            const suppressUp = (!!_filePopupNoUp) || (baseNow && (_isHostRoot(baseNow) || _isUncShareRoot(baseNow)));
+                            const idx2 = _fileEntries.findIndex(e=> e && e.name === _filePostSelectName);
+                            if (idx2>=0){ _fileSel = idx2 + (suppressUp?0:1); }
+                          }catch{}
+                          _filePostSelectName = null;
+                        }
+                      }
+                    }
+                  }catch{}
+                })
+        .catch((e)=>{ console.warn('dir list (:e typing) failed', e); /* keep previous entries */ })
+        .finally(()=>{
+          try{
+            const stillEmpty = !(_fileEntries && _fileEntries.length>0);
+            // 遷移直後は（UNCに限らず）猶予内は必ず Loading 維持＋再試行
+            const withinGrace = (Date.now() - _fileJustNavAt) < 4000;
+            if (stillEmpty && withinGrace && _fileNavRetryCount < 5){
+              _fileNavRetryCount++;
+              _fileLoading = true;
+              _filePopupRender();
+              const delay = (_fileNavRetryCount<=2 ? 250 : _fileNavRetryCount<=4 ? 400 : 600);
+              setTimeout(()=>{ try{ const kNow = _ensureSlash(_fileBaseURL)?.toString(); if (kNow===reqKey) { doList(); } else { _fileLoading=false; _filePopupRender(); } }catch{} }, delay);
+              return;
+            }
+          }catch{}
+          _fileLoading=false; _filePopupRender();
+        });
+            };
+            // デバウンスせず即列挙（補完・手入力とも一本化、確実に開始）
+            doList();
+          } else {
+            // ベース不変でも、":e "（afterEが空）の場合は初回列挙を必ず開始（#180）
+            const isAfterEEmpty = (function(){ try{ const mAfter=v.match(/^\s*:?[\s]*e\s+(.*)$/i); const a=(mAfter?mAfter[1]:''); return (a.trim()===''); }catch{ return false; } })();
+            if (isAfterEEmpty){
+              // 現在の基点で強制列挙
+              _fileEntries = []; _fileSel = 0; _fileLoading = true;
+              if (_fileListTimer){ try{ clearTimeout(_fileListTimer); }catch{} _fileListTimer=null; }
+              if (_filePopupVisible()) _filePopupRender();
+              const reqKey = (function(){ try{ return _ensureSlash(_fileBaseURL)?.toString()||null; }catch{ return null; } })();
+              const doList2 = ()=>{
+                _listDirEntriesWithQuickRetry(_fileBaseURL)
+                  .then(list=>{
+                    try{
+                      const curKey = _ensureSlash(_fileBaseURL)?.toString()||null;
+                      if (!reqKey || curKey === reqKey){
+                        if (Array.isArray(list) && list.length>0){
+                          _fileEntries = list;
+                          _fileStableEntries = list.slice();
+                          _fileStableBaseKey = curKey;
+                        }
+                      }
+                    }catch{}
+                  })
+                  .catch((e)=>{ console.warn('dir list (:e typing force) failed', e); /* keep previous entries */ })
+                  .finally(()=>{
+                    try{
+                      const stillEmpty = !(_fileEntries && _fileEntries.length>0);
+                      const withinGrace = (Date.now() - _fileJustNavAt) < 4000;
+                      if (stillEmpty && withinGrace && _fileNavRetryCount < 5){
+                        _fileNavRetryCount++;
+                        _fileLoading = true;
+                        _filePopupRender();
+                        const delay = (_fileNavRetryCount<=2 ? 250 : _fileNavRetryCount<=4 ? 400 : 600);
+                        setTimeout(()=>{ try{ const kNow = _ensureSlash(_fileBaseURL)?.toString(); if (kNow===reqKey) { doList2(); } else { _fileLoading=false; _filePopupRender(); } }catch{} }, delay);
+                        return;
+                      }
+                    }catch{}
+                    _fileLoading=false; _filePopupRender();
+                  });
+              };
+              doList2();
+            } else {
+              // ベース不変時（フィルタ入力など）はローディング状態を変更しない
+              if (_filePopupVisible()) _filePopupRender();
+            }
+          }
+          return;
+        }
+
+        // 5) それ以外
+        // 入力が ":e"（スペース可）のみに戻った場合、ポップアップが開いていれば
+        // バッファのカレントディレクトリに戻して一覧を再表示（#175 後段）
+        try{
+          if (_filePopupVisible() && /^\s*:?\s*e\s*$/i.test(v)){
+            // オープン時の開始基点があればそれへ戻す。無ければ現バッファ基点。
+            _fileBaseURL = (_fileStartBaseURL ? _ensureSlash(_fileStartBaseURL) : _currentDirBase());
+            _fileTypedDirRaw = '';
+            _fileFilter = '';
+            _fileInvalid = false;
+            _fileLoading = true;
+            _fileEntries = []; _fileSel = 0;
+            // '..' 抑止フラグを現在地に合わせて再計算
+            try{
+              const baseNow = _ensureSlash(_fileBaseURL);
+              _filePopupNoUp = !!(baseNow && (_isHostRoot(baseNow) || _isUncShareRoot(baseNow)));
+            }catch{ _filePopupNoUp = false; }
+            if (_filePopupVisible()) _filePopupRender();
+            (function(){
+              const reqKey = (function(){ try{ return _ensureSlash(_fileBaseURL)?.toString()||null; }catch{ return null; } })();
+              _listDirEntries(_fileBaseURL)
+                .then(list=>{
+                  try{
+                    const curKey = _ensureSlash(_fileBaseURL)?.toString()||null;
+                    if (!reqKey || curKey === reqKey){
+                      _fileEntries = Array.isArray(list) ? list : [];
+                      if (Array.isArray(list) && list.length>0){
+                        _fileStableEntries = list.slice();
+                        _fileStableBaseKey = curKey;
+                      }
+                    }
+                  }catch{}
+                })
+                .catch((e)=>{ console.warn('dir list (:e back to current) failed', e); })
+                .finally(()=>{ _fileLoading=false; _filePopupRender(); });
+            })();
+            return;
+          }
+        }catch{}
+        // 非表示
         _bufPopupHide();
+        _filePopupHide();
       });
     }
   }
@@ -872,7 +1819,9 @@
   let _bufSelAbs = null;        // 絶対バッファインデックス（必要時）
   let _bufFilter = '';
   let _bufFilterKind = 'text';  // 'text' | 'numPrefix'
-  function _bufPopupVisible(){ return bufpopup && bufpopup.style.display !== 'none'; }
+  function _popupKind(){ return bufpopup ? (bufpopup.dataset && bufpopup.dataset.kind) : undefined; }
+  function _bufPopupVisible(){ return !!(bufpopup && bufpopup.style.display !== 'none' && _popupKind() === 'buf'); }
+  function _filePopupVisible(){ return !!(bufpopup && bufpopup.style.display !== 'none' && _popupKind() === 'file'); }
   function _bufPopupComputeList(){
     const q = (_bufFilter||'').trim().toLowerCase();
     const kind = _bufFilterKind;
@@ -894,6 +1843,7 @@
   }
   function _bufPopupRender(){
     if (!bufpopup || !bufpopupInner) return;
+    bufpopup.dataset.kind = 'buf';
     bufpopupInner.innerHTML = '';
     const list = _bufPopupComputeList();
     // 絶対指定があれば可視インデックスへ変換
@@ -908,15 +1858,33 @@
       const div = document.createElement('div');
       div.className = 'item'+(visIdx===_bufSel?' active':'');
       const num = document.createElement('span'); num.className='num'; num.textContent = _bufferNumberLabel(i+1);
-      const name = document.createElement('span'); name.className='name'; name.textContent = b.name || '(untitled)';
+      const name = document.createElement('span'); name.className='name';
+      // WSLなど file:// のときはアクティブタブ表示に合わせて 'file:' を外した体裁へ
+      let disp = b && b.name || '(untitled)';
+      try{
+        if (b && b.path && /^file:\/\//i.test(b.path)){
+          const rel = _relativeDisplayPath(b.path);
+          disp = rel && rel !== b.path ? rel : _prettyFileUrlLabel(b.path);
+          if (!disp) disp = b.name || '(untitled)';
+        }
+      }catch{}
+      name.textContent = disp;
       div.appendChild(num); div.appendChild(name);
       div.addEventListener('click', ()=>{ _switchToBuffer(i); _bufPopupHide(); _setMode('NORMAL'); setTimeout(()=>editor.focus(),0); });
       return div;
     });
     items.forEach(el=>bufpopupInner.appendChild(el));
+    // アクティブ項目が見切れていれば可視範囲にスクロール
+    try{ const act = bufpopupInner.querySelector('.item.active'); if (act && act.scrollIntoView) act.scrollIntoView({block:'nearest', inline:'nearest'}); }catch{}
+    // 可視スナップショット更新（現在表示している一覧/基点を保存）
+    try{
+      const curKey = _ensureSlash(_fileBaseURL)?.toString()||null;
+      _fileVisibleBaseKey = curKey;
+      _fileVisibleEntries = (_fileEntries && Array.isArray(_fileEntries)) ? _fileEntries.slice() : [];
+    }catch{}
   }
-  function _bufPopupShow(){ if (!bufpopup) return; bufpopup.style.display=''; if (!(_bufSel>=0)) _bufSel=Math.max(0,Math.min(buffers.length-1,currentIdx)); _bufPopupRender(); }
-  function _bufPopupHide(){ if (!bufpopup) return; bufpopup.style.display='none'; }
+  function _bufPopupShow(){ if (!bufpopup) return; bufpopup.dataset.kind='buf'; bufpopup.style.display=''; if (!(_bufSel>=0)) _bufSel=Math.max(0,Math.min(buffers.length-1,currentIdx)); _bufPopupRender(); }
+  function _bufPopupHide(){ if (!bufpopup) return; if (_bufPopupVisible()) bufpopup.style.display='none'; }
   function _bufPopupMove(d){ if (!bufpopup) return; _bufSel=_bufSel+d; if (_bufSel<0) _bufSel=0; _bufPopupRender(); }
 
   function _extractBufQuery(){
@@ -927,6 +1895,602 @@
   }
 
   // runCommand へのフック（Enter確定）
+
+  /*********************************************************
+   * File popup (:e ...)
+   *********************************************************/
+  // 簡易キャッシュ（ディレクトリURL→エントリ）
+  const _dirCache = new Map();
+  let _fileSel = 0;              // 可視リスト内選択
+  let _fileFilter = '';
+  let _fileBaseURL = null;       // URL オブジェクト（末尾/を保証）
+  let _fileTypedDirRaw = '';     // ユーザーが :e の後に入力したディレクトリ部分（最後の区切りまで）
+  let _fileEntries = [];         // {name,isDir,url}
+  let _fileLoading = false;      // ディレクトリ一覧ロード中か
+  let _fileListTimer = null;     // :e 入力時の列挙ディレイ用
+  // 選択直後の短期リトライ管理
+  let _fileJustNavAt = 0;        // 直近のディレクトリ選択での遷移発火時刻
+  let _fileNavRetryCount = 0;    // 選択直後の追加再試行回数
+  // 親へ戻った直後に、親一覧で「今いたフォルダ」を選択するための一時的なターゲット名
+  let _filePostSelectName = null;
+  // 直近の安定した一覧/基点（"//" 入力途中で再利用）
+  let _fileStableEntries = [];
+  let _fileStableBaseKey = null; // _ensureSlash(_fileBaseURL).toString()
+  // 直前に“実際に画面表示していた”一覧（レースや未確定ホスト操作時の復元に使う）
+  let _fileVisibleEntries = [];
+  let _fileVisibleBaseKey = null;
+  let _fileInvalid = false; // 不正な :e 入力中（一覧の代わりに '********' を表示）
+  let _filePopupNoUp = false; // 特殊ケース（":e //" の疑似候補表示など）で ".." を消す
+  // 選択ドリルダウン時に、:e 入力ハンドラのデバウンスをバイパスするためのキー
+  let _fileNavPendingKey = null;
+  // 入力文字列が候補のいずれにもマッチしないときは、選択の塗り潰しを抑制（Enter は入力優先の新仕様 #164）
+  let _fileSelMuted = false;
+  // :e ポップアップを開いた当初の基点（Esc キャンセルで復元するため）
+  let _fileStartBaseURL = null;
+  // Esc キャンセル後、次の引数なし :e の開始基点を上書きするための一時記憶
+  let _fileNextStartBaseURL = null;
+
+  function _ensureSlash(u){
+    try{
+      const x = new URL(u);
+      if (!x.pathname.endsWith('/')) x.pathname += '/';
+      return x;
+    }catch{ return null; }
+  }
+
+  // UNC 共有ルート判定: file:////host/share/ （先頭セグメントが1個のみ）
+  function _isUncShareRoot(u){
+    try{
+      const x = (u instanceof URL) ? u : new URL(u);
+      if (x.protocol !== 'file:' || !x.host) return false;
+      const segs = (x.pathname||'').split('/').filter(s=>s.length>0);
+      return segs.length === 1; // 例: /Ubuntu/
+    }catch{ return false; }
+  }
+
+  // UNC 向けのクイック再試行付き列挙（初回が空なら短い遅延で数回再試行）
+  async function _listDirEntriesWithQuickRetry(dirUrl){
+    const u = _ensureSlash(dirUrl);
+    let list = await _listDirEntries(u);
+    if (Array.isArray(list) && list.length > 0) return list;
+    // UNC 全般（ホストがある file://）は列挙が揺れやすいので短時間で数回だけ再試行
+    const isUnc = (function(){ try{ return (u && u.protocol==='file:' && !!u.host); }catch{ return false; } })();
+    if (isUnc){
+      // UNC は初回直後に空で返る揺らぎがあるため、再試行回数をやや増やす
+      const delays = [250, 450, 800, 1200, 1800];
+      for (const d of delays){
+        // ベースが変わっていたら中断
+        try{ const curKey = _ensureSlash(_fileBaseURL)?.toString()||null; if (!curKey || curKey !== _ensureSlash(u)?.toString()) break; }catch{}
+        await new Promise(r=>setTimeout(r, d));
+        // 同一ベースを確認して再列挙
+        const again = await _listDirEntries(u);
+        if (Array.isArray(again) && again.length > 0){ list = again; break; }
+      }
+      // なお空のままなら、バックグラウンド再試行スケジューラへ委譲
+      try{ const key = _ensureSlash(u)?.toString(); if (key) _scheduleDirRetry(key); }catch{}
+    }
+    return list;
+  }
+
+  // 空結果時のバックグラウンド再試行を管理（key: dirUrlString → {tries,timer}）
+  const _dirRetryState = new Map();
+  function _scheduleDirRetry(key){
+    if (!_apiBase) return;
+    const cur = _dirRetryState.get(key) || { tries: 0, timer: null };
+    if (cur.tries >= 3) return; // 最大3回まで
+    const delays = [1000, 2000, 4000];
+    const delay = delays[cur.tries] || 4000;
+    cur.tries++;
+    if (cur.timer) { try{ clearTimeout(cur.timer); }catch{} }
+    cur.timer = setTimeout(async ()=>{
+      try{
+        const apiUrl2 = _apiBase + 'dir?cwd=' + encodeURIComponent(key);
+        const jx = await _fetchJSONWithTimeout(apiUrl2, 7000);
+        if (jx && Array.isArray(jx.entries) && jx.entries.length){
+          const arrx = jx.entries.map(e=>({ name: e.name, isDir: !!e.isDir, url: String(e.url||'') }));
+          _dirCache.set(key, arrx);
+          // まだ同じディレクトリを見ているなら即時反映
+          try{
+            const curKey = _ensureSlash(_fileBaseURL)?.toString();
+            if (curKey === key){ _fileEntries = arrx; _filePopupRender(); }
+          }catch{}
+          _dirRetryState.delete(key);
+          return;
+        }
+      } catch {}
+      // 失敗 → 次の遅延で再試行
+      _scheduleDirRetry(key);
+    }, delay);
+    _dirRetryState.set(key, cur);
+  }
+  async function _listDirEntries(dirUrl){
+    try{
+      const u = _ensureSlash(dirUrl);
+      if (!u) return [];
+      // ホスト直下 (file:////host/) は _listDirEntries の対象外: shares は別経路で取得する
+      try{ if (_isHostRoot(u)) return []; }catch{}
+      const key = u.toString();
+      if (_dirCache.has(key)) return _dirCache.get(key);
+      // URL 正規化ヘルパー（APIのentries.urlが省略/相対/Windowsパスの場合に補う）
+      const makeEntryUrl = (baseUrlObj, name, isDir, urlField)=>{
+        try{
+          const s = String(urlField||'');
+          if (/^[a-z][a-z0-9+.-]*:/i.test(s)) return s; // 既に絶対URL
+          const seg = encodeURIComponent(String(name||'')) + (isDir?'/':'');
+          return new URL(seg, baseUrlObj).toString();
+        }catch{ return ''; }
+      };
+
+      // Windows パス推定ヘルパー（file:///C:/... または UNC）
+      const winPathFromFileURL = (urlObj)=>{
+        try{
+          if (!urlObj || urlObj.protocol !== 'file:') return null;
+          const host = urlObj.host; // '' for local drive, 'server' for UNC
+          const path = decodeURIComponent(urlObj.pathname || '');
+          if (host){
+            // UNC: file:////server/share/...
+            const p = ('\\\\' + host + path.replace(/\//g,'\\'));
+            return p;
+          }
+          // local drive: '/C:/Users/...'
+          const m = path.match(/^\/([A-Za-z]:)(\/.*)?$/);
+          if (m){
+            const drive = m[1];
+            const rest  = (m[2]||'');
+            return drive + rest.replace(/\//g,'\\');
+          }
+          return null;
+        }catch{ return null; }
+      };
+
+      // 1) ループバック API 優先（cwd=）。UNC は一時的無効化中でも試す。
+      const isUncPre = (function(){ try{ return (u.protocol==='file:' && !!u.host); }catch{ return false; } })();
+      const apiCanTry = _apiIsEnabled() || isUncPre;
+      if (apiCanTry){
+        try{
+          // UNC の場合は fs= 優先で列挙（Uri.LocalPath 解決の揺れを回避）
+          if (isUncPre){
+            try{
+              const fsPath0 = winPathFromFileURL(u);
+              // 追加: WSL 用に "\\wsl$" 形式も試す（環境により wsl.localhost と相互に可/不可があるため）
+              let fsPathWslAlt = null;
+              try{
+                const host = u.host;
+                if (host && host.toLowerCase()==='wsl.localhost'){
+                  const p = decodeURIComponent(u.pathname||'');
+                  const segs = p.split('/').filter(s=>s.length>0);
+                  if (segs.length>=1){
+                    const distro = segs[0];
+                    const rest = segs.slice(1).join('\\');
+                    fsPathWslAlt = rest ? (`\\\\wsl$\\${distro}\\${rest}`) : (`\\\\wsl$\\${distro}\\`);
+                    // URL がディレクトリを指している場合は末尾に'\\'を付与
+                    try{ if ((u.pathname||'').endsWith('/') && !fsPathWslAlt.endsWith('\\')) fsPathWslAlt += '\\'; }catch{}
+                  }
+                }
+              }catch{}
+              const tryFs = async (fsPath)=>{
+                const apiFs = _apiBase + 'dir?fs=' + encodeURIComponent(fsPath);
+                let jf; const timeoutFs = 6000;
+                jf = await _fetchJSONWithTimeout(apiFs, timeoutFs); try{ _apiNoteSuccess(); }catch{}
+                if (jf && Array.isArray(jf.entries)){
+                  const arrFs = jf.entries.map(e=>{
+                    const n = e.name; const d = !!e.isDir; const url = makeEntryUrl(u, n, d, e.url);
+                    return { name: n, isDir: d, url };
+                  });
+                  if (arrFs.length > 0){ _dirCache.set(key, arrFs); return arrFs; }
+                }
+                return null;
+              };
+              // まず wsl$ を優先、その後 wsl.localhost を試す
+              if (fsPathWslAlt){
+                try{ const r = await tryFs(fsPathWslAlt); if (r) return r; }catch(ea){ if (_apiIsEnabled()){ try{ _apiNoteFailure(); }catch{} } }
+              }
+              if (fsPath0){
+                try{ if ((u.pathname||'').endsWith('/') && !/\\$/.test(fsPath0)) fsPath0 += '\\'; }catch{}
+                try{ const r0 = await tryFs(fsPath0); if (r0) return r0; }catch(e0){ if (_apiIsEnabled()){ try{ _apiNoteFailure(); }catch{} } }
+              }
+            }catch{}
+          }
+          const apiUrl = _apiBase + 'dir?cwd=' + encodeURIComponent(key);
+          let j;
+          const isUnc = isUncPre;
+          const timeout1 = isUnc ? 6000 : 2000;
+          try{ j = await _fetchJSONWithTimeout(apiUrl, timeout1); try{ _apiNoteSuccess(); }catch{} }catch(e){ if (_apiIsEnabled()){ try{ _apiNoteFailure(); }catch{} } throw e; }
+          if (j && Array.isArray(j.entries)){
+            const arr = j.entries.map(e=>{
+              const n = e.name; const d = !!e.isDir; const url = makeEntryUrl(u, n, d, e.url);
+              return { name: n, isDir: d, url };
+            });
+            if (arr.length > 0){ _dirCache.set(key, arr); return arr; }
+            // 空なら fs= でも試す（Uri.LocalPath 解決の失敗対策）
+            try{
+              const fsPath = winPathFromFileURL(u);
+              if (fsPath){
+                const apiFs = _apiBase + 'dir?fs=' + encodeURIComponent(fsPath);
+                let j2;
+                const timeout2 = isUnc ? 6000 : 2000;
+                try{ j2 = await _fetchJSONWithTimeout(apiFs, timeout2); try{ _apiNoteSuccess(); }catch{} }catch(e2){ if (_apiIsEnabled()){ try{ _apiNoteFailure(); }catch{} } throw e2; }
+                if (j2 && Array.isArray(j2.entries)){
+                  const arr2 = j2.entries.map(e=>{
+                    const n = e.name; const d = !!e.isDir; const url = makeEntryUrl(u, n, d, e.url);
+                    return { name: n, isDir: d, url };
+                  });
+                  if (arr2.length > 0){ _dirCache.set(key, arr2); return arr2; }
+                }
+              }
+            } catch (e2){ console.warn('API fs fallback failed', e2); }
+          }
+        } catch (e) {
+          console.warn('API listing failed, trying fs fallback', e);
+          // タイムアウト等でも fs= を試す
+          try{
+            const fsPath = winPathFromFileURL(u);
+            if (fsPath){
+              const apiFs = _apiBase + 'dir?fs=' + encodeURIComponent(fsPath);
+              let j2;
+              const timeout3 = isUnc ? 6000 : 2000;
+              try{ j2 = await _fetchJSONWithTimeout(apiFs, timeout3); try{ _apiNoteSuccess(); }catch{} }catch(e3){ if (_apiIsEnabled()){ try{ _apiNoteFailure(); }catch{} } throw e3; }
+              if (j2 && Array.isArray(j2.entries)){
+                const arr2 = j2.entries.map(e=>{
+                  const n = e.name; const d = !!e.isDir; const url = makeEntryUrl(u, n, d, e.url);
+                  return { name: n, isDir: d, url };
+                });
+                if (arr2.length > 0){ _dirCache.set(key, arr2); return arr2; }
+              }
+            }
+          } catch (e3){ console.warn('API fs fallback failed after API error', e3); }
+          // 最後に file:// 解析へ
+        }
+      }
+
+      // 2) file:// ディレクトリインデックス解析（fetch→XHRフォールバック）
+      let html = '';
+      try {
+        html = await _fetchTextWithTimeout(key, 3000);
+      } catch {
+        // フォールバックで XHR を試す
+        html = await new Promise((resolve, reject)=>{
+          try{
+            const xhr = new XMLHttpRequest();
+            xhr.open('GET', key, true);
+            xhr.responseType = 'text';
+            try { xhr.timeout = 2500; } catch {}
+            xhr.onload = ()=>{
+              // status 0 でも responseText が空の場合は失敗扱い
+              if (xhr.responseText && (xhr.status === 0 || (xhr.status>=200 && xhr.status<300))) resolve(xhr.responseText);
+              else reject(new Error('dir XHR empty'));
+            };
+            xhr.onerror = ()=>reject(new Error('dir XHR error'));
+            xhr.ontimeout = ()=>reject(new Error('dir XHR timeout'));
+            xhr.send();
+          }catch(e){ reject(e); }
+        });
+      }
+      // file:// ディレクトリインデックスHTMLから <a href> を抽出
+      const doc = new DOMParser().parseFromString(html, 'text/html');
+      const links = Array.from(doc.querySelectorAll('a[href]'));
+  const out = [];
+      for (const a of links){
+        const href = a.getAttribute('href');
+        if (!href) continue;
+        if (href === '../' || href === './' || href.startsWith('#')) continue;
+        try{
+          const resolved = new URL(href, u);
+          const isDir = /\/$/.test(resolved.pathname);
+          // name は a.textContent 優先、無ければURLパス末尾
+          let nm = (a.textContent||'').trim();
+          if (!nm){ const parts = resolved.pathname.split('/').filter(Boolean); nm = decodeURIComponent(parts[parts.length-1]||''); }
+          out.push({ name: nm, isDir, url: resolved.toString() });
+        }catch{}
+      }
+      // 重複排除+並び（ディレクトリ→ファイル、名前昇順）
+      const seen = new Set();
+      const dedup = [];
+      for (const e of out){ const k=e.url; if (seen.has(k)) continue; seen.add(k); dedup.push(e); }
+      dedup.sort((a,b)=> (a.isDir===b.isDir) ? a.name.localeCompare(b.name) : (a.isDir? -1: 1));
+      if (dedup.length > 0) {
+        _dirCache.set(key, dedup);
+        return dedup;
+      }
+      // 空だった場合、API があるなら複数回のバックグラウンド再試行（指数バックオフ）
+  if (_apiIsEnabled()){ _scheduleDirRetry(key); }
+      return dedup;
+    }catch(e){ console.warn('dir list failed', e); return []; }
+  }
+
+  function _filePopupComputeList(){
+    // 入力文字ではフィルタせず、一覧は常に全件（'..' を必要に応じて含む）
+    const list = [];
+    // '..' は通常先頭に表示するが、ホスト直下/UNC共有ルートでは抑止
+    try{
+      // ローディング中や現在のエントリが空のときは、".." を強制表示しない
+      if (_fileLoading || !(_fileEntries && _fileEntries.length)){
+        // 下の for で _fileEntries をそのまま返す（空ならここで空配列のまま）
+      } else {
+      const baseNow = _ensureSlash(_fileBaseURL);
+      const suppressUp = (!!_filePopupNoUp) || (baseNow && (_isHostRoot(baseNow) || _isUncShareRoot(baseNow)));
+      if (!suppressUp){
+        const parent = _ensureSlash(new URL('../', _fileBaseURL));
+        if (parent){ list.push({ name: '..', isDir: true, url: parent.toString(), _up: true }); }
+      }
+      }
+    }catch{}
+    for (const e of _fileEntries){ list.push(e); }
+    return list;
+  }
+  function _collapseDotDotPath(s){
+    if (!s) return '';
+    // 相対表現のみを対象に簡易正規化（絶対は触らない）
+    const norm = s.replace(/\\/g,'/');
+    const isAbsLike = /^(?:\/[\/]|[A-Za-z]:\/|\/)/.test(norm);
+    if (isAbsLike) return norm;
+    const hadTrail = norm.endsWith('/');
+    const parts = norm.split('/');
+    const stack = [];
+    for (const seg of parts){
+      if (!seg || seg === '.') continue;
+      if (seg === '..'){
+        if (stack.length>0 && stack[stack.length-1] !== '..') stack.pop(); else stack.push('..');
+      } else {
+        stack.push(seg);
+      }
+    }
+    let out = stack.join('/');
+    if (hadTrail && out && !out.endsWith('/')) out += '/';
+    return out;
+  }
+
+  function _filePopupRender(){
+    if (!bufpopup || !bufpopupInner) return;
+    bufpopup.dataset.kind = 'file';
+    bufpopupInner.innerHTML = '';
+  if (_fileInvalid){
+    _fileSel = 0; _fileSelMuted = false;
+    const row = document.createElement('div');
+    row.className = 'item';
+    const num = document.createElement('span'); num.className='num'; num.textContent='';
+    const name = document.createElement('span'); name.className='name'; name.textContent = '********';
+    row.appendChild(num); row.appendChild(name);
+    bufpopupInner.appendChild(row);
+    return;
+  }
+  const list = _filePopupComputeList();
+    if (list.length===0){
+      _fileSel = 0; _fileSelMuted = false;
+      const empty = document.createElement('div');
+      empty.className = 'item';
+      const num = document.createElement('span'); num.className='num'; num.textContent='';
+      // 遷移直後は（UNCに限らず）猶予内は強制的に '(loading...)' を表示して空表示のフリッカーを抑止
+      let forceLoading = false;
+      try{
+        const elapsed = Date.now() - (_fileJustNavAt||0);
+        if (elapsed >= 0 && elapsed < 4000){ forceLoading = true; }
+      }catch{}
+  const name = document.createElement('span'); name.className='name'; name.textContent = ((_fileLoading || forceLoading) ? '(loading…)' : '(no entries)');
+      empty.appendChild(num); empty.appendChild(name);
+      bufpopupInner.appendChild(empty);
+      return;
+    }
+    // 親へ戻った直後に選択ターゲットがあれば、ここでも最終的に優先適用（安全ネット）
+    try{
+      if (_filePostSelectName){
+        // '..' 抑止状況を再評価（インデックス算出は list 側で '..' を含む前提）
+        let suppressUp = false;
+        try{ const baseNow = _ensureSlash(_fileBaseURL); suppressUp = (!!_filePopupNoUp) || (baseNow && (_isHostRoot(baseNow) || _isUncShareRoot(baseNow))); }catch{}
+        const idx2 = list.findIndex(e=> e && !e._up && e.name === _filePostSelectName);
+        if (idx2>=0){
+          _fileSel = idx2; _fileSelMuted = false; // list には '..' が含まれているため、そのままのインデックスでよい
+          _filePostSelectName = null; // 適用できたときだけクリア
+        }
+        // 見つからない場合は保持を継続（ディレイ列挙完了後に適用）
+      }
+    }catch{}
+    // 入力欄の文字はフィルタではなくインクリメンタルサーチとして扱い、選択のみ移動（反映は上下キーで）
+    try{
+      const qRawOrig = String(_fileFilter||'');
+      const qTrim = qRawOrig.replace(/\/+$/,'');
+      if (qTrim){
+        let caseSensitive = false;
+        try{ const b = _ensureSlash(_fileBaseURL); if (b && b.protocol==='file:' && b.host && b.host.toLowerCase()==='wsl.localhost') caseSensitive = true; }catch{}
+        const pred = (nm)=>{
+          if (caseSensitive) return nm.startsWith(qTrim);
+          return nm.toLowerCase().startsWith(qTrim.toLowerCase());
+        };
+        const idxMatch = list.findIndex(e=> e && !e._up && pred(String(e.name||'')));
+        if (idxMatch>=0){ _fileSel = idxMatch; _fileSelMuted = false; }
+        else { _fileSelMuted = true; }
+      } else {
+        _fileSelMuted = false;
+      }
+    }catch{}
+    _fileSel = Math.max(0, Math.min(list.length-1, _fileSel));
+    for (let i=0;i<list.length;i++){
+      const it = list[i];
+  const div = document.createElement('div');
+      div.className = 'item'+((i===_fileSel && !_fileSelMuted)?' active':'');
+      if (i===_fileSel && _fileSelMuted){
+        div.className += ' muted';
+      }
+      // 数字は付けない（配置合わせのため空の num を置く）
+      const num = document.createElement('span'); num.className='num'; num.textContent='';
+      const name = document.createElement('span'); name.className='name'; name.textContent = it.name + (it.isDir? '/':'');
+      div.appendChild(num); div.appendChild(name);
+      // クリックでフォーカスを奪わない
+      div.addEventListener('mousedown', (ev)=>{ ev.preventDefault(); });
+      div.addEventListener('click', ()=>{
+        // クリック時も補完専用: 入力欄に貼り付けて input ハンドラに委譲
+        if (it.isDir){
+          try{
+            const nextBase = _ensureSlash(new URL(it.url, _fileBaseURL));
+            // 選択直後の短期リトライウィンドウを開始
+            _fileJustNavAt = Date.now();
+            _fileNavRetryCount = 0;
+            _fileFilter = '';
+            _fileSelMuted = false;
+            if (it._up){
+              // 親: 直前セグメントは baseURL から頑健に取得し、基点も即更新
+              let s = (_fileTypedDirRaw||'').replace(/\\/g,'/').replace(/\/+$/,'');
+              const idx = s.lastIndexOf('/');
+              if (!s){
+                // 入力欄に基底パスが無い場合、親ディレクトリの絶対表記を生成して入力側に採用
+                _fileTypedDirRaw = _inputDirRawFromURL(nextBase);
+              } else {
+                _fileTypedDirRaw = (idx>=0? s.slice(0,idx+1) : '');
+              }
+              let prevSeg = '';
+              try{
+                const b = _ensureSlash(_fileBaseURL);
+                let p = decodeURIComponent((b && b.pathname) || '');
+                p = p.replace(/\/+$/,'');
+                const i2 = p.lastIndexOf('/');
+                prevSeg = (i2>=0 ? p.slice(i2+1) : p);
+              }catch{}
+              _filePostSelectName = prevSeg || null;
+              _fileBaseURL = nextBase;
+              if (cmdinput){ cmdinput.value=':e ' + _collapseDotDotPath(_fileTypedDirRaw + prevSeg); }
+            } else {
+              // Enter/Tab と同じ補完のみに徹する。"//" 段階で "wsl.localhost/" を選んだ場合は先頭 "//" を保持。
+              // "/" はローカルルートとして通常処理（UNC化しない）。
+              const isAtRootDoubleSlash = /^\s*:?\s*e\s+\/\/$/i.test((cmdinput && cmdinput.value)||'') || (_fileTypedDirRaw==='//');
+              if (isAtRootDoubleSlash){
+                _fileTypedDirRaw = '//' + it.name + '/';
+              } else {
+                _fileTypedDirRaw = (_fileTypedDirRaw||'') + it.name + '/';
+              }
+              if (cmdinput){ cmdinput.value=':e ' + _collapseDotDotPath(_fileTypedDirRaw); }
+              // 基点も進める
+              _fileBaseURL = nextBase;
+            }
+            try{ _fileNavPendingKey = _ensureSlash(nextBase)?.toString()||null; }catch{ _fileNavPendingKey=null; }
+            if (cmdinput){ try { cmdinput.dispatchEvent(new Event('input', { bubbles:true })); } catch {} }
+            try{ cmdinput && cmdinput.focus(); }catch{}
+          }catch{}
+        } else {
+          _loadFromPath(it.url, null, {mode:'new'});
+          // Enter と同等に、入力欄をクリアし NORMAL に戻す
+          try{ if (cmdinput) cmdinput.value=''; }catch{}
+          _filePopupHide(); _bufPopupHide(); _setMode('NORMAL'); setTimeout(()=>editor.focus(),0);
+        }
+      });
+      bufpopupInner.appendChild(div);
+    }
+  // アクティブ（またはミュート）項目が見切れていれば可視範囲にスクロール
+  try{ const act = bufpopupInner.querySelector('.item.active, .item.muted'); if (act && act.scrollIntoView) act.scrollIntoView({block:'nearest', inline:'nearest'}); }catch{}
+  }
+  function _filePopupShow(){ if (!bufpopup) return; bufpopup.dataset.kind='file'; bufpopup.style.display=''; _filePopupRender(); }
+  function _filePopupHide(){ if (!bufpopup) return; if (_filePopupVisible()){ bufpopup.style.display='none'; _fileLoading=false; } }
+  // 旧: 一覧の単純移動は廃止（反映ロジック付きの新実装は下）
+  // ↑↓で選択を動かしたときは、即座に入力欄へ反映（末尾 '/' なし、".." は例外で反映しない）
+  function _filePopupMove(d){
+    if (!bufpopup) return;
+    const list = _filePopupComputeList();
+    _fileSel = Math.max(0, Math.min(list.length-1, _fileSel + d));
+    _fileSelMuted = false; // 矢印移動で通常のハイライトに復帰
+    try{
+      const it = list[_fileSel];
+      if (cmdinput && it && !it._up){
+        const val = ':e ' + _collapseDotDotPath((_fileTypedDirRaw||'') + String(it.name||''));
+        cmdinput.value = val;
+        try{ const pos=(cmdinput.value||'').length; cmdinput.setSelectionRange(pos,pos); }catch{}
+      }
+    }catch{}
+    _filePopupRender();
+  }
+
+  // フォーカス管理: ポップアップそのものでもエディタ/コマンドのフォーカスを維持
+  if (bufpopup){
+    bufpopup.addEventListener('mousedown', (ev)=>{ ev.preventDefault(); });
+    bufpopup.addEventListener('mouseenter', ()=>{ try{ if (_mode==='CMD' && cmdinput) cmdinput.focus(); else editor.focus(); }catch{} });
+    // ホイールはポップアップ内スクロールへ
+    bufpopup.addEventListener('wheel', (ev)=>{
+      try{
+        const inner = bufpopupInner;
+        if (!inner) return;
+        const prev = inner.scrollTop;
+        inner.scrollTop += ev.deltaY;
+        if (inner.scrollTop !== prev){ ev.preventDefault(); ev.stopPropagation(); }
+      }catch{}
+    }, { passive:false });
+  }
+
+  function _currentDirBase(){
+    const cur = currentBuffer();
+    if (cur && cur.path){ return _dirnameURL(cur.path); }
+    return _htmlBaseURL();
+  }
+
+  // :e 入力文字列の解析 → {baseURL, typedDirRaw, filter}
+  function _eParseInput(vRaw){
+    // 先頭のコロンは1つのみ許容（"::e" は不正とみなす）
+    const m = vRaw.match(/^:?\s*e\s*(.*)$/i);
+    const rest = (m? m[1] : '').trimStart();
+    const orig = rest;
+    // バックスラッシュ→スラッシュ統一（内部処理用）。raw は保持
+    const norm = orig.replace(/\\/g,'/');
+    let dirPart = '';
+    let filter = '';
+    const slashIdx = norm.lastIndexOf('/');
+    if (slashIdx >= 0){
+      dirPart = norm.slice(0, slashIdx+1); // include '/'
+      filter = norm.slice(slashIdx+1);
+    } else {
+      dirPart = '';
+      filter = norm;
+    }
+  // 入力解釈の基点: :e ポップアップが開いている間は、インタラクティブな現在地(_fileBaseURL)
+  // を最優先に使う。未表示時/未初期化時はカレントバッファ基点へフォールバック（#169）。
+  let base = null;
+  try{
+    base = _fileBaseURL ? _ensureSlash(_fileBaseURL) : _currentDirBase();
+  }catch{
+    base = _currentDirBase();
+  }
+    let typedDirRaw = orig.slice(0, orig.length - filter.length);
+    // 特例: スキーム相対の先頭入力 "//host" の途中
+    try{
+      if (norm.startsWith('//')){
+        // UNC/WSL 風の先頭入力は、常に「現時点のディレクトリ部分(dirPart)」を file: スキームでそのまま基点にする
+        // 例: "//wsl.localhost/Ubuntu/" → base = file:////wsl.localhost/Ubuntu/
+        const body = norm.slice(2); // host/...
+        const segs = body.split('/').filter(s=>s.length>0);
+        const host = segs[0] || '';
+        if (host && host.length >= 3){
+          // dirPart は既に先頭から最後の '/' まで（=ディレクトリ部分）。これをそのまま base に採用する。
+          const dirForBase = (dirPart || ('//'+host+'/')).replace(/\\/g,'/');
+          base = _ensureSlash(new URL('file:' + dirForBase));
+          // typedDirRaw/filter は先頭で計算した値を尊重（再構成しない）
+        } else {
+          // まだ host 未確定: ベースは仮（列挙は別側で抑止）
+          base = _ensureSlash(new URL('./', _htmlBaseURL()));
+        }
+      } else {
+        // 通常: '..' を含む場合も URL 解決に任せる
+        // 先頭が '/' の絶対パス入力は、現バッファのホストに引きずられないよう
+        // HTML 側ベース（ローカル PC 側）を基点に解決する（#168）。
+        const isAbsFromRoot = dirPart.startsWith('/') && !dirPart.startsWith('//');
+        const baseForResolve = isAbsFromRoot ? _htmlBaseURL() : base;
+        base = _ensureSlash(new URL(dirPart || './', baseForResolve));
+      }
+    } catch {}
+    // 絶対パス系のとき、不要な '../' が残らないよう軽く正規化
+    // ただし UNC 先頭の '//' は絶対に潰さない（'//host/share/...' を '/host/...' にしない）
+    try{
+      const raw = typedDirRaw.replace(/\\/g,'/');
+      const isUNC = raw.startsWith('//');
+      const absLike = /^(?:\/[\/]|[A-Za-z]:\/|\/)/.test(raw);
+      if (absLike){
+        if (isUNC){
+          // 先頭の '//' を保持しつつ、それ以外の重複スラッシュや '/./' を整理
+          const restUNC = raw.slice(2).replace(/\/\.\//g,'/').replace(/\/{2,}/g,'/');
+          typedDirRaw = '//' + restUNC;
+        } else {
+          // UNC 以外は通常通り簡易正規化
+          typedDirRaw = raw.replace(/\/\.\//g,'/').replace(/\/{2,}/g,'/');
+        }
+      }
+    }catch{}
+    return { baseURL: base, typedDirRaw, filter };
+  }
 
   /*********************************************************
    * Seed demo
@@ -942,26 +2506,49 @@
   /*********************************************************
    * Bootstrap
    *********************************************************/
-  document.addEventListener('DOMContentLoaded', ()=>{
-    _applyTheme();
-    _loadDocFromQuery().then(loaded=>{
-      if(!loaded) _seedDemo();
-      initialQuickViewportPaint();
-      clampViewportExactLines();
-      _initLineLock();
-      bindEvents();
-      if (cmdinput){ cmdinput.placeholder = 'command (e.g. 100, q)'; }
-      // 起動直後に caret を 0,0 に固定し、可視化とスクロール確保
-      caretRow = Math.max(0, Math.min(_totalLines()-1, caretRow));
-      caretCol = Math.max(0, caretCol);
-      ensureScrolloff({centerOnce:false});
-      _repositionCaret();
-      updateGutter();
-      _renderTabbar();
-      // フォーカス強制（タイミング競合を避ける）
-      setTimeout(()=>editor.focus(), 0);
-    });
-  });
+  function _bootstrap(){
+    try{
+      _readApiFromHash();
+      _applyTheme();
+      const loadP = Promise.resolve().then(()=>_loadDocFromQuery()).catch(()=>false);
+      const watchdog = new Promise(resolve=> setTimeout(()=>resolve(false), 1500));
+      Promise.race([loadP, watchdog]).then(loaded=>{
+        if (!loaded && !editor.value) _seedDemo();
+        initialQuickViewportPaint();
+        clampViewportExactLines();
+        _initLineLock();
+        bindEvents();
+        if (cmdinput){ cmdinput.placeholder = 'command (e.g. :100, :q)'; }
+        caretRow = Math.max(0, Math.min(_totalLines()-1, caretRow));
+        caretCol = Math.max(0, caretCol);
+        ensureScrolloff({centerOnce:false});
+        _repositionCaret();
+        updateGutter();
+        _renderTabbar();
+        // hide boot sentinel if present
+        try{ const bw = document.getElementById('bootwarn'); if (bw) bw.style.display='none'; }catch{}
+        setTimeout(()=>{ try{ editor.focus(); }catch{} }, 0);
+        try{ console.debug && console.debug('[six] boot done'); }catch{}
+      });
+    }catch(e){
+      try{
+        console.error('起動に失敗しました。再度お試しください。');
+        console.error('[six] boot error', e);
+        // 可能なら画面にも表示
+        try{
+          const bw = document.getElementById('bootwarn');
+          if (bw){ bw.style.display=''; bw.textContent='six: 起動に失敗しました。再度お試しください。'; }
+        }catch{}
+        // すぐに閉じる（ポリシー上閉じられない環境もある）
+        try{ window.close(); }catch{}
+      }catch{}
+    }
+  }
+  if (document.readyState === 'loading'){
+    document.addEventListener('DOMContentLoaded', _bootstrap, { once:true });
+  } else {
+    _bootstrap();
+  }
 
   window.six = {
     runCommand,
