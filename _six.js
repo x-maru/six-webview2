@@ -899,6 +899,34 @@
       if (!Number.isNaN(n)) window.six.setScrolloff(n);
       return;
     }
+    // :w[!] [path?] — save current buffer (file:// only via local API)
+    const wm = cmd.match(/^:(w!?)(?:\s*(.*))?$/i);
+    if (wm){
+      const arg = (wm[2]||'').trim();
+      const b = currentBuffer();
+      if (!b){ toast('no buffer'); _setMode('NORMAL'); return; }
+      // 変更なし + パス引数なしのときは何もしない（エラーも出さない）
+  try{ if (!arg && b && b.modified === false){ _setMode('NORMAL'); toast('Nothing has been changed.', 1800); return; } }catch{}
+      // Resolve target URL
+      const base = (function(){ try{ if (b && b.path) return _dirnameURL(b.path); }catch{} return _htmlBaseURL(); })();
+      let targetUrl = null;
+      try{ targetUrl = arg ? _normalizeToURLString(arg, base) : (b.path||null); }catch{ targetUrl = b && b.path || null; }
+      if (!targetUrl){ toast('no file path; use :w <path>'); _setMode('NORMAL'); return; }
+      (async()=>{
+        const ok = await _saveToURL(targetUrl, editor.value||'');
+        if (ok){
+          try{
+            const was = b.path||null;
+            if (was !== targetUrl){ b.path = targetUrl; b.name = _basename(targetUrl); }
+            b.text = editor.value||''; b.modified = false;
+          }catch{}
+          _setTitle(); _renderTabbar();
+          toast('written: ' + _prettyFileUrlLabel(targetUrl));
+        }
+      })();
+      _setMode('NORMAL');
+      return;
+    }
     // :e [path]  / :e! で現バッファ再読込（:e はポップアップ表示）
     const em = cmd.match(/^:(e!?)(?:\s*(.*))?$/i);
     if (em){
@@ -1936,6 +1964,57 @@
       if (!x.pathname.endsWith('/')) x.pathname += '/';
       return x;
     }catch{ return null; }
+  }
+
+  // Convert file:// URL to Windows/UNC fs path for local API
+  function _fsPathFromFileURL(urlLike){
+    try{
+      const u = (urlLike instanceof URL) ? urlLike : new URL(String(urlLike||''));
+      if (u.protocol !== 'file:') return null;
+      const host = u.host || '';
+      const path = decodeURIComponent(u.pathname || '');
+      if (host){
+        return ('\\\\' + host + path.replace(/\//g,'\\'));
+      }
+      const m = path.match(/^\/([A-Za-z]:)(\/.*)?$/);
+      if (m){
+        const drive = m[1];
+        const rest  = (m[2]||'');
+        return drive + rest.replace(/\//g,'\\');
+      }
+      return null;
+    }catch{ return null; }
+  }
+
+  async function _saveToURL(urlStr, textUtf8){
+    try{
+      // 書き込みはサーキットブレーカー無視で常に試行（_apiBase があれば）
+      if (!_apiBase) { toast('save unavailable (no API)'); return false; }
+      const u = new URL(urlStr);
+      if (u.protocol !== 'file:'){ toast('save only supports file://'); return false; }
+      // Normalize line endings to CRLF for Windows writes
+      const payload = String(textUtf8||'').replace(/\n/g, '\r\n');
+      let fsPath = _fsPathFromFileURL(u);
+      if (!fsPath){ toast('invalid target path'); return false; }
+      const apiUrl = _apiBase + 'write?fs=' + encodeURIComponent(fsPath);
+      const ac = (window.AbortController ? new AbortController() : null);
+      const to = setTimeout(()=>{ try{ ac && ac.abort(); }catch{} }, 8000);
+      const resp = await fetch(apiUrl, { method:'POST', body: new TextEncoder().encode(payload), headers: { 'Content-Type':'text/plain; charset=utf-8' }, signal: (ac?ac.signal:undefined) });
+      try{ clearTimeout(to); }catch{}
+      if (!resp.ok) {
+        let msg = 'write failed';
+        try{
+          const rt = await resp.text();
+          try{ const j = JSON.parse(rt); if (j && j.error) msg = 'write failed: ' + j.error; else if (rt) msg = 'write failed: ' + rt; }
+          catch{ if (rt) msg = 'write failed: ' + rt; }
+        }catch{}
+        try{ _apiNoteFailure(); }catch{}
+        toast(msg);
+        return false;
+      }
+      try{ _apiNoteSuccess(); }catch{}
+      return true;
+    }catch(e){ toast('write failed'); return false; }
   }
 
   // UNC 共有ルート判定: file:////host/share/ （先頭セグメントが1個のみ）

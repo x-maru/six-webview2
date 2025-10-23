@@ -591,3 +591,82 @@ textareaにはsample.mdの中身が表示されている。
 2) OK
 次は:wを実装したい。
 
+#182
+起動時エラー。
+```
+six.ps1 starting in: C:\Users\ymaru\WebView2\six
+Add-Type : c:\Users\ymaru\AppData\Local\Temp\wczv33wd.0.cs(103) : 'else' は無効です
+。
+c:\Users\ymaru\AppData\Local\Temp\wczv33wd.0.cs(102) :         try{ client.Close();
+ } catch{}
+c:\Users\ymaru\AppData\Local\Temp\wczv33wd.0.cs(103) : >>>           } else if (pat
+h.StartsWith("/write")){
+c:\Users\ymaru\AppData\Local\Temp\wczv33wd.0.cs(104) :             // POST /write?f
+s=\\\\host\\path  body=utf-8 text
+発生場所 C:\Users\ymaru\WebView2\six\six.ps1:99 文字:5
++     Add-Type -TypeDefinition $code -Language CSharp -IgnoreWarnings - ...
++     ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : InvalidData: (Microsoft.Power...peCompilerError:AddT
+   ypeCompilerError) [Add-Type]、Exception
+    + FullyQualifiedErrorId : SOURCE_CODE_ERROR,Microsoft.PowerShell.Commands.AddT
+   ypeCommand
+```
+
+#183
+起動時エラー。
+```
+six.ps1 starting in: C:\Users\ymaru\WebView2\six
+Add-Type : c:\Users\ymaru\AppData\Local\Temp\qocde31f.0.cs(138) : } が必要です。
+c:\Users\ymaru\AppData\Local\Temp\qocde31f.0.cs(137) :   }
+c:\Users\ymaru\AppData\Local\Temp\qocde31f.0.cs(138) : >>> }
+c:\Users\ymaru\AppData\Local\Temp\qocde31f.0.cs(139) :
+発生場所 C:\Users\ymaru\WebView2\six\six.ps1:99 文字:5
++     Add-Type -TypeDefinition $code -Language CSharp -IgnoreWarnings - ...
++     ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : InvalidData: (Microsoft.Power...peCompilerError:AddT
+   ypeCompilerError) [Add-Type]、Exception
+    + FullyQualifiedErrorId : SOURCE_CODE_ERROR,Microsoft.PowerShell.Commands.AddT
+   ypeCommand
+```
+
+#184
+```
+six.ps1 starting in: C:\Users\ymaru\WebView2\six
+Add-Type : c:\Users\ymaru\AppData\Local\Temp\vlhrggfv.0.cs(88) : ) が必要です。
+c:\Users\ymaru\AppData\Local\Temp\vlhrggfv.0.cs(87) :             var bufBody = new
+ byte[8192];
+c:\Users\ymaru\AppData\Local\Temp\vlhrggfv.0.cs(88) : >>>             while(remaini
+ng > 0){ int n; try{ n = sock.Receive(bufBody); } catch { break; } if (n<=0) break;
+ receivedBody.Write(bufBody,0,n); remaining -= n; if (receivedBody.Length > 50_000_
+000) break; }
+c:\Users\ymaru\AppData\Local\Temp\vlhrggfv.0.cs(89) :             string textToWrit
+e = "";
+発生場所 C:\Users\ymaru\WebView2\six\six.ps1:99 文字:5
++     Add-Type -TypeDefinition $code -Language CSharp -IgnoreWarnings - ...
++     ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : InvalidData: (Microsoft.Power...peCompilerError:AddT
+   ypeCompilerError) [Add-Type]、Exception
+    + FullyQualifiedErrorId : SOURCE_CODE_ERROR,Microsoft.PowerShell.Commands.AddT
+   ypeCommand
+```
+
+#185
+- (untitled)で:w → toast表示 → OK
+- ":e newfile.txt"で新バッファを開き、数文字入力して:w → "write failed"
+  - "save unavailable (no API)"になるときもある
+- 既存ファイルを開き、何も編集せず:w → "write failed" ※何もしないのが正解
+
+#186
+1) ":e newfile.txt" → 新バッファ → 編集 → :w → `write failed: {"entries":[]}`
+2) ":e exist.txt" → :w → 何も起きない
+  - 仕様どおりだが、やっぱりtoastは出そう。"Nothing has been changed."かな。
+
+#187
+- ":e newfile.txt" → 新バッファ → 編集 → :w → "written: (フルパス)newfile.txt" → OK
+- ":e exist.txt" → 何も編集せず:w → "Nothing has been changed." → OK
+- ":w :" → "write failed: 指定されたパスのフォーマットはサポートされていません。" → まあOK
+- ":w no-exist.txt" → "written:..." → OK
+- ":w otherfile.txt" → "written:..." → 仕様通りだが、":w name"でnameが既存だった場合は確認を求めるようにしたい。
+- :w! / :wqも必要だが、その前に:q時にmodifiedなバッファが残っていたら確認を出すようにしたい。
+
+

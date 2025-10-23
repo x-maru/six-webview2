@@ -28,9 +28,16 @@ public class __CLASSNAME__ {
         try{
           var ms = new MemoryStream(); var buf = new byte[8192];
           while(true){ int n = sock.Receive(buf); if (n<=0) break; ms.Write(buf,0,n); var txt = Encoding.ASCII.GetString(ms.ToArray()); if (txt.Contains("\r\n\r\n")) break; if (ms.Length>65536) break; }
-          var req = Encoding.ASCII.GetString(ms.ToArray());
+          var reqBytesInitial = ms.ToArray();
+          var req = Encoding.ASCII.GetString(reqBytesInitial);
           int eol = req.IndexOf("\r\n"); var first = (eol>=0? req.Substring(0,eol).Trim() : req.Trim());
-          var path = first; if (path.StartsWith("GET ")) path = path.Substring(4); int sp = path.IndexOf(' '); if (sp>=0) path = path.Substring(0,sp);
+          // Parse request line: METHOD SP PATH SP HTTP/...
+          string method = "GET"; string path = "/";
+          try{
+            var parts = (first ?? "").Split(' ');
+            if (parts.Length>=1 && !string.IsNullOrEmpty(parts[0])) method = parts[0].ToUpperInvariant();
+            if (parts.Length>=2 && !string.IsNullOrEmpty(parts[1])) path = parts[1];
+          }catch{}
           string status = "200 OK"; string contentType = "application/json; charset=utf-8"; string body = "{\"entries\":[]}";
           if (path.StartsWith("/ping")){ contentType = "text/plain; charset=utf-8"; body = "ok"; }
           else if (path.StartsWith("/dir")){
@@ -58,6 +65,39 @@ public class __CLASSNAME__ {
             Write(sock, headerRead); sock.Send(bytesTxt);
             try{ client.Close(); } catch{}
             continue;
+          } else if (path.StartsWith("/write")){
+            // POST /write?fs=\\\\host\\path  body=utf-8 text
+            string query=null; int qm = path.IndexOf('?'); if (qm>=0) query = path.Substring(qm+1);
+            string fsPath=null; if (query!=null){ foreach(var pair in query.Split('&')){ if (pair.Length==0) continue; var kv=pair.Split('='); var k=UrlDecode(kv[0]); var v=(kv.Length>1? UrlDecode(kv[1]) : ""); if (k=="fs") fsPath=v; } }
+            // Parse headers for Content-Length
+            int headerEnd = req.IndexOf("\r\n\r\n"); if (headerEnd < 0) headerEnd = req.Length;
+            string headerText = (headerEnd > 0 ? req.Substring(0, headerEnd) : req);
+            int contentLength = 0;
+            try{
+              foreach(var line in headerText.Split(new[]{"\r\n"}, StringSplitOptions.None)){
+                var idx = line.IndexOf(':'); if (idx<=0) continue; var k=line.Substring(0,idx).Trim(); var v=line.Substring(idx+1).Trim();
+                if (k.Equals("Content-Length", StringComparison.OrdinalIgnoreCase)) { int.TryParse(v, out contentLength); }
+              }
+            }catch{}
+            // Read body bytes
+            var bodyStart = headerEnd + 4; if (bodyStart > reqBytesInitial.Length) bodyStart = reqBytesInitial.Length;
+            var receivedBody = new MemoryStream();
+            if (reqBytesInitial.Length > bodyStart){ receivedBody.Write(reqBytesInitial, bodyStart, reqBytesInitial.Length - bodyStart); }
+            int remaining = Math.Max(0, contentLength - (int)receivedBody.Length);
+            var bufBody = new byte[8192];
+            while(remaining > 0){ int n; try{ n = sock.Receive(bufBody); } catch { break; } if (n<=0) break; receivedBody.Write(bufBody,0,n); remaining -= n; if (receivedBody.Length > 50000000) break; }
+            string textToWrite = "";
+            try{ textToWrite = Encoding.UTF8.GetString(receivedBody.ToArray()); }catch{ textToWrite = ""; }
+            // Write file
+            try{
+              if (string.IsNullOrEmpty(fsPath)) throw new Exception("fs required");
+              var dir = Path.GetDirectoryName(fsPath);
+              if (!string.IsNullOrEmpty(dir) && !Directory.Exists(dir)) Directory.CreateDirectory(dir);
+              File.WriteAllText(fsPath, textToWrite, Encoding.UTF8);
+              body = "{\"ok\":true}"; contentType = "application/json; charset=utf-8"; status = "200 OK";
+            } catch (Exception ex) {
+              status = "400 Bad Request"; contentType = "application/json; charset=utf-8"; body = "{\"ok\":false,\"error\":\""+JsonEscape(ex.Message)+"\"}";
+            }
           } else if (path.StartsWith("/shares")){
             // /shares?host=wsl.localhost → ディストリ名を shares として返す
             string query=null; int qm = path.IndexOf('?'); if (qm>=0) query = path.Substring(qm+1);
