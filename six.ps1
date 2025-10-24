@@ -153,8 +153,20 @@ if ($DocItems.Count -ge 2) {
   $b64   = [System.Convert]::ToBase64String($bytes)
   $qsDoc  = [System.Uri]::EscapeDataString($one.doc)
   $qsName = [System.Uri]::EscapeDataString($one.name)
-  $qsData = [System.Uri]::EscapeDataString($b64)
-  $frag = "doc=$qsDoc&name=$qsName&data=$qsData&api=" + ([System.Uri]::EscapeDataString($apiBase))
+  $includeData = $true
+  # EscapeDataString は非常に長い文字列で例外を投げる場合があるため、閾値を超えたら data 伝達を省略
+  try { if ($b64.Length -gt 60000) { $includeData = $false } } catch { $includeData = $false }
+  if ($includeData) {
+    try {
+      $qsData = [System.Uri]::EscapeDataString($b64)
+      $frag = "doc=$qsDoc&name=$qsName&data=$qsData&api=" + ([System.Uri]::EscapeDataString($apiBase))
+    } catch {
+      # フォールバック: data を付けずに doc/name のみ（フロント側で file:// を読み込む）
+      $frag = "doc=$qsDoc&name=$qsName&api=" + ([System.Uri]::EscapeDataString($apiBase))
+    }
+  } else {
+    $frag = "doc=$qsDoc&name=$qsName&api=" + ([System.Uri]::EscapeDataString($apiBase))
+  }
   $targetUrl = $indexUri.AbsoluteUri + "#" + $frag
 } else {
   $targetUrl = $indexUri.AbsoluteUri + "#api=" + ([System.Uri]::EscapeDataString($apiBase))

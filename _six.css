@@ -50,3 +50,15 @@ body { font: 18px/var(--lh) Consolas, 'Courier New', monospace; overflow: hidden
 /* toast */
 #toast { position: fixed; left: 50%; transform: translateX(-50%); bottom: 48px; background: rgba(26,32,48,0.96); color:#e6e6e6; border:1px solid #2a3244; border-radius: 6px; padding:8px 12px; z-index:10001; box-shadow: 0 8px 18px rgba(0,0,0,0.35); max-width: 80vw; }
 #toast .msg { white-space: nowrap; }
+
+/* modal (custom confirm) */
+#modalOverlay { position: fixed; inset: 0; background: rgba(0,0,0,0.45); display: none; align-items: center; justify-content: center; z-index: 10002; }
+#modalBox { min-width: 360px; max-width: 80vw; background: #0f1117; color: #e6e6e6; border: 1px solid #2a3244; border-radius: 8px; box-shadow: 0 12px 28px rgba(0,0,0,0.5); overflow: hidden; }
+#modalBox .modal-body { padding: 14px 16px; font: 14px/1.6 system-ui, -apple-system, 'Segoe UI', sans-serif; color: #d8d8d8; }
+#modalBox .modal-title { font-weight: 600; margin-bottom: 6px; color: #eaeaf0; }
+#modalBox .modal-detail { opacity: 0.85; white-space: pre-wrap; word-break: break-all; margin-top: 4px; }
+#modalBox .modal-buttons { display:flex; gap:8px; justify-content: flex-end; padding: 10px 12px; background:#111827; border-top: 1px solid #1e2737; }
+#modalBox .modal-buttons button { min-width: 80px; border: 1px solid #2a3244; background: #1a2030; color:#e6e6e6; padding:6px 10px; border-radius: 6px; cursor: pointer; font: 13px/1.2 system-ui, -apple-system, 'Segoe UI', sans-serif; }
+#modalBox .modal-buttons button:hover { filter: brightness(1.06); }
+#modalBox .modal-buttons .primary { background:#2a3756; border-color:#2f4064; }
+#modalBox .modal-buttons .danger { background:#5b1f2a; border-color:#7a2a3a; }

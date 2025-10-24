@@ -252,6 +252,21 @@
     }catch{}
   }
 
+  // Close current buffer (tab). If no buffers remain, exit app.
+  function _closeCurrentBuffer(){
+    try{
+      if (!(currentIdx>=0 && currentIdx<buffers.length)) return;
+      const removedIndex = currentIdx;
+      buffers.splice(removedIndex, 1);
+      if (buffers.length === 0){
+        window.close();
+        return;
+      }
+      const nextIndex = Math.min(removedIndex, buffers.length - 1);
+      _switchToBuffer(nextIndex);
+    }catch{}
+  }
+
   // Enter/Tab 確定統合（:e ファイルポップアップ用）
   function _confirmFilePopupSelection(){
     try{
@@ -665,6 +680,13 @@
     if (buffers.length===0){ _addBuffer({ name: name||null, path: doc||null, text: t, modified:false }); }
     else { const b=currentBuffer(); b.name = name||b.name; b.path = doc||b.path; b.text=t; b.modified=false; }
     _setTitle(); _renderTabbar();
+    // Ensure initial view is at top (avoid unintended 'G'-like position)
+    try{
+      caretRow=0; caretCol=0; editor.scrollTop=0; _centerScrolloffOnce=false;
+      _scrollGuardUntil = Date.now() + 800; // 初期描画直後の再配置を抑止
+      _repositionCaret(); updateGutter();
+      setTimeout(()=>{ try{ caretRow=0; caretCol=0; editor.scrollTop=0; _repositionCaret(); updateGutter(); }catch{} }, 0);
+    }catch{}
         return Promise.resolve(true);
       } catch { /* fallthrough */ }
     }
@@ -677,6 +699,11 @@
     if (buffers.length===0){ _addBuffer({ name: name||null, path: doc||null, text: t, modified:false }); }
     else { const b=currentBuffer(); if(name) b.name = name; b.path = doc; b.text=t; b.modified=false; }
     _setTitle(); _renderTabbar();
+      try{
+        caretRow=0; caretCol=0; editor.scrollTop=0; _centerScrolloffOnce=false; _scrollGuardUntil = Date.now() + 800;
+        _repositionCaret(); updateGutter();
+        setTimeout(()=>{ try{ caretRow=0; caretCol=0; editor.scrollTop=0; _repositionCaret(); updateGutter(); }catch{} }, 0);
+      }catch{}
       return true;
     }).catch(()=>{
       return false;
@@ -749,7 +776,9 @@
   /*********************************************************
    * ensureScrolloff
    *********************************************************/
+  let _scrollGuardUntil = 0; // temporary guard to suppress auto scroll adjustments
   function ensureScrolloff(opts={}){
+    try{ if (Date.now() < _scrollGuardUntil) return; }catch{}
     const linesTotal = _totalLines();
     const vis = _visibleLinesExact();
     let topLine = _topLine();
@@ -882,14 +911,79 @@
       caretRow = Math.max(0, Math.min(last-1, n-1));
       _centerScrolloffOnce = true;
       ensureScrolloff({centerOnce:true});
-      _repositionCaret();
-      updateGutter();
+      // 行ジャンプ直後に他の描画でスクロールが揺れるのを抑止
+      const targetTop = editor.scrollTop;
+      _scrollGuardUntil = Date.now() + 900;
+      const reinforce = ()=>{ try{ editor.scrollTop = targetTop; _repositionCaret(); updateGutter(); }catch{} };
+      reinforce();
+      try{ if (window.requestAnimationFrame){ requestAnimationFrame(()=>{ reinforce(); requestAnimationFrame(()=>reinforce()); }); } }catch{}
+      try{ setTimeout(reinforce, 140); }catch{}
       _setMode('NORMAL');
       return;
     }
-    // q -> close
+    // :q — quit current buffer only (exit app only when last one)
     if (cmd === ':q' || cmd === ':quit'){
-      window.close();
+      (async()=>{
+        try{
+          const b = currentBuffer();
+          if (!b){ _closeCurrentBuffer(); return; }
+          if (b.modified){
+            const label = b.path ? _prettyFileUrlLabel(b.path) : (b.name || '(untitled)');
+            const id = await choiceModal({
+              title: 'Unsaved changes',
+              detail: `Save changes to: ${label}?`,
+              buttons: [
+                { id:'save', label:'Save', primary:true },
+                { id:'dont', label:"Don't Save" },
+                { id:'cancel', label:'Cancel', danger:true }
+              ],
+              returnFocusEl: editor
+            });
+            if (id === 'cancel' || id === null){
+              // Ensure NORMAL mode and focus back to editor
+              try{ _setMode('NORMAL'); if (cmdinput){ cmdinput.value=''; } setTimeout(()=>{ try{ editor && editor.focus && editor.focus(); }catch{} }, 0); }catch{}
+              return; // abort
+            }
+            if (id === 'save'){
+              if (b.path){
+                const textData = editor.value||'';
+                const ok = await _saveToURL(b.path, textData);
+                if (!ok){ toast('write failed: ' + (b.name||'')); return; }
+                try{ b.text = textData; b.modified = false; }catch{}
+              } else {
+                // No path => skip save for now
+              }
+            }
+          }
+          _closeCurrentBuffer();
+        }catch{}
+      })();
+      return;
+    }
+    // :q! — force: discard changes for current buffer and close it
+    if (cmd === ':q!'){
+      _closeCurrentBuffer();
+      return;
+    }
+    // :qa — quit all (old :q behavior)
+    if (cmd === ':qa' || cmd === ':quitall'){
+      (async()=>{
+        try{
+          // If current buffer is unmodified, close it first (spec in #192)
+          try{ const b0=currentBuffer(); if (b0 && b0.modified===false){ _closeCurrentBuffer(); } }catch{}
+          // Collect modified buffers (including current if modified)
+          const items = buffers.map((b,i)=>({b,i})).filter(x=>x.b && x.b.modified);
+          if (items.length > 0){
+            const ok = await multiSaveDialog(items);
+            if (!ok){
+              // Ensure we fall back to NORMAL and focus editor on cancel
+              try{ _setMode('NORMAL'); if (cmdinput) cmdinput.value=''; setTimeout(()=>{ try{ editor && editor.focus && editor.focus(); }catch{} },0); }catch{}
+              return;
+            }
+          }
+          window.close();
+        }catch{}
+      })();
       return;
     }
     // :set so=N
@@ -899,20 +993,186 @@
       if (!Number.isNaN(n)) window.six.setScrolloff(n);
       return;
     }
+    // :wqa[!] [path?] — write all & quit (use previous :wq behavior)
+    const wqam = cmd.match(/^:(wqa!?)(?:\s*(.*))?$/i);
+    if (wqam){
+      const bang = /!$/.test(wqam[1]||'');
+      const arg = (wqam[2]||'').trim();
+      const b = currentBuffer();
+      if (!b){ toast('no buffer'); _setMode('NORMAL'); return; }
+      // unchanged and no path → close current, then aggregate others and exit
+      try{ if (!arg && b && b.modified===false){
+        (async()=>{
+          _closeCurrentBuffer();
+          const others = buffers.map((x,i)=>({b:x,i})).filter(x=>x.b && x.b.modified);
+          if (others.length>0){ const ok = await multiSaveDialog(others); if (!ok){ _setMode('NORMAL'); return; } }
+          window.close();
+        })();
+        _setMode('NORMAL');
+        return; } }catch{}
+      // Resolve target URL
+      const base = (function(){ try{ if (b && b.path) return _dirnameURL(b.path); }catch{} return _htmlBaseURL(); })();
+      let targetUrl = null;
+      try{ targetUrl = arg ? _normalizeToURLString(arg, base) : (b.path||null); }catch{ targetUrl = b && b.path || null; }
+      if (!targetUrl){ toast('no file path; use :wq <path>'); _setMode('NORMAL'); return; }
+      (async()=>{
+        // Overwrite confirm if arg present and target exists and not bang
+        if (arg && !bang){
+          try{
+            const parent = _dirnameURL(targetUrl);
+            const baseName = _basename(targetUrl);
+            const list = await _listDirEntriesWithQuickRetry(parent);
+            if (Array.isArray(list)){
+              let caseSensitive = false; try{ const u = new URL(targetUrl); if (u.protocol==='file:' && u.host && u.host.toLowerCase()==='wsl.localhost') caseSensitive = true; }catch{}
+              const exists = list.some(e=> e && !e.isDir && (caseSensitive ? (e.name===baseName) : (String(e.name||'').toLowerCase()===String(baseName||'').toLowerCase())));
+              if (exists){
+                const ok = await confirmModal({ title:'Overwrite', detail:_prettyFileUrlLabel(targetUrl), okText:'Overwrite', okClass:'danger', cancelText:'Cancel' });
+                if (!ok){ toast('write cancelled', 1500); _setMode('NORMAL'); return; }
+              }
+            }
+          }catch{}
+        }
+        const ok = await _saveToURL(targetUrl, editor.value||'');
+        if (ok){
+          try{
+            const was = b.path||null;
+            if (was !== targetUrl){ b.path = targetUrl; b.name = _basename(targetUrl); }
+            b.text = editor.value||''; b.modified = false;
+          }catch{}
+          _setTitle(); _renderTabbar();
+          toast('written: ' + _prettyFileUrlLabel(targetUrl));
+          // Close current before dialog (spec in #192)
+          _closeCurrentBuffer();
+          if (bang){ window.close(); return; }
+          const others = buffers.map((x,i)=>({b:x,i})).filter(x=>x.b && x.b.modified);
+          if (others.length>0){ const ok2 = await multiSaveDialog(others); if (!ok2){ _setMode('NORMAL'); return; } }
+          window.close();
+        }
+      })();
+      _setMode('NORMAL');
+      return;
+    }
+
+    // :wq[!] [path?] — write current buffer and close it (exit app only when last)
+    const wqm = cmd.match(/^:(wq!?)(?:\s*(.*))?$/i);
+    if (wqm){
+      const bang = /!$/.test(wqm[1]||'');
+      const arg = (wqm[2]||'').trim();
+      const b = currentBuffer();
+      if (!b){ toast('no buffer'); _setMode('NORMAL'); return; }
+      // unchanged and no path → just close current buffer
+      try{ if (!arg && b && b.modified===false){ _setMode('NORMAL'); _closeCurrentBuffer(); return; } }catch{}
+      // Resolve target URL
+      const base = (function(){ try{ if (b && b.path) return _dirnameURL(b.path); }catch{} return _htmlBaseURL(); })();
+      let targetUrl = null;
+      try{ targetUrl = arg ? _normalizeToURLString(arg, base) : (b.path||null); }catch{ targetUrl = b && b.path || null; }
+      if (!targetUrl){ toast('no file path; use :wq <path>'); _setMode('NORMAL'); return; }
+      (async()=>{
+        // Overwrite confirm if arg present and target exists and not bang
+        if (arg && !bang){
+          try{
+            const parent = _dirnameURL(targetUrl);
+            const baseName = _basename(targetUrl);
+            const list = await _listDirEntriesWithQuickRetry(parent);
+            if (Array.isArray(list)){
+              let caseSensitive = false; try{ const u = new URL(targetUrl); if (u.protocol==='file:' && u.host && u.host.toLowerCase()==='wsl.localhost') caseSensitive = true; }catch{}
+              const exists = list.some(e=> e && !e.isDir && (caseSensitive ? (e.name===baseName) : (String(e.name||'').toLowerCase()===String(baseName||'').toLowerCase())));
+              if (exists){
+                const ok = await confirmModal({ title:'Overwrite', detail:_prettyFileUrlLabel(targetUrl), okText:'Overwrite', okClass:'danger', cancelText:'Cancel' });
+                if (!ok){ toast('write cancelled', 1500); _setMode('NORMAL'); return; }
+              }
+            }
+          }catch{}
+        }
+        const ok = await _saveToURL(targetUrl, editor.value||'');
+        if (ok){
+          try{
+            const was = b.path||null;
+            if (was !== targetUrl){ b.path = targetUrl; b.name = _basename(targetUrl); }
+            b.text = editor.value||''; b.modified = false;
+          }catch{}
+          _setTitle(); _renderTabbar();
+          toast('written: ' + _prettyFileUrlLabel(targetUrl));
+          _closeCurrentBuffer();
+        }
+      })();
+      _setMode('NORMAL');
+      return;
+    }
+
+    // :wa — write all modified buffers with a path
+    if (/^:wa\s*$/i.test(cmd)){
+      (async()=>{
+        for (let i=0;i<buffers.length;i++){
+          const b = buffers[i];
+          if (!b || !b.modified || !b.path) continue;
+          const textData = (i===currentIdx)?(editor.value||''):(b.text||'');
+          const ok = await _saveToURL(b.path, textData);
+          if (ok){ try{ b.text=textData; b.modified=false; }catch{} toast('written: ' + _prettyFileUrlLabel(b.path)); } else { toast('write failed: ' + (b.name||'')); }
+        }
+        _setTitle(); _renderTabbar();
+      })();
+      _setMode('NORMAL');
+      return;
+    }
+
     // :w[!] [path?] — save current buffer (file:// only via local API)
     const wm = cmd.match(/^:(w!?)(?:\s*(.*))?$/i);
     if (wm){
+      const bang = /!$/.test(wm[1]||'');
       const arg = (wm[2]||'').trim();
       const b = currentBuffer();
       if (!b){ toast('no buffer'); _setMode('NORMAL'); return; }
       // 変更なし + パス引数なしのときは何もしない（エラーも出さない）
-  try{ if (!arg && b && b.modified === false){ _setMode('NORMAL'); toast('Nothing has been changed.', 1800); return; } }catch{}
+      try{ if (!arg && b && b.modified === false){
+        // 強固にチラつき抑止: 一時的にスクロールガードを有効化し、その場で状態を復元
+        const st = editor.scrollTop, cr = caretRow, cc = caretCol;
+        // ネイティブ selection（textarea 側）も保持・復元（内部スクロール発生の芽を摘む）
+        let selS = 0, selE = 0; try{ selS = editor.selectionStart; selE = editor.selectionEnd; }catch{}
+        _scrollGuardUntil = Date.now() + 1500; // ガード時間をさらに伸ばす
+        _centerScrolloffOnce = false; // G 相当のセンタリングを抑止
+        _clearPending && _clearPending();
+        _setMode('NORMAL'); toast('Nothing has been changed.', 1500);
+        const restore = ()=>{
+          try{
+            // selection を先に戻し、後で scrollTop を上書き（選択復元での自動スクロールを打ち消す）
+            try{ if (typeof selS === 'number' && typeof selE === 'number'){ editor.setSelectionRange(selS, selE); } }catch{}
+            caretRow = cr; caretCol = cc;
+            editor.scrollTop = st;
+            _repositionCaret(); updateGutter();
+          }catch{}
+        };
+        // 直ちに復元 → 次フレームでもう一度 → 少し遅延してもう一度（描画タイミングの揺れ吸収）
+        restore();
+        try{
+          if (window.requestAnimationFrame){
+            requestAnimationFrame(()=>{ restore(); requestAnimationFrame(()=>{ restore(); }); });
+          }
+        }catch{}
+        try{ setTimeout(restore, 160); }catch{}
+        return; } }catch{}
       // Resolve target URL
       const base = (function(){ try{ if (b && b.path) return _dirnameURL(b.path); }catch{} return _htmlBaseURL(); })();
       let targetUrl = null;
       try{ targetUrl = arg ? _normalizeToURLString(arg, base) : (b.path||null); }catch{ targetUrl = b && b.path || null; }
       if (!targetUrl){ toast('no file path; use :w <path>'); _setMode('NORMAL'); return; }
       (async()=>{
+        // Overwrite confirm if arg present and target exists and not bang
+        if (arg && !bang){
+          try{
+            const parent = _dirnameURL(targetUrl);
+            const baseName = _basename(targetUrl);
+            const list = await _listDirEntriesWithQuickRetry(parent);
+            if (Array.isArray(list)){
+              let caseSensitive = false; try{ const u = new URL(targetUrl); if (u.protocol==='file:' && u.host && u.host.toLowerCase()==='wsl.localhost') caseSensitive = true; }catch{}
+              const exists = list.some(e=> e && !e.isDir && (caseSensitive ? (e.name===baseName) : (String(e.name||'').toLowerCase()===String(baseName||'').toLowerCase())));
+              if (exists){
+                const ok = await confirmModal({ title:'Overwrite', detail:_prettyFileUrlLabel(targetUrl), okText:'Overwrite', okClass:'danger', cancelText:'Cancel' });
+                if (!ok){ toast('write cancelled', 1500); _setMode('NORMAL'); return; }
+              }
+            }
+          }catch{}
+        }
         const ok = await _saveToURL(targetUrl, editor.value||'');
         if (ok){
           try{
@@ -1070,6 +1330,200 @@
     _toastEl.style.display = '';
     if (_toastTimer) { clearTimeout(_toastTimer); _toastTimer = null; }
     _toastTimer = setTimeout(()=>{ _toastEl.style.display='none'; }, Math.max(300, ms));
+  }
+
+  // custom modal (confirm/choice) — avoid native confirm() banner
+  const _modalOverlay = document.getElementById('modalOverlay');
+  const _modalTitle   = document.getElementById('modalTitle');
+  const _modalDetail  = document.getElementById('modalDetail');
+  const _modalButtons = document.getElementById('modalButtons');
+  function _hideModal(){ if (_modalOverlay) _modalOverlay.style.display='none'; try{ _modalButtons && (_modalButtons.innerHTML=''); }catch{} }
+  function _showModal(){ if (_modalOverlay) _modalOverlay.style.display='flex'; }
+  function confirmModal(opts){
+    return new Promise((resolve)=>{
+      try{
+        if (!_modalOverlay || !_modalTitle || !_modalDetail || !_modalButtons){
+          const ok = window.confirm(String(opts && (opts.title||opts.detail) || 'Are you sure?'));
+          return resolve(!!ok);
+        }
+        const title = (opts && opts.title) || 'Confirm';
+        const detail = (opts && opts.detail) || '';
+        const okText = (opts && opts.okText) || 'OK';
+        const cancelText = (opts && opts.cancelText) || 'Cancel';
+        const okClass = (opts && opts.okClass) || 'primary';
+        const cancelClass = (opts && opts.cancelClass) || '';
+        const restoreEl = (opts && opts.returnFocusEl) || ((_mode==='CMD' && cmdinput) ? cmdinput : editor);
+        _modalTitle.textContent = title;
+        _modalDetail.textContent = detail;
+        _modalButtons.innerHTML = '';
+        const btnCancel = document.createElement('button'); btnCancel.textContent = cancelText; if (cancelClass) btnCancel.classList.add(cancelClass);
+        const btnOk = document.createElement('button'); btnOk.textContent = okText; if (okClass) btnOk.classList.add(okClass);
+        _modalButtons.appendChild(btnCancel); _modalButtons.appendChild(btnOk);
+        const btnEls = [btnCancel, btnOk];
+        const cleanup = ()=>{ try{ document.removeEventListener('keydown', onKey); }catch{} _hideModal(); try{ setTimeout(()=>{ try{ restoreEl && restoreEl.focus && restoreEl.focus(); }catch{} }, 0); }catch{} };
+        const onCancel = ()=>{ cleanup(); resolve(false); };
+        const onOk = ()=>{ cleanup(); resolve(true); };
+        btnCancel.addEventListener('click', onCancel, { once:true });
+        btnOk.addEventListener('click', onOk, { once:true });
+        const onKey = (e)=>{
+          if (e.key==='Escape'){ e.preventDefault(); onCancel(); }
+          else if (e.key==='Enter'){ e.preventDefault(); onOk(); }
+          else if (e.key==='Tab'){
+            e.preventDefault();
+            if (!btnEls.length) return;
+            const idx = btnEls.findIndex(el=> el===document.activeElement);
+            const dir = e.shiftKey ? -1 : 1;
+            const next = (idx>=0 ? (idx+dir+btnEls.length)%btnEls.length : (dir>0?0:btnEls.length-1));
+            try{ btnEls[next].focus(); }catch{}
+          }
+        };
+        document.addEventListener('keydown', onKey);
+        _showModal();
+        try{ btnOk.focus(); }catch{}
+        try{ requestAnimationFrame(()=>{ try{ btnOk.focus(); }catch{} }); }catch{}
+        try{ setTimeout(()=>{ try{ btnOk.focus(); }catch{} }, 0); }catch{}
+      }catch{ resolve(false); }
+    });
+  }
+  function choiceModal(opts){
+    return new Promise((resolve)=>{
+      try{
+        if (!_modalOverlay || !_modalTitle || !_modalDetail || !_modalButtons){
+          const ok = window.confirm(String(opts && (opts.title||opts.detail) || 'Continue?'));
+          return resolve(ok ? ((opts && opts.buttons && opts.buttons[0] && opts.buttons[0].id) || 'ok') : null);
+        }
+        const title = (opts && opts.title) || 'Confirm';
+        const detail = (opts && opts.detail) || '';
+        const buttons = (opts && Array.isArray(opts.buttons)) ? opts.buttons : [{id:'ok', label:'OK', primary:true}];
+        const restoreEl = (opts && opts.returnFocusEl) || ((_mode==='CMD' && cmdinput) ? cmdinput : editor);
+        _modalTitle.textContent = title;
+        _modalDetail.textContent = detail;
+        _modalButtons.innerHTML = '';
+        const btnEls = [];
+        for (const b of buttons){
+          const el = document.createElement('button');
+          el.textContent = b.label || b.id;
+          if (b.primary) el.classList.add('primary');
+          if (b.danger) el.classList.add('danger');
+          el.addEventListener('click', ()=>{ cleanup(); resolve(b.id); }, { once:true });
+          _modalButtons.appendChild(el);
+          btnEls.push(el);
+        }
+        const onKey = (e)=>{
+          if (e.key==='Escape'){ e.preventDefault(); cleanup(); resolve(null); }
+          else if (e.key==='Enter'){ e.preventDefault(); cleanup(); resolve((buttons.find(x=>x.primary)||buttons[0]).id); }
+          else if (e.key>='1' && e.key<='9'){
+            const idx = parseInt(e.key,10) - 1;
+            if (idx >= 0 && idx < buttons.length){ e.preventDefault(); cleanup(); resolve(buttons[idx].id); }
+          } else if (e.key==='Tab'){
+            // trap focus within the choice buttons
+            e.preventDefault();
+            if (!btnEls.length) return;
+            const idx = btnEls.findIndex(el=> el===document.activeElement);
+            const dir = e.shiftKey ? -1 : 1;
+            const next = (idx>=0 ? (idx+dir+btnEls.length)%btnEls.length : (dir>0?0:btnEls.length-1));
+            try{ btnEls[next].focus(); }catch{}
+          }
+        };
+        const cleanup = ()=>{ try{ document.removeEventListener('keydown', onKey); }catch{} _hideModal(); try{ setTimeout(()=>{ try{ restoreEl && restoreEl.focus && restoreEl.focus(); }catch{} }, 0); }catch{} };
+        document.addEventListener('keydown', onKey);
+        _showModal();
+        try{ const prim = btnEls.find(el=>el.classList.contains('primary')) || btnEls[0]; if (prim){ prim.focus(); requestAnimationFrame(()=>{ try{ prim.focus(); }catch{} }); setTimeout(()=>{ try{ prim.focus(); }catch{} }, 0); } }catch{}
+      }catch{ resolve(null); }
+    });
+  }
+
+  // Aggregated multi-save dialog for :wq (no bang)
+  function multiSaveDialog(modifiedItems){
+    // modifiedItems: Array<{b,i}>
+    return new Promise((resolve)=>{
+      try{
+        if (!_modalOverlay || !_modalTitle || !_modalDetail || !_modalButtons){
+          // Fallback to sequential prompts if custom modal not available
+          (async()=>{
+            for (const {b,i} of modifiedItems){
+              const id = await choiceModal({ title:'Unsaved changes', detail:`Save changes to: ${b.path? _prettyFileUrlLabel(b.path):(b.name||'(untitled)')}`, buttons:[{id:'save',label:'Save',primary:true},{id:'dont',label:"Don't Save"},{id:'cancel',label:'Cancel',danger:true}] });
+              if (id===null || id==='cancel'){ resolve(false); return; }
+              if (id==='save' && b.path){ const textData = (i===currentIdx)?(editor.value||''):(b.text||''); const ok = await _saveToURL(b.path, textData); if (!ok){ toast('write failed: ' + (b.name||'')); resolve(false); return; } try{ b.text=textData; b.modified=false; }catch{} }
+            }
+            resolve(true);
+          })();
+          return;
+        }
+        _modalTitle.textContent = 'Save changes before quitting?';
+        _modalDetail.innerHTML = '';
+        const listWrap = document.createElement('div');
+        listWrap.style.display='flex'; listWrap.style.flexDirection='column'; listWrap.style.gap='6px';
+        const rows = new Map();
+        function makeRow(entry){
+          const {b,i} = entry;
+          const row = document.createElement('div'); row.style.display='flex'; row.style.alignItems='center'; row.style.gap='8px';
+          const label = document.createElement('div'); label.style.flex='1'; label.style.whiteSpace='nowrap'; label.style.overflow='hidden'; label.style.textOverflow='ellipsis';
+          label.textContent = b.path ? _prettyFileUrlLabel(b.path) : (b.name||'(untitled)');
+          const btnSave = document.createElement('button'); btnSave.textContent='Save'; btnSave.classList.add('primary'); btnSave.tabIndex = -1; // exclude from focus trap
+          const btnSkip = document.createElement('button'); btnSkip.textContent="Don't Save"; btnSkip.tabIndex = -1;
+          if (!b.path){ btnSave.disabled = true; btnSave.title = 'No path'; }
+          const removeRow = ()=>{ try{ listWrap.removeChild(row); rows.delete(i); }catch{} };
+          btnSave.addEventListener('click', async()=>{
+            btnSave.disabled = true; btnSkip.disabled=true;
+            if (b.path){ const textData = (i===currentIdx)?(editor.value||''):(b.text||''); const ok = await _saveToURL(b.path, textData); if (!ok){ toast('write failed: ' + (b.name||'')); btnSave.disabled=false; btnSkip.disabled=false; return; } try{ b.text=textData; b.modified=false; }catch{} }
+            removeRow(); maybeFinish();
+          });
+          btnSkip.addEventListener('click', ()=>{ removeRow(); maybeFinish(); });
+          row.appendChild(label); row.appendChild(btnSave); row.appendChild(btnSkip);
+          rows.set(i, {row, b});
+          return row;
+        }
+        modifiedItems.forEach(x=> listWrap.appendChild(makeRow(x)));
+        _modalDetail.appendChild(listWrap);
+        _modalButtons.innerHTML='';
+        const btnAll = document.createElement('button'); btnAll.textContent='All save'; btnAll.classList.add('primary');
+        const btnDiscardAll = document.createElement('button'); btnDiscardAll.textContent='Discard all';
+        const btnCancel = document.createElement('button'); btnCancel.textContent='Cancel'; btnCancel.classList.add('danger');
+        _modalButtons.appendChild(btnAll); _modalButtons.appendChild(btnDiscardAll); _modalButtons.appendChild(btnCancel);
+        const topBtns = [btnAll, btnDiscardAll, btnCancel];
+        const finish = (ok)=>{ try{ document.removeEventListener('keydown', onKey); }catch{} _hideModal(); setTimeout(()=>{ try{ editor && editor.focus && editor.focus(); }catch{} },0); resolve(ok); };
+        async function doAllSave(){
+          btnAll.disabled = true; btnCancel.disabled = true;
+          for (const [i, obj] of Array.from(rows.entries())){
+            const b = obj.b;
+            if (b && b.modified && b.path){
+              const textData = (i===currentIdx)?(editor.value||''):(b.text||'');
+              const ok = await _saveToURL(b.path, textData);
+              if (!ok){ toast('write failed: ' + (b.name||'')); btnAll.disabled=false; btnCancel.disabled=false; return; }
+              try{ b.text=textData; b.modified=false; }catch{}
+            }
+            try{ listWrap.removeChild(obj.row); rows.delete(i); }catch{}
+          }
+          maybeFinish();
+        }
+        function doDiscardAll(){
+          // treat as don't save for all remaining
+          for (const [i, obj] of Array.from(rows.entries())){
+            try{ listWrap.removeChild(obj.row); rows.delete(i); }catch{}
+          }
+          maybeFinish();
+        }
+        function maybeFinish(){ if (rows.size===0){ finish(true); } }
+        btnAll.addEventListener('click', ()=>{ doAllSave(); });
+        btnDiscardAll.addEventListener('click', ()=>{ doDiscardAll(); });
+        btnCancel.addEventListener('click', ()=>{ finish(false); });
+        const onKey = (e)=>{
+          if (e.key==='Escape'){ e.preventDefault(); finish(false); }
+          else if (e.key==='Tab'){
+            // trap among top buttons only
+            e.preventDefault();
+            const idx = topBtns.findIndex(el=> el===document.activeElement);
+            const dir = e.shiftKey ? -1 : 1;
+            const next = (idx>=0 ? (idx+dir+topBtns.length)%topBtns.length : (dir>0?0:topBtns.length-1));
+            try{ topBtns[next].focus(); }catch{}
+          }
+        };
+        document.addEventListener('keydown', onKey);
+        _showModal();
+        try{ btnAll.focus(); }catch{}
+      }catch{ resolve(false); }
+    });
   }
 
   function _clearPending(){
@@ -1382,6 +1836,17 @@
           setTimeout(()=>editor.focus(), 0);
         } else if (e.key==='Escape'){
           e.preventDefault(); e.stopPropagation();
+          // CMD 終了時の一瞬のスクロール揺れ（EOF 付近へ飛ぶ）を抑止するガードと座標再適用
+          let st = editor.scrollTop, cr = caretRow, cc = caretCol;
+          let selS = 0, selE = 0; try{ selS = editor.selectionStart; selE = editor.selectionEnd; }catch{}
+          _scrollGuardUntil = Date.now() + 900; // 短期ガード
+          const restoreView = ()=>{
+            try{
+              try{ editor.setSelectionRange(selS, selE); }catch{}
+              caretRow = cr; caretCol = cc; editor.scrollTop = st;
+              _repositionCaret(); updateGutter();
+            }catch{}
+          };
           // :e 入力をキャンセルした際、基点をオープン時点へ復元（#174）
           try{
             if (_filePopupVisible()){
@@ -1397,7 +1862,7 @@
           cmdinput.value = '';
           _setMode('NORMAL');
           _bufPopupHide(); _filePopupHide();
-          setTimeout(()=>editor.focus(), 0);
+          setTimeout(()=>{ try{ editor.focus(); restoreView(); if (window.requestAnimationFrame){ requestAnimationFrame(()=>restoreView()); } setTimeout(restoreView, 120); }catch{} }, 0);
         } else if (e.key==='Tab'){
           // :e ファイルポップアップ中の Tab の仕様変更
           if (_filePopupVisible()){
@@ -1992,8 +2457,8 @@
       if (!_apiBase) { toast('save unavailable (no API)'); return false; }
       const u = new URL(urlStr);
       if (u.protocol !== 'file:'){ toast('save only supports file://'); return false; }
-      // Normalize line endings to CRLF for Windows writes
-      const payload = String(textUtf8||'').replace(/\n/g, '\r\n');
+  // 保存時は改行コードを変更しない（そのまま保存）
+  const payload = String(textUtf8||'');
       let fsPath = _fsPathFromFileURL(u);
       if (!fsPath){ toast('invalid target path'); return false; }
       const apiUrl = _apiBase + 'write?fs=' + encodeURIComponent(fsPath);

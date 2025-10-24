@@ -31,6 +31,17 @@
 
   <div id="toast" style="display:none"><span class="msg"></span></div>
 
+  <!-- modal (custom confirm/choice) -->
+  <div id="modalOverlay" role="dialog" aria-modal="true" style="display:none">
+    <div id="modalBox">
+      <div class="modal-body">
+        <div class="modal-title" id="modalTitle"></div>
+        <div class="modal-detail" id="modalDetail"></div>
+      </div>
+      <div class="modal-buttons" id="modalButtons"></div>
+    </div>
+  </div>
+
   <!-- boot sentinel: shows if JS bootstrap didn't run -->
   <div id="bootwarn" style="display:none;position:fixed;left:8px;bottom:8px;z-index:99999;padding:6px 10px;border-radius:4px;background:#3b1f1f;color:#ffdede;font:12px/1.4 system-ui, sans-serif;box-shadow:0 1px 3px rgba(0,0,0,.4)"></div>
   <script>
