@@ -15,7 +15,8 @@
 
 
   // layout constants (should match CSS)
-  const LINE_HEIGHT = 20;        // px
+  let LINE_HEIGHT = 20;        // px (will sync with computed CSS)
+  let FONT_SIZE   = 18;        // px (will sync with computed CSS)
   const HSCROLL_RESERVE = 0;     // px
   const ROUND_THRESH = 0.5;      // fraction
 
@@ -39,11 +40,33 @@
     s.style.left = '-99999px';
     s.style.top = '-99999px';
     s.style.whiteSpace = 'pre';
-    // Keep in sync with editor font if changed via CSS
-    s.style.font = '14px/20px ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", Menlo, monospace';
+    // Set a default; will be synced to editor computed styles at bootstrap/resize
+    s.style.font = '18px/20px ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", Menlo, monospace';
     document.body.appendChild(s);
     return s;
   })();
+
+  // caret vertical offset (leading top) derived from line-height and font-size
+  let _caretYOffset = 0; // px
+
+  function _syncEditorMetrics(){
+    try{
+      const cs = window.getComputedStyle(editor);
+      const lh = parseFloat(cs && cs.lineHeight);
+      if (Number.isFinite(lh) && lh > 0) LINE_HEIGHT = lh;
+      const fs = parseFloat(cs && cs.fontSize);
+      if (Number.isFinite(fs) && fs > 0) FONT_SIZE = fs;
+      // Sync measurement span font to editor
+      try{
+        if (cs && cs.fontFamily) _measureSpan.style.fontFamily = cs.fontFamily;
+        if (Number.isFinite(FONT_SIZE)) _measureSpan.style.fontSize = FONT_SIZE + 'px';
+        if (Number.isFinite(LINE_HEIGHT)) _measureSpan.style.lineHeight = LINE_HEIGHT + 'px';
+      }catch{}
+      // Compute caret vertical offset: center font box within line box
+      const off = (LINE_HEIGHT - FONT_SIZE) / 2;
+      _caretYOffset = Number.isFinite(off) ? Math.max(0, off) : 0;
+    }catch{}
+  }
 
   // buffers helpers expected by later code
   function currentBuffer(){
@@ -190,8 +213,15 @@
 
   function _splitLines(){ return String(editor.value||'').split(/\n/); }
   function _totalLines(){ return _splitLines().length; }
-  function _topLine(){ return Math.floor((editor.scrollTop||0) / LINE_HEIGHT) + 1; }
-  function _visibleLinesExact(){ return _cachedVisibleCount || Math.max(1, Math.floor(viewport.clientHeight/LINE_HEIGHT)); }
+  function _topLine(){
+    const st = (editor.scrollTop||0);
+    // 端数によるズレを抑えるため丸め込み（行境界にスナップする設計と整合）
+    return Math.round(st / LINE_HEIGHT) + 1;
+  }
+  function _visibleLinesExact(){
+    if (_cachedVisibleCount) return _cachedVisibleCount;
+    try{ const h = editor.clientHeight || viewport.clientHeight; return Math.max(1, Math.round(h/LINE_HEIGHT)); }catch{ return Math.max(1, Math.floor(viewport.clientHeight/LINE_HEIGHT)); }
+  }
   function _needsHScrollReserve(){ return false; }
 
   function _applyTheme(){
@@ -721,15 +751,15 @@
    * 2. clampViewportExactLines
    *********************************************************/
   function clampViewportExactLines(){
-    let h = viewport.clientHeight;
+    // Measure the actual text area height (textarea), not the wrapper,
+    // to keep visible-lines count consistent with what the user sees.
+    let h = editor.clientHeight || viewport.clientHeight;
     if (_needsHScrollReserve()) h -= HSCROLL_RESERVE;
     const raw = h / LINE_HEIGHT;
-    const lines = (raw - Math.floor(raw) >= ROUND_THRESH ? Math.ceil(raw) : Math.floor(raw));
-    const target = lines * LINE_HEIGHT;
-    const diff = viewport.clientHeight - target;
-    if (Math.abs(diff - parseInt(viewport.style.paddingBottom||'0',10)) > 0.1) {
-      viewport.style.paddingBottom = diff + 'px';
-    }
+    // Prefer rounding to nearest line to avoid off-by-one jitter
+    const lines = Math.max(1, Math.round(raw));
+    // Wrapper padding adjustment is unnecessary since scrolling is on the textarea
+    try{ if (viewport && viewport.style) viewport.style.paddingBottom = '0px'; }catch{}
     _cachedVisibleCount = lines;
   }
 
@@ -748,12 +778,22 @@
     const offsetLines = row1 - topLine;
     if (offsetLines < 0) { edstripe.style.display='none'; return; }
     const topPx = offsetLines * LINE_HEIGHT;
+    // Subpixel remainder between scrollTop and line-height (e.g., due to DPI/zoom)
+    // Align overlays (stripe/caret) with the text by canceling the remainder via translateY
+    let rem = 0;
+    try{
+      const st = (editor.scrollTop||0);
+      rem = st - Math.round(st/LINE_HEIGHT)*LINE_HEIGHT;
+    }catch{}
     if (topPx >= 0 && topPx < viewport.clientHeight) {
       edstripe.style.display='';
       edstripe.style.top = topPx + 'px';
       edstripe.style.height = LINE_HEIGHT + 'px';
+      // apply remainder compensation to stripe
+      try{ edstripe.style.transform = (Math.abs(rem) > 0.01) ? `translateY(${-rem}px)` : ''; }catch{}
     } else {
       edstripe.style.display='none';
+      try{ edstripe.style.transform = ''; }catch{}
     }
 
     // caret rectangle (column) using text measurement for monospace
@@ -769,8 +809,11 @@
     _measureSpan.textContent = line.slice(0, caretCol);
     const x = _measureSpan.getBoundingClientRect().width; // px
     caret.style.left = x + 'px';
-    caret.style.top = topPx + 'px';
-    caret.style.height = LINE_HEIGHT + 'px';
+    // Vertically center the caret within the line's content box
+    caret.style.top = (topPx + _caretYOffset) + 'px';
+    caret.style.height = Math.max(1, Math.round(FONT_SIZE)) + 'px';
+    // Apply the same remainder compensation to caret overlay container
+    try{ caretLayer.style.transform = (Math.abs(rem) > 0.01) ? `translateY(${-rem}px)` : ''; }catch{}
   }
 
   /*********************************************************
@@ -800,10 +843,17 @@
       }
     }
     topLine = _topLine();
-    const maxTop = Math.max(1, linesTotal - vis + 1 + 1); // +1 行余白
+  // 末尾ページの先頭行（maxTop）は「全行数 - 可視行数 + 1」。
+  // 以前の +1 余白は EOF 直前ページで 1 行押し上げる原因になっていたため撤去。
+  const maxTop = Math.max(1, linesTotal - vis + 1);
     if (topLine > maxTop){
       editor.scrollTop = (maxTop-1)*LINE_HEIGHT;
     }
+    // スクロール位置を行境界にスナップして、丸め誤差での1行ズレを防止
+    try{
+      const snapped = Math.round((editor.scrollTop||0)/LINE_HEIGHT)*LINE_HEIGHT;
+      if (Math.abs(snapped - (editor.scrollTop||0)) > 0.1){ editor.scrollTop = snapped; }
+    }catch{}
   }
 
   /*********************************************************
@@ -848,6 +898,18 @@
     for (let i=rows.length; i<children.length; i++){
       gutter.removeChild(children[i]);
     }
+    // Subpixel alignment guard: if textarea scrollTop is not an exact multiple
+    // of LINE_HEIGHT due to float rounding or devicePixelRatio, align gutter by
+    // applying a small translateY to cancel the remainder.
+    try{
+      const st = (editor.scrollTop||0);
+      const rem = st - Math.round(st/LINE_HEIGHT)*LINE_HEIGHT;
+      if (Math.abs(rem) > 0.01){
+        gutter.style.transform = `translateY(${-rem}px)`;
+      } else {
+        gutter.style.transform = '';
+      }
+    }catch{}
   }
 
   /*********************************************************
@@ -1552,7 +1614,7 @@
     });
     editor.addEventListener('keyup', (e)=>{ if(e.key==='Enter') ensureScrolloff(); _repositionCaret(); updateGutter(); });
     editor.addEventListener('click', ()=>{ _repositionCaret(); updateGutter(); });
-    window.addEventListener('resize', ()=>{ clampViewportExactLines(); _exactLineLockAdjust(); ensureScrolloff(); _repositionCaret(); updateGutter(); });
+  window.addEventListener('resize', ()=>{ _syncEditorMetrics(); clampViewportExactLines(); _exactLineLockAdjust(); ensureScrolloff(); _repositionCaret(); updateGutter(); });
     editor.addEventListener('keydown', (e)=>{
       if (_mode === 'CMD') return;
       if (_mode === 'INSERT'){
@@ -3054,6 +3116,8 @@
     try{
       _readApiFromHash();
       _applyTheme();
+      // Sync metrics (line-height, font-size, measurement span)
+      _syncEditorMetrics();
       const loadP = Promise.resolve().then(()=>_loadDocFromQuery()).catch(()=>false);
       const watchdog = new Promise(resolve=> setTimeout(()=>resolve(false), 1500));
       Promise.race([loadP, watchdog]).then(loaded=>{
