@@ -298,7 +298,19 @@
   }
 
   function _addBuffer(b){
-    try{ buffers.push({ name: b.name||'(untitled)', path: b.path||null, text: b.text||'', modified: !!b.modified }); if (currentIdx<0) currentIdx=0; }catch{}
+    try{
+      const text0 = String(b.text||'');
+      buffers.push({
+        name: b.name||'(untitled)',
+        path: b.path||null,
+        text: text0,          // current working text (unsaved edits reflected)
+        savedText: text0,     // last-saved snapshot for modified detection
+        modified: !!b.modified,
+        _undo: [],
+        _redo: []
+      });
+      if (currentIdx<0) currentIdx=0;
+    }catch{}
   }
   function _switchToBuffer(i){
     try{
@@ -307,6 +319,7 @@
       const b = buffers[i];
       editor.value = String(b.text||'');
       caretRow = 0; caretCol = 0; editor.scrollTop = 0;
+      // clear redo stack visual side-effects; keep per-buffer stacks as-is
       _centerScrolloffOnce = true; ensureScrolloff({centerOnce:true});
       _repositionCaret(); updateGutter();
       _setTitle(); _renderTabbar();
@@ -619,7 +632,7 @@
         if (exist >= 0){ _switchToBuffer(exist); }
         else { _addBuffer({ name: _basename(path), path: urlStr, text: t, modified:false }); _switchToBuffer(buffers.length-1); }
       } else {
-        const b=currentBuffer(); if (b){ b.path = urlStr; b.name = _basename(path); b.text = t; b.modified=false; }
+        const b=currentBuffer(); if (b){ b.path = urlStr; b.name = _basename(path); b.text = t; b.savedText = t; b.modified=false; try{ b._undo=[]; b._redo=[]; }catch{} }
       }
       try{ _setTitle(); _renderTabbar(); }catch{}
       return true;
@@ -634,7 +647,7 @@
             if (exist >= 0){ _switchToBuffer(exist); }
             else { _addBuffer({ name: _basename(path), path: urlStr||path, text: t||editor.value||'', modified:false }); _switchToBuffer(buffers.length-1); }
           } else {
-            const b=currentBuffer(); if (b){ b.path = urlStr||b.path; b.name = _basename(path); b.text = t||editor.value||b.text; b.modified=false; }
+            const b=currentBuffer(); if (b){ b.path = urlStr||b.path; b.name = _basename(path); b.text = t||editor.value||b.text; b.savedText = b.text; b.modified=false; try{ b._undo=[]; b._redo=[]; }catch{} }
           }
           try{ _setTitle(); _renderTabbar(); }catch{}
           // ユーザーに不要なトーストは出さない
@@ -666,7 +679,7 @@
           if (mode === 'new'){
             _addBuffer({ name: f.name, path: null, text: txt, modified:false });
           } else {
-            const b=currentBuffer(); if (b){ b.path = null; b.name = f.name; b.text = txt; b.modified=false; }
+            const b=currentBuffer(); if (b){ b.path = null; b.name = f.name; b.text = txt; b.savedText = txt; b.modified=false; }
           }
           _setTitle(); _renderTabbar();
           document.body.removeChild(inp);
@@ -740,7 +753,7 @@
     const t = txt.replace(/\r\n?/g,'\n');
     editor.value = t;
     if (buffers.length===0){ _addBuffer({ name: name||null, path: doc||null, text: t, modified:false }); }
-    else { const b=currentBuffer(); b.name = name||b.name; b.path = doc||b.path; b.text=t; b.modified=false; }
+    else { const b=currentBuffer(); b.name = name||b.name; b.path = doc||b.path; b.text = t; b.savedText = t; b.modified=false; }
     _setTitle(); _renderTabbar();
     // Ensure initial view is at top (avoid unintended 'G'-like position)
     try{
@@ -759,7 +772,7 @@
     const t = txt.replace(/\r\n?/g,'\n');
     editor.value = t;
     if (buffers.length===0){ _addBuffer({ name: name||null, path: doc||null, text: t, modified:false }); }
-    else { const b=currentBuffer(); if(name) b.name = name; b.path = doc; b.text=t; b.modified=false; }
+    else { const b=currentBuffer(); if(name) b.name = name; b.path = doc; b.text = t; b.savedText = t; b.modified=false; }
     _setTitle(); _renderTabbar();
       try{
         caretRow=0; caretCol=0; editor.scrollTop=0; _centerScrolloffOnce=false; _scrollGuardUntil = Date.now() + 800;
@@ -849,7 +862,28 @@
   }
 
   // ---- Buffer/text helpers for editing ----
-  function _touchBufferModified(){ try{ const b=currentBuffer(); if (b){ b.modified=true; b.text=editor.value||''; } _setTitle(); _renderTabbar(); }catch{} }
+  function _touchBufferModified(){
+    try{
+      const b=currentBuffer();
+      if (b){
+        const now = String(editor.value||'');
+        b.text = now; // keep current working text in buffer
+        const saved = (typeof b.savedText === 'string') ? b.savedText : '';
+        b.modified = (now !== saved);
+      }
+      _setTitle(); _renderTabbar();
+    }catch{}
+  }
+  // ---- Undo/Redo ----
+  const UNDO_LIMIT = 200;
+  function _currentStacks(){ const b=currentBuffer(); return b ? b : null; }
+  function _makeSnapshot(){ return { text: String(editor.value||''), caretRow, caretCol, scrollTop: (editor.scrollTop||0) }; }
+  function _applySnapshot(s){ if (!s) return; editor.value = String(s.text||''); caretRow = Math.max(0, s.caretRow|0); caretCol = Math.max(0, s.caretCol|0); try{ editor.scrollTop = Math.max(0, s.scrollTop|0); }catch{} _touchBufferModified(); ensureScrolloff(); _repositionCaret(); updateGutter(); }
+  function _pushUndoSnapshot(kind){ try{ const st=_currentStacks(); if (!st) return; const snap=_makeSnapshot(); // push current state as undo checkpoint
+    const u = st._undo || (st._undo=[]); u.push({ ...snap, kind: kind||null }); if (u.length>UNDO_LIMIT) u.splice(0, u.length-UNDO_LIMIT); // clear redo on new branch
+    st._redo = []; }catch{} }
+  function _undo(){ const st=_currentStacks(); if (!st) return; const u=st._undo||[]; if (u.length===0) return; const cur=_makeSnapshot(); const prev=u.pop(); const r=st._redo||(st._redo=[]); r.push(cur); _applySnapshot(prev); }
+  function _redo(){ const st=_currentStacks(); if (!st) return; const r=st._redo||[]; if (r.length===0) return; const cur=_makeSnapshot(); const next=r.pop(); const u=st._undo||(st._undo=[]); u.push(cur); _applySnapshot(next); }
   function _cmpPos(a,b){ if (a.r!==b.r) return a.r-b.r; return a.c-b.c; }
   function _clampPos(p){ const lines=_splitLines(); let r=Math.max(0, Math.min(lines.length-1, p.r|0)); let c=Math.max(0, Math.min((lines[r]||'').length, p.c|0)); return {r,c}; }
   function _advancePosByCp(r,c,n){
@@ -868,6 +902,8 @@
     return {r:rr, c:cc};
   }
   function _deleteRangePos(p1,p2){
+    // record undo before mutation
+    _pushUndoSnapshot('delete-range');
     const lines=_splitLines();
     let a=_clampPos(p1), b=_clampPos(p2);
     if (_cmpPos(a,b)>0){ const t=a; a=b; b=t; }
@@ -889,6 +925,7 @@
     _touchBufferModified();
   }
   function _deleteWholeLines(rStart, count){
+    _pushUndoSnapshot('delete-lines');
     const lines=_splitLines();
     const total=lines.length;
     if (total===0) return;
@@ -1300,9 +1337,20 @@
                 const textData = editor.value||'';
                 const ok = await _saveToURL(b.path, textData);
                 if (!ok){ toast('write failed: ' + (b.name||'')); return; }
-                try{ b.text = textData; b.modified = false; }catch{}
+                try{ b.text = textData; b.savedText = textData; b.modified = false; }catch{}
               } else {
-                // No path => skip save for now
+                // No path -> prompt for a save path (Save As)
+                const base = _currentDirBase();
+                const suggest = (b && b.name && b.name!=='(untitled)') ? b.name : '';
+                const input = await inputModal({ title:'Save As', detail:'Enter a file path (relative or absolute)', initialValue: suggest, okText:'Save', cancelText:'Cancel' });
+                if (!input){ toast('write cancelled', 1500); return; }
+                let targetUrl = null;
+                try{ targetUrl = _normalizeToURLString(input, base); }catch{}
+                if (!targetUrl){ toast('invalid path', 1500); return; }
+                const ok = await _saveToURL(targetUrl, editor.value||'');
+                if (!ok){ toast('write failed', 1500); return; }
+                try{ b.path = targetUrl; b.name = _basename(targetUrl); const textData = editor.value||''; b.text = textData; b.savedText = textData; b.modified=false; }catch{}
+                _setTitle(); _renderTabbar();
               }
             }
           }
@@ -1388,7 +1436,7 @@
           try{
             const was = b.path||null;
             if (was !== targetUrl){ b.path = targetUrl; b.name = _basename(targetUrl); }
-            b.text = editor.value||''; b.modified = false;
+            b.text = editor.value||''; b.savedText = editor.value||''; b.modified = false;
           }catch{}
           _setTitle(); _renderTabbar();
           toast('written: ' + _prettyFileUrlLabel(targetUrl));
@@ -1440,7 +1488,7 @@
           try{
             const was = b.path||null;
             if (was !== targetUrl){ b.path = targetUrl; b.name = _basename(targetUrl); }
-            b.text = editor.value||''; b.modified = false;
+            b.text = editor.value||''; b.savedText = editor.value||''; b.modified = false;
           }catch{}
           _setTitle(); _renderTabbar();
           toast('written: ' + _prettyFileUrlLabel(targetUrl));
@@ -1529,7 +1577,7 @@
           try{
             const was = b.path||null;
             if (was !== targetUrl){ b.path = targetUrl; b.name = _basename(targetUrl); }
-            b.text = editor.value||''; b.modified = false;
+            b.text = editor.value||''; b.savedText = editor.value||''; b.modified = false;
           }catch{}
           _setTitle(); _renderTabbar();
           toast('written: ' + _prettyFileUrlLabel(targetUrl));
@@ -1669,6 +1717,10 @@
   function _setMode(m){
     _mode = m;
     if (modestatus) modestatus.textContent = '['+_mode+']';
+    // Begin an INSERT compound edit by pushing a snapshot before edits start
+    if (m==='INSERT'){
+      _pushUndoSnapshot('insert');
+    }
   }
 
   // toast
@@ -1734,6 +1786,56 @@
         try{ requestAnimationFrame(()=>{ try{ btnOk.focus(); }catch{} }); }catch{}
         try{ setTimeout(()=>{ try{ btnOk.focus(); }catch{} }, 0); }catch{}
       }catch{ resolve(false); }
+    });
+  }
+  // Simple input modal (Save As) — returns Promise<string|null>
+  function inputModal(opts){
+    return new Promise((resolve)=>{
+      try{
+        if (!_modalOverlay || !_modalTitle || !_modalDetail || !_modalButtons){
+          const v = window.prompt(String((opts&&opts.title)||'Input'), String((opts&&opts.initialValue)||''));
+          return resolve(v==null?null:v);
+        }
+        const title = (opts && opts.title) || 'Input';
+        const detail = (opts && opts.detail) || '';
+        const initial = (opts && opts.initialValue) || '';
+        const okText = (opts && opts.okText) || 'OK';
+        const cancelText = (opts && opts.cancelText) || 'Cancel';
+        const restoreEl = ((_mode==='CMD' && cmdinput) ? cmdinput : editor);
+        _modalTitle.textContent = title;
+        _modalDetail.innerHTML = '';
+        const wrap = document.createElement('div');
+        wrap.style.display='flex'; wrap.style.flexDirection='column'; wrap.style.gap='8px';
+        if (detail){ const p = document.createElement('div'); p.textContent = detail; wrap.appendChild(p); }
+        const inp = document.createElement('input');
+        inp.type='text'; inp.value = initial; inp.style.width='100%';
+        wrap.appendChild(inp);
+        _modalDetail.appendChild(wrap);
+        _modalButtons.innerHTML='';
+        const btnCancel = document.createElement('button'); btnCancel.textContent = cancelText;
+        const btnOk = document.createElement('button'); btnOk.textContent = okText; btnOk.classList.add('primary');
+        _modalButtons.appendChild(btnCancel); _modalButtons.appendChild(btnOk);
+        const cleanup = ()=>{ try{ document.removeEventListener('keydown', onKey); }catch{} _hideModal(); try{ setTimeout(()=>{ try{ restoreEl && restoreEl.focus && restoreEl.focus(); }catch{} }, 0); }catch{} };
+        const finishOk = ()=>{ const v = inp.value; cleanup(); resolve(v!=null?v:''); };
+        const finishCancel = ()=>{ cleanup(); resolve(null); };
+        btnOk.addEventListener('click', finishOk, { once:true });
+        btnCancel.addEventListener('click', finishCancel, { once:true });
+        const onKey = (e)=>{
+          if (e.key==='Escape'){ e.preventDefault(); finishCancel(); }
+          else if (e.key==='Enter'){ e.preventDefault(); finishOk(); }
+          else if (e.key==='Tab'){
+            e.preventDefault(); // trap focus between input and two buttons
+            const focusables = [inp, btnOk, btnCancel];
+            const idx = focusables.findIndex(el=> el===document.activeElement);
+            const dir = e.shiftKey ? -1 : 1;
+            const next = (idx>=0 ? (idx+dir+focusables.length)%focusables.length : 0);
+            try{ focusables[next].focus(); }catch{}
+          }
+        };
+        document.addEventListener('keydown', onKey);
+        _showModal();
+        try{ setTimeout(()=>{ try{ inp.focus(); inp.select(); }catch{} }, 0); }catch{}
+      }catch{ resolve(null); }
     });
   }
   function choiceModal(opts){
@@ -1817,7 +1919,7 @@
           const removeRow = ()=>{ try{ listWrap.removeChild(row); rows.delete(i); }catch{} };
           btnSave.addEventListener('click', async()=>{
             btnSave.disabled = true; btnSkip.disabled=true;
-            if (b.path){ const textData = (i===currentIdx)?(editor.value||''):(b.text||''); const ok = await _saveToURL(b.path, textData); if (!ok){ toast('write failed: ' + (b.name||'')); btnSave.disabled=false; btnSkip.disabled=false; return; } try{ b.text=textData; b.modified=false; }catch{} }
+            if (b.path){ const textData = (i===currentIdx)?(editor.value||''):(b.text||''); const ok = await _saveToURL(b.path, textData); if (!ok){ toast('write failed: ' + (b.name||'')); btnSave.disabled=false; btnSkip.disabled=false; return; } try{ b.text=textData; b.savedText=textData; b.modified=false; }catch{} }
             removeRow(); maybeFinish();
           });
           btnSkip.addEventListener('click', ()=>{ removeRow(); maybeFinish(); });
@@ -1842,7 +1944,7 @@
               const textData = (i===currentIdx)?(editor.value||''):(b.text||'');
               const ok = await _saveToURL(b.path, textData);
               if (!ok){ toast('write failed: ' + (b.name||'')); btnAll.disabled=false; btnCancel.disabled=false; return; }
-              try{ b.text=textData; b.modified=false; }catch{}
+              try{ b.text=textData; b.savedText=textData; b.modified=false; }catch{}
             }
             try{ listWrap.removeChild(obj.row); rows.delete(i); }catch{}
           }
@@ -1896,8 +1998,8 @@
     });
     editor.addEventListener('input', ()=>{
       if (_mode === 'INSERT'){
-        const b = currentBuffer(); if (b){ b.modified = true; b.text = editor.value; }
-        _setTitle(); _renderTabbar();
+        // centralize modified tracking
+        _touchBufferModified();
       }
       _exactLineLockAdjust(); _repositionCaret(); updateGutter();
     });
@@ -2054,6 +2156,11 @@
       if (e.key>='1' && e.key<='9' && !e.ctrlKey && !e.metaKey && !e.altKey){ e.preventDefault(); _countAcc = (_countAcc==null?0:_countAcc)*10 + parseInt(e.key,10); return; }
       if (e.key==='0' && !e.ctrlKey && !e.metaKey && !e.altKey && _countAcc!=null){ e.preventDefault(); _countAcc = _countAcc*10; return; }
       if (e.key==='i'){ e.preventDefault(); _setMode('INSERT'); return; }
+      // Undo / Redo (NORMAL)
+      if (e.key==='u' && !e.ctrlKey && !e.metaKey && !e.altKey){ e.preventDefault(); _undo(); return; }
+      if ((e.key==='r' && e.ctrlKey && !e.metaKey && !e.altKey) || (e.key==='R' && e.ctrlKey && !e.metaKey && !e.altKey)){
+        e.preventDefault(); _redo(); return;
+      }
       // 'gg' (go to first line) / 'G' (go to last line)
       if (e.key === 'g' && !e.ctrlKey && !e.metaKey){
         e.preventDefault();
