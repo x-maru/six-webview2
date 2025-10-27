@@ -853,9 +853,18 @@
     const caretLine1 = caretRow + 1;
     const centerOnce = opts.centerOnce || _centerScrolloffOnce;
     const big = scrolloff >= 99999;
+    // Allow one extra "virtual" page step so EOF の下に 1 行分の余白が見える
+    const baseMaxTop = Math.max(1, linesTotal - vis + 1);
+    const maxTopWithPad = Math.min(linesTotal, baseMaxTop + 1);
 
     if (big || centerOnce || scrolloff >= Math.floor(vis/2)){
-      const targetTop = Math.max(1, caretLine1 - Math.floor(vis/2));
+      let targetTop = Math.max(1, caretLine1 - Math.floor(vis/2));
+      // When explicitly requested (e.g., 'G'), prefer showing 1-line EOF pad
+      if (opts.preferEOFPad && caretLine1 === linesTotal){
+        targetTop = Math.min(maxTopWithPad, Math.max(1, targetTop));
+      }
+      // clamp to at most one-line pad range
+      targetTop = Math.min(targetTop, maxTopWithPad);
       editor.scrollTop = (targetTop-1) * LINE_HEIGHT;
       _centerScrolloffOnce = false;
     } else {
@@ -863,14 +872,15 @@
         const newTop = Math.max(1, caretLine1 - scrolloff);
         if (newTop !== topLine) editor.scrollTop = (newTop-1)*LINE_HEIGHT;
       } else if (caretLine1 > topLine + vis - scrolloff - 1){
-        const newTop = Math.max(1, caretLine1 - (vis - scrolloff - 1));
+        let newTop = Math.max(1, caretLine1 - (vis - scrolloff - 1));
+        // If caret is at EOF, prefer letting one-line pad show at the bottom
+        if (caretLine1 === linesTotal){ newTop = Math.min(newTop, maxTopWithPad); }
         if (newTop !== topLine) editor.scrollTop = (newTop-1)*LINE_HEIGHT;
       }
     }
     topLine = _topLine();
-  // 末尾ページの先頭行（maxTop）は「全行数 - 可視行数 + 1」。
-  // 以前の +1 余白は EOF 直前ページで 1 行押し上げる原因になっていたため撤去。
-  const maxTop = Math.max(1, linesTotal - vis + 1);
+  // 末尾ページの先頭行（maxTop）は「全行数 - 可視行数 + 1」だが、EOF の下に 1 行分の余白を許容
+    const maxTop = maxTopWithPad;
     if (topLine > maxTop){
       editor.scrollTop = (maxTop-1)*LINE_HEIGHT;
     }
@@ -1683,7 +1693,7 @@
       }
       if (e.key === 'G' && !e.ctrlKey && !e.metaKey){
         e.preventDefault(); _clearPending();
-        caretRow = Math.max(0, _totalLines()-1); _centerScrolloffOnce = true; ensureScrolloff({centerOnce:true}); _repositionCaret(); updateGutter();
+        caretRow = Math.max(0, _totalLines()-1); _centerScrolloffOnce = true; ensureScrolloff({centerOnce:true, preferEOFPad:true}); _repositionCaret(); updateGutter();
         return;
       }
       // other keys cancel pending sequences

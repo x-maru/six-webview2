@@ -22,7 +22,7 @@ body { font: 18px/var(--lh) Consolas, 'Courier New', monospace; overflow: hidden
 #editWrap { position:absolute; inset:0; display:flex; }
 #gutter { width: var(--gw); flex: 0 0 var(--gw); background: linear-gradient(#141821, #0f1117); color:#57607a; text-align:right; padding-right:6px; box-sizing:border-box; }
 #gutter div { line-height: var(--lh); }
-#editor { flex: 1; background: transparent; color:#e6e6e6; border:0; outline:0; resize:none; font: inherit; line-height: var(--lh); tab-size: 4; white-space: pre; padding: 0; margin: 0; box-sizing: content-box; }
+#editor { flex: 1; background: transparent; color:#e6e6e6; border:0; outline:0; resize:none; font: inherit; line-height: var(--lh); tab-size: 4; white-space: pre; padding: 0 0 var(--lh) 0; margin: 0; box-sizing: content-box; }
 #editor { caret-color: transparent; }
 
 /* caret overlay placeholder */
