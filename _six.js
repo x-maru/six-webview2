@@ -25,6 +25,8 @@
   let currentIdx = -1;
   let caretRow = 0;
   let caretCol = 0;
+  // numeric count prefix for NORMAL motions (e.g., 5l)
+  let _countAcc = null;
   let scrolloff = 3;
   let _cachedVisibleCount = 0;
   let _lineLockActive = false;
@@ -961,6 +963,132 @@
     const line = (_splitLines()[caretRow] || '');
     caretCol = Math.max(0, Math.min(line.length, caretCol + delta));
   }
+  // ---- Motion helpers ----
+  function _lineLen(r){ const lines=_splitLines(); return (r>=0 && r<lines.length) ? (lines[r]||'').length : 0; }
+  function _firstNonBlankColOf(line){ const m = String(line||'').match(/^\s*/); return m ? (m[0]||'').length : 0; }
+  function _setCaret(r,c){ const lines=_splitLines(); r=Math.max(0, Math.min(lines.length-1, r|0)); const len=(lines[r]||'').length; caretRow=r; caretCol=Math.max(0, Math.min(len, c|0)); }
+  function _consumeCount(){ const n=(_countAcc==null?1:_countAcc); _countAcc=null; return Math.max(1,n); }
+  // --- Word movement helpers (HTA parity, surrogate-aware) ---
+  // code point at index (or -1 if invalid/middle of surrogate)
+  function _cpAt(s, i){
+    if (!s || i<0 || i>=s.length) return -1;
+    const c1 = s.charCodeAt(i);
+    if (c1 >= 0xD800 && c1 <= 0xDBFF){
+      const c2 = s.charCodeAt(i+1);
+      if (c2 >= 0xDC00 && c2 <= 0xDFFF){
+        return ((c1-0xD800) << 10) + (c2-0xDC00) + 0x10000;
+      }
+      return -1; // dangling high surrogate
+    }
+    if (c1 >= 0xDC00 && c1 <= 0xDFFF) return -1; // low-surrogate start
+    return c1;
+  }
+  function _nextIndex(s, i){
+    if (!s || i<0) return 0;
+    if (i >= s.length) return s.length;
+    const c1 = s.charCodeAt(i);
+    if (c1 >= 0xD800 && c1 <= 0xDBFF){
+      const c2 = s.charCodeAt(i+1);
+      if (c2 >= 0xDC00 && c2 <= 0xDFFF) return i+2;
+    }
+    return i+1;
+  }
+  function _prevIndex(s, i){
+    if (!s || i<=0) return 0;
+    let j = i-1;
+    const c2 = s.charCodeAt(j);
+    if (c2 >= 0xDC00 && c2 <= 0xDFFF){
+      if (j-1 >= 0){
+        const c1 = s.charCodeAt(j-1);
+        if (c1 >= 0xD800 && c1 <= 0xDBFF) return j-1;
+      }
+    }
+    return j;
+  }
+  // Word types
+  const _WT_SPACE = 0, _WT_NL = 1, _WT_ALNUM = 2, _WT_KANA = 3, _WT_HAN = 4, _WT_SYMBOL = 5;
+  function _isSpaceCp(cp){ return cp===0x20 || cp===0x09 || cp===0x3000; }
+  function _isAsciiWordCp(cp){
+    return (cp>=0x30 && cp<=0x39) || (cp>=0x41 && cp<=0x5A) || (cp>=0x61 && cp<=0x7A) || cp===0x5F;
+  }
+  function _isFullwidthAlnumCp(cp){
+    // FF10–FF19 (0-9), FF21–FF3A (A-Z), FF41–FF5A (a-z), FF3F (underscore)
+    return (cp>=0xFF10 && cp<=0xFF19) || (cp>=0xFF21 && cp<=0xFF3A) || (cp>=0xFF41 && cp<=0xFF5A) || cp===0xFF3F;
+  }
+  function _isKanaCp(cp){
+    // Hiragana, Katakana, Halfwidth Katakana, plus middle dot/prolong mark within range
+    return (cp>=0x3040 && cp<=0x309F) || (cp>=0x30A0 && cp<=0x30FF) || (cp>=0xFF66 && cp<=0xFF9D) || cp===0x30FC || cp===0x30FB;
+  }
+  function _isHanCp(cp){
+    // CJK Unified Ideographs + Extension A + Compatibility
+    return (cp>=0x4E00 && cp<=0x9FFF) || (cp>=0x3400 && cp<=0x4DBF) || (cp>=0xF900 && cp<=0xFAFF);
+  }
+  function _wordTypeAtInLine(line, idx){
+    const cp = _cpAt(line, idx);
+    if (cp < 0) return _WT_SPACE; // treat invalid as space boundary
+    if (_isSpaceCp(cp)) return _WT_SPACE;
+    if (_isAsciiWordCp(cp) || _isFullwidthAlnumCp(cp)) return _WT_ALNUM;
+    if (_isKanaCp(cp)) return _WT_KANA;
+    if (_isHanCp(cp)) return _WT_HAN;
+    return _WT_SYMBOL;
+  }
+  function _nextWordStart(row, col){
+    const lines = _splitLines();
+    let r = row, c = col;
+    for(;;){
+      if (r >= lines.length) return { r: lines.length-1, c: _lineLen(lines.length-1) };
+      const line = lines[r] || '';
+      const n = line.length;
+      if (c > n) c = n;
+      if (c >= n){ r++; c = 0; continue; }
+      // skip spaces first
+      let t = _wordTypeAtInLine(line, c);
+      if (t === _WT_SPACE){
+        while (c < n && _wordTypeAtInLine(line, c) === _WT_SPACE){ c = _nextIndex(line, c); }
+        if (c < n) return { r, c };
+        r++; c = 0; continue;
+      }
+      // in a non-space run: leave current run
+      const tRun = t;
+      while (c < n && _wordTypeAtInLine(line, c) === tRun){ c = _nextIndex(line, c); }
+      // then skip spaces to next start
+      while (c < n && _wordTypeAtInLine(line, c) === _WT_SPACE){ c = _nextIndex(line, c); }
+      if (c < n) return { r, c };
+      r++; c = 0;
+    }
+  }
+  function _prevWordStart(row, col){
+    const lines = _splitLines();
+    let r = row, c = col;
+    for(;;){
+      if (r < 0) return { r:0, c:0 };
+      const line = (r>=0 && r<lines.length) ? (lines[r]||'') : '';
+      const n = line.length;
+      if (c > n) c = n;
+      if (c > 0){
+        // step left one code point first
+        c = _prevIndex(line, c);
+        // skip spaces/newlines to the left
+        while (c >= 0 && _wordTypeAtInLine(line, c) === _WT_SPACE){ c = _prevIndex(line, c); }
+        if (c < 0){ r--; c = (r>=0 ? (lines[r]||'').length : 0); continue; }
+        const tRun = _wordTypeAtInLine(line, c);
+        // go to start of this run
+        while (c > 0){
+          const prev = _prevIndex(line, c);
+          if (prev < 0) break;
+          if (_wordTypeAtInLine(line, prev) !== tRun) break;
+          c = prev;
+        }
+        return { r, c };
+      } else {
+        r--; c = (r>=0 ? (lines[r]||'').length : 0);
+      }
+    }
+  }
+  function _moveWordW(count){ let r=caretRow, c=caretCol; const times=Math.max(1,count|0); for(let i=0;i<times;i++){ const p=_nextWordStart(r,c); r=p.r; c=p.c; } _setCaret(r,c); }
+  function _moveWordB(count){ let r=caretRow, c=caretCol; const times=Math.max(1,count|0); for(let i=0;i<times;i++){ const p=_prevWordStart(r,c); r=p.r; c=p.c; } _setCaret(r,c); }
+  function _moveParagraphNext(count){ const lines=_splitLines(); let r=caretRow; const times=Math.max(1,count|0); for(let i=0;i<times;i++){ let j=r+1; while (j<lines.length && !/^\s*$/.test(lines[j]||'')) j++; while (j<lines.length && /^\s*$/.test(lines[j]||'')) j++; if (j>=lines.length){ r=lines.length-1; break; } r=j; } const col=_firstNonBlankColOf(lines[r]||''); _setCaret(r,col); }
+  function _moveParagraphPrev(count){ const lines=_splitLines(); let r=caretRow; const times=Math.max(1,count|0); for(let i=0;i<times;i++){ let j=r-1; while (j>=0 && !/^\s*$/.test(lines[j]||'')) j--; while (j>=0 && /^\s*$/.test(lines[j]||'')) j--; if (j<0){ r=0; break; } let k=j; while (k>0 && !/^\s*$/.test(lines[k-1]||'')) k--; r=k; } const col=_firstNonBlankColOf(lines[r]||''); _setCaret(r,col); }
 
   /*********************************************************
    * runCommand (:N)
@@ -1672,10 +1800,24 @@
         }
         return;
       }
-      if (e.key==='j'){ e.preventDefault(); _moveCaretLines(1); _repositionCaret(); updateGutter(); return; }
-      if (e.key==='k'){ e.preventDefault(); _moveCaretLines(-1); _repositionCaret(); updateGutter(); return; }
-      if (e.key==='h'){ e.preventDefault(); _moveCaretCols(-1); _repositionCaret(); return; }
-      if (e.key==='l'){ e.preventDefault(); _moveCaretCols(1); _repositionCaret(); return; }
+      if (e.key==='j' || e.key==='ArrowDown'){ e.preventDefault(); const n=_consumeCount(); _moveCaretLines(n); _repositionCaret(); updateGutter(); return; }
+      if (e.key==='k' || e.key==='ArrowUp'){ e.preventDefault(); const n=_consumeCount(); _moveCaretLines(-n); _repositionCaret(); updateGutter(); return; }
+      if (e.key==='h' || e.key==='ArrowLeft'){ e.preventDefault(); const n=_consumeCount(); _moveCaretCols(-n); _repositionCaret(); return; }
+      if (e.key==='l' || e.key==='ArrowRight'){ e.preventDefault(); const n=_consumeCount(); _moveCaretCols(n); _repositionCaret(); return; }
+      // word motions (w: next word start, b: prev word start)
+      if (e.key==='w' && !e.ctrlKey && !e.metaKey && !e.altKey){ e.preventDefault(); const n=_consumeCount(); _moveWordW(n); ensureScrolloff(); _repositionCaret(); updateGutter(); return; }
+      if (e.key==='b' && !e.ctrlKey && !e.metaKey && !e.altKey){ e.preventDefault(); const n=_consumeCount(); _moveWordB(n); ensureScrolloff(); _repositionCaret(); updateGutter(); return; }
+      // line anchors ^, 0, $
+      if (e.key==='^'){ e.preventDefault(); const _n=_consumeCount(); const line=(_splitLines()[caretRow]||''); _setCaret(caretRow, _firstNonBlankColOf(line)); _repositionCaret(); return; }
+      // '0' as a command only when no count prefix in progress
+      if (e.key==='0' && _countAcc==null){ e.preventDefault(); _setCaret(caretRow, 0); _repositionCaret(); return; }
+      if (e.key==='$'){ e.preventDefault(); const n=_consumeCount(); let r=caretRow; if (n>1){ _moveCaretLines(n-1); r=caretRow; } const len=_lineLen(r); _setCaret(r, len); _repositionCaret(); updateGutter(); return; }
+      // paragraphs { }
+      if (e.key==='}'){ e.preventDefault(); const n=_consumeCount(); _moveParagraphNext(n); ensureScrolloff(); _repositionCaret(); updateGutter(); return; }
+      if (e.key==='{'){ e.preventDefault(); const n=_consumeCount(); _moveParagraphPrev(n); ensureScrolloff(); _repositionCaret(); updateGutter(); return; }
+      // numeric prefix (1-9 start/extend; 0 extends if already started)
+      if (e.key>='1' && e.key<='9' && !e.ctrlKey && !e.metaKey && !e.altKey){ e.preventDefault(); _countAcc = (_countAcc==null?0:_countAcc)*10 + parseInt(e.key,10); return; }
+      if (e.key==='0' && !e.ctrlKey && !e.metaKey && !e.altKey && _countAcc!=null){ e.preventDefault(); _countAcc = _countAcc*10; return; }
       if (e.key==='i'){ e.preventDefault(); _setMode('INSERT'); return; }
       // 'gg' (go to first line) / 'G' (go to last line)
       if (e.key === 'g' && !e.ctrlKey && !e.metaKey){
@@ -1683,6 +1825,7 @@
         if (_pendingNormal === 'g'){
           // gg detected
           _clearPending();
+          _countAcc = null;
           caretRow = 0; _centerScrolloffOnce = true; ensureScrolloff({centerOnce:true}); _repositionCaret(); updateGutter();
         } else {
           _pendingNormal = 'g';
@@ -1693,11 +1836,15 @@
       }
       if (e.key === 'G' && !e.ctrlKey && !e.metaKey){
         e.preventDefault(); _clearPending();
-        caretRow = Math.max(0, _totalLines()-1); _centerScrolloffOnce = true; ensureScrolloff({centerOnce:true, preferEOFPad:true}); _repositionCaret(); updateGutter();
+        _countAcc = null;
+        caretRow = Math.max(0, _totalLines()-1);
+        // clamp caretCol to EOL of last line to avoid stale column causing b to stall
+        try{ const len = _lineLen(caretRow); if (caretCol>len) caretCol=len; }catch{}
+        _centerScrolloffOnce = true; ensureScrolloff({centerOnce:true, preferEOFPad:true}); _repositionCaret(); updateGutter();
         return;
       }
       // other keys cancel pending sequences
-      _clearPending();
+      _clearPending(); _countAcc = null;
       // NORMALモードでは、未対応キーでのテキスト挿入を抑止
       const isPrintable = (e.key.length === 1) && !e.ctrlKey && !e.metaKey && !e.altKey;
       const isEditKey = ['Enter','Tab','Backspace','Delete','Insert'].includes(e.key);
