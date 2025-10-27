@@ -33,6 +33,30 @@
   let _pendingNormal = null;
   let _pendingTimer = null;
 
+  // command history (HTA-like)
+  const _cmdHistory = [];
+  let _cmdHistIndex = 0;        // 0.._cmdHistory.length (length means draft)
+  let _cmdHistBrowsing = false; // true when navigating history in cmdinput
+  let _cmdHistTemp = '';        // current draft while browsing
+
+  function _cmdHistoryMaybePush(s){
+    try{
+      const v = String(s||'').trim();
+      if (!v || v === ':') return;
+      const last = _cmdHistory.length ? _cmdHistory[_cmdHistory.length-1] : null;
+      if (last === v) return; // skip identical consecutive
+      _cmdHistory.push(v);
+    }catch{}
+    // reset browsing state after submit
+    _cmdHistIndex = _cmdHistory.length;
+    _cmdHistBrowsing = false;
+    _cmdHistTemp = '';
+  }
+
+  // file popup selection auto-follow control
+  // true: input filter auto-selects first match. false: keep user's arrow selection.
+  let _fileSelAuto = true;
+
   // measurement span (for caret x position)
   const _measureSpan = (function(){
     const s = document.createElement('span');
@@ -411,6 +435,7 @@
       } else {
         _loadFromPath(it.url, null, {mode:'new'});
       }
+      try{ const hist=':e ' + _collapseDotDotPath(String(_fileTypedDirRaw||'') + String(it.name||'')); _cmdHistoryMaybePush(hist); }catch{}
       _filePopupHide(); _bufPopupHide(); _setMode('NORMAL'); cmdinput.value=''; setTimeout(()=>editor.focus(),0);
       return true;
     }catch{ return false; }
@@ -1626,6 +1651,8 @@
         e.preventDefault();
         _setMode('CMD');
         _clearPending();
+        // reset command history browsing state when entering CMD
+        try{ _cmdHistBrowsing=false; _cmdHistIndex=_cmdHistory.length; _cmdHistTemp=''; }catch{}
         if (cmdinput){
           // コロンは入力欄にそのまま見えるようにする
           cmdinput.value = ':';
@@ -1671,6 +1698,28 @@
         if (e.key==='Enter'){
           e.preventDefault(); e.stopPropagation();
           const raw = cmdinput.value.trim();
+          // popup 非表示かつ先頭が :e のときは、Enter で :e の動作を確定（ファイルを開く）。
+          try{
+            if (!_filePopupVisible()){
+              const vNow = String(cmdinput.value||'');
+              const m = vNow.match(/^\s*:?(?:e\b)\s*(.*)$/i);
+              if (m){
+                const after = (m[1]||'').trim();
+                if (after){
+                  // 入力後続を使って :e を実行（直接読み込み or 新規）
+                  const base = _currentDirBase();
+                  // 履歴は実際の最終文字列で
+                  try{ const hist=':e ' + _collapseDotDotPath(after.replace(/\\/g,'/')); _cmdHistoryMaybePush(hist); }catch{}
+                  (async()=>{
+                    const ok = await _loadFromPath(after, base, { silentOnFail:true, mode:'new' });
+                    if (!ok){ let finalURL = null; try{ finalURL = new URL(after, base).toString(); }catch{} _addBuffer({ name: after, path: finalURL, text: '', modified:false }); _switchToBuffer(buffers.length-1); }
+                    cmdinput.value=''; _setMode('NORMAL'); _bufPopupHide(); setTimeout(()=>editor.focus(),0);
+                  })();
+                  return;
+                }
+              }
+            }
+          }catch{}
           // まず、:e のファイルポップアップが表示中なら Enter はポップアップに対する確定/ドリルダウンとして扱う
           if (_filePopupVisible()){
             // #164: 入力欄が '/' で終わっていない場合は、入力文字列を優先して確定
@@ -1734,6 +1783,8 @@
                   if (ent && !ent.isDir){
                     // ファイルを開く（確定）
                     _loadFromPath(ent.url, null, {mode:'new'});
+                    // 履歴には補完後の最終文字列を入れる
+                    try{ const hist = ':e ' + _collapseDotDotPath(String(_fileTypedDirRaw||'') + String(ent.name||'')); _cmdHistoryMaybePush(hist); }catch{}
                     _filePopupHide(); _bufPopupHide(); _setMode('NORMAL'); cmdinput.value=''; setTimeout(()=>editor.focus(), 0);
                     return;
                   }
@@ -1749,6 +1800,7 @@
                       return;
                     } else {
                       _loadFromPath(one.url, null, {mode:'new'});
+                      try{ const hist=':e ' + _collapseDotDotPath(String(_fileTypedDirRaw||'') + String(one.name||'')); _cmdHistoryMaybePush(hist); }catch{}
                       _filePopupHide(); _bufPopupHide(); _setMode('NORMAL'); cmdinput.value=''; setTimeout(()=>editor.focus(), 0);
                       return;
                     }
@@ -1823,6 +1875,8 @@
                   _addBuffer({ name: q, path: finalURL, text: '', modified:false });
                   _switchToBuffer(buffers.length-1);
                 }
+                try{ _cmdHistoryMaybePush(cmdinput.value); }catch{}
+                try{ const hist=':e ' + _collapseDotDotPath(String(_fileTypedDirRaw||'') + String(q)); _cmdHistoryMaybePush(hist); }catch{}
                 _filePopupHide();
                 _bufPopupHide();
                 _setMode('NORMAL');
@@ -1875,6 +1929,7 @@
             }
             _filePopupHide();
             _bufPopupHide();
+            try{ const hist=':e ' + _collapseDotDotPath(String(_fileTypedDirRaw||'') + String(it.name||'')); _cmdHistoryMaybePush(hist); }catch{}
             _setMode('NORMAL');
             cmdinput.value = '';
             setTimeout(()=>editor.focus(), 0);
@@ -1890,7 +1945,11 @@
             toast('invalid command');
             return;
           }
-          if (raw){ runCommand(raw.startsWith(':')?raw:(':'+raw)); }
+          if (raw){
+            // Push to history before clearing (store what user sees)
+            _cmdHistoryMaybePush(cmdinput.value);
+            runCommand(raw.startsWith(':')?raw:(':'+raw));
+          }
           cmdinput.value = '';
           _setMode('NORMAL');
           _bufPopupHide();
@@ -1898,6 +1957,8 @@
           setTimeout(()=>editor.focus(), 0);
         } else if (e.key==='Escape'){
           e.preventDefault(); e.stopPropagation();
+          // reset history browsing state on cancel
+          try{ _cmdHistBrowsing=false; _cmdHistIndex=_cmdHistory.length; _cmdHistTemp=''; }catch{}
           // CMD 終了時の一瞬のスクロール揺れ（EOF 付近へ飛ぶ）を抑止するガードと座標再適用
           let st = editor.scrollTop, cr = caretRow, cc = caretCol;
           let selS = 0, selE = 0; try{ selS = editor.selectionStart; selE = editor.selectionEnd; }catch{}
@@ -1988,15 +2049,102 @@
               }
             }catch{}
             return;
+          } else if (_bufPopupVisible()){
+            // :b ポップアップ表示中の Tab は何もしない（フォーカス移動抑止）
+            e.preventDefault(); e.stopPropagation();
+            return;
+          } else {
+            // popup 非表示かつ先頭が :e のときは、Tab でポップアップを表示（補完はしない）
+            try{
+              const val = String(cmdinput.value||'');
+              if (/^\s*:?(?:e\b)/i.test(val)){
+                e.preventDefault(); e.stopPropagation();
+                // 直ちに :e 空ベースのポップアップを開く
+                _fileBaseURL = _currentDirBase();
+                _fileStartBaseURL = _ensureSlash(_fileBaseURL);
+                _fileNextStartBaseURL = null;
+                try{ const b=_ensureSlash(_fileBaseURL); _filePopupNoUp = !!(b && (_isHostRoot(b) || _isUncShareRoot(b))); }catch{ _filePopupNoUp=false; }
+                _fileJustNavAt = Date.now(); _fileNavRetryCount = 0;
+                _fileTypedDirRaw = '';
+                _fileFilter = '';
+                _fileInvalid = false;
+                _fileLoading = true;
+                _fileEntries = []; _fileSel = 0;
+                if (!_filePopupVisible()) _filePopupShow(); else _filePopupRender();
+                (function(){
+                  const reqKey = (function(){ try{ return _ensureSlash(_fileBaseURL)?.toString()||null; }catch{ return null; } })();
+                  _listDirEntries(_fileBaseURL)
+                    .then(list=>{
+                      try{
+                        const curKey = _ensureSlash(_fileBaseURL)?.toString()||null;
+                        if (!reqKey || curKey===reqKey){
+                          _fileEntries = Array.isArray(list) ? list : [];
+                          if (Array.isArray(list) && list.length>0){ _fileStableEntries = list.slice(); _fileStableBaseKey = curKey; }
+                        }
+                      }catch{}
+                    })
+                    .catch(()=>{})
+                    .finally(()=>{ _fileLoading=false; _filePopupRender(); });
+                })();
+                return;
+              }
+              // popup 非表示かつ先頭が :b のときは、Tab でバッファポップアップを表示
+              if (/^\s*:?(?:b\b)/i.test(val)){
+                e.preventDefault(); e.stopPropagation();
+                // 現在の入力からフィルタ/選択を反映して表示
+                const mTail = val.match(/^\s*:?\s*b\s*(.*)$/i);
+                const tail = (mTail? mTail[1] : '');
+                const digits = tail.match(/^([0-9]+)\s*$/);
+                if (digits){
+                  _bufFilterKind = 'numPrefix';
+                  _bufFilter = String(digits[1]);
+                  _bufSelAbs = Math.max(0, Math.min(buffers.length-1, parseInt(digits[1],10)-1));
+                } else if (tail && tail.trim()){ 
+                  _bufFilterKind = 'text';
+                  _bufFilter = tail;
+                  _bufSelAbs = null;
+                } else {
+                  _bufFilterKind = 'text'; _bufFilter=''; _bufSelAbs=null;
+                }
+                _bufPopupShow();
+                return;
+              }
+            }catch{}
+            // CMD 中は Tab のフォーカス移動は常に抑止
+            e.preventDefault(); e.stopPropagation();
           }
-        } else if (e.key==='ArrowDown' || e.key==='ArrowUp'){
+        } else if (e.key==='ArrowDown' || e.key==='ArrowUp' || e.key==='PageDown' || e.key==='PageUp'){
           // buf popup navigation
           if (_bufPopupVisible()){
             e.preventDefault(); e.stopPropagation();
-            _bufPopupMove(e.key==='ArrowDown'?1:-1);
+            const delta = (e.key==='PageDown')?10 : (e.key==='PageUp')?-10 : (e.key==='ArrowDown'?1:-1);
+            _bufPopupMove(delta);
           } else if (_filePopupVisible()){
             e.preventDefault(); e.stopPropagation();
-            _filePopupMove(e.key==='ArrowDown'?1:-1);
+            const delta = (e.key==='PageDown')?10 : (e.key==='PageUp')?-10 : (e.key==='ArrowDown'?1:-1);
+            _filePopupMove(delta);
+          } else {
+            // command history navigation (ArrowUp/ArrowDown only)
+            if (e.key==='PageUp' || e.key==='PageDown') return; // 履歴では無効
+            e.preventDefault(); e.stopPropagation();
+            try{
+              const n = _cmdHistory.length;
+              if (!_cmdHistBrowsing){ _cmdHistTemp = cmdinput.value; _cmdHistIndex = n; _cmdHistBrowsing = true; }
+              if (e.key==='ArrowUp'){
+                _cmdHistIndex = Math.max(0, _cmdHistIndex - 1);
+              } else if (e.key==='ArrowDown'){
+                _cmdHistIndex = Math.min(n, _cmdHistIndex + 1);
+              }
+              if (_cmdHistIndex === n){
+                _cmdHistBrowsing = false; // back to draft
+                cmdinput.value = _cmdHistTemp;
+              } else {
+                cmdinput.value = _cmdHistory[_cmdHistIndex] || '';
+              }
+              // move caret to end and propagate input (to trigger popups if needed)
+              try{ const pos=(cmdinput.value||'').length; cmdinput.setSelectionRange(pos,pos); }catch{}
+              try { cmdinput.dispatchEvent(new Event('input', { bubbles:true })); } catch {}
+            }catch{}
           }
         }
       });
@@ -2005,6 +2153,24 @@
         // NBSP/ゼロ幅スペースなどの不可視を除去（貼り付け時の "U\u00A0b\u00A0u..." 問題の回避）
         const vSan = vRaw.replace(/[\u200B-\u200D\u2060\u00A0]/g, '');
         const v = vSan; // keep visible spaces for parsing
+        // :b は履歴から戻したテキストでも即ポップアップを出さない。
+        // ただし " :b"（空白のみ）に戻した場合は表示する。
+        try{
+          const mb = v.match(/^\s*:?\s*b\b(.*)$/i);
+          if (mb){
+            const tail = (mb[1]||'');
+            const onlySpaces = /^\s*$/.test(tail);
+            if (!onlySpaces && !_bufPopupVisible()){
+              // 以降の :b 分岐はスキップ（Tab で明示表示）
+              // ただし正確一致の :bN はこの早期リターンに該当しないため、先に :bN を処理する
+              // （よって、このガードは :bN マッチの後段で作用する）
+            } else if (onlySpaces && !_bufPopupVisible()){
+              // :b or :b のみ → ポップアップ表示
+              _bufFilterKind='text'; _bufFilter=''; _bufSelAbs=null; _bufPopupShow();
+              return;
+            }
+          }
+        }catch{}
         // 1) 完全一致 ":bN"（空白なし、末尾に他文字なし）を検出し、即確定ルール適用
         let m;
         if ((m = v.match(/^\s*:?[\s]*b([0-9]+)$/i))){
@@ -2037,17 +2203,18 @@
             _bufFilterKind = 'numPrefix';
             _bufFilter = String(n);
             _bufSelAbs = Math.max(0, Math.min(buffers.length-1, n-1));
-            if (!_bufPopupVisible()) _bufPopupShow(); else _bufPopupRender();
+            if (!_bufPopupVisible()) return; else _bufPopupRender();
             return;
           }
         }
 
         // 3) ":b <query>"（テキスト）→ インクリメンタル絞り込み
         if ((m = v.match(/^\s*:?[\s]*b\s+(.*)$/i))){
+          if (!_bufPopupVisible()) return;
           _bufFilterKind = 'text';
           _bufFilter = (m[1]||'');
           _bufSelAbs = null;
-          if (!_bufPopupVisible()) _bufPopupShow(); else _bufPopupRender();
+          _bufPopupRender();
           return;
         }
 
@@ -2063,7 +2230,54 @@
         // ---- :e 入力に応じたファイルポップアップ処理（":e " の時点で発火）----
         let me;
         // :e の検出は先頭コロンを1個のみ許容（"::e" は不正扱い）
-        if ((me = v.match(/^\s*:?\s*e\s+.*$/i))){
+        if ((me = v.match(/^\s*:?(?:e\b)(.*)$/i))){
+          // 履歴から ":e ..." を呼び出しても即ポップアップは開かない。
+          // 先頭が ":e" で、後続が空白のみ（" :e" or ":e "）ならポップアップを開く。
+          const tail = (me[1]||'');
+          const onlySpaces = /^\s*$/.test(tail);
+          if (onlySpaces){
+            // ここだけポップアップ起動（基点は現バッファ）
+            try{
+              if (!_filePopupVisible()){
+                _fileBaseURL = _currentDirBase();
+                _fileStartBaseURL = _ensureSlash(_fileBaseURL);
+                _fileNextStartBaseURL = null;
+                try{ const b=_ensureSlash(_fileBaseURL); _filePopupNoUp = !!(b && (_isHostRoot(b) || _isUncShareRoot(b))); }catch{ _filePopupNoUp=false; }
+                _fileJustNavAt = Date.now(); _fileNavRetryCount = 0;
+              }
+            }catch{}
+            // 入力直後に列挙を開始（この時点の自動選択は有効）
+            _fileSelAuto = true;
+            _fileTypedDirRaw = '';
+            _fileFilter = '';
+            _fileInvalid = false;
+            _fileLoading = true;
+            _fileEntries = []; _fileSel = 0;
+            if (!_filePopupVisible()) _filePopupShow(); else _filePopupRender();
+            (function(){
+              const reqKey = (function(){ try{ return _ensureSlash(_fileBaseURL)?.toString()||null; }catch{ return null; } })();
+              _listDirEntries(_fileBaseURL)
+                .then(list=>{
+                  try{
+                    const curKey = _ensureSlash(_fileBaseURL)?.toString()||null;
+                    if (!reqKey || curKey===reqKey){
+                      _fileEntries = Array.isArray(list) ? list : [];
+                      if (Array.isArray(list) && list.length>0){ _fileStableEntries = list.slice(); _fileStableBaseKey = curKey; }
+                    }
+                  }catch{}
+                })
+                .catch(()=>{})
+                .finally(()=>{ _fileLoading=false; _filePopupRender(); });
+            })();
+            return;
+          }
+
+          // 先頭が :e でも、後続に文字がある（履歴呼出を含む）場合は、ここではポップアップを開かない。
+          // ただし既に開いているケース（手入力派生）は従来どおり処理。
+          if (!_filePopupVisible()){
+            return; // 後続キー（Tab/Enter）に任せる
+          }
+          // 以降は従来の処理（手入力＝ポップアップ開いている前提）
           // :e 入力時のポップアップ
           // 新規に :e 入力を開始したときの基点は常に「現バッファのディレクトリ」。
           // 以前のセッション由来の一時基点は使わずクリアしておく（#178）。
@@ -2133,6 +2347,7 @@
           );
 
           // 入力の反映（まずは typed/filter の可視化）
+          _fileSelAuto = true; // 入力に伴う自動選択を有効化
           _fileTypedDirRaw = parsed.typedDirRaw || '';
           _fileFilter = parsed.filter || '';
           if (!_filePopupVisible()) _filePopupShow(); else _filePopupRender();
@@ -2903,8 +3118,13 @@
           return nm.toLowerCase().startsWith(qTrim.toLowerCase());
         };
         const idxMatch = list.findIndex(e=> e && !e._up && pred(String(e.name||'')));
-        if (idxMatch>=0){ _fileSel = idxMatch; _fileSelMuted = false; }
-        else { _fileSelMuted = true; }
+        if (idxMatch>=0){
+          // 自動選択は input 直後のみ有効。矢印ナビ後は維持。
+          if (_fileSelAuto){ _fileSel = idxMatch; }
+          _fileSelMuted = false;
+        } else {
+          _fileSelMuted = true;
+        }
       } else {
         _fileSelMuted = false;
       }
@@ -2974,6 +3194,7 @@
         } else {
           _loadFromPath(it.url, null, {mode:'new'});
           // Enter と同等に、入力欄をクリアし NORMAL に戻す
+          try{ const hist=':e ' + _collapseDotDotPath(String(_fileTypedDirRaw||'') + String(it.name||'')); _cmdHistoryMaybePush(hist); }catch{}
           try{ if (cmdinput) cmdinput.value=''; }catch{}
           _filePopupHide(); _bufPopupHide(); _setMode('NORMAL'); setTimeout(()=>editor.focus(),0);
         }
@@ -2990,6 +3211,7 @@
   function _filePopupMove(d){
     if (!bufpopup) return;
     const list = _filePopupComputeList();
+    _fileSelAuto = false; // ユーザ操作により自動選択を停止
     _fileSel = Math.max(0, Math.min(list.length-1, _fileSel + d));
     _fileSelMuted = false; // 矢印移動で通常のハイライトに復帰
     try{
