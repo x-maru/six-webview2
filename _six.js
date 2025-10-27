@@ -34,6 +34,11 @@
   let _mode = 'NORMAL';
   let _pendingNormal = null;
   let _pendingTimer = null;
+  // delete operator state (for d + motion)
+  let _pendingOp = null;           // e.g., 'd'
+  let _pendingOpCount = 1;         // count before operator
+  let _pendingOpSeq = null;        // sub-sequence (e.g., 'g' of 'gg')
+  let _pendingOpTimer = null;      // timer to clear pending operator
 
   // command history (HTA-like)
   const _cmdHistory = [];
@@ -841,6 +846,127 @@
     caret.style.height = Math.max(1, Math.round(FONT_SIZE)) + 'px';
     // Apply the same remainder compensation to caret overlay container
     try{ caretLayer.style.transform = (Math.abs(rem) > 0.01) ? `translateY(${-rem}px)` : ''; }catch{}
+  }
+
+  // ---- Buffer/text helpers for editing ----
+  function _touchBufferModified(){ try{ const b=currentBuffer(); if (b){ b.modified=true; b.text=editor.value||''; } _setTitle(); _renderTabbar(); }catch{} }
+  function _cmpPos(a,b){ if (a.r!==b.r) return a.r-b.r; return a.c-b.c; }
+  function _clampPos(p){ const lines=_splitLines(); let r=Math.max(0, Math.min(lines.length-1, p.r|0)); let c=Math.max(0, Math.min((lines[r]||'').length, p.c|0)); return {r,c}; }
+  function _advancePosByCp(r,c,n){
+    const lines=_splitLines();
+    let rr=r, cc=c, left=n|0;
+    const last=lines.length-1;
+    while(left>0){
+      const line=lines[rr]||''; const len=line.length;
+      if (cc < len){ cc = _nextIndex(line, cc); left--; }
+      else {
+        if (rr>=last) break; // at final EOF
+        // consume newline as 1 step and move to next line head
+        rr++; cc=0; left--;
+      }
+    }
+    return {r:rr, c:cc};
+  }
+  function _deleteRangePos(p1,p2){
+    const lines=_splitLines();
+    let a=_clampPos(p1), b=_clampPos(p2);
+    if (_cmpPos(a,b)>0){ const t=a; a=b; b=t; }
+    if (a.r===b.r && a.c===b.c) return; // nothing
+    if (a.r===b.r){
+      const r=a.r; const s=lines[r]||'';
+      const next = (s.slice(0,a.c) + s.slice(b.c));
+      lines[r]=next;
+    } else {
+      const head=(lines[a.r]||'').slice(0,a.c);
+      const tail=(lines[b.r]||'').slice(b.c);
+      // remove inner lines and join
+      const newLine = head + tail;
+      lines.splice(a.r, (b.r - a.r + 1), newLine);
+    }
+    editor.value = lines.join('\n');
+    // set caret at start of deletion
+    _setCaret(a.r, a.c);
+    _touchBufferModified();
+  }
+  function _deleteWholeLines(rStart, count){
+    const lines=_splitLines();
+    const total=lines.length;
+    if (total===0) return;
+    let rs=Math.max(0, Math.min(total-1, rStart|0));
+    let n=Math.max(1, count|0);
+    const rEnd = Math.min(total-1, rs + n - 1);
+    if (total===1 && rs===0 && rEnd===0){
+      // keep single empty line
+      editor.value='';
+      _setCaret(0,0);
+      _touchBufferModified();
+      return;
+    }
+    const before = lines.slice(0, rs);
+    const after  = lines.slice(rEnd+1);
+    const nextLines = before.concat(after);
+    if (nextLines.length===0) nextLines.push('');
+    const newRow = Math.max(0, Math.min(nextLines.length-1, rs));
+    editor.value = nextLines.join('\n');
+    _setCaret(newRow, 0);
+    _touchBufferModified();
+  }
+  function _paragraphNextPos(startRow, count){
+    const lines=_splitLines(); let r=startRow; const times=Math.max(1,count|0);
+    for (let i=0;i<times;i++){
+      let j=r+1; while (j<lines.length && !/^\s*$/.test(lines[j]||'')) j++;
+      while (j<lines.length && /^\s*$/.test(lines[j]||'')) j++;
+      if (j>=lines.length){ r=lines.length-1; break; }
+      r=j;
+    }
+    const col=_firstNonBlankColOf(lines[r]||'');
+    return { r, c: col };
+  }
+  function _paragraphPrevPos(startRow, count){
+    const lines=_splitLines(); let r=startRow; const times=Math.max(1,count|0);
+    for (let i=0;i<times;i++){
+      let j=r-1; while (j>=0 && !/^\s*$/.test(lines[j]||'')) j--; while (j>=0 && /^\s*$/.test(lines[j]||'')) j--; if (j<0){ r=0; break; } let k=j; while (k>0 && !/^\s*$/.test(lines[k-1]||'')) k--; r=k;
+    }
+    const col=_firstNonBlankColOf(lines[r]||'');
+    return { r, c: col };
+  }
+  function _computeMotionTarget(r,c,key,count){
+    const lines=_splitLines();
+    const times=Math.max(1, count|0);
+    let rr=r, cc=c;
+    const last=lines.length-1;
+    const moveCols=(delta)=>{ const line=lines[rr]||''; const len=line.length; cc=Math.max(0, Math.min(len, cc+delta)); };
+    const moveLines=(delta)=>{ rr=Math.max(0, Math.min(last, rr+delta)); const len=(lines[rr]||'').length; cc=Math.max(0, Math.min(len, cc)); };
+    switch(key){
+      case 'h': moveCols(-times); break;
+      case 'l': moveCols(+times); break;
+      case 'j': moveLines(+times); break;
+      case 'k': moveLines(-times); break;
+      case 'w': { let r0=rr,c0=cc; for(let i=0;i<times;i++){ const p=_nextWordStart(r0,c0); r0=p.r; c0=p.c; } rr=r0; cc=c0; break; }
+      case 'b': { let r0=rr,c0=cc; for(let i=0;i<times;i++){ const p=_prevWordStart(r0,c0); r0=p.r; c0=p.c; } rr=r0; cc=c0; break; }
+      case '^': { rr=rr; cc=_firstNonBlankColOf(lines[rr]||''); break; }
+      case '0': { cc=0; break; }
+      case '$': {
+        let r0=rr; if (times>1){ r0=Math.max(0, Math.min(last, rr + (times-1))); }
+        rr=r0; cc=(lines[rr]||'').length; break; }
+      case '}': { const p=_paragraphNextPos(rr, times); rr=p.r; cc=p.c; break; }
+      case '{': { const p=_paragraphPrevPos(rr, times); rr=p.r; cc=p.c; break; }
+      default: return null;
+    }
+    return { r: rr, c: cc };
+  }
+  function _clearPendingOp(){ _pendingOp=null; _pendingOpCount=1; _pendingOpSeq=null; if (_pendingOpTimer){ clearTimeout(_pendingOpTimer); _pendingOpTimer=null; } }
+  function _armPendingOpTimeout(){
+    // Abolish operator wait timeout for 'd': never auto-cancel
+    if (_pendingOpTimer){ try{ clearTimeout(_pendingOpTimer); }catch{} }
+    _pendingOpTimer = null;
+  }
+  function _doDeleteX(count){
+    const n=Math.max(1, count|0);
+    const start={ r: caretRow, c: caretCol };
+    const end=_advancePosByCp(start.r, start.c, n);
+    if (start.r===end.r && start.c===end.c){ return; }
+    _deleteRangePos(start, end);
   }
 
   /*********************************************************
@@ -1785,6 +1911,111 @@
         return; // テキスト入力はデフォルトに委ねる
       }
       // NORMAL
+  // Pending delete operator: interpret next key as motion or line-wise command
+  if (_pendingOp === 'd'){
+  // allow composing count for motion (digits only when Shift is NOT held)
+  if (e.key>='1' && e.key<='9' && !e.shiftKey && !e.ctrlKey && !e.metaKey && !e.altKey){ e.preventDefault(); _countAcc = (_countAcc==null?0:_countAcc)*10 + parseInt(e.key,10); _armPendingOpTimeout(); return; }
+  if (e.key==='0' && !e.shiftKey && !e.ctrlKey && !e.metaKey && !e.altKey && _countAcc!=null){ e.preventDefault(); _countAcc = _countAcc*10; _armPendingOpTimeout(); return; }
+        if (e.key==='Escape'){ e.preventDefault(); _clearPendingOp(); _countAcc=null; return; }
+        // Ignore standalone modifier keys while waiting for the motion key
+        // This prevents cancelling the pending 'd' when user presses Shift for $, G, {, }
+        if (e.key==='Shift' || e.key==='Control' || e.key==='Alt' || e.key==='Meta'){
+          // Do not clear or consume the operator; wait for the actual motion key
+          return;
+        }
+        e.preventDefault();
+        // dd (delete N lines)
+        if (e.key==='d'){
+          const mcount = (_countAcc==null?1:_countAcc); _countAcc=null;
+          const total = Math.max(1, (_pendingOpCount||1) * mcount);
+          _deleteWholeLines(caretRow, total);
+          _clearPendingOp(); ensureScrolloff(); _repositionCaret(); updateGutter();
+          return;
+        }
+        // dgg / dNgg
+        if (e.key==='g'){
+          if (_pendingOpSeq === 'g'){
+            // second 'g' -> gg
+            const mcount = (_countAcc==null?1:_countAcc); _countAcc=null;
+            // gg count means go to line N (default 1)
+            const targetLine = Math.max(1, mcount) - 1;
+            const r0 = caretRow;
+            const r1 = Math.max(0, Math.min(_totalLines()-1, targetLine));
+            const rs = Math.min(r0, r1);
+            const re = Math.max(r0, r1);
+            // delete complete lines between rs..re inclusive
+            _deleteWholeLines(rs, re-rs+1);
+            _clearPendingOp(); ensureScrolloff(); _repositionCaret(); updateGutter();
+            return;
+          } else {
+            _pendingOpSeq = 'g'; _armPendingOpTimeout(); return;
+          }
+        }
+  // dG / dNG (N as target line) — linewise (use literal 'G')
+  if (e.key==='G'){
+          const mcount = (_countAcc==null?0:_countAcc); _countAcc=null;
+          const r0 = caretRow; const total=_totalLines();
+          let r1;
+          if (mcount && mcount>0){ r1 = Math.max(0, Math.min(total-1, mcount-1)); }
+          else { r1 = total-1; }
+          const rs = Math.min(r0, r1);
+          const re = Math.max(r0, r1);
+          _deleteWholeLines(rs, re-rs+1);
+          _clearPendingOp(); ensureScrolloff(); _repositionCaret(); updateGutter();
+          return;
+        }
+  // d$ — charwise to end-of-line (or across lines if count>1); detect literal '$'
+  if (e.key==='$'){
+          const mcount = (_countAcc==null?1:_countAcc); _countAcc=null;
+          let rS = caretRow, cS = caretCol;
+          let rE = rS, cE = (_splitLines()[rS]||'').length;
+          if (mcount > 1){
+            const last = _totalLines()-1;
+            rE = Math.min(last, rS + (mcount-1));
+            cE = (_splitLines()[rE]||'').length;
+          }
+          const start={r:rS, c:cS}, end={r:rE, c:cE};
+          if (!(start.r===end.r && start.c===end.c)) _deleteRangePos(start, end);
+          _clearPendingOp(); ensureScrolloff(); _repositionCaret(); updateGutter();
+          return;
+        }
+  // d} / d{ — linewise delete by paragraph; detect literal '}' / '{'
+  if (e.key==='}'){
+          const mcount = (_countAcc==null?1:_countAcc); _countAcc=null;
+          const next = _paragraphNextPos(caretRow, mcount);
+          const rs = caretRow;
+          const re = Math.max(rs, Math.max(0, Math.min(_totalLines()-1, next.r-1)));
+          if (re >= rs){ _deleteWholeLines(rs, re-rs+1); }
+          _clearPendingOp(); ensureScrolloff(); _repositionCaret(); updateGutter();
+          return;
+        }
+  if (e.key==='{'){
+          const mcount = (_countAcc==null?1:_countAcc); _countAcc=null;
+          const prev = _paragraphPrevPos(caretRow, mcount);
+          const rs = Math.min(prev.r, caretRow);
+          const re = caretRow;
+          if (re >= rs){ _deleteWholeLines(rs, re-rs+1); }
+          _clearPendingOp(); ensureScrolloff(); _repositionCaret(); updateGutter();
+          return;
+        }
+        // generic d + motion (charwise)
+        const mcount = (_countAcc==null?1:_countAcc); _countAcc=null;
+        const totalCount = Math.max(1, (_pendingOpCount||1) * mcount);
+        // compute target based on motion key
+        const target = _computeMotionTarget(caretRow, caretCol, e.key, totalCount);
+        if (target){
+          const start = { r: caretRow, c: caretCol };
+          const end   = target;
+          // If motion is left/backward and end equals start (no movement), do nothing
+          if (!(start.r===end.r && start.c===end.c)){
+            _deleteRangePos(start, end);
+          }
+          _clearPendingOp(); ensureScrolloff(); _repositionCaret(); updateGutter();
+          return;
+        }
+        // unknown motion → cancel operator
+        _clearPendingOp(); return;
+      }
       if (e.key===':' && !e.ctrlKey){
         e.preventDefault();
         _setMode('CMD');
@@ -1804,6 +2035,10 @@
       if (e.key==='k' || e.key==='ArrowUp'){ e.preventDefault(); const n=_consumeCount(); _moveCaretLines(-n); _repositionCaret(); updateGutter(); return; }
       if (e.key==='h' || e.key==='ArrowLeft'){ e.preventDefault(); const n=_consumeCount(); _moveCaretCols(-n); _repositionCaret(); return; }
       if (e.key==='l' || e.key==='ArrowRight'){ e.preventDefault(); const n=_consumeCount(); _moveCaretCols(n); _repositionCaret(); return; }
+  // delete: x (delete char(s) under cursor / join newline)
+  if (e.key==='x' && !e.ctrlKey && !e.metaKey && !e.altKey){ e.preventDefault(); const n=_consumeCount(); _doDeleteX(n); ensureScrolloff(); _repositionCaret(); updateGutter(); return; }
+  // delete operator: d + motion
+  if (e.key==='d' && !e.ctrlKey && !e.metaKey && !e.altKey){ e.preventDefault(); _pendingOp='d'; _pendingOpCount=_consumeCount(); if (!_pendingOpCount || _pendingOpCount<1) _pendingOpCount=1; _pendingOpSeq=null; _armPendingOpTimeout(); return; }
       // word motions (w: next word start, b: prev word start)
       if (e.key==='w' && !e.ctrlKey && !e.metaKey && !e.altKey){ e.preventDefault(); const n=_consumeCount(); _moveWordW(n); ensureScrolloff(); _repositionCaret(); updateGutter(); return; }
       if (e.key==='b' && !e.ctrlKey && !e.metaKey && !e.altKey){ e.preventDefault(); const n=_consumeCount(); _moveWordB(n); ensureScrolloff(); _repositionCaret(); updateGutter(); return; }
