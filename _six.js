@@ -25,6 +25,12 @@
   let currentIdx = -1;
   let caretRow = 0;
   let caretCol = 0;
+  // quit/unload control
+  let _quittingAll = false;     // allow window to close without interception
+  let _quitInProgress = false;  // prevent re-entrancy of quit flow
+  let _allowUnloadOnce = false; // allow one reload/navigation without interception
+  // environment detection
+  const _isWebView2 = !!(window.chrome && window.chrome.webview);
   // numeric count prefix for NORMAL motions (e.g., 5l)
   let _countAcc = null;
   let scrolloff = 3;
@@ -333,7 +339,7 @@
       const removedIndex = currentIdx;
       buffers.splice(removedIndex, 1);
       if (buffers.length === 0){
-        window.close();
+        _quittingAll = true; window.close();
         return;
       }
       const nextIndex = Math.min(removedIndex, buffers.length - 1);
@@ -874,6 +880,12 @@
       _setTitle(); _renderTabbar();
     }catch{}
   }
+  function _hasAnyModifiedBuffers(){
+    try{
+      for (let i=0;i<buffers.length;i++){ const b=buffers[i]; if (b && b.modified) return true; }
+      return false;
+    }catch{ return false; }
+  }
   // ---- Undo/Redo ----
   const UNDO_LIMIT = 200;
   function _currentStacks(){ const b=currentBuffer(); return b ? b : null; }
@@ -1380,7 +1392,7 @@
               return;
             }
           }
-          window.close();
+          _quittingAll = true; window.close();
         }catch{}
       })();
       return;
@@ -1691,7 +1703,7 @@
     }
     // :reload -> location.reload (hash保持)
     if (cmd === ':reload'){
-      location.reload(); return;
+      _allowUnloadOnce = true; location.reload(); return;
     }
 
     // :pick -> ネイティブ/ブラウザピッカーを即時起動
@@ -2130,6 +2142,7 @@
           Promise.resolve().then(()=>{
             try{ cmdinput.focus(); const pos = (cmdinput.value||'').length; cmdinput.setSelectionRange(pos,pos); }catch{}
           });
+          // close interception is now bound at startup; nothing to do here
         }
         return;
       }
@@ -3076,6 +3089,76 @@
         _bufPopupHide();
         _filePopupHide();
       });
+
+      // Close interception setup (bind once at startup, outside CMD flow)
+      // WebView2: host sends 'close-request' and expects 'close-result'
+      // Browser fallback: use beforeunload to cancel and run :qa-like flow
+      (function setupCloseInterceptionOnce(){
+        try{
+          if (_isWebView2){
+            const onHostMessage = (ev)=>{
+              try{
+                const msg = (ev && ev.data) || {};
+                if (!msg || msg.type !== 'close-request') return;
+                if (_quitInProgress) return;
+                _quitInProgress = true;
+                (async()=>{
+                  let okAll = true;
+                  try{
+                    // Spec: close current first if unmodified
+                    try{ const b0=currentBuffer(); if (b0 && b0.modified===false){ _closeCurrentBuffer(); } }catch{}
+                    const items = buffers.map((b,i)=>({b,i})).filter(x=>x.b && x.b.modified);
+                    if (items.length > 0){
+                      const ok = await multiSaveDialog(items);
+                      if (!ok){ okAll = false; }
+                    }
+                    if (okAll){ _quittingAll = true; }
+                  }catch{ okAll = false; }
+                  try{ window.chrome.webview.postMessage({ type:'close-result', ok: !!okAll }); }catch{}
+                  if (okAll){ try{ window.close(); }catch{} }
+                  _quitInProgress = false;
+                })();
+              }catch{}
+            };
+            // Bind once
+            try{ window.chrome.webview.removeEventListener && window.chrome.webview.removeEventListener('message', onHostMessage); }catch{}
+            window.chrome.webview.addEventListener('message', onHostMessage);
+            // Important: DO NOT attach beforeunload in WebView2 to avoid native dialog
+            try{ window.onbeforeunload = null; }catch{}
+          } else {
+            // Browser fallback
+            const onBeforeUnload = (e)=>{
+              try{
+                if (_allowUnloadOnce){ _allowUnloadOnce = false; return; }
+                if (_quittingAll) return;
+                const hasUnsaved = _hasAnyModifiedBuffers();
+                if (!hasUnsaved){
+                  // 未保存なし → そのままアンロード許可（ネイティブ離脱ダイアログを出さない）
+                  return;
+                }
+                // 未保存あり → 既定動作をキャンセルし、アプリ側 :qa 相当を実行
+                e.preventDefault();
+                if (_quitInProgress) return;
+                _quitInProgress = true;
+                (async()=>{
+                  try{
+                    try{ const b0=currentBuffer(); if (b0 && b0.modified===false){ _closeCurrentBuffer(); } }catch{}
+                    const items = buffers.map((b,i)=>({b,i})).filter(x=>x.b && x.b.modified);
+                    if (items.length > 0){
+                      const ok = await multiSaveDialog(items);
+                      if (!ok){ _quitInProgress = false; return; }
+                    }
+                    _quittingAll = true; window.close();
+                  }catch{ _quitInProgress = false; }
+                })();
+              }catch{}
+            };
+            // ensure no duplicate listeners
+            try{ window.removeEventListener('beforeunload', onBeforeUnload); }catch{}
+            window.addEventListener('beforeunload', onBeforeUnload);
+          }
+        }catch{}
+      })();
     }
   }
 

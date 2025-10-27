@@ -1,4 +1,43 @@
 # six-webview2
+## WebView2 ホストのクローズ連携（ネイティブの「移動しますか？」を出さない）
+
+ブラウザ単体（Edge/Chrome 等）で OS のクローズボタンを押した場合、ページ側で :qa 相当の確認を出す前にネイティブの「このサイトから移動しますか？」が先に出ることがあります。これはブラウザの制約で、完全抑止はできません。
+
+six-webview2 では、WebView2 ホストとページ間のメッセージでクローズ時のハンドシェイクを行うことで、ネイティブダイアログを一切出さずにアプリ側の :qa ダイアログを先に実行する設計にしています。
+
+ページ側の仕様:
+
+- WebView2 環境では `beforeunload` を使いません。
+- ホストから `{type:'close-request'}` を受けると :qa 相当を実行し、`{type:'close-result', ok:true|false}` を返信します。
+
+ホスト側（C# WinForms）の最小実装例を `webview2_host_sample.cs` に追加しました。ポイントは以下です。
+
+- フォームの `FormClosing` を `e.Cancel = true` でキャンセルし、WebView に `close-request` を投げる。
+- ページからの `close-result` を受け取り `ok:true` のときだけ再度 `Close()` する（このときはキャンセルしない）。
+- 15 秒程度のタイムアウトを入れてデッドロックを避ける。
+
+ビルド手順（Windows 上で実行）:
+
+```powershell
+# プロジェクト作成（任意の空フォルダで）
+dotnet new winforms -n SixHost -f net8.0
+cd SixHost
+
+# WebView2 参照追加
+dotnet add package Microsoft.Web.WebView2
+
+# サンプルコードを置き換え（このリポジトリの webview2_host_sample.cs を Program.cs として上書きなど）
+copy /y ..\six\webview2_host_sample.cs .\Program.cs
+
+# 実行（引数に six の URL を渡す。開発用ローカル HTTP サーバ URL や _six.html への file:// など）
+dotnet run -- "http://localhost:12345/_six.html"
+```
+
+注意:
+
+- ブラウザで直接開く運用（WebView2 ホストなし）では、完全にネイティブの離脱ダイアログを抑止することはできません。
+- six-webview2 側では WebView2 環境を自動検出し、`beforeunload` を付けないようにしてあります（ブラウザのみのときはフォールバックで `beforeunload` を使用）。
+
 
 six エディタを WebView (Edge app mode 代替) 上で最小構成で再現するための最小ランチャとクライアント実装です。  
 HTA 版 six のレイアウト / THEME キーを踏襲しつつ、管理者権限不要・ローカル API なし（ブラウザピッカーのみ）で動作します。

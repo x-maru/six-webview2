@@ -174,47 +174,145 @@ if ($DocItems.Count -ge 2) {
 
 if ($ShowUrl) { Write-Host "Launching URL: $targetUrl" }
 
-$edge = "C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe"
-if (!(Test-Path $edge)) { $edge = "C:\\Program Files\\Microsoft\\Edge\\Application\\msedge.exe" }
-
-if (Test-Path $edge) {
-  # 引数は 1 文字列で渡す。空白含みも OK
-  $profileDir = Join-Path $here ".edge-profile"
-  if ($ResetProfile) { try { Remove-Item -Recurse -Force -ErrorAction SilentlyContinue $profileDir } catch {} }
-  if (-not (Test-Path $profileDir)) { New-Item -ItemType Directory -Path $profileDir | Out-Null }
-  $args = @("--allow-file-access-from-files","--user-data-dir=$profileDir","--app=$targetUrl")
-  if ($DevInsecure) { $args = @("--allow-file-access-from-files","--disable-web-security","--user-data-dir=$profileDir","--app=$targetUrl") }
-  $p = Start-Process -FilePath $edge -ArgumentList $args -WorkingDirectory $here -PassThru
-  # 監視ループ: user-data-dir が一致する msedge.exe のうち、ウィンドウを持つものが存在する間は待機
-  $deadline = (Get-Date).AddMinutes([Math]::Max(1, $WaitMinutes))
-  $seenWindow = $false; $lastHadWindow = Get-Date
-  while ((Get-Date) -lt $deadline) {
-    try {
-      $wmi = Get-CimInstance Win32_Process -Filter "Name='msedge.exe'" -ErrorAction SilentlyContinue |
-        Where-Object { $_.CommandLine -and $_.CommandLine.Contains($profileDir) }
-    } catch { $wmi = @() }
-    $withWindow = @()
-    foreach($pinfo in $wmi){
+function Start-WebView2Host([string]$Url){
+  # 探索: NuGet の Microsoft.Web.WebView2 パッケージから DLL を見つける
+  $nugetBase = Join-Path $env:USERPROFILE ".nuget/packages/microsoft.web.webview2"
+  $coreDll = $null; $wfDll = $null
+  if (Test-Path $nugetBase){
+    $candidates = Get-ChildItem -Path $nugetBase -Directory -ErrorAction SilentlyContinue | Sort-Object Name -Descending
+    foreach($ver in $candidates){
       try {
-        $gp = Get-Process -Id $pinfo.ProcessId -ErrorAction SilentlyContinue
-        if ($gp -and $gp.MainWindowHandle -ne 0) { $withWindow += $gp }
+        $coreCand = Get-ChildItem -Path (Join-Path $ver.FullName "lib") -Recurse -Filter "Microsoft.Web.WebView2.Core.dll" -ErrorAction SilentlyContinue | Select-Object -First 1
+        $wfCand   = Get-ChildItem -Path (Join-Path $ver.FullName "lib") -Recurse -Filter "Microsoft.Web.WebView2.WinForms.dll" -ErrorAction SilentlyContinue | Select-Object -First 1
+        if ($coreCand -and $wfCand) { $coreDll = $coreCand.FullName; $wfDll = $wfCand.FullName; break }
       } catch {}
     }
-    if ($withWindow.Count -gt 0) {
-      $seenWindow = $true; $lastHadWindow = Get-Date
-    } elseif ($seenWindow) {
-      # 以前はウィンドウがあった → 1秒以上なければ終了
-      if ((Get-Date) -gt $lastHadWindow.AddSeconds(1)) { break }
-    } else {
-      # まだウィンドウを検知していない → Edge 親プロセスが死んでいたら終了
-      try { $parent = Get-Process -Id $p.Id -ErrorAction SilentlyContinue } catch { $parent = $null }
-      if (-not $parent) { break }
-    }
-    Start-Sleep -Milliseconds 300
   }
-} else {
-  Write-Host "Edge not found. Open $index manually."
-  if ($DocRel) { Write-Host "Then append ?doc=$qsDoc to the file URL." }
+  if (-not ($coreDll -and $wfDll)) { return $false }
+
+  $code = @"
+using System;
+using System.Threading.Tasks;
+using System.Windows.Forms;
+using Microsoft.Web.WebView2.Core;
+using Microsoft.Web.WebView2.WinForms;
+
+public static class SixHostApp
+{
+  private static bool _closing = false;
+  private static bool _approved = false;
+  private static TaskCompletionSource<bool> _tcs;
+
+  public static void Run(string url)
+  {
+    Application.SetHighDpiMode(HighDpiMode.SystemAware);
+    Application.EnableVisualStyles();
+    Application.SetCompatibleTextRenderingDefault(false);
+
+    var form = new Form();
+    form.Text = "six-webview2";
+    form.Width = 1200; form.Height = 800;
+    var wv = new WebView2(){ Dock = DockStyle.Fill };
+    form.Controls.Add(wv);
+
+    form.Load += async (_, __) => {
+      var env = await CoreWebView2Environment.CreateAsync();
+      await wv.EnsureCoreWebView2Async(env);
+      wv.CoreWebView2.Settings.AreDefaultScriptDialogsEnabled = false;
+      wv.CoreWebView2.WebMessageReceived += (s, e) => {
+        try{
+          var txt = e.TryGetWebMessageAsString();
+          if (string.IsNullOrEmpty(txt)) return;
+          // very small parser to detect {"type":"close-result","ok":true|false}
+          if (txt.Contains("\"type\"\s*:\s*\"close-result\"")){
+            bool ok = txt.Contains("\"ok\"\s*:\s*true");
+            _tcs?.TrySetResult(ok);
+          }
+        }catch{}
+      };
+      wv.CoreWebView2.Navigate(url);
+    };
+
+    form.FormClosing += async (sender, e) => {
+      if (_approved) return;
+      if (_closing) { e.Cancel = true; return; }
+      if (wv.CoreWebView2 == null) return;
+      e.Cancel = true;
+      _closing = true; _tcs = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+      try{
+        wv.CoreWebView2.PostWebMessageAsJson("{\\\"type\\\":\\\"close-request\\\"}");
+        using (var cts = new System.Threading.CancellationTokenSource(15000)){
+          using (cts.Token.Register(()=> _tcs.TrySetResult(false))){
+            var ok = await _tcs.Task.ConfigureAwait(true);
+            if (ok){ _approved = true; form.Close(); }
+          }
+        }
+      }catch{}
+      finally{ _closing = false; }
+    };
+
+    Application.Run(form);
+  }
+}
+"@
+
+  $refs = @("System.Windows.Forms","System.Drawing", $coreDll, $wfDll)
+  try {
+    Add-Type -TypeDefinition $code -ReferencedAssemblies $refs -Language CSharp -IgnoreWarnings -ErrorAction Stop
+    [SixHostApp]::Run($Url)
+    return $true
+  } catch {
+    Write-Host "WebView2 host compile failed: $($_.Exception.Message)"
+    return $false
+  }
+}
+
+# 1) まず WebView2 ホストで起動を試みる（成功すればブラウザは使わない）
+$launched = Start-WebView2Host -Url $targetUrl
+if (-not $launched) {
+  # 2) フォールバック: Edge app mode
+  $edge = "C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe"
+  if (!(Test-Path $edge)) { $edge = "C:\\Program Files\\Microsoft\\Edge\\Application\\msedge.exe" }
+
+  if (Test-Path $edge) {
+    # 引数は 1 文字列で渡す。空白含みも OK
+    $profileDir = Join-Path $here ".edge-profile"
+    if ($ResetProfile) { try { Remove-Item -Recurse -Force -ErrorAction SilentlyContinue $profileDir } catch {} }
+    if (-not (Test-Path $profileDir)) { New-Item -ItemType Directory -Path $profileDir | Out-Null }
+    $args = @("--allow-file-access-from-files","--user-data-dir=$profileDir","--app=$targetUrl")
+    if ($DevInsecure) { $args = @("--allow-file-access-from-files","--disable-web-security","--user-data-dir=$profileDir","--app=$targetUrl") }
+    $p = Start-Process -FilePath $edge -ArgumentList $args -WorkingDirectory $here -PassThru
+    # 監視ループ: user-data-dir が一致する msedge.exe のうち、ウィンドウを持つものが存在する間は待機
+    $deadline = (Get-Date).AddMinutes([Math]::Max(1, $WaitMinutes))
+    $seenWindow = $false; $lastHadWindow = Get-Date
+    while ((Get-Date) -lt $deadline) {
+      try {
+        $wmi = Get-CimInstance Win32_Process -Filter "Name='msedge.exe'" -ErrorAction SilentlyContinue |
+          Where-Object { $_.CommandLine -and $_.CommandLine.Contains($profileDir) }
+      } catch { $wmi = @() }
+      $withWindow = @()
+      foreach($pinfo in $wmi){
+        try {
+          $gp = Get-Process -Id $pinfo.ProcessId -ErrorAction SilentlyContinue
+          if ($gp -and $gp.MainWindowHandle -ne 0) { $withWindow += $gp }
+        } catch {}
+      }
+      if ($withWindow.Count -gt 0) {
+        $seenWindow = $true; $lastHadWindow = Get-Date
+      } elseif ($seenWindow) {
+        # 以前はウィンドウがあった → 1秒以上なければ終了
+        if ((Get-Date) -gt $lastHadWindow.AddSeconds(1)) { break }
+      } else {
+        # まだウィンドウを検知していない → Edge 親プロセスが死んでいたら終了
+        try { $parent = Get-Process -Id $p.Id -ErrorAction SilentlyContinue } catch { $parent = $null }
+        if (-not $parent) { break }
+      }
+      Start-Sleep -Milliseconds 300
+    }
+  } else {
+    Write-Host "Edge not found. Open $index manually."
+    if ($DocRel) { Write-Host "Then append ?doc=$qsDoc to the file URL." }
+  }
 }
 
 if ($KeepOpen) { Write-Host 'Press Enter to exit...'; Read-Host | Out-Null }
