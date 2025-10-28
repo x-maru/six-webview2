@@ -25,8 +25,40 @@
   let currentIdx = -1;
   let caretRow = 0;
   let caretCol = 0;
+  // track last caret position to detect movement (for cursor hide policy)
+  let _lastCaretRow = -1;
+  let _lastCaretCol = -1;
+  // track last time caret moved (for distinguishing caret-induced scroll vs manual scroll)
+  let _lastCaretMovedAt = 0;
+  // global mouse cursor visibility state and helpers (used across modules)
+  let _cursorHidden = false;
+  const _hideCursor = ()=>{ try{ if (!_cursorHidden){ document.body.classList.add('hide-cursor'); _cursorHidden=true; } }catch{} };
+  const _showCursor = ()=>{ try{ if (_cursorHidden){ document.body.classList.remove('hide-cursor'); _cursorHidden=false; } }catch{} };
   // editor zoom state (scale only editor/gutter, not global UI)
   let _edScale = 1;
+  // guard window to avoid scroll snapping while zooming via wheel
+  let _zoomGuardUntil = 0;
+  // fixed zoom steps (percent): 50,75,90,100,110,133,180,250,300
+  const _scaleSteps = [0.5, 0.75, 0.9, 1.0, 1.10, 1.33, 1.80, 2.50, 3.00];
+  function _nearestScale(x){
+    let best = _scaleSteps[0], diff = Math.abs(x - best);
+    for (const s of _scaleSteps){ const d = Math.abs(x - s); if (d < diff){ diff = d; best = s; } }
+    return best;
+  }
+  function _currentScaleIndex(){
+    // assume _edScale is close to a step; find nearest index
+    let bestIdx = 0, diff = Math.abs(_edScale - _scaleSteps[0]);
+    for (let i=1;i<_scaleSteps.length;i++){ const d = Math.abs(_edScale - _scaleSteps[i]); if (d < diff){ diff=d; bestIdx=i; } }
+    return bestIdx;
+  }
+  function _stepEditorScale(dir){
+    try{
+      const idx = _currentScaleIndex();
+      let nextIdx = idx + (dir>0 ? 1 : -1);
+      nextIdx = Math.max(0, Math.min(_scaleSteps.length-1, nextIdx));
+      _setEditorScale(_scaleSteps[nextIdx]);
+    }catch{}
+  }
   // quit/unload control
   let _quittingAll = false;     // allow window to close without interception
   let _quitInProgress = false;  // prevent re-entrancy of quit flow
@@ -85,7 +117,8 @@
     s.style.top = '-99999px';
     s.style.whiteSpace = 'pre';
     // Set a default; will be synced to editor computed styles at bootstrap/resize
-    s.style.font = '18px/20px ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", Menlo, monospace';
+  s.style.font = '200 20px/20px "Cascadia Code", "Cascadia Mono", "JetBrains Mono", "Fira Code", "Consolas", "游ゴシック Light", "Yu Gothic", "Meiryo", "MS Gothic", monospace';
+  s.style.fontWeight = '200';
     document.body.appendChild(s);
     return s;
   })();
@@ -103,6 +136,7 @@
       // Sync measurement span font to editor
       try{
         if (cs && cs.fontFamily) _measureSpan.style.fontFamily = cs.fontFamily;
+        if (cs && cs.fontWeight) _measureSpan.style.fontWeight = cs.fontWeight;
         if (Number.isFinite(FONT_SIZE)) _measureSpan.style.fontSize = FONT_SIZE + 'px';
         if (Number.isFinite(LINE_HEIGHT)) _measureSpan.style.lineHeight = LINE_HEIGHT + 'px';
       }catch{}
@@ -276,9 +310,20 @@
       // Core colors
       setVar('bodyBGColor', t.bodyBGColor);
       setVar('lineBaseFill', t.lineBaseFill);
+      // Per-line gradient colors (top -> bottom)
+      setVar('lineGradStart', t.lineGradientStart);
+      setVar('lineGradEnd', t.lineGradientEnd);
+  // Editor text color
+  setVar('editorTextColor', t.editorTextColor);
+  // Active line stripe gradient (top -> bottom)
+  setVar('activeLineGradStart', t.activeLineGradientStart);
+  setVar('activeLineGradEnd', t.activeLineGradientEnd);
       setVar('activeLineBg', t.activeLineBg);
       setVar('tabBarBg', t.tabBarBg);
       setVar('tabBarFg', t.tabBarFg);
+  // Command input colors
+  setVar('cmdInputFg', t.cmdInputFg);
+  setVar('cmdInputBg', t.cmdInputBg);
       setVar('gutterGradientStart', t.gutterGradientStart);
       setVar('gutterGradientEnd', t.gutterGradientEnd);
       setVar('gutterNumberColor', t.gutterNumberColor);
@@ -290,7 +335,7 @@
       try{
         const s = localStorage.getItem('six.edScale');
         const n = s ? parseFloat(s) : NaN;
-        if (Number.isFinite(n) && n > 0.3 && n < 5){ _edScale = n; }
+        if (Number.isFinite(n) && n > 0.3 && n < 5){ _edScale = _nearestScale(n); }
       }catch{}
       try{ root.style.setProperty('--edScale', String(_edScale)); }catch{}
     }catch{}
@@ -298,8 +343,10 @@
 
   function _setEditorScale(next){
     const root = document.documentElement;
-    const min = 0.5, max = 3.0;
-    _edScale = Math.min(max, Math.max(min, next));
+    const min = _scaleSteps[0], max = _scaleSteps[_scaleSteps.length-1];
+    // snap to nearest allowed step while clamping
+    const clamped = Math.min(max, Math.max(min, next));
+    _edScale = _nearestScale(clamped);
     try{ root.style.setProperty('--edScale', String(_edScale)); }catch{}
     try{ localStorage.setItem('six.edScale', String(_edScale)); }catch{}
     // re-sync metrics and overlays
@@ -317,13 +364,25 @@
   function _wireZoomHUD(){
     try{
       const el = document.getElementById('zoomhud'); if (!el) return;
+      // Make HUD non-focusable and prevent it from stealing focus on interaction
+      try{ el.setAttribute('tabindex','-1'); }catch{}
+      try{ el.addEventListener('mousedown', (e)=>{ e.preventDefault(); }, true); }catch{}
       const v = document.getElementById('zoomVal'); if (v) v.textContent = _formatZoom();
       const minus = document.getElementById('zoomMinus');
       const plus = document.getElementById('zoomPlus');
       const reset = document.getElementById('zoomReset');
-      if (minus){ minus.onclick = ()=> _setEditorScale(_edScale/1.1); }
-      if (plus){ plus.onclick = ()=> _setEditorScale(_edScale*1.1); }
-      if (reset){ reset.onclick = ()=> _setEditorScale(1); }
+      if (minus){
+        try{ minus.setAttribute('tabindex','-1'); }catch{}
+        minus.onclick = ()=>{ _stepEditorScale(-1); try{ setTimeout(()=>{ try{ editor && editor.focus && editor.focus(); }catch{} }, 0); }catch{} };
+      }
+      if (plus){
+        try{ plus.setAttribute('tabindex','-1'); }catch{}
+        plus.onclick = ()=>{ _stepEditorScale(+1); try{ setTimeout(()=>{ try{ editor && editor.focus && editor.focus(); }catch{} }, 0); }catch{} };
+      }
+      if (reset){
+        try{ reset.setAttribute('tabindex','-1'); }catch{}
+        reset.onclick = ()=>{ _setEditorScale(1); try{ setTimeout(()=>{ try{ editor && editor.focus && editor.focus(); }catch{} }, 0); }catch{} };
+      }
     }catch{}
   }
   function _showZoomHUD(){
@@ -934,9 +993,9 @@
     _measureSpan.textContent = line.slice(0, caretCol);
     const x = _measureSpan.getBoundingClientRect().width; // px
     caret.style.left = x + 'px';
-    // Vertically center the caret within the line's content box
-    caret.style.top = (topPx + _caretYOffset) + 'px';
-    caret.style.height = Math.max(1, Math.round(FONT_SIZE)) + 'px';
+  // Make caret height match the full line box
+  caret.style.top = topPx + 'px';
+  caret.style.height = Math.max(1, Math.round(LINE_HEIGHT)) + 'px';
     // Determine character box width at caret (full-width aware), then shrink to 90%
     let chW = 0;
     if (caretCol < line.length){
@@ -957,6 +1016,18 @@
     try{ caret.style.setProperty('--caretWidth', cw + 'px'); }catch{}
     // Apply the same remainder compensation to caret overlay container
     try{ caretLayer.style.transform = (Math.abs(rem) > 0.01) ? `translateY(${-rem}px)` : ''; }catch{}
+    // Detect caret movement (row/col change) and hide mouse cursor accordingly
+    try{
+      const moved = (caretRow !== _lastCaretRow) || (caretCol !== _lastCaretCol);
+      if (moved){
+        // Skip initial bootstrap comparison to avoid hiding once at startup
+        if (!(_lastCaretRow === -1 && _lastCaretCol === -1)){
+          _hideCursor();
+        }
+        _lastCaretMovedAt = Date.now();
+        _lastCaretRow = caretRow; _lastCaretCol = caretCol;
+      }
+    }catch{}
   }
 
   // ---- Buffer/text helpers for editing ----
@@ -970,6 +1041,8 @@
         b._changeTick = ((b._changeTick|0) + 1)|0;
         b.modified = ((b._changeTick|0) !== (b._savedTick|0));
       }
+      // Any text edit (including programmatic via commands) hides mouse cursor
+      _hideCursor();
       _setTitle(); _renderTabbar();
     }catch{}
   }
@@ -1257,6 +1330,35 @@
     _deleteRangePos(start, end);
   }
 
+  // Yank helpers (copy to unnamed register without modifying text)
+  function _yankRangePos(p1, p2){
+    const lines=_splitLines();
+    let a=_clampPos(p1), b=_clampPos(p2);
+    if (_cmpPos(a,b)>0){ const t=a; a=b; b=t; }
+    if (a.r===b.r && a.c===b.c) return; // nothing
+    let yanked = '';
+    if (a.r===b.r){
+      const r=a.r; const s=lines[r]||'';
+      yanked = s.slice(a.c, b.c);
+    } else {
+      const head=(lines[a.r]||'').slice(a.c);
+      const middle = (b.r - a.r > 1) ? (lines.slice(a.r+1, b.r).join('\n') + '\n') : '';
+      const tail=(lines[b.r]||'').slice(0,b.c);
+      yanked = head + '\n' + middle + tail;
+    }
+    try{ _regUnnamed = { text: String(yanked||''), linewise: false }; }catch{}
+  }
+  function _yankWholeLines(rStart, count){
+    const lines=_splitLines();
+    const total=lines.length;
+    if (total===0) return;
+    let rs=Math.max(0, Math.min(total-1, rStart|0));
+    let n=Math.max(1, count|0);
+    const rEnd = Math.min(total-1, rs + n - 1);
+    const yankedBlock = lines.slice(rs, rEnd+1).join('\n');
+    try{ _regUnnamed = { text: String(yankedBlock||''), linewise: true }; }catch{}
+  }
+
   /*********************************************************
    * ensureScrolloff
    *********************************************************/
@@ -1346,7 +1448,14 @@
         el.style.color = (T.gutterNumberColor||'#57607a');
       } else {
         el.textContent = r.ln;
-        el.style.background = r.active ? (T.activeLineBg||'#1b2231') : 'transparent';
+        if (r.active){
+          const g1 = (T.activeGutterGradientStart||'rgb(231,255,231)');
+          const g2 = (T.activeGutterGradientEnd||'rgb(219,243,219)');
+          el.style.background = `linear-gradient(to bottom, ${g1}, ${g2})`;
+        } else {
+          // Inactive rows: transparent to let container's tiled background show (prevents flicker)
+          el.style.background = '';
+        }
         el.style.color = r.active ? (T.activeLineNumberColor||'#a6accd') : (T.gutterNumberColor||'#57607a');
       }
     }
@@ -1354,17 +1463,14 @@
     for (let i=rows.length; i<children.length; i++){
       gutter.removeChild(children[i]);
     }
-    // Subpixel alignment guard: if textarea scrollTop is not an exact multiple
-    // of LINE_HEIGHT due to float rounding or devicePixelRatio, align gutter by
-    // applying a small translateY to cancel the remainder.
+    // Subpixel alignment guard without moving the container background:
+    // shift only the first row slightly so the tiled background stays locked.
     try{
+      gutter.style.transform = '';
       const st = (editor.scrollTop||0);
       const rem = st - Math.round(st/LINE_HEIGHT)*LINE_HEIGHT;
-      if (Math.abs(rem) > 0.01){
-        gutter.style.transform = `translateY(${-rem}px)`;
-      } else {
-        gutter.style.transform = '';
-      }
+      const first = gutter.firstElementChild;
+      if (first){ first.style.marginTop = Math.abs(rem) > 0.01 ? (-rem)+'px' : '0px'; }
     }catch{}
   }
 
@@ -2254,20 +2360,45 @@
    * Events
    *********************************************************/
   function bindEvents(){
-    viewport.addEventListener('scroll', ()=>{ _repositionCaret(); updateGutter(); });
-    editor.addEventListener('scroll', ()=>{ _repositionCaret(); updateGutter(); });
+  // Show cursor on any mouse move or window blur
+  window.addEventListener('mousemove', _showCursor, { passive:true });
+  window.addEventListener('blur', _showCursor);
+  // Unified scroll handler: snap to line grid and render once per frame
+  let _scrollRAF = 0;
+  const scheduleScrollRender = ()=>{
+    try{ if (_scrollRAF) cancelAnimationFrame(_scrollRAF); }catch{}
+    _scrollRAF = requestAnimationFrame(()=>{
+      try{
+        if (Date.now() >= _zoomGuardUntil){
+          const st = (editor.scrollTop||0);
+          const snapped = Math.round(st/LINE_HEIGHT)*LINE_HEIGHT;
+          if (Math.abs(snapped - st) > 0.25){ editor.scrollTop = snapped; }
+        }
+      }catch{}
+      // Hide mouse cursor when visible range changes shortly after caret moved
+      if ((Date.now() - _lastCaretMovedAt) < 120){ _hideCursor(); }
+      _repositionCaret(); updateGutter();
+    });
+  };
+  viewport.addEventListener('scroll', scheduleScrollRender);
+  editor.addEventListener('scroll', scheduleScrollRender);
     // Ctrl + Wheel = editor zoom (only editor/gutter)
+    let _lastZoomStepAt = 0;
     const wheelZoom = (e)=>{
       if (e && e.ctrlKey){
-        try{ e.preventDefault(); }catch{}
+        try{ e.preventDefault(); e.stopPropagation(); }catch{}
+        const now = Date.now();
+        // Rate-limit: step at most once per ~140ms to avoid multi-step jumps per notch
+        if (now - _lastZoomStepAt < 140) return;
         const dy = e.deltaY||0;
-        const factor = (dy < 0) ? 1.1 : 1/1.1;
-        _setEditorScale(_edScale * factor);
+        if (dy < 0){ _stepEditorScale(+1); } else if (dy > 0){ _stepEditorScale(-1); }
+        _lastZoomStepAt = now;
+        _zoomGuardUntil = now + 250; // suppress scroll snap briefly during zoom
       }
     };
     // Use non-passive to be able to prevent default browser zoom
-    try{ editor.addEventListener('wheel', wheelZoom, { passive:false }); }catch{ editor.addEventListener('wheel', wheelZoom); }
     try{ viewport.addEventListener('wheel', wheelZoom, { passive:false }); }catch{ viewport.addEventListener('wheel', wheelZoom); }
+    // Scroll snapping is handled in the unified RAF above
     editor.addEventListener('beforeinput', (e)=>{
       if (_mode !== 'INSERT'){
         // NORMAL/CMD ではテキスト変更を禁止
@@ -2280,9 +2411,18 @@
         _touchBufferModified();
         // sync overlay caret to native insertion point
         try{ const off = editor.selectionStart|0; const rc = _rcFromOffset(off); caretRow = rc.r; caretCol = rc.c; }catch{}
+        // _touchBufferModified already hides cursor; redundant call removed
       }
       _exactLineLockAdjust(); _repositionCaret(); updateGutter();
     });
+    // Mouse click: move caret to clicked position in NORMAL mode
+    const syncCaretFromSelection = ()=>{
+      if (_mode !== 'NORMAL') return;
+      try{ const off = editor.selectionStart|0; const rc = _rcFromOffset(off); caretRow = rc.r; caretCol = rc.c; }catch{}
+      _repositionCaret(); updateGutter();
+    };
+    editor.addEventListener('mouseup', syncCaretFromSelection);
+    editor.addEventListener('click', syncCaretFromSelection);
     // selection moves in INSERT mode (arrows/mouse) — keep overlay caret in sync
     editor.addEventListener('select', ()=>{
       if (_mode === 'INSERT'){
@@ -2306,6 +2446,103 @@
         return; // テキスト入力はデフォルトに委ねる
       }
       // NORMAL
+  // Pending yank operator: interpret next key as motion or line-wise command
+  if (_pendingOp === 'y'){
+  // allow composing count for motion (digits only when Shift is NOT held)
+  if (e.key>='1' && e.key<='9' && !e.shiftKey && !e.ctrlKey && !e.metaKey && !e.altKey){ e.preventDefault(); _countAcc = (_countAcc==null?0:_countAcc)*10 + parseInt(e.key,10); _armPendingOpTimeout(); return; }
+  if (e.key==='0' && !e.shiftKey && !e.ctrlKey && !e.metaKey && !e.altKey && _countAcc!=null){ e.preventDefault(); _countAcc = _countAcc*10; _armPendingOpTimeout(); return; }
+        if (e.key==='Escape'){ e.preventDefault(); _clearPendingOp(); _countAcc=null; return; }
+        // Ignore standalone modifier keys while waiting for the motion key
+        if (e.key==='Shift' || e.key==='Control' || e.key==='Alt' || e.key==='Meta'){
+          return;
+        }
+        e.preventDefault();
+        // yy (yank N lines)
+        if (e.key==='y'){
+          const mcount = (_countAcc==null?1:_countAcc); _countAcc=null;
+          const total = Math.max(1, (_pendingOpCount||1) * mcount);
+          _yankWholeLines(caretRow, total);
+          _clearPendingOp(); _repositionCaret(); updateGutter();
+          return;
+        }
+        // ygg / yNgg
+        if (e.key==='g'){
+          if (_pendingOpSeq === 'g'){
+            const mcount = (_countAcc==null?1:_countAcc); _countAcc=null;
+            const targetLine = Math.max(1, mcount) - 1;
+            const r0 = caretRow;
+            const r1 = Math.max(0, Math.min(_totalLines()-1, targetLine));
+            const rs = Math.min(r0, r1);
+            const re = Math.max(r0, r1);
+            _yankWholeLines(rs, re-rs+1);
+            _clearPendingOp(); _repositionCaret(); updateGutter();
+            return;
+          } else {
+            _pendingOpSeq = 'g'; _armPendingOpTimeout(); return;
+          }
+        }
+  // yG / yNG (N as target line) — linewise (use literal 'G')
+  if (e.key==='G'){
+          const mcount = (_countAcc==null?0:_countAcc); _countAcc=null;
+          const r0 = caretRow; const total=_totalLines();
+          let r1;
+          if (mcount && mcount>0){ r1 = Math.max(0, Math.min(total-1, mcount-1)); }
+          else { r1 = total-1; }
+          const rs = Math.min(r0, r1);
+          const re = Math.max(r0, r1);
+          _yankWholeLines(rs, re-rs+1);
+          _clearPendingOp(); _repositionCaret(); updateGutter();
+          return;
+        }
+  // y$ — charwise to end-of-line (or across lines if count>1)
+  if (e.key==='$'){
+          const mcount = (_countAcc==null?1:_countAcc); _countAcc=null;
+          let rS = caretRow, cS = caretCol;
+          let rE = rS, cE = (_splitLines()[rS]||'').length;
+          if (mcount > 1){
+            const last = _totalLines()-1;
+            rE = Math.min(last, rS + (mcount-1));
+            cE = (_splitLines()[rE]||'').length;
+          }
+          const start={r:rS, c:cS}, end={r:rE, c:cE};
+          if (!(start.r===end.r && start.c===end.c)) _yankRangePos(start, end);
+          _clearPendingOp(); _repositionCaret(); updateGutter();
+          return;
+        }
+  // y} / y{ — linewise yank by paragraph
+  if (e.key==='}'){
+          const mcount = (_countAcc==null?1:_countAcc); _countAcc=null;
+          const next = _paragraphNextPos(caretRow, mcount);
+          const rs = caretRow;
+          const re = Math.max(rs, Math.max(0, Math.min(_totalLines()-1, next.r-1)));
+          if (re >= rs){ _yankWholeLines(rs, re-rs+1); }
+          _clearPendingOp(); _repositionCaret(); updateGutter();
+          return;
+        }
+  if (e.key==='{'){
+          const mcount = (_countAcc==null?1:_countAcc); _countAcc=null;
+          const prev = _paragraphPrevPos(caretRow, mcount);
+          const rs = Math.min(prev.r, caretRow);
+          const re = caretRow;
+          if (re >= rs){ _yankWholeLines(rs, re-rs+1); }
+          _clearPendingOp(); _repositionCaret(); updateGutter();
+          return;
+        }
+        // generic y + motion (charwise)
+        const mcount = (_countAcc==null?1:_countAcc); _countAcc=null;
+        const totalCount = Math.max(1, (_pendingOpCount||1) * mcount);
+        const target = _computeMotionTarget(caretRow, caretCol, e.key, totalCount);
+        if (target){
+          const start = { r: caretRow, c: caretCol };
+          const end   = target;
+          if (!(start.r===end.r && start.c===end.c)){
+            _yankRangePos(start, end);
+          }
+          _clearPendingOp(); _repositionCaret(); updateGutter();
+          return;
+        }
+        _clearPendingOp(); return;
+      }
   // Pending delete operator: interpret next key as motion or line-wise command
   if (_pendingOp === 'd'){
   // allow composing count for motion (digits only when Shift is NOT held)
@@ -2435,6 +2672,8 @@
   if (e.key==='x' && !e.ctrlKey && !e.metaKey && !e.altKey){ e.preventDefault(); const n=_consumeCount(); _doDeleteX(n); ensureScrolloff(); _repositionCaret(); updateGutter(); return; }
   // delete operator: d + motion
   if (e.key==='d' && !e.ctrlKey && !e.metaKey && !e.altKey){ e.preventDefault(); _pendingOp='d'; _pendingOpCount=_consumeCount(); if (!_pendingOpCount || _pendingOpCount<1) _pendingOpCount=1; _pendingOpSeq=null; _armPendingOpTimeout(); return; }
+  // yank operator: y + motion
+  if (e.key==='y' && !e.ctrlKey && !e.metaKey && !e.altKey){ e.preventDefault(); _pendingOp='y'; _pendingOpCount=_consumeCount(); if (!_pendingOpCount || _pendingOpCount<1) _pendingOpCount=1; _pendingOpSeq=null; _armPendingOpTimeout(); return; }
       // word motions (w: next word start, b: prev word start)
       if (e.key==='w' && !e.ctrlKey && !e.metaKey && !e.altKey){ e.preventDefault(); const n=_consumeCount(); _moveWordW(n); ensureScrolloff(); _repositionCaret(); updateGutter(); return; }
       if (e.key==='b' && !e.ctrlKey && !e.metaKey && !e.altKey){ e.preventDefault(); const n=_consumeCount(); _moveWordB(n); ensureScrolloff(); _repositionCaret(); updateGutter(); return; }
