@@ -36,6 +36,16 @@
 
   <div id="toast" style="display:none"><span class="msg"></span></div>
 
+  <!-- zoom HUD (over tabbar) -->
+  <div id="zoomhud" aria-hidden="true" style="display:none">
+    <div class="box">
+      <span class="val" id="zoomVal">100%</span>
+      <button id="zoomMinus" title="縮小">―</button>
+      <button id="zoomPlus" title="拡大">＋</button>
+      <button id="zoomReset" title="リセット">リセット</button>
+    </div>
+  </div>
+
   <!-- modal (custom confirm/choice) -->
   <div id="modalOverlay" role="dialog" aria-modal="true" style="display:none">
     <div id="modalBox">

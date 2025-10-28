@@ -25,6 +25,8 @@
   let currentIdx = -1;
   let caretRow = 0;
   let caretCol = 0;
+  // editor zoom state (scale only editor/gutter, not global UI)
+  let _edScale = 1;
   // quit/unload control
   let _quittingAll = false;     // allow window to close without interception
   let _quitInProgress = false;  // prevent re-entrancy of quit flow
@@ -284,6 +286,56 @@
       // Caret gradient colors (start/mid). End is fixed to rgba(255,0,0,0.0) in CSS
       setVar('caretGradStart', t.caretGradientStart);
       setVar('caretGradMid', t.caretGradientMid);
+      // apply persisted scale if any
+      try{
+        const s = localStorage.getItem('six.edScale');
+        const n = s ? parseFloat(s) : NaN;
+        if (Number.isFinite(n) && n > 0.3 && n < 5){ _edScale = n; }
+      }catch{}
+      try{ root.style.setProperty('--edScale', String(_edScale)); }catch{}
+    }catch{}
+  }
+
+  function _setEditorScale(next){
+    const root = document.documentElement;
+    const min = 0.5, max = 3.0;
+    _edScale = Math.min(max, Math.max(min, next));
+    try{ root.style.setProperty('--edScale', String(_edScale)); }catch{}
+    try{ localStorage.setItem('six.edScale', String(_edScale)); }catch{}
+    // re-sync metrics and overlays
+    _syncEditorMetrics();
+    clampViewportExactLines();
+    ensureScrolloff();
+    _repositionCaret();
+    updateGutter();
+    _showZoomHUD();
+  }
+
+  // --- Zoom HUD ---
+  let _zoomHudTimer = null;
+  function _formatZoom(){ return Math.round(_edScale*100) + '%'; }
+  function _wireZoomHUD(){
+    try{
+      const el = document.getElementById('zoomhud'); if (!el) return;
+      const v = document.getElementById('zoomVal'); if (v) v.textContent = _formatZoom();
+      const minus = document.getElementById('zoomMinus');
+      const plus = document.getElementById('zoomPlus');
+      const reset = document.getElementById('zoomReset');
+      if (minus){ minus.onclick = ()=> _setEditorScale(_edScale/1.1); }
+      if (plus){ plus.onclick = ()=> _setEditorScale(_edScale*1.1); }
+      if (reset){ reset.onclick = ()=> _setEditorScale(1); }
+    }catch{}
+  }
+  function _showZoomHUD(){
+    try{
+      const el = document.getElementById('zoomhud');
+      const v = document.getElementById('zoomVal');
+      if (!el) return;
+      if (v) v.textContent = _formatZoom();
+      // Force visible explicitly (initial CSS is display:none)
+      el.style.display = 'block';
+      if (_zoomHudTimer){ clearTimeout(_zoomHudTimer); _zoomHudTimer=null; }
+      _zoomHudTimer = setTimeout(()=>{ try{ el.style.display='none'; }catch{} }, 3000);
     }catch{}
   }
 
@@ -1280,9 +1332,14 @@
       let el = children[i];
       if (!el){
         el = document.createElement('div');
-        el.style.height = LINE_HEIGHT+'px';
         gutter.appendChild(el);
       }
+      // Ensure both height and line-height reflect current zoom, every render
+      try{
+        el.style.display = 'block';
+        el.style.height = LINE_HEIGHT+'px';
+        el.style.lineHeight = LINE_HEIGHT+'px';
+      }catch{}
       if (r.eof){
         el.textContent = '';
         el.style.background = (T.eofGutterFillColor||'#0f1117');
@@ -2199,6 +2256,18 @@
   function bindEvents(){
     viewport.addEventListener('scroll', ()=>{ _repositionCaret(); updateGutter(); });
     editor.addEventListener('scroll', ()=>{ _repositionCaret(); updateGutter(); });
+    // Ctrl + Wheel = editor zoom (only editor/gutter)
+    const wheelZoom = (e)=>{
+      if (e && e.ctrlKey){
+        try{ e.preventDefault(); }catch{}
+        const dy = e.deltaY||0;
+        const factor = (dy < 0) ? 1.1 : 1/1.1;
+        _setEditorScale(_edScale * factor);
+      }
+    };
+    // Use non-passive to be able to prevent default browser zoom
+    try{ editor.addEventListener('wheel', wheelZoom, { passive:false }); }catch{ editor.addEventListener('wheel', wheelZoom); }
+    try{ viewport.addEventListener('wheel', wheelZoom, { passive:false }); }catch{ viewport.addEventListener('wheel', wheelZoom); }
     editor.addEventListener('beforeinput', (e)=>{
       if (_mode !== 'INSERT'){
         // NORMAL/CMD ではテキスト変更を禁止
@@ -4185,6 +4254,7 @@
       _applyTheme();
       // Sync metrics (line-height, font-size, measurement span)
       _syncEditorMetrics();
+      _wireZoomHUD();
       const loadP = Promise.resolve().then(()=>_loadDocFromQuery()).catch(()=>false);
       const watchdog = new Promise(resolve=> setTimeout(()=>resolve(false), 1500));
       Promise.race([loadP, watchdog]).then(loaded=>{

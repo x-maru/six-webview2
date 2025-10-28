@@ -1,7 +1,17 @@
 ﻿/* six-webview2 minimal layout */
-:root { --lh: 20px; --gw: 56px; }
+:root {
+	/* Editor zoom model */
+	--edScale: 1;
+	--lhBase: 20px;          /* base line-height for editor */
+	--gwBase: 56px;          /* base gutter width */
+	--fontBase: 18px;        /* base font-size for editor */
+	/* Derived (used by editor only) */
+	--lh: calc(var(--lhBase) * var(--edScale));
+	--gw: calc(var(--gwBase) * var(--edScale));
+}
 html, body { height: 100%; margin: 0; background: var(--bodyBGColor, #0b0d12); color: #e6e6e6; }
-body { font: 18px/var(--lh) Consolas, 'Courier New', monospace; overflow: hidden; }
+/* Keep global UI (tabbar/cmdbar) unaffected by editor zoom */
+body { font: var(--fontBase, 18px)/20px Consolas, 'Courier New', monospace; overflow: hidden; }
 
 #tabbar { height: 24px; background: var(--tabBarBg, #0f1117); color: var(--tabBarFg, #a6accd); display:flex; align-items:center; padding:0 4px; border-bottom:1px solid #1c2230; overflow:hidden; }
 #tabbar .tabs { display:flex; gap:4px; align-items:stretch; width:100%; overflow-x:auto; overflow-y:hidden; scrollbar-width: thin; }
@@ -20,9 +30,9 @@ body { font: 18px/var(--lh) Consolas, 'Courier New', monospace; overflow: hidden
 #editorViewport { position: relative; flex: 1; background: var(--lineBaseFill, #0f1117); overflow: hidden; }
 
 #editWrap { position:absolute; inset:0; display:flex; }
-#gutter { width: var(--gw); flex: 0 0 var(--gw); background: linear-gradient(var(--gutterGradientStart, #141821), var(--gutterGradientEnd, #0f1117)); color: var(--gutterNumberColor, #57607a); text-align:right; padding-right:6px; box-sizing:border-box; }
-#gutter div { line-height: var(--lh); }
-#editor { flex: 1; background: transparent; color:#e6e6e6; border:0; outline:0; resize:none; font: inherit; line-height: var(--lh); tab-size: 4; white-space: pre; padding: 0 0 var(--lh) 0; margin: 0; box-sizing: content-box; position: relative; z-index: 1; }
+#gutter { width: var(--gw); flex: 0 0 var(--gw); background: linear-gradient(var(--gutterGradientStart, #141821), var(--gutterGradientEnd, #0f1117)); color: var(--gutterNumberColor, #57607a); text-align:right; padding-right: calc(6px * var(--edScale)); box-sizing:border-box; font-size: calc(var(--fontBase, 18px) * var(--edScale)); }
+#gutter div { line-height: var(--lh); /* use line-height centering; avoid flex rounding drift */ }
+#editor { flex: 1; background: transparent; color:#e6e6e6; border:0; outline:0; resize:none; line-height: var(--lh); tab-size: 4; white-space: pre; padding: 0 0 var(--lh) 0; margin: 0; box-sizing: content-box; position: relative; z-index: 1; font-size: calc(var(--fontBase, 18px) * var(--edScale)); font-family: Consolas, 'Courier New', monospace; }
 #editor { caret-color: transparent; }
 
 /* caret overlay placeholder */
@@ -52,6 +62,13 @@ body { font: 18px/var(--lh) Consolas, 'Courier New', monospace; overflow: hidden
 /* toast */
 #toast { position: fixed; left: 50%; transform: translateX(-50%); bottom: 48px; background: rgba(26,32,48,0.96); color:#e6e6e6; border:1px solid #2a3244; border-radius: 6px; padding:8px 12px; z-index:10001; box-shadow: 0 8px 18px rgba(0,0,0,0.35); max-width: 80vw; }
 #toast .msg { white-space: nowrap; }
+
+/* Zoom HUD (over tabbar) */
+#zoomhud { position: fixed; right: 10px; top: 2px; z-index: 10002; display:none; }
+#zoomhud .box { background: rgba(26,32,48,0.96); color:#e6e6e6; border:1px solid #2a3244; border-radius: 6px; padding:4px 8px; font: 12px/1.4 system-ui, -apple-system, 'Segoe UI', sans-serif; box-shadow: 0 6px 14px rgba(0,0,0,0.35); display:flex; gap:8px; align-items:center; }
+#zoomhud .val { font-weight: 600; min-width: 48px; text-align: right; }
+#zoomhud button { border: 1px solid #2a3244; background: #1a2030; color:#e6e6e6; border-radius: 4px; padding:2px 6px; cursor:pointer; font: 11px/1.2 system-ui, -apple-system, 'Segoe UI', sans-serif; }
+#zoomhud button:hover { filter: brightness(1.06); }
 
 /* modal (custom confirm) */
 #modalOverlay { position: fixed; inset: 0; background: rgba(0,0,0,0.45); display: none; align-items: center; justify-content: center; z-index: 10002; }
