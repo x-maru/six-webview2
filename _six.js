@@ -273,11 +273,17 @@
       const setVar = (k, v)=>{ try{ if (v!=null) root.style.setProperty('--'+k, String(v)); }catch{} };
       // Core colors
       setVar('bodyBGColor', t.bodyBGColor);
+      setVar('lineBaseFill', t.lineBaseFill);
       setVar('activeLineBg', t.activeLineBg);
       setVar('tabBarBg', t.tabBarBg);
       setVar('tabBarFg', t.tabBarFg);
-      // Caret gradient start from THEME; end is fixed to rgba(255,0,0,0.0) in CSS
+      setVar('gutterGradientStart', t.gutterGradientStart);
+      setVar('gutterGradientEnd', t.gutterGradientEnd);
+      setVar('gutterNumberColor', t.gutterNumberColor);
+      setVar('activeLineNumberColor', t.activeLineNumberColor);
+      // Caret gradient colors (start/mid). End is fixed to rgba(255,0,0,0.0) in CSS
       setVar('caretGradStart', t.caretGradientStart);
+      setVar('caretGradMid', t.caretGradientMid);
     }catch{}
   }
 
@@ -882,19 +888,17 @@
     // Determine character box width at caret (full-width aware), then shrink to 90%
     let chW = 0;
     if (caretCol < line.length){
+      // width of the next character box
       _measureSpan.textContent = line.slice(0, caretCol+1);
       const x2 = _measureSpan.getBoundingClientRect().width;
       chW = Math.max(0, x2 - x);
-    } else if (caretCol > 0){
-      _measureSpan.textContent = line.slice(0, Math.max(0, caretCol-1));
-      const x0 = _measureSpan.getBoundingClientRect().width;
-      chW = Math.max(0, x - x0);
     } else {
-      _measureSpan.textContent = 'M';
+      // at EOL: use half-width box width (measure with 'W')
+      _measureSpan.textContent = 'W';
       chW = _measureSpan.getBoundingClientRect().width;
     }
     if (!(chW > 0)){
-      _measureSpan.textContent = 'M';
+      _measureSpan.textContent = 'W';
       chW = _measureSpan.getBoundingClientRect().width;
     }
     const cw = Math.max(1, Math.round(chW * 0.9));

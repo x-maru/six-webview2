@@ -1,9 +1,9 @@
 ﻿/* six-webview2 minimal layout */
 :root { --lh: 20px; --gw: 56px; }
-html, body { height: 100%; margin: 0; background: #0b0d12; color: #e6e6e6; }
+html, body { height: 100%; margin: 0; background: var(--bodyBGColor, #0b0d12); color: #e6e6e6; }
 body { font: 18px/var(--lh) Consolas, 'Courier New', monospace; overflow: hidden; }
 
-#tabbar { height: 24px; background: #0f1117; color: #a6accd; display:flex; align-items:center; padding:0 4px; border-bottom:1px solid #1c2230; overflow:hidden; }
+#tabbar { height: 24px; background: var(--tabBarBg, #0f1117); color: var(--tabBarFg, #a6accd); display:flex; align-items:center; padding:0 4px; border-bottom:1px solid #1c2230; overflow:hidden; }
 #tabbar .tabs { display:flex; gap:4px; align-items:stretch; width:100%; overflow-x:auto; overflow-y:hidden; scrollbar-width: thin; }
 #tabbar .tab { flex: 0 0 auto; min-width: 80px; padding:0 10px; height: 18px; line-height: 18px; margin: 2px 0; border-radius:4px 4px 0 0; background:#131722; color:#a6accd; display:flex; align-items:center; border:1px solid #1c2230; border-bottom-color:#0f1117; box-sizing:border-box; cursor:pointer; }
 #tabbar .tab:hover { filter: brightness(1.05); }
@@ -17,10 +17,10 @@ body { font: 18px/var(--lh) Consolas, 'Courier New', monospace; overflow: hidden
 #cmdinput { flex:1; background: transparent; color: var(--tabBarFg); border:0; outline:0; font: inherit; height:100%; }
 
 #pane { position: absolute; top: 24px; bottom: 24px; left: 0; right: 0; display:flex; }
-#editorViewport { position: relative; flex: 1; background: #0f1117; overflow: hidden; }
+#editorViewport { position: relative; flex: 1; background: var(--lineBaseFill, #0f1117); overflow: hidden; }
 
 #editWrap { position:absolute; inset:0; display:flex; }
-#gutter { width: var(--gw); flex: 0 0 var(--gw); background: linear-gradient(#141821, #0f1117); color:#57607a; text-align:right; padding-right:6px; box-sizing:border-box; }
+#gutter { width: var(--gw); flex: 0 0 var(--gw); background: linear-gradient(var(--gutterGradientStart, #141821), var(--gutterGradientEnd, #0f1117)); color: var(--gutterNumberColor, #57607a); text-align:right; padding-right:6px; box-sizing:border-box; }
 #gutter div { line-height: var(--lh); }
 #editor { flex: 1; background: transparent; color:#e6e6e6; border:0; outline:0; resize:none; font: inherit; line-height: var(--lh); tab-size: 4; white-space: pre; padding: 0 0 var(--lh) 0; margin: 0; box-sizing: content-box; }
 #editor { caret-color: transparent; }
@@ -29,8 +29,8 @@ body { font: 18px/var(--lh) Consolas, 'Courier New', monospace; overflow: hidden
 #caretLayer { position:absolute; top:0; left:var(--gw); right:0; bottom:0; pointer-events:none; }
 .caret {
 	position:absolute; width: var(--caretWidth, 2px); 
-	/* Gradient: left (theme) -> right (transparent red) */
-	background: linear-gradient(to right, var(--caretGradStart, #ff5b5b), rgba(255,0,0,0.0));
+	/* Gradient: left (theme) -> mid (theme) -> right (transparent red) */
+	background: linear-gradient(to right, var(--caretGradStart, #ff5b5b), var(--caretGradMid, rgba(255,0,0,0.2)), rgba(255,0,0,0.0));
 	z-index:2; animation: caret-blink 1s steps(1, end) infinite;
 }
 @keyframes caret-blink { 0%{opacity:1} 50%{opacity:0} 100%{opacity:1} }

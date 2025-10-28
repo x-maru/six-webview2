@@ -11,6 +11,7 @@ window.THEME = {
   gutterNumberColor: "#57607a",
   caretColor: "#f0f3ff",
   caretGradientStart: "#ff0000",
+  caretGradientMid: "rgba(255,0,0,0.5)",
   caretWidthPx: 2,
   tabBarBg: "#0f1117",
   tabBarFg: "#a6accd"
