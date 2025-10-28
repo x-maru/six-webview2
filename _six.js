@@ -1431,7 +1431,11 @@
         // step left one code point first
         c = _prevIndex(line, c);
         // skip spaces/newlines to the left
-        while (c >= 0 && _wordTypeAtInLine(line, c) === _WT_SPACE){ c = _prevIndex(line, c); }
+        while (c >= 0 && _wordTypeAtInLine(line, c) === _WT_SPACE){
+          // If at the first code point and it's space, advance to previous line trigger
+          if (c === 0){ c = -1; break; }
+          c = _prevIndex(line, c);
+        }
         if (c < 0){ r--; c = (r>=0 ? (lines[r]||'').length : 0); continue; }
         const tRun = _wordTypeAtInLine(line, c);
         // go to start of this run
