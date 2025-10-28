@@ -10,8 +10,7 @@ window.THEME = {
   activeLineNumberColor: "#a6accd",
   gutterNumberColor: "#57607a",
   caretColor: "#f0f3ff",
-  caretGradientStart: "#ff5b5b",
-  caretGradientEnd: "#d90000",
+  caretGradientStart: "#ff0000",
   caretWidthPx: 2,
   tabBarBg: "#0f1117",
   tabBarFg: "#a6accd"

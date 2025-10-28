@@ -46,6 +46,11 @@
   let _pendingOpSeq = null;        // sub-sequence (e.g., 'g' of 'gg')
   let _pendingOpTimer = null;      // timer to clear pending operator
 
+  // simple unnamed register for yank/delete (for p/P)
+  let _regUnnamed = { text: '', linewise: false };
+  // suppress extra snapshot when entering INSERT immediately after o/O
+  let _suppressInsertSnapshotOnce = false;
+
   // command history (HTA-like)
   const _cmdHistory = [];
   let _cmdHistIndex = 0;        // 0.._cmdHistory.length (length means draft)
@@ -263,7 +268,16 @@
 
   function _applyTheme(){
     try{
-      // no-op for now; hooks to CSS variables if needed later
+      const t = (window && window.THEME) ? window.THEME : {};
+      const root = document.documentElement;
+      const setVar = (k, v)=>{ try{ if (v!=null) root.style.setProperty('--'+k, String(v)); }catch{} };
+      // Core colors
+      setVar('bodyBGColor', t.bodyBGColor);
+      setVar('activeLineBg', t.activeLineBg);
+      setVar('tabBarBg', t.tabBarBg);
+      setVar('tabBarFg', t.tabBarFg);
+      // Caret gradient start from THEME; end is fixed to rgba(255,0,0,0.0) in CSS
+      setVar('caretGradStart', t.caretGradientStart);
     }catch{}
   }
 
@@ -310,8 +324,10 @@
         name: b.name||'(untitled)',
         path: b.path||null,
         text: text0,          // current working text (unsaved edits reflected)
-        savedText: text0,     // last-saved snapshot for modified detection
+        savedText: text0,     // last-saved snapshot (content reference only)
         modified: !!b.modified,
+        _changeTick: 0,
+        _savedTick: 0,
         _undo: [],
         _redo: []
       });
@@ -638,7 +654,7 @@
         if (exist >= 0){ _switchToBuffer(exist); }
         else { _addBuffer({ name: _basename(path), path: urlStr, text: t, modified:false }); _switchToBuffer(buffers.length-1); }
       } else {
-        const b=currentBuffer(); if (b){ b.path = urlStr; b.name = _basename(path); b.text = t; b.savedText = t; b.modified=false; try{ b._undo=[]; b._redo=[]; }catch{} }
+  const b=currentBuffer(); if (b){ b.path = urlStr; b.name = _basename(path); b.text = t; b.savedText = t; b._changeTick=0; b._savedTick=0; b.modified=false; try{ b._undo=[]; b._redo=[]; }catch{} }
       }
       try{ _setTitle(); _renderTabbar(); }catch{}
       return true;
@@ -653,7 +669,7 @@
             if (exist >= 0){ _switchToBuffer(exist); }
             else { _addBuffer({ name: _basename(path), path: urlStr||path, text: t||editor.value||'', modified:false }); _switchToBuffer(buffers.length-1); }
           } else {
-            const b=currentBuffer(); if (b){ b.path = urlStr||b.path; b.name = _basename(path); b.text = t||editor.value||b.text; b.savedText = b.text; b.modified=false; try{ b._undo=[]; b._redo=[]; }catch{} }
+            const b=currentBuffer(); if (b){ b.path = urlStr||b.path; b.name = _basename(path); b.text = t||editor.value||b.text; b.savedText = b.text; b._changeTick=0; b._savedTick=0; b.modified=false; try{ b._undo=[]; b._redo=[]; }catch{} }
           }
           try{ _setTitle(); _renderTabbar(); }catch{}
           // ユーザーに不要なトーストは出さない
@@ -685,7 +701,7 @@
           if (mode === 'new'){
             _addBuffer({ name: f.name, path: null, text: txt, modified:false });
           } else {
-            const b=currentBuffer(); if (b){ b.path = null; b.name = f.name; b.text = txt; b.savedText = txt; b.modified=false; }
+            const b=currentBuffer(); if (b){ b.path = null; b.name = f.name; b.text = txt; b.savedText = txt; b._changeTick=0; b._savedTick=0; b.modified=false; }
           }
           _setTitle(); _renderTabbar();
           document.body.removeChild(inp);
@@ -759,7 +775,7 @@
     const t = txt.replace(/\r\n?/g,'\n');
     editor.value = t;
     if (buffers.length===0){ _addBuffer({ name: name||null, path: doc||null, text: t, modified:false }); }
-    else { const b=currentBuffer(); b.name = name||b.name; b.path = doc||b.path; b.text = t; b.savedText = t; b.modified=false; }
+  else { const b=currentBuffer(); b.name = name||b.name; b.path = doc||b.path; b.text = t; b.savedText = t; b._changeTick=0; b._savedTick=0; b.modified=false; }
     _setTitle(); _renderTabbar();
     // Ensure initial view is at top (avoid unintended 'G'-like position)
     try{
@@ -778,7 +794,7 @@
     const t = txt.replace(/\r\n?/g,'\n');
     editor.value = t;
     if (buffers.length===0){ _addBuffer({ name: name||null, path: doc||null, text: t, modified:false }); }
-    else { const b=currentBuffer(); if(name) b.name = name; b.path = doc; b.text = t; b.savedText = t; b.modified=false; }
+  else { const b=currentBuffer(); if(name) b.name = name; b.path = doc; b.text = t; b.savedText = t; b._changeTick=0; b._savedTick=0; b.modified=false; }
     _setTitle(); _renderTabbar();
       try{
         caretRow=0; caretCol=0; editor.scrollTop=0; _centerScrolloffOnce=false; _scrollGuardUntil = Date.now() + 800;
@@ -863,21 +879,84 @@
     // Vertically center the caret within the line's content box
     caret.style.top = (topPx + _caretYOffset) + 'px';
     caret.style.height = Math.max(1, Math.round(FONT_SIZE)) + 'px';
+    // Determine character box width at caret (full-width aware), then shrink to 90%
+    let chW = 0;
+    if (caretCol < line.length){
+      _measureSpan.textContent = line.slice(0, caretCol+1);
+      const x2 = _measureSpan.getBoundingClientRect().width;
+      chW = Math.max(0, x2 - x);
+    } else if (caretCol > 0){
+      _measureSpan.textContent = line.slice(0, Math.max(0, caretCol-1));
+      const x0 = _measureSpan.getBoundingClientRect().width;
+      chW = Math.max(0, x - x0);
+    } else {
+      _measureSpan.textContent = 'M';
+      chW = _measureSpan.getBoundingClientRect().width;
+    }
+    if (!(chW > 0)){
+      _measureSpan.textContent = 'M';
+      chW = _measureSpan.getBoundingClientRect().width;
+    }
+    const cw = Math.max(1, Math.round(chW * 0.9));
+    try{ caret.style.setProperty('--caretWidth', cw + 'px'); }catch{}
     // Apply the same remainder compensation to caret overlay container
     try{ caretLayer.style.transform = (Math.abs(rem) > 0.01) ? `translateY(${-rem}px)` : ''; }catch{}
   }
 
   // ---- Buffer/text helpers for editing ----
+  // mark current buffer as edited (bump change tick and recompute modified flag)
   function _touchBufferModified(){
     try{
       const b=currentBuffer();
       if (b){
         const now = String(editor.value||'');
-        b.text = now; // keep current working text in buffer
-        const saved = (typeof b.savedText === 'string') ? b.savedText : '';
-        b.modified = (now !== saved);
+        b.text = now;
+        b._changeTick = ((b._changeTick|0) + 1)|0;
+        b.modified = ((b._changeTick|0) !== (b._savedTick|0));
       }
       _setTitle(); _renderTabbar();
+    }catch{}
+  }
+  function _syncModifiedFromTick(){
+    try{
+      const b=currentBuffer();
+      if (b){
+        b.text = String(editor.value||'');
+        b.modified = ((b._changeTick|0) !== (b._savedTick|0));
+      }
+      _setTitle(); _renderTabbar();
+    }catch{}
+  }
+  // Convert between (row,col) and absolute offset in editor.value
+  function _offsetFromRC(r,c){
+    try{
+      const lines = _splitLines();
+      let rr = Math.max(0, Math.min(lines.length-1, r|0));
+      let cc = Math.max(0, Math.min((lines[rr]||'').length, c|0));
+      let off = 0;
+      for (let i=0;i<rr;i++){ off += (lines[i]||'').length + 1; }
+      off += cc;
+      return off;
+    }catch{ return 0; }
+  }
+  function _rcFromOffset(off){
+    try{
+      let o = Math.max(0, off|0);
+      const lines = _splitLines();
+      for (let r=0;r<lines.length;r++){
+        const len = (lines[r]||'').length;
+        if (o <= len){ return { r, c: o }; }
+        o -= (len + 1);
+      }
+      // clamp to EOF
+      const last = Math.max(0, lines.length-1);
+      return { r: last, c: (lines[last]||'').length };
+    }catch{ return { r:0, c:0 }; }
+  }
+  function _syncNativeSelectionToCaret(){
+    try{
+      const off = _offsetFromRC(caretRow, caretCol);
+      editor.setSelectionRange(off, off);
     }catch{}
   }
   function _hasAnyModifiedBuffers(){
@@ -889,8 +968,21 @@
   // ---- Undo/Redo ----
   const UNDO_LIMIT = 200;
   function _currentStacks(){ const b=currentBuffer(); return b ? b : null; }
-  function _makeSnapshot(){ return { text: String(editor.value||''), caretRow, caretCol, scrollTop: (editor.scrollTop||0) }; }
-  function _applySnapshot(s){ if (!s) return; editor.value = String(s.text||''); caretRow = Math.max(0, s.caretRow|0); caretCol = Math.max(0, s.caretCol|0); try{ editor.scrollTop = Math.max(0, s.scrollTop|0); }catch{} _touchBufferModified(); ensureScrolloff(); _repositionCaret(); updateGutter(); }
+  function _makeSnapshot(){
+    const b=currentBuffer();
+    return { text: String(editor.value||''), caretRow, caretCol, scrollTop: (editor.scrollTop||0), changeTick: (b? (b._changeTick|0) : 0) };
+  }
+  function _applySnapshot(s){
+    if (!s) return;
+    editor.value = String(s.text||'');
+    caretRow = Math.max(0, s.caretRow|0);
+    caretCol = Math.max(0, s.caretCol|0);
+    try{ editor.scrollTop = Math.max(0, s.scrollTop|0); }catch{}
+    // restore change tick from snapshot and recompute modified
+    try{ const b=currentBuffer(); if (b){ b._changeTick = (s.changeTick|0); } }catch{}
+    _syncModifiedFromTick();
+    ensureScrolloff(); _repositionCaret(); updateGutter();
+  }
   function _pushUndoSnapshot(kind){ try{ const st=_currentStacks(); if (!st) return; const snap=_makeSnapshot(); // push current state as undo checkpoint
     const u = st._undo || (st._undo=[]); u.push({ ...snap, kind: kind||null }); if (u.length>UNDO_LIMIT) u.splice(0, u.length-UNDO_LIMIT); // clear redo on new branch
     st._redo = []; }catch{} }
@@ -920,6 +1012,17 @@
     let a=_clampPos(p1), b=_clampPos(p2);
     if (_cmpPos(a,b)>0){ const t=a; a=b; b=t; }
     if (a.r===b.r && a.c===b.c) return; // nothing
+    // Capture deleted text for paste (charwise)
+    let deletedText = '';
+    if (a.r===b.r){
+      const r=a.r; const s=lines[r]||'';
+      deletedText = s.slice(a.c, b.c);
+    } else {
+      const head=(lines[a.r]||'').slice(a.c);
+      const middle = (b.r - a.r > 1) ? (lines.slice(a.r+1, b.r).join('\n') + '\n') : '';
+      const tail=(lines[b.r]||'').slice(0,b.c);
+      deletedText = head + '\n' + middle + tail;
+    }
     if (a.r===b.r){
       const r=a.r; const s=lines[r]||'';
       const next = (s.slice(0,a.c) + s.slice(b.c));
@@ -934,6 +1037,8 @@
     editor.value = lines.join('\n');
     // set caret at start of deletion
     _setCaret(a.r, a.c);
+    // Update unnamed register (charwise)
+    try{ _regUnnamed = { text: String(deletedText||''), linewise: false }; }catch{}
     _touchBufferModified();
   }
   function _deleteWholeLines(rStart, count){
@@ -944,10 +1049,13 @@
     let rs=Math.max(0, Math.min(total-1, rStart|0));
     let n=Math.max(1, count|0);
     const rEnd = Math.min(total-1, rs + n - 1);
+    // Capture deleted text (linewise)
+    const deletedBlock = lines.slice(rs, rEnd+1).join('\n');
     if (total===1 && rs===0 && rEnd===0){
       // keep single empty line
       editor.value='';
       _setCaret(0,0);
+      try{ _regUnnamed = { text: String(deletedBlock||''), linewise: true }; }catch{}
       _touchBufferModified();
       return;
     }
@@ -958,7 +1066,82 @@
     const newRow = Math.max(0, Math.min(nextLines.length-1, rs));
     editor.value = nextLines.join('\n');
     _setCaret(newRow, 0);
+    try{ _regUnnamed = { text: String(deletedBlock||''), linewise: true }; }catch{}
     _touchBufferModified();
+  }
+  function _insertTextAt(r,c,text){
+    const s = String(text||'');
+    if (!s) return { r, c };
+    const lines = _splitLines();
+    const rr = Math.max(0, Math.min(lines.length-1, r|0));
+    const line = lines[rr] || '';
+    const cc = Math.max(0, Math.min(line.length, c|0));
+    const parts = s.split('\n');
+    if (parts.length === 1){
+      // single-line insert
+      const nextLine = line.slice(0, cc) + parts[0] + line.slice(cc);
+      lines[rr] = nextLine;
+      editor.value = lines.join('\n');
+      const newC = cc + parts[0].length;
+      return { r: rr, c: newC };
+    } else {
+      // multi-line insert
+      const head = line.slice(0, cc);
+      const tail = line.slice(cc);
+      const first = head + parts[0];
+      const last  = parts[parts.length-1] + tail;
+      const mid = parts.slice(1, parts.length-1);
+      // replace current line with expanded block
+      const newLines = [];
+      for (let i=0;i<rr;i++) newLines.push(lines[i]);
+      newLines.push(first);
+      for (const m of mid) newLines.push(m);
+      newLines.push(last);
+      for (let i=rr+1;i<lines.length;i++) newLines.push(lines[i]);
+      editor.value = newLines.join('\n');
+      const newR = rr + parts.length - 1;
+      const newC = (parts[parts.length-1]||'').length;
+      return { r: newR, c: newC };
+    }
+  }
+  function _pasteCharwise(after, count){
+    const n = Math.max(1, count|0);
+    const clip = _regUnnamed && !_regUnnamed.linewise ? String(_regUnnamed.text||'') : '';
+    if (!clip) return;
+    _pushUndoSnapshot('paste');
+    let pos;
+    const line = (_splitLines()[caretRow]||'');
+    if (after){
+      // advance within line by one code point if possible; do not cross to next line here
+      let nextC = caretCol;
+      if (caretCol < line.length){ nextC = _nextIndex(line, caretCol); }
+      pos = { r: caretRow, c: nextC };
+    } else {
+      pos = { r: caretRow, c: caretCol };
+    }
+    let final = pos;
+    for (let i=0;i<n;i++){
+      final = _insertTextAt(final.r, final.c, clip);
+    }
+    _setCaret(final.r, final.c);
+    _touchBufferModified(); ensureScrolloff(); _repositionCaret(); updateGutter();
+  }
+  function _pasteLinewise(below, count){
+    const n = Math.max(1, count|0);
+    const clip = _regUnnamed && _regUnnamed.linewise ? String(_regUnnamed.text||'') : '';
+    if (!clip) return;
+    _pushUndoSnapshot('paste');
+    const lines = _splitLines();
+    const insertAt = Math.max(0, Math.min(lines.length, (below ? (caretRow+1) : caretRow)));
+    const block = clip.split('\n');
+    const toInsert = [];
+    for (let i=0;i<n;i++) toInsert.push(...block);
+    const newLines = lines.slice(0, insertAt).concat(toInsert).concat(lines.slice(insertAt));
+    editor.value = newLines.join('\n');
+    const newR = insertAt; // first inserted line
+    const col = _firstNonBlankColOf(newLines[newR]||'');
+    _setCaret(newR, col);
+    _touchBufferModified(); ensureScrolloff(); _repositionCaret(); updateGutter();
   }
   function _paragraphNextPos(startRow, count){
     const lines=_splitLines(); let r=startRow; const times=Math.max(1,count|0);
@@ -1349,7 +1532,7 @@
                 const textData = editor.value||'';
                 const ok = await _saveToURL(b.path, textData);
                 if (!ok){ toast('write failed: ' + (b.name||'')); return; }
-                try{ b.text = textData; b.savedText = textData; b.modified = false; }catch{}
+                try{ b.text = textData; b.savedText = textData; b._savedTick = (b._changeTick|0); b.modified = false; }catch{}
               } else {
                 // No path -> prompt for a save path (Save As)
                 const base = _currentDirBase();
@@ -1361,7 +1544,7 @@
                 if (!targetUrl){ toast('invalid path', 1500); return; }
                 const ok = await _saveToURL(targetUrl, editor.value||'');
                 if (!ok){ toast('write failed', 1500); return; }
-                try{ b.path = targetUrl; b.name = _basename(targetUrl); const textData = editor.value||''; b.text = textData; b.savedText = textData; b.modified=false; }catch{}
+                try{ b.path = targetUrl; b.name = _basename(targetUrl); const textData = editor.value||''; b.text = textData; b.savedText = textData; b._savedTick = (b._changeTick|0); b.modified=false; }catch{}
                 _setTitle(); _renderTabbar();
               }
             }
@@ -1448,7 +1631,7 @@
           try{
             const was = b.path||null;
             if (was !== targetUrl){ b.path = targetUrl; b.name = _basename(targetUrl); }
-            b.text = editor.value||''; b.savedText = editor.value||''; b.modified = false;
+            b.text = editor.value||''; b.savedText = editor.value||''; b._savedTick = (b._changeTick|0); b.modified = false;
           }catch{}
           _setTitle(); _renderTabbar();
           toast('written: ' + _prettyFileUrlLabel(targetUrl));
@@ -1500,7 +1683,7 @@
           try{
             const was = b.path||null;
             if (was !== targetUrl){ b.path = targetUrl; b.name = _basename(targetUrl); }
-            b.text = editor.value||''; b.savedText = editor.value||''; b.modified = false;
+            b.text = editor.value||''; b.savedText = editor.value||''; b._savedTick = (b._changeTick|0); b.modified = false;
           }catch{}
           _setTitle(); _renderTabbar();
           toast('written: ' + _prettyFileUrlLabel(targetUrl));
@@ -1731,7 +1914,13 @@
     if (modestatus) modestatus.textContent = '['+_mode+']';
     // Begin an INSERT compound edit by pushing a snapshot before edits start
     if (m==='INSERT'){
-      _pushUndoSnapshot('insert');
+      if (!_suppressInsertSnapshotOnce){
+        _pushUndoSnapshot('insert');
+      }
+      _suppressInsertSnapshotOnce = false;
+      // ensure native textarea caret matches overlay caret position
+      try{ editor && editor.focus && editor.focus(); }catch{}
+      _syncNativeSelectionToCaret();
     }
   }
 
@@ -2010,10 +2199,19 @@
     });
     editor.addEventListener('input', ()=>{
       if (_mode === 'INSERT'){
-        // centralize modified tracking
+        // centralize modified tracking (bump change tick on each input)
         _touchBufferModified();
+        // sync overlay caret to native insertion point
+        try{ const off = editor.selectionStart|0; const rc = _rcFromOffset(off); caretRow = rc.r; caretCol = rc.c; }catch{}
       }
       _exactLineLockAdjust(); _repositionCaret(); updateGutter();
+    });
+    // selection moves in INSERT mode (arrows/mouse) — keep overlay caret in sync
+    editor.addEventListener('select', ()=>{
+      if (_mode === 'INSERT'){
+        try{ const off = editor.selectionStart|0; const rc = _rcFromOffset(off); caretRow = rc.r; caretCol = rc.c; }catch{}
+        _repositionCaret(); updateGutter();
+      }
     });
     editor.addEventListener('keyup', (e)=>{ if(e.key==='Enter') ensureScrolloff(); _repositionCaret(); updateGutter(); });
     editor.addEventListener('click', ()=>{ _repositionCaret(); updateGutter(); });
@@ -2021,7 +2219,13 @@
     editor.addEventListener('keydown', (e)=>{
       if (_mode === 'CMD') return;
       if (_mode === 'INSERT'){
-        if (e.key==='Escape'){ e.preventDefault(); _setMode('NORMAL'); return; }
+        if (e.key==='Escape'){
+          e.preventDefault();
+          // on leaving INSERT, capture native caret back to overlay state
+          try{ const off = editor.selectionStart|0; const rc = _rcFromOffset(off); caretRow = rc.r; caretCol = rc.c; }catch{}
+          _setMode('NORMAL');
+          return;
+        }
         return; // テキスト入力はデフォルトに委ねる
       }
       // NORMAL
@@ -2169,6 +2373,57 @@
       if (e.key>='1' && e.key<='9' && !e.ctrlKey && !e.metaKey && !e.altKey){ e.preventDefault(); _countAcc = (_countAcc==null?0:_countAcc)*10 + parseInt(e.key,10); return; }
       if (e.key==='0' && !e.ctrlKey && !e.metaKey && !e.altKey && _countAcc!=null){ e.preventDefault(); _countAcc = _countAcc*10; return; }
       if (e.key==='i'){ e.preventDefault(); _setMode('INSERT'); return; }
+      if (e.key==='a' && !e.ctrlKey && !e.metaKey && !e.altKey){
+        e.preventDefault();
+        // move one cp right within line if possible, then enter INSERT
+        const line = (_splitLines()[caretRow]||'');
+        let nc = caretCol;
+        if (caretCol < line.length){ nc = _nextIndex(line, caretCol); }
+        _setCaret(caretRow, nc); _setMode('INSERT'); return;
+      }
+      if (e.key==='I' && !e.ctrlKey && !e.metaKey && !e.altKey){
+        e.preventDefault();
+        const line = (_splitLines()[caretRow]||'');
+        const col = _firstNonBlankColOf(line);
+        _setCaret(caretRow, col); _setMode('INSERT'); return;
+      }
+      if (e.key==='A' && !e.ctrlKey && !e.metaKey && !e.altKey){
+        e.preventDefault();
+        const len = _lineLen(caretRow);
+        _setCaret(caretRow, len); _setMode('INSERT'); return;
+      }
+      if (e.key==='o' && !e.ctrlKey && !e.metaKey && !e.altKey){
+        e.preventDefault();
+  _pushUndoSnapshot('open-below');
+  _suppressInsertSnapshotOnce = true;
+        const lines = _splitLines();
+        const rr = Math.max(0, Math.min(lines.length-1, caretRow));
+        const newLines = lines.slice(0, rr+1).concat(['']).concat(lines.slice(rr+1));
+        editor.value = newLines.join('\n');
+        _setCaret(rr+1, 0); _touchBufferModified(); ensureScrolloff(); _repositionCaret(); updateGutter(); _setMode('INSERT'); return;
+      }
+      if (e.key==='O' && !e.ctrlKey && !e.metaKey && !e.altKey){
+        e.preventDefault();
+  _pushUndoSnapshot('open-above');
+  _suppressInsertSnapshotOnce = true;
+        const lines = _splitLines();
+        const rr = Math.max(0, Math.min(lines.length-1, caretRow));
+        const newLines = lines.slice(0, rr).concat(['']).concat(lines.slice(rr));
+        editor.value = newLines.join('\n');
+        _setCaret(rr, 0); _touchBufferModified(); ensureScrolloff(); _repositionCaret(); updateGutter(); _setMode('INSERT'); return;
+      }
+      if (e.key==='p' && !e.ctrlKey && !e.metaKey && !e.altKey){
+        e.preventDefault();
+        const n=_consumeCount();
+        if (_regUnnamed && _regUnnamed.linewise) _pasteLinewise(true, n); else _pasteCharwise(true, n);
+        return;
+      }
+      if (e.key==='P' && !e.ctrlKey && !e.metaKey && !e.altKey){
+        e.preventDefault();
+        const n=_consumeCount();
+        if (_regUnnamed && _regUnnamed.linewise) _pasteLinewise(false, n); else _pasteCharwise(false, n);
+        return;
+      }
       // Undo / Redo (NORMAL)
       if (e.key==='u' && !e.ctrlKey && !e.metaKey && !e.altKey){ e.preventDefault(); _undo(); return; }
       if ((e.key==='r' && e.ctrlKey && !e.metaKey && !e.altKey) || (e.key==='R' && e.ctrlKey && !e.metaKey && !e.altKey)){

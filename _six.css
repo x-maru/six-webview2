@@ -29,7 +29,8 @@ body { font: 18px/var(--lh) Consolas, 'Courier New', monospace; overflow: hidden
 #caretLayer { position:absolute; top:0; left:var(--gw); right:0; bottom:0; pointer-events:none; }
 .caret {
 	position:absolute; width: var(--caretWidth, 2px); 
-	background: linear-gradient(to bottom, var(--caretGradStart, #ff5b5b), var(--caretGradEnd, #d90000));
+	/* Gradient: left (theme) -> right (transparent red) */
+	background: linear-gradient(to right, var(--caretGradStart, #ff5b5b), rgba(255,0,0,0.0));
 	z-index:2; animation: caret-blink 1s steps(1, end) infinite;
 }
 @keyframes caret-blink { 0%{opacity:1} 50%{opacity:0} 100%{opacity:1} }
