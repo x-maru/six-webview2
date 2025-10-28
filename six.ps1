@@ -190,10 +190,27 @@ function Start-WebView2Host([string]$Url){
   }
   if (-not ($coreDll -and $wfDll)) { return $false }
 
+  # ウィンドウアイコン: 最適な PNG を選択（256x256 を優先。なければ 512x512、1024x1024 の順）
+  $iconCandidates = @(
+    Join-Path $here "256x256.png",
+    Join-Path $here "512x512.png",
+    Join-Path $here "1024x1024.png"
+  )
+  $iconFile = $null
+  foreach($cand in $iconCandidates){ if (Test-Path $cand) { $iconFile = $cand; break } }
+  $iconLiteral = $null
+  if ($iconFile) {
+    $iconLiteral = '"' + ($iconFile -replace '\\','\\\\') + '"'
+  } else {
+    $iconLiteral = 'null'
+  }
+
   $code = @"
 using System;
 using System.Threading.Tasks;
 using System.Windows.Forms;
+using System.IO;
+using System.Drawing;
 using Microsoft.Web.WebView2.Core;
 using Microsoft.Web.WebView2.WinForms;
 
@@ -202,6 +219,8 @@ public static class SixHostApp
   private static bool _closing = false;
   private static bool _approved = false;
   private static TaskCompletionSource<bool> _tcs;
+  [System.Runtime.InteropServices.DllImport("user32.dll", SetLastError=true)]
+  private static extern bool DestroyIcon(IntPtr hIcon);
 
   public static void Run(string url)
   {
@@ -214,6 +233,20 @@ public static class SixHostApp
     form.Width = 1200; form.Height = 800;
     var wv = new WebView2(){ Dock = DockStyle.Fill };
     form.Controls.Add(wv);
+
+    // Try to set window icon: choose best available PNG (prefer 256x256)
+    try{
+      string iconPath = ICON_PATH_PLACEHOLDER;
+      if (!string.IsNullOrEmpty(iconPath) && File.Exists(iconPath)){
+        using (var bmp = new Bitmap(iconPath)){
+          IntPtr hIcon = bmp.GetHicon();
+          using (var tmp = Icon.FromHandle(hIcon)){
+            form.Icon = (Icon)tmp.Clone();
+          }
+          DestroyIcon(hIcon);
+        }
+      }
+    }catch{}
 
     form.Load += async (_, __) => {
       var env = await CoreWebView2Environment.CreateAsync();
@@ -255,6 +288,9 @@ public static class SixHostApp
   }
 }
 "@
+
+  # 置換: アイコンパスをコードへ埋め込み
+  $code = $code.Replace('ICON_PATH_PLACEHOLDER', $iconLiteral)
 
   $refs = @("System.Windows.Forms","System.Drawing", $coreDll, $wfDll)
   try {
