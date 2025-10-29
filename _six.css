@@ -56,6 +56,8 @@ body { font: var(--fontBase, 18px)/20px Consolas, 'Courier New', monospace; over
 	font-family: "Cascadia Code", "Cascadia Mono", "JetBrains Mono", "Fira Code", "Consolas", "游ゴシック Light", "Yu Gothic", "Meiryo", "MS Gothic", monospace !important;
 	font-weight: 200 !important; }
 #editor { caret-color: transparent; }
+/* Visual selection colors (native selection range) */
+#editor::selection { background: var(--selBg, cyan); color: var(--selFg, white); }
 
 /* caret overlay placeholder */
 #caretLayer { position:absolute; top:0; left:var(--gw); right:0; bottom:0; pointer-events:none; z-index: 2; }

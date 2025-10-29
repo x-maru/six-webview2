@@ -72,6 +72,11 @@
   let _lineLockActive = false;
   let _centerScrolloffOnce = false;
   let _mode = 'NORMAL';
+  // Visual mode state
+  let _visualActive = false;
+  let _visualLinewise = false;
+  let _visualAnchorR = 0;
+  let _visualAnchorC = 0;
   let _pendingNormal = null;
   let _pendingTimer = null;
   // delete operator state (for d + motion)
@@ -328,9 +333,12 @@
       setVar('gutterGradientEnd', t.gutterGradientEnd);
       setVar('gutterNumberColor', t.gutterNumberColor);
       setVar('activeLineNumberColor', t.activeLineNumberColor);
-      // Caret gradient colors (start/mid). End is fixed to rgba(255,0,0,0.0) in CSS
+  // Caret gradient colors (start/mid). End is fixed to rgba(255,0,0,0.0) in CSS
       setVar('caretGradStart', t.caretGradientStart);
       setVar('caretGradMid', t.caretGradientMid);
+  // Visual selection colors
+  setVar('selBg', t.selectionBg);
+  setVar('selFg', t.selectionFg);
       // apply persisted scale if any
       try{
         const s = localStorage.getItem('six.edScale');
@@ -1087,6 +1095,33 @@
       const off = _offsetFromRC(caretRow, caretCol);
       editor.setSelectionRange(off, off);
     }catch{}
+  }
+  function _updateVisualSelection(){
+    if (!_visualActive){ _syncNativeSelectionToCaret(); return; }
+    try{
+      if (_visualLinewise){
+        const rs = Math.min(_visualAnchorR, caretRow);
+        const re = Math.max(_visualAnchorR, caretRow);
+        const sOff = _offsetFromRC(rs, 0);
+        const eOff = _offsetFromRC(re, (_splitLines()[re]||'').length);
+        editor.setSelectionRange(sOff, eOff);
+      } else {
+        const sOff = _offsetFromRC(_visualAnchorR, _visualAnchorC);
+        const eOff = _offsetFromRC(caretRow, caretCol);
+        if (sOff <= eOff) editor.setSelectionRange(sOff, eOff); else editor.setSelectionRange(eOff, sOff);
+      }
+    }catch{}
+  }
+  function _enterVisual(linewise){
+    _visualActive = true; _visualLinewise = !!linewise;
+    _visualAnchorR = caretRow; _visualAnchorC = caretCol;
+    _setMode('VISUAL');
+    _updateVisualSelection();
+  }
+  function _exitVisual(){
+    _visualActive = false; _visualLinewise = false;
+    _setMode('NORMAL');
+    _syncNativeSelectionToCaret();
   }
   function _hasAnyModifiedBuffers(){
     try{
@@ -2445,6 +2480,69 @@
         }
         return; // テキスト入力はデフォルトに委ねる
       }
+      if (_mode === 'VISUAL'){
+        // VISUAL mode key handling
+        if (e.key==='Escape'){ e.preventDefault(); _exitVisual(); _repositionCaret(); updateGutter(); return; }
+        // toggle char/line visual
+        if (e.key==='v' && !e.ctrlKey && !e.metaKey && !e.altKey){ e.preventDefault(); _exitVisual(); _repositionCaret(); updateGutter(); return; }
+        if (e.key==='V' && !e.ctrlKey && !e.metaKey && !e.altKey){ e.preventDefault(); _visualLinewise = true; _updateVisualSelection(); return; }
+        // yank/delete selection in VISUAL
+        if (e.key==='y' && !e.ctrlKey && !e.metaKey && !e.altKey){ e.preventDefault(); if (_visualLinewise){ const rs=Math.min(_visualAnchorR, caretRow); const re=Math.max(_visualAnchorR, caretRow); _yankWholeLines(rs, re-rs+1); } else { const a={r:_visualAnchorR,c:_visualAnchorC}; const b={r:caretRow,c:caretCol}; _yankRangePos(a,b); } _exitVisual(); _repositionCaret(); updateGutter(); return; }
+        if (e.key==='d' && !e.ctrlKey && !e.metaKey && !e.altKey){ e.preventDefault(); if (_visualLinewise){ const rs=Math.min(_visualAnchorR, caretRow); const re=Math.max(_visualAnchorR, caretRow); _deleteWholeLines(rs, re-rs+1); } else { const a={r:_visualAnchorR,c:_visualAnchorC}; const b={r:caretRow,c:caretCol}; _deleteRangePos(a,b); } _exitVisual(); ensureScrolloff(); _repositionCaret(); updateGutter(); return; }
+        // Motions extend selection
+        const moveAndUpdate=(fn)=>{ fn(); ensureScrolloff(); _repositionCaret(); updateGutter(); _updateVisualSelection(); };
+        if (e.key==='j' || e.key==='ArrowDown'){ e.preventDefault(); const n=_consumeCount(); moveAndUpdate(()=>_moveCaretLines(n)); return; }
+        if (e.key==='k' || e.key==='ArrowUp'){ e.preventDefault(); const n=_consumeCount(); moveAndUpdate(()=>_moveCaretLines(-n)); return; }
+        if (e.key==='h' || e.key==='ArrowLeft'){ e.preventDefault(); const n=_consumeCount(); moveAndUpdate(()=>_moveCaretCols(-n)); return; }
+        if (e.key==='l' || e.key==='ArrowRight'){ e.preventDefault(); const n=_consumeCount(); moveAndUpdate(()=>_moveCaretCols(n)); return; }
+        if (e.key==='w' && !e.ctrlKey && !e.metaKey && !e.altKey){ e.preventDefault(); const n=_consumeCount(); moveAndUpdate(()=>_moveWordW(n)); return; }
+        if (e.key==='b' && !e.ctrlKey && !e.metaKey && !e.altKey){ e.preventDefault(); const n=_consumeCount(); moveAndUpdate(()=>_moveWordB(n)); return; }
+        if (e.key==='^'){ e.preventDefault(); const _n=_consumeCount(); const line=(_splitLines()[caretRow]||''); _setCaret(caretRow, _firstNonBlankColOf(line)); _repositionCaret(); _updateVisualSelection(); return; }
+        if (e.key==='0' && _countAcc==null){ e.preventDefault(); _setCaret(caretRow, 0); _repositionCaret(); _updateVisualSelection(); return; }
+        if (e.key==='$'){ e.preventDefault(); const n=_consumeCount(); let r=caretRow; if (n>1){ _moveCaretLines(n-1); r=caretRow; } const len=_lineLen(r); _setCaret(r, len); _repositionCaret(); updateGutter(); _updateVisualSelection(); return; }
+        if (e.key==='}'){ e.preventDefault(); const n=_consumeCount(); moveAndUpdate(()=>_moveParagraphNext(n)); return; }
+        if (e.key==='{'){ e.preventDefault(); const n=_consumeCount(); moveAndUpdate(()=>_moveParagraphPrev(n)); return; }
+        // gg / G motions in VISUAL (extend selection)
+        if (e.key==='g' && !e.ctrlKey && !e.metaKey && !e.altKey){
+          e.preventDefault();
+          if (_pendingNormal === 'g'){
+            // gg detected (with optional count for target line)
+            _clearPending();
+            const mcount = (_countAcc==null?1:_countAcc); _countAcc=null;
+            let targetRow = Math.max(0, Math.min(_totalLines()-1, (mcount>0? (mcount-1) : 0)));
+            const newCol = Math.min(caretCol, _lineLen(targetRow));
+            _setCaret(targetRow, newCol);
+            ensureScrolloff({centerOnce:true});
+            _repositionCaret(); updateGutter(); _updateVisualSelection();
+            return;
+          } else {
+            _pendingNormal = 'g';
+            if (_pendingTimer) clearTimeout(_pendingTimer);
+            _pendingTimer = setTimeout(()=>{ _pendingNormal=null; _pendingTimer=null; }, 800);
+            return;
+          }
+        }
+        if (e.key==='G' && !e.ctrlKey && !e.metaKey && !e.altKey){
+          e.preventDefault(); _clearPending();
+          const mcount = (_countAcc==null?0:_countAcc); _countAcc=null;
+          const total = _totalLines();
+          let targetRow;
+          if (mcount && mcount>0){ targetRow = Math.max(0, Math.min(total-1, mcount-1)); }
+          else { targetRow = Math.max(0, total-1); }
+          const newCol = Math.min(caretCol, _lineLen(targetRow));
+          _setCaret(targetRow, newCol);
+          ensureScrolloff({centerOnce:true, preferEOFPad:true});
+          _repositionCaret(); updateGutter(); _updateVisualSelection();
+          return;
+        }
+        // counts in VISUAL
+        if (e.key>='1' && e.key<='9' && !e.ctrlKey && !e.metaKey && !e.altKey){ e.preventDefault(); _countAcc = (_countAcc==null?0:_countAcc)*10 + parseInt(e.key,10); return; }
+        if (e.key==='0' && !e.ctrlKey && !e.metaKey && !e.altKey && _countAcc!=null){ e.preventDefault(); _countAcc = _countAcc*10; return; }
+        // ignore other insertions
+        const isPrintable = (e.key.length === 1) && !e.ctrlKey && !e.metaKey && !e.altKey;
+        if (isPrintable){ e.preventDefault(); return; }
+        return;
+      }
       // NORMAL
   // Pending yank operator: interpret next key as motion or line-wise command
   if (_pendingOp === 'y'){
@@ -2688,7 +2786,9 @@
       // numeric prefix (1-9 start/extend; 0 extends if already started)
       if (e.key>='1' && e.key<='9' && !e.ctrlKey && !e.metaKey && !e.altKey){ e.preventDefault(); _countAcc = (_countAcc==null?0:_countAcc)*10 + parseInt(e.key,10); return; }
       if (e.key==='0' && !e.ctrlKey && !e.metaKey && !e.altKey && _countAcc!=null){ e.preventDefault(); _countAcc = _countAcc*10; return; }
-      if (e.key==='i'){ e.preventDefault(); _setMode('INSERT'); return; }
+  if (e.key==='i'){ e.preventDefault(); _setMode('INSERT'); return; }
+  if (e.key==='v' && !e.ctrlKey && !e.metaKey && !e.altKey){ e.preventDefault(); _enterVisual(false); return; }
+  if (e.key==='V' && !e.ctrlKey && !e.metaKey && !e.altKey){ e.preventDefault(); _enterVisual(true); return; }
       if (e.key==='a' && !e.ctrlKey && !e.metaKey && !e.altKey){
         e.preventDefault();
         // move one cp right within line if possible, then enter INSERT

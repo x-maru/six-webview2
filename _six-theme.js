@@ -27,6 +27,9 @@ window.THEME = {
   caretWidthPx: 2,
   tabBarBg: "rgb(27,47,15)",
   tabBarFg: "rgb(0,95,31)",
+  // Visual selection default colors
+  selectionBg: "cyan",
+  selectionFg: "white",
   // Command input colors (requested: white text on black background)
   cmdInputFg: "white",
   cmdInputBg: "black"
