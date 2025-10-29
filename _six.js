@@ -221,8 +221,30 @@
   function _syncEditorMetrics(){
     try{
       const cs = window.getComputedStyle(editor);
-      const lh = parseFloat(cs && cs.lineHeight);
-      if (Number.isFinite(lh) && lh > 0) LINE_HEIGHT = lh;
+      const root = document.documentElement;
+      // Compute raw line-height from CSS variables rather than current computed line-height,
+      // because the editor's line-height uses --lhEff which we are about to override.
+      const rcs = window.getComputedStyle(root);
+      const _measureCssValueToPx = (val)=>{
+        try{
+          const el = document.createElement('div');
+          el.style.position='absolute'; el.style.visibility='hidden'; el.style.height = String(val||'0'); el.style.width='1px';
+          document.body.appendChild(el);
+          const h = el.getBoundingClientRect().height; document.body.removeChild(el);
+          return (Number.isFinite(h) && h>0) ? h : 0;
+        }catch{ return 0; }
+      };
+      // Read base vars as-is (they may be in px/rem). Fallback to sane defaults.
+      const vBase = (rcs.getPropertyValue('--lhBase')||'20px').trim();
+      const vExtra = (rcs.getPropertyValue('--lhExtraBase')||'0.4rem').trim();
+      const basePx = _measureCssValueToPx(vBase);
+      const extraPx = _measureCssValueToPx(vExtra);
+      const raw = (_edScale>0 ? (basePx + extraPx) * _edScale : (parseFloat(cs && cs.lineHeight)||20));
+      if (Number.isFinite(raw) && raw>0){
+        const snapped = Math.max(1, Math.round(raw));
+        try{ root.style.setProperty('--lhEff', snapped + 'px'); }catch{}
+        LINE_HEIGHT = snapped;
+      }
       const fs = parseFloat(cs && cs.fontSize);
       if (Number.isFinite(fs) && fs > 0) FONT_SIZE = fs;
       // Sync measurement span font to editor
