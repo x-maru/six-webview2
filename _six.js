@@ -90,6 +90,93 @@
   // suppress extra snapshot when entering INSERT immediately after o/O
   let _suppressInsertSnapshotOnce = false;
 
+  // Last search state for '/' and '?' commands (pattern, flags, direction)
+  // flags: currently only 'i' (case-insensitive) supported
+  let _lastSearch = null; // { src:string, flags:string, dir:'fwd'|'bwd' }
+  // Incremental search anchor: absolute offset captured when entering '/' or '?' CMD
+  let _incSearchAnchorOff = null; // number|null
+  let _incSearchDir = 'fwd';
+
+  // Incremental search preview overlay element (reused)
+  let _incPrevEl = null; // DOMElement or null
+  function _incPrevHide(){ try{ if (_incPrevEl && _incPrevEl.parentNode){ _incPrevEl.parentNode.removeChild(_incPrevEl); } _incPrevEl=null; }catch{ _incPrevEl=null; } }
+  function _incPrevShowAt(startOff, len){
+    try{
+      if (!(Number.isFinite(startOff) && startOff>=0)) { _incPrevHide(); return; }
+      const nlen = Math.max(0, len|0);
+      // compute row/col from absolute offset
+      const rc = _rcFromOffset(startOff|0);
+      const r = rc.r|0, c = rc.c|0;
+      const lines = _splitLines();
+      const line = String(lines[r]||'');
+      // limit to single line box for preview; clamp highlight width within this line
+      const endCol = Math.min(line.length, c + nlen);
+      // measure x positions
+      _measureSpan.textContent = line.slice(0, c);
+      const x1 = _measureSpan.getBoundingClientRect().width;
+      _measureSpan.textContent = line.slice(0, endCol);
+      let x2 = _measureSpan.getBoundingClientRect().width;
+      if (!(x2 > x1)){
+        // zero-length or unmeasurable width → hide preview (caret移動のみ)
+        _incPrevHide();
+        return;
+      }
+      // compute top (relative to current viewport top line)
+      const row1 = r + 1;
+      const topLine = _topLine();
+      const offsetLines = row1 - topLine;
+      const topPx = offsetLines * LINE_HEIGHT;
+      if (topPx < -LINE_HEIGHT || topPx > (viewport.clientHeight + LINE_HEIGHT)){
+        // offscreen; still show after ensureScrolloff/_repositionCaret re-runs
+      }
+      // ensure element
+      if (!_incPrevEl){ _incPrevEl = document.createElement('div'); _incPrevEl.className = 'incprev'; }
+      // attach to caretLayer (follows transform remainder compensation)
+      if (_incPrevEl.parentNode !== caretLayer){ try{ caretLayer.appendChild(_incPrevEl); }catch{} }
+      // position and size
+      _incPrevEl.style.left = x1 + 'px';
+      _incPrevEl.style.top = topPx + 'px';
+      _incPrevEl.style.width = Math.max(1, Math.round(x2 - x1)) + 'px';
+      _incPrevEl.style.height = Math.max(1, Math.round(LINE_HEIGHT)) + 'px';
+    }catch{ _incPrevHide(); }
+  }
+  function _incPrevUpdateForCmdValue(v){
+    try{
+      const s = String(v||'');
+      // Accept "/pat" or "?pat" with optional trailing "/i" or "?i" for flags during typing
+      // Examples: "/foo", "/foo/i", "?bar", "?bar?i" (case-insensitive)
+      const mF = s.match(/^\s*:?\s*\/(.*?)(?:\/(?:([A-Za-z]*))?)?\s*$/);
+      const mB = (!mF) ? s.match(/^\s*:?\s*\?(.*?)(?:\?(?:([A-Za-z]*))?)?\s*$/) : null;
+      if (!mF && !mB){ _incPrevHide(); return false; }
+  const dir = mF ? 'fwd' : 'bwd';
+      let pat = String((mF?mF[1]:mB[1])||'');
+      const flagsGiven = String((mF?mF[2]:mB[2])||'');
+      const flags = (/i/.test(flagsGiven)?'i':'');
+      // Do nothing on empty pattern
+      if (!pat){ _incPrevHide(); return true; }
+      // Try compile regex quickly; invalid → hide
+      let reOk = true; try{ new RegExp(pat, flags); }catch{ reOk=false; }
+      if (!reOk){ _incPrevHide(); return true; }
+      // Use stable anchor captured when entering search CMD; fallback to current caret if missing
+      const fromOff = (function(){
+        try{
+          const base = (typeof _incSearchAnchorOff === 'number' && _incSearchAnchorOff>=0) ? _incSearchAnchorOff : _offsetFromRC(caretRow, caretCol)|0;
+          return base|0;
+        }catch{ return 0; }
+      })();
+      const res = _searchFindNext(pat, flags, dir, fromOff, true);
+      if (res && Number.isFinite(res.start)){
+        // move caret to match start (live preview behavior)
+        try{ const rc = _rcFromOffset(res.start); caretRow = rc.r; caretCol = rc.c; ensureScrolloff(); _repositionCaret(); updateGutter(); }catch{}
+        // show preview highlight at current line (single-line only)
+        _incPrevShowAt(res.start, res.len);
+      } else {
+        _incPrevHide();
+      }
+      return true;
+    }catch{ _incPrevHide(); return false; }
+  }
+
   // command history (HTA-like)
   const _cmdHistory = [];
   let _cmdHistIndex = 0;        // 0.._cmdHistory.length (length means draft)
@@ -220,9 +307,9 @@
 
   function _relativeDisplayPath(full){
     if (!full) return '';
-    try {
-      const base = new URL('.', location.href).toString();
-      const u = new URL(full, base).toString();
+    try{
+      const base = _htmlBaseURL().toString();
+      const u = new URL(full, _htmlBaseURL()).toString();
       if (u.startsWith(base)) return decodeURIComponent(u.substring(base.length));
       return full;
     } catch { return full; }
@@ -306,6 +393,48 @@
     try{ const h = editor.clientHeight || viewport.clientHeight; return Math.max(1, Math.round(h/LINE_HEIGHT)); }catch{ return Math.max(1, Math.floor(viewport.clientHeight/LINE_HEIGHT)); }
   }
   function _needsHScrollReserve(){ return false; }
+
+  // ---- Search helpers (for '/', '?' and n/N) ----
+  function _searchFindNext(src, flags, dir, fromOff, wrap){
+    try{
+      const text = String(editor.value||'');
+      const n = text.length|0;
+      const reFlags = (flags && /i/.test(flags)) ? 'i' : '';
+      let startIdx = -1; let matchLen = 0;
+      if (dir === 'fwd'){
+        const off = Math.max(0, Math.min(n, (fromOff|0)));
+        const start = Math.min(n, off + 1); // move past current
+        let re = null;
+        try{ re = new RegExp(src, reFlags); }catch{ re=null; }
+        if (!re) return null;
+        const slice1 = text.slice(start);
+        const m1 = re.exec(slice1);
+        if (m1){ startIdx = start + (m1.index|0); matchLen = (m1[0]||'').length; }
+        else if (wrap !== false){
+          const m2 = re.exec(text.slice(0, start));
+          if (m2){ startIdx = (m2.index|0); matchLen = (m2[0]||'').length; }
+        }
+      } else { // 'bwd'
+        const off = Math.max(0, Math.min(n, (fromOff|0)));
+        const upto = Math.max(0, off - 1);
+        const reAll = (function(){ try{ return new RegExp(src, (reFlags+'g')); }catch{ return null; } })();
+        if (!reAll) return null;
+        let last = null; let m;
+        reAll.lastIndex = 0;
+        const s = text.slice(0, upto);
+        while ((m = reAll.exec(s))){ last = { i:m.index|0, l:(m[0]||'').length|0 }; if ((m[0]||'').length===0) reAll.lastIndex++; }
+        if (last){ startIdx = last.i; matchLen = last.l; }
+        else if (wrap !== false){
+          reAll.lastIndex = 0; last = null;
+          const s2 = text;
+          while ((m = reAll.exec(s2))){ last = { i:m.index|0, l:(m[0]||'').length|0 }; if ((m[0]||'').length===0) reAll.lastIndex++; }
+          if (last){ startIdx = last.i; matchLen = last.l; }
+        }
+      }
+      if (startIdx>=0){ return { start:startIdx, len: Math.max(0, matchLen|0) }; }
+      return null;
+    }catch{ return null; }
+  }
 
   function _applyTheme(){
     try{
@@ -1658,6 +1787,30 @@
    * runCommand (:N)
    *********************************************************/
   function runCommand(cmd){
+    // '/' and '?' — regex search with optional trailing flags (e.g., /foo/i)
+    // Accept both '/...' and ':/...' (cmdinput may prefix ':')
+    try{
+      const mF = cmd && cmd.match(/^:?\s*\/(.*?)(?:\/([A-Za-z]*))?\s*$/);
+      const mB = (!mF && cmd) ? cmd.match(/^:?\s*\?(.*?)(?:\?([A-Za-z]*))?\s*$/) : null;
+      if (mF || mB){
+        const forward = !!mF;
+        let pat = String((forward?mF[1]:mB[1])||'');
+        const flagsGiven = String((forward?mF[2]:mB[2])||'');
+        if (!pat && _lastSearch){ pat = _lastSearch.src; }
+        if (pat){
+          const dir = forward? 'fwd':'bwd';
+          const flags = (flagsGiven || (_lastSearch && _lastSearch.src===pat ? _lastSearch.flags : ''));
+          const fromOff = (function(){ try{ return _offsetFromRC(caretRow, caretCol)|0; }catch{ return 0; } })();
+          const res = _searchFindNext(pat, flags, dir, fromOff, true);
+          if (res && Number.isFinite(res.start)){
+            try{ const rc = _rcFromOffset(res.start); caretRow = rc.r; caretCol = rc.c; ensureScrolloff(); _repositionCaret(); updateGutter(); _lastSearch = { src: pat, flags: flags||'', dir }; }catch{}
+          } else {
+            toast('no match');
+          }
+          return;
+        }
+      }
+    }catch{}
     // :b [N|query] — Enter で確定（数字のみは優先）
     if (/^:b/i.test(cmd)){
       const mNum = cmd.match(/^:b\s*(\d+)\s*$/i);
@@ -2750,6 +2903,8 @@
         e.preventDefault();
         _setMode('CMD');
         _clearPending();
+        _incPrevHide();
+        _incSearchAnchorOff = null; _incSearchDir = 'fwd';
         // reset command history browsing state when entering CMD
         try{ _cmdHistBrowsing=false; _cmdHistIndex=_cmdHistory.length; _cmdHistTemp=''; }catch{}
         if (cmdinput){
@@ -2760,6 +2915,24 @@
           });
           // close interception is now bound at startup; nothing to do here
         }
+        return;
+      }
+      // '/' search prompt (enter CMD with '/' prefilled)
+      if (e.key==='/' && !e.ctrlKey && !e.metaKey && !e.altKey){
+        e.preventDefault(); _setMode('CMD'); _clearPending();
+        _incPrevHide();
+        try{ _incSearchAnchorOff = _offsetFromRC(caretRow, caretCol)|0; _incSearchDir = 'fwd'; }catch{ _incSearchAnchorOff = null; _incSearchDir='fwd'; }
+        try{ _cmdHistBrowsing=false; _cmdHistIndex=_cmdHistory.length; _cmdHistTemp=''; }catch{}
+        if (cmdinput){ cmdinput.value = '/'; Promise.resolve().then(()=>{ try{ cmdinput.focus(); const pos=(cmdinput.value||'').length; cmdinput.setSelectionRange(pos,pos); }catch{} }); }
+        return;
+      }
+      // '?' backward search prompt
+      if (e.key==='?' && !e.ctrlKey && !e.metaKey && !e.altKey){
+        e.preventDefault(); _setMode('CMD'); _clearPending();
+        _incPrevHide();
+        try{ _incSearchAnchorOff = _offsetFromRC(caretRow, caretCol)|0; _incSearchDir = 'bwd'; }catch{ _incSearchAnchorOff = null; _incSearchDir='bwd'; }
+        try{ _cmdHistBrowsing=false; _cmdHistIndex=_cmdHistory.length; _cmdHistTemp=''; }catch{}
+        if (cmdinput){ cmdinput.value = '?'; Promise.resolve().then(()=>{ try{ cmdinput.focus(); const pos=(cmdinput.value||'').length; cmdinput.setSelectionRange(pos,pos); }catch{} }); }
         return;
       }
       if (e.key==='j' || e.key==='ArrowDown'){ e.preventDefault(); const n=_consumeCount(); _moveCaretLines(n); _repositionCaret(); updateGutter(); return; }
@@ -2869,6 +3042,20 @@
         _centerScrolloffOnce = true; ensureScrolloff({centerOnce:true, preferEOFPad:true}); _repositionCaret(); updateGutter();
         return;
       }
+      // Repeat last search: n (same direction), N (reverse)
+      if ((e.key==='n' || e.key==='N') && !e.ctrlKey && !e.metaKey && !e.altKey){
+        e.preventDefault();
+        if (_lastSearch && _lastSearch.src){
+          const rev = (e.key==='N');
+          const dir = (!rev ? _lastSearch.dir : (_lastSearch.dir==='fwd'?'bwd':'fwd'));
+          const fromOff = (function(){ try{ return _offsetFromRC(caretRow, caretCol)|0; }catch{ return 0; } })();
+          const res = _searchFindNext(_lastSearch.src, _lastSearch.flags||'', dir, fromOff, true);
+          if (res && Number.isFinite(res.start)){
+            try{ const rc = _rcFromOffset(res.start); caretRow = rc.r; caretCol = rc.c; ensureScrolloff(); _repositionCaret(); updateGutter(); }catch{}
+          } else { toast('no match'); }
+        }
+        return;
+      }
       // other keys cancel pending sequences
       _clearPending(); _countAcc = null;
       // NORMALモードでは、未対応キーでのテキスト挿入を抑止
@@ -2880,6 +3067,7 @@
       cmdinput.addEventListener('keydown',(e)=>{
         if (e.key==='Enter'){
           e.preventDefault(); e.stopPropagation();
+          _incPrevHide();
           const raw = cmdinput.value.trim();
           // popup 非表示かつ先頭が :e のときは、Enter で :e の動作を確定（ファイルを開く）。
           try{
@@ -3140,6 +3328,7 @@
           setTimeout(()=>editor.focus(), 0);
         } else if (e.key==='Escape'){
           e.preventDefault(); e.stopPropagation();
+          _incPrevHide();
           // reset history browsing state on cancel
           try{ _cmdHistBrowsing=false; _cmdHistIndex=_cmdHistory.length; _cmdHistTemp=''; }catch{}
           // CMD 終了時の一瞬のスクロール揺れ（EOF 付近へ飛ぶ）を抑止するガードと座標再適用
@@ -3336,6 +3525,8 @@
         // NBSP/ゼロ幅スペースなどの不可視を除去（貼り付け時の "U\u00A0b\u00A0u..." 問題の回避）
         const vSan = vRaw.replace(/[\u200B-\u200D\u2060\u00A0]/g, '');
         const v = vSan; // keep visible spaces for parsing
+        // Incremental search preview for '/' and '?' inputs
+        try{ if (_incPrevUpdateForCmdValue(v)) { return; } }catch{}
         // :b は履歴から戻したテキストでも即ポップアップを出さない。
         // ただし " :b"（空白のみ）に戻した場合は表示する。
         try{
