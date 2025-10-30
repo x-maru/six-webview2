@@ -15,6 +15,9 @@
 	/* Incremental preview (search/replace highlight) */
 	--incPreviewBg: rgba(128,192,255,0.35);
 	--incPreviewOutline: rgba(128,192,255,0.55);
+	/* hlsearch (all matches) */
+	--hlsearchBg: rgba(255,255,0,0.35);
+	--hlsearchOutline: rgba(255,255,0,0.55);
 }
 html, body { height: 100%; margin: 0; background: var(--bodyBGColor, #0b0d12); color: #e6e6e6; }
 /* Keep global UI (tabbar/cmdbar) unaffected by editor zoom */
@@ -70,6 +73,14 @@ body { font: var(--fontBase, 18px)/20px Consolas, 'Courier New', monospace; over
 	position: absolute;
 	background: var(--incPreviewBg);
 	outline: 1px solid var(--incPreviewOutline);
+	outline-offset: -1px;
+	pointer-events: none;
+	border-radius: 2px;
+}
+.hlmatch {
+	position: absolute;
+	background: var(--hlsearchBg);
+	outline: 1px solid var(--hlsearchOutline);
 	outline-offset: -1px;
 	pointer-events: none;
 	border-radius: 2px;

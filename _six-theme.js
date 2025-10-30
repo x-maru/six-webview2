@@ -32,5 +32,11 @@ window.THEME = {
   selectionFg: "white",
   // Command input colors (requested: white text on black background)
   cmdInputFg: "white",
-  cmdInputBg: "black"
+  cmdInputBg: "black",
+  // Incremental search preview highlight (background/outline)
+  incPreviewBg: "rgba(128,192,255,0.35)",
+  incPreviewOutline: "rgba(128,192,255,0.55)",
+  // hlsearch (all matches) highlight; default to yellow
+  hlsearchBg: "rgba(255,255,0,0.35)",
+  hlsearchOutline: "rgba(255,255,0,0.55)"
 };

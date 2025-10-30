@@ -177,6 +177,96 @@
     }catch{ _incPrevHide(); return false; }
   }
 
+  // --- hlsearch (highlight all matches) ---
+  let _optHlsearch = false;          // :set hlsearch / :set nohlsearch
+  let _hlLayer = null;               // container for match rectangles
+  let _hlMatches = null;             // cached [{start,len}] for _lastSearch over current text
+
+  function _hlEnsureLayer(){
+    if (!_hlLayer){
+      const d = document.createElement('div');
+      d.style.position = 'absolute';
+      d.style.inset = '0 0 0 0';
+      d.style.pointerEvents = 'none';
+      _hlLayer = d;
+    }
+    if (_hlLayer.parentNode !== caretLayer){ try{ caretLayer.appendChild(_hlLayer); }catch{} }
+  }
+  function _hlClear(){
+    try{
+      if (_hlLayer){ while (_hlLayer.firstChild){ _hlLayer.removeChild(_hlLayer.firstChild); } }
+      // keep layer; removing/adding causes more layout churn than clearing children
+    }catch{}
+  }
+  function _recomputeHlMatches(){
+    try{
+      _hlMatches = null;
+      if (!_optHlsearch) return;
+      if (!(_lastSearch && _lastSearch.src)) return;
+      const src = String(_lastSearch.src||'');
+      const flags = String(_lastSearch.flags||'');
+      const text = String(editor.value||'');
+      let re = null; try{ re = new RegExp(src, flags.includes('g')?flags:flags+'g'); }catch{ re=null; }
+      if (!re) return;
+      const out = [];
+      let m; re.lastIndex = 0;
+      while ((m = re.exec(text))){
+        const s = (m.index|0);
+        const l = ((m[0]||'').length|0);
+        if (l > 0) out.push({ start:s, len:l });
+        else { re.lastIndex++; }
+        // bail-out guard for extreme cases
+        if (out.length > 20000) break;
+      }
+      _hlMatches = out;
+    }catch{ _hlMatches = null; }
+  }
+  function _renderHlMatchesVisible(){
+    try{
+      if (!_optHlsearch){ _hlClear(); return; }
+      if (!(_lastSearch && _lastSearch.src)){ _hlClear(); return; }
+      if (!_hlMatches) return; // no matches or not computed yet
+      _hlEnsureLayer();
+      // visible row range
+      const topLine = _topLine();
+      const vis = _visibleLinesExact();
+      const endLine = topLine + vis - 1;
+      // clear previous children
+      _hlClear();
+      const lines = _splitLines();
+      for (const m of _hlMatches){
+        const rc = _rcFromOffset(m.start|0);
+        const r = rc.r|0, c = rc.c|0;
+        const row1 = r + 1;
+        if (row1 < topLine || row1 > endLine) continue;
+        const line = String(lines[r]||'');
+        const endCol = Math.min(line.length, c + (m.len|0));
+        // measure x positions
+        _measureSpan.textContent = line.slice(0, c);
+        const x1 = _measureSpan.getBoundingClientRect().width;
+        _measureSpan.textContent = line.slice(0, endCol);
+        const x2 = _measureSpan.getBoundingClientRect().width;
+        if (!(x2 > x1)) continue;
+        const topPx = (row1 - topLine) * LINE_HEIGHT;
+        const el = document.createElement('div');
+        el.className = 'hlmatch';
+        el.style.left = x1 + 'px';
+        el.style.top = topPx + 'px';
+        el.style.width = Math.max(1, Math.round(x2 - x1)) + 'px';
+        el.style.height = Math.max(1, Math.round(LINE_HEIGHT)) + 'px';
+        _hlLayer.appendChild(el);
+      }
+    }catch{}
+  }
+  function _updateHlsearchFull(){
+    if (!_optHlsearch || !(_lastSearch && _lastSearch.src)){
+      _hlClear();
+      return;
+    }
+    _recomputeHlMatches();
+    _renderHlMatchesVisible();
+  }
+
   // command history (HTA-like)
   const _cmdHistory = [];
   let _cmdHistIndex = 0;        // 0.._cmdHistory.length (length means draft)
@@ -490,6 +580,12 @@
   // Visual selection colors
   setVar('selBg', t.selectionBg);
   setVar('selFg', t.selectionFg);
+  // Incremental search preview highlight
+  setVar('incPreviewBg', t.incPreviewBg);
+  setVar('incPreviewOutline', t.incPreviewOutline);
+  // hlsearch (all matches) highlight
+  setVar('hlsearchBg', t.hlsearchBg);
+  setVar('hlsearchOutline', t.hlsearchOutline);
       // apply persisted scale if any
       try{
         const s = localStorage.getItem('six.edScale');
@@ -514,6 +610,7 @@
     ensureScrolloff();
     _repositionCaret();
     updateGutter();
+    _renderHlMatchesVisible();
     _showZoomHUD();
   }
 
@@ -621,6 +718,7 @@
       _centerScrolloffOnce = true; ensureScrolloff({centerOnce:true});
       _repositionCaret(); updateGutter();
       _setTitle(); _renderTabbar();
+      _updateHlsearchFull();
     }catch{}
   }
 
@@ -1187,6 +1285,8 @@
         _lastCaretRow = caretRow; _lastCaretCol = caretCol;
       }
     }catch{}
+    // keep hlsearch overlay in sync with caret/scroll
+    _renderHlMatchesVisible();
   }
 
   // ---- Buffer/text helpers for editing ----
@@ -1825,7 +1925,7 @@
           const fromOff = (function(){ try{ return _offsetFromRC(caretRow, caretCol)|0; }catch{ return 0; } })();
           const res = _searchFindNext(pat, flags, dir, fromOff, true);
           if (res && Number.isFinite(res.start)){
-            try{ const rc = _rcFromOffset(res.start); caretRow = rc.r; caretCol = rc.c; ensureScrolloff(); _repositionCaret(); updateGutter(); _lastSearch = { src: pat, flags: flags||'', dir }; }catch{}
+            try{ const rc = _rcFromOffset(res.start); caretRow = rc.r; caretCol = rc.c; ensureScrolloff(); _repositionCaret(); updateGutter(); _lastSearch = { src: pat, flags: flags||'', dir }; _updateHlsearchFull(); }catch{}
           } else {
             toast('no match');
           }
@@ -1967,6 +2067,16 @@
       const n = parseInt(m[1],10);
       if (!Number.isNaN(n)) window.six.setScrolloff(n);
       return;
+    }
+    // :set hlsearch / :set nohlsearch / :set hlsearch!
+    if (/^:set\s+hlsearch\s*$/i.test(cmd)){
+      _optHlsearch = true; _updateHlsearchFull(); toast('hlsearch: on', 900); return;
+    }
+    if (/^:set\s+nohlsearch\s*$/i.test(cmd)){
+      _optHlsearch = false; _updateHlsearchFull(); toast('hlsearch: off', 900); return;
+    }
+    if (/^:set\s+hlsearch!\s*$/i.test(cmd)){
+      _optHlsearch = !_optHlsearch; _updateHlsearchFull(); toast('hlsearch: ' + (_optHlsearch?'on':'off'), 900); return;
     }
     // :wqa[!] [path?] — write all & quit (use previous :wq behavior)
     const wqam = cmd.match(/^:(wqa!?)(?:\s*(.*))?$/i);
@@ -2587,7 +2697,7 @@
       }catch{}
       // Hide mouse cursor when visible range changes shortly after caret moved
       if ((Date.now() - _lastCaretMovedAt) < 120){ _hideCursor(); }
-      _repositionCaret(); updateGutter();
+      _repositionCaret(); updateGutter(); _renderHlMatchesVisible();
     });
   };
   viewport.addEventListener('scroll', scheduleScrollRender);
@@ -2623,7 +2733,7 @@
         try{ const off = editor.selectionStart|0; const rc = _rcFromOffset(off); caretRow = rc.r; caretCol = rc.c; }catch{}
         // _touchBufferModified already hides cursor; redundant call removed
       }
-      _exactLineLockAdjust(); _repositionCaret(); updateGutter();
+      _exactLineLockAdjust(); _repositionCaret(); updateGutter(); _updateHlsearchFull();
     });
     // Mouse click: move caret to clicked position in NORMAL mode
     const syncCaretFromSelection = ()=>{
@@ -2642,7 +2752,7 @@
     });
     editor.addEventListener('keyup', (e)=>{ if(e.key==='Enter') ensureScrolloff(); _repositionCaret(); updateGutter(); });
     editor.addEventListener('click', ()=>{ _repositionCaret(); updateGutter(); });
-  window.addEventListener('resize', ()=>{ _syncEditorMetrics(); clampViewportExactLines(); _exactLineLockAdjust(); ensureScrolloff(); _repositionCaret(); updateGutter(); });
+  window.addEventListener('resize', ()=>{ _syncEditorMetrics(); clampViewportExactLines(); _exactLineLockAdjust(); ensureScrolloff(); _repositionCaret(); updateGutter(); _renderHlMatchesVisible(); });
     editor.addEventListener('keydown', (e)=>{
       if (_mode === 'CMD') return;
       if (_mode === 'INSERT'){
@@ -3073,7 +3183,7 @@
           const fromOff = (function(){ try{ return _offsetFromRC(caretRow, caretCol)|0; }catch{ return 0; } })();
           const res = _searchFindNext(_lastSearch.src, _lastSearch.flags||'', dir, fromOff, true);
           if (res && Number.isFinite(res.start)){
-            try{ const rc = _rcFromOffset(res.start); caretRow = rc.r; caretCol = rc.c; ensureScrolloff(); _repositionCaret(); updateGutter(); }catch{}
+            try{ const rc = _rcFromOffset(res.start); caretRow = rc.r; caretCol = rc.c; ensureScrolloff(); _repositionCaret(); updateGutter(); _renderHlMatchesVisible(); }catch{}
           } else { toast('no match'); }
         }
         return;
@@ -3183,21 +3293,40 @@
                   }
                   // 追加仕様(#176): 正確一致が無くても、先頭一致候補が1つだけならそれを確定対象にする
                   const startsWith = (name,q2)=> caseSensitive ? name.startsWith(q2) : name.toLowerCase().startsWith(q2.toLowerCase());
+                  let usedOne = false;
                   const cand = (_fileEntries||[]).filter(e=> e && !e._up && startsWith(String(e.name||''), q));
-                  if (cand.length === 1){
-                    const one = cand[0];
+                  const tryOpenEntry = (one)=>{
+                    if (!one) return false;
                     if (one.isDir){
+                      // ドリルダウン（補完専用）
                       _fileJustNavAt = Date.now(); _fileNavRetryCount = 0; _fileFilter = ''; _fileSelMuted = false;
                       _fileTypedDirRaw = (_fileTypedDirRaw||'') + String(one.name||'') + '/';
                       if (cmdinput){ cmdinput.value=':e ' + _collapseDotDotPath(_fileTypedDirRaw); try { cmdinput.dispatchEvent(new Event('input', { bubbles:true })); } catch {} }
-                      return;
+                      return true;
                     } else {
                       _loadFromPath(one.url, null, {mode:'new'});
                       try{ const hist=':e ' + _collapseDotDotPath(String(_fileTypedDirRaw||'') + String(one.name||'')); _cmdHistoryMaybePush(hist); }catch{}
                       _filePopupHide(); _bufPopupHide(); _setMode('NORMAL'); cmdinput.value=''; setTimeout(()=>editor.focus(), 0);
-                      return;
+                      return true;
                     }
+                  };
+                  if (cand.length === 1){
+                    if (tryOpenEntry(cand[0])) return;
                   }
+                  // 予防的なフォールバック: 表示リスト側からの startsWith 判定
+                  try{
+                    const vis = _filePopupComputeList().filter(e=> e && !e._up && startsWith(String(e.name||''), q));
+                    if (vis.length === 1){ if (tryOpenEntry(vis[0])) return; }
+                  }catch{}
+                  // さらに選択中の項目が startsWith に合致しファイルならそれを優先確定
+                  try{
+                    const listNow = _filePopupComputeList();
+                    const selNow = Math.max(0, Math.min(listNow.length-1, _fileSel));
+                    const itNow = listNow[selNow];
+                    if (itNow && !itNow.isDir && !itNow._up && startsWith(String(itNow.name||''), q)){
+                      if (tryOpenEntry(itNow)) return;
+                    }
+                  }catch{}
                   // 未一致 → 入力優先で開く（無ければ新規）
                   (async()=>{
                     const ok = await _loadFromPath(q, _fileBaseURL, { silentOnFail:true, mode:'new' });
