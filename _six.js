@@ -30,6 +30,10 @@
   let _lastCaretCol = -1;
   // track last time caret moved (for distinguishing caret-induced scroll vs manual scroll)
   let _lastCaretMovedAt = 0;
+  // scrolloff pause control: temporarily suppress ensureScrolloff after search confirm
+  let _scrolloffPaused = false;
+  let _scrolloffPauseAnchorR = -1;
+  let _scrolloffPauseAnchorC = -1;
   // global mouse cursor visibility state and helpers (used across modules)
   let _cursorHidden = false;
   const _hideCursor = ()=>{ try{ if (!_cursorHidden){ document.body.classList.add('hide-cursor'); _cursorHidden=true; } }catch{} };
@@ -272,6 +276,31 @@
   let _cmdHistIndex = 0;        // 0.._cmdHistory.length (length means draft)
   let _cmdHistBrowsing = false; // true when navigating history in cmdinput
   let _cmdHistTemp = '';        // current draft while browsing
+
+  // search history for '/' and '?' (separate from command history)
+  const _searchHistory = [];
+  let _searchHistIndex = 0;         // 0.._searchHistory.length (length means draft)
+  let _searchHistBrowsing = false;  // true when navigating search history in cmdinput
+  let _searchHistTemp = '';         // current draft while browsing
+
+  function _searchHistoryMaybePush(s){
+    try{
+      // Normalize: trim and ensure starts with '/' or '?'
+      let v = String(s||'').trim();
+      if (!v) return;
+      // Allow optional leading ':'
+      v = v.replace(/^:\s*/, '');
+    // Require '/pat' or '?pat' with non-empty pattern (flags optional)
+    if (!/^[\/?].+/.test(v)) return;
+      const last = _searchHistory.length ? _searchHistory[_searchHistory.length-1] : null;
+      if (last === v) return; // skip identical consecutive
+      _searchHistory.push(v);
+    }catch{}
+    // reset browsing state after submit
+    _searchHistIndex = _searchHistory.length;
+    _searchHistBrowsing = false;
+    _searchHistTemp = '';
+  }
 
   function _cmdHistoryMaybePush(s){
     try{
@@ -1283,6 +1312,14 @@
         }
         _lastCaretMovedAt = Date.now();
         _lastCaretRow = caretRow; _lastCaretCol = caretCol;
+        // If scrolloff is paused due to a just-confirmed search, resume it
+        // when the user moves the caret away from the confirm anchor.
+        if (_scrolloffPaused){
+          if (caretRow !== _scrolloffPauseAnchorR || caretCol !== _scrolloffPauseAnchorC){
+            _scrolloffPaused = false;
+            _scrolloffPauseAnchorR = -1; _scrolloffPauseAnchorC = -1;
+          }
+        }
       }
     }catch{}
     // keep hlsearch overlay in sync with caret/scroll
@@ -1650,6 +1687,9 @@
    *********************************************************/
   let _scrollGuardUntil = 0; // temporary guard to suppress auto scroll adjustments
   function ensureScrolloff(opts={}){
+    // If paused (e.g., right after '/word' confirm), skip any automatic
+    // re-centering/adjustment. This resumes on next explicit caret move.
+    if (_scrolloffPaused) return;
     try{ if (Date.now() < _scrollGuardUntil) return; }catch{}
     const linesTotal = _totalLines();
     const vis = _visibleLinesExact();
@@ -1935,7 +1975,15 @@
             try{
               const rc = _rcFromOffset(res.start);
               caretRow = rc.r; caretCol = rc.c;
-              ensureScrolloff(); _repositionCaret(); updateGutter();
+              // Keep the current viewport stable while syncing the native selection
+              // to the overlay caret. Setting selection can auto-scroll the textarea.
+              const stPrev = (editor.scrollTop||0);
+              _syncNativeSelectionToCaret();
+              try{ editor.scrollTop = stPrev; }catch{}
+              // Do NOT scroll here even if scrolloff would normally re-center.
+              // The match is visible thanks to incremental preview; pause once.
+              _scrolloffPaused = true; _scrolloffPauseAnchorR = rc.r; _scrolloffPauseAnchorC = rc.c;
+              _repositionCaret(); updateGutter();
               _lastSearch = { src: pat, flags: flags||'', dir };
               _updateHlsearchFull();
             }catch{}
@@ -3211,7 +3259,16 @@
           const fromOff = (function(){ try{ return _offsetFromRC(caretRow, caretCol)|0; }catch{ return 0; } })();
           const res = _searchFindNext(_lastSearch.src, _lastSearch.flags||'', dir, fromOff, true);
           if (res && Number.isFinite(res.start)){
-            try{ const rc = _rcFromOffset(res.start); caretRow = rc.r; caretCol = rc.c; ensureScrolloff(); _repositionCaret(); updateGutter(); _renderHlMatchesVisible(); }catch{}
+            try{
+              const rc = _rcFromOffset(res.start);
+              caretRow = rc.r; caretCol = rc.c;
+              // The first search confirm pauses scrolloff once (#280). For repeats (n/N),
+              // resume scrolloff immediately so the next match is brought into view even
+              // if it's currently off-screen (#283).
+              _scrolloffPaused = false; _scrolloffPauseAnchorR = -1; _scrolloffPauseAnchorC = -1;
+              ensureScrolloff();
+              _repositionCaret(); updateGutter(); _renderHlMatchesVisible();
+            }catch{}
           } else { toast('no match'); }
         }
         return;
@@ -3229,6 +3286,22 @@
           e.preventDefault(); e.stopPropagation();
           _incPrevHide();
           const raw = cmdinput.value.trim();
+          // If this is a search (/ or ?), push to search history (not cmd history)
+          try{
+            const normCmd = (raw.startsWith(':')?raw:(':'+raw));
+            if (/^:\s*[\/?].+/.test(normCmd)){
+              // store normalized '/...' or '?...' form
+              const store = normCmd.replace(/^:\s*/, '');
+              _searchHistoryMaybePush(store);
+              // Delegate to runCommand and exit early
+              runCommand(normCmd);
+              cmdinput.value = '';
+              _setMode('NORMAL');
+              _bufPopupHide();
+              setTimeout(()=>editor.focus(), 0);
+              return;
+            }
+          }catch{}
           // popup 非表示かつ先頭が :e のときは、Enter で :e の動作を確定（ファイルを開く）。
           try{
             if (!_filePopupVisible()){
@@ -3510,6 +3583,7 @@
           _incPrevHide();
           // reset history browsing state on cancel
           try{ _cmdHistBrowsing=false; _cmdHistIndex=_cmdHistory.length; _cmdHistTemp=''; }catch{}
+          try{ _searchHistBrowsing=false; _searchHistIndex=_searchHistory.length; _searchHistTemp=''; }catch{}
           // CMD 終了時の一瞬のスクロール揺れ（EOF 付近へ飛ぶ）を抑止するガードと座標再適用
           let st = editor.scrollTop, cr = caretRow, cc = caretCol;
           let selS = 0, selE = 0; try{ selS = editor.selectionStart; selE = editor.selectionEnd; }catch{}
@@ -3675,24 +3749,42 @@
             const delta = (e.key==='PageDown')?10 : (e.key==='PageUp')?-10 : (e.key==='ArrowDown'?1:-1);
             _filePopupMove(delta);
           } else {
-            // command history navigation (ArrowUp/ArrowDown only)
+            // history navigation: use search history when input begins with '/' or '?', otherwise command history
             if (e.key==='PageUp' || e.key==='PageDown') return; // 履歴では無効
             e.preventDefault(); e.stopPropagation();
             try{
-              const n = _cmdHistory.length;
-              if (!_cmdHistBrowsing){ _cmdHistTemp = cmdinput.value; _cmdHistIndex = n; _cmdHistBrowsing = true; }
-              if (e.key==='ArrowUp'){
-                _cmdHistIndex = Math.max(0, _cmdHistIndex - 1);
-              } else if (e.key==='ArrowDown'){
-                _cmdHistIndex = Math.min(n, _cmdHistIndex + 1);
-              }
-              if (_cmdHistIndex === n){
-                _cmdHistBrowsing = false; // back to draft
-                cmdinput.value = _cmdHistTemp;
+              const curVal = String(cmdinput.value||'');
+              const isSearchInput = /^\s*:?[\/?]/.test(curVal);
+              if (isSearchInput){
+                const nS = _searchHistory.length;
+                if (!_searchHistBrowsing){ _searchHistTemp = curVal; _searchHistIndex = nS; _searchHistBrowsing = true; }
+                if (e.key==='ArrowUp'){
+                  _searchHistIndex = Math.max(0, _searchHistIndex - 1);
+                } else if (e.key==='ArrowDown'){
+                  _searchHistIndex = Math.min(nS, _searchHistIndex + 1);
+                }
+                if (_searchHistIndex === nS){
+                  _searchHistBrowsing = false; // back to draft
+                  cmdinput.value = _searchHistTemp;
+                } else {
+                  cmdinput.value = _searchHistory[_searchHistIndex] || '';
+                }
               } else {
-                cmdinput.value = _cmdHistory[_cmdHistIndex] || '';
+                const n = _cmdHistory.length;
+                if (!_cmdHistBrowsing){ _cmdHistTemp = curVal; _cmdHistIndex = n; _cmdHistBrowsing = true; }
+                if (e.key==='ArrowUp'){
+                  _cmdHistIndex = Math.max(0, _cmdHistIndex - 1);
+                } else if (e.key==='ArrowDown'){
+                  _cmdHistIndex = Math.min(n, _cmdHistIndex + 1);
+                }
+                if (_cmdHistIndex === n){
+                  _cmdHistBrowsing = false; // back to draft
+                  cmdinput.value = _cmdHistTemp;
+                } else {
+                  cmdinput.value = _cmdHistory[_cmdHistIndex] || '';
+                }
               }
-              // move caret to end and propagate input (to trigger popups if needed)
+              // move caret to end and propagate input (to trigger preview/popups if needed)
               try{ const pos=(cmdinput.value||'').length; cmdinput.setSelectionRange(pos,pos); }catch{}
               try { cmdinput.dispatchEvent(new Event('input', { bubbles:true })); } catch {}
             }catch{}
