@@ -103,11 +103,23 @@
 
   // Incremental search preview overlay element (reused)
   let _incPrevEl = null; // DOMElement or null
-  function _incPrevHide(){ try{ if (_incPrevEl && _incPrevEl.parentNode){ _incPrevEl.parentNode.removeChild(_incPrevEl); } _incPrevEl=null; }catch{ _incPrevEl=null; } }
+  let _incPrevLastStart = null; // number|null
+  let _incPrevLastLen = 0;
+  // Sticky preview for :s — keep previous match position while pattern grows if it still matches
+  let _incPrevStickyOff = null; // number|null
+  let _incPrevStickySrc = '';
+  function _incPrevHide(){ try{ if (_incPrevEl && _incPrevEl.parentNode){ _incPrevEl.parentNode.removeChild(_incPrevEl); } _incPrevEl=null; }catch{ _incPrevEl=null; } _incPrevLastStart=null; _incPrevLastLen=0; }
+  function _incPrevRefresh(){
+    if (_incPrevEl && _incPrevLastStart!=null){
+      _incPrevShowAt(_incPrevLastStart, _incPrevLastLen);
+    }
+  }
   function _incPrevShowAt(startOff, len){
     try{
       if (!(Number.isFinite(startOff) && startOff>=0)) { _incPrevHide(); return; }
       const nlen = Math.max(0, len|0);
+      _incPrevLastStart = (startOff|0);
+      _incPrevLastLen = nlen;
       // compute row/col from absolute offset
       const rc = _rcFromOffset(startOff|0);
       const r = rc.r|0, c = rc.c|0;
@@ -151,11 +163,17 @@
       // Examples: "/foo", "/foo/i", "?bar", "?bar?i" (case-insensitive)
       const mF = s.match(/^\s*:?\s*\/(.*?)(?:\/(?:([A-Za-z]*))?)?\s*$/);
       const mB = (!mF) ? s.match(/^\s*:?\s*\?(.*?)(?:\?(?:([A-Za-z]*))?)?\s*$/) : null;
-      if (!mF && !mB){ _incPrevHide(); return false; }
-  const dir = mF ? 'fwd' : 'bwd';
-      let pat = String((mF?mF[1]:mB[1])||'');
-      const flagsGiven = String((mF?mF[2]:mB[2])||'');
+      // Also accept :s and %:s incremental preview on the search part (before replacement)
+      const mS = (!mF && !mB) ? s.match(/^\s*:?(%?)\s*s\/(.*?)(?:\/|$)/i) : null;
+      if (!mF && !mB && !mS){ _incPrevHide(); return false; }
+      const dir = mF ? 'fwd' : (mB ? 'bwd' : 'fwd');
+      let pat = String((mF?mF[1]:(mB?mB[1]:(mS?mS[2]:'')))||'');
+      const flagsGiven = String((mF?mF[2]:(mB?mB[2]:''))||'');
       const flags = (/i/.test(flagsGiven)?'i':'');
+      // For :s incremental preview: capture a stable anchor once at first pattern detection
+      if (mS && !(_incSearchAnchorOff>=0)){
+        try{ _incSearchAnchorOff = _offsetFromRC(caretRow, caretCol)|0; }catch{ _incSearchAnchorOff=null; }
+      }
       // Do nothing on empty pattern
       if (!pat){ _incPrevHide(); return true; }
       // Try compile regex quickly; invalid → hide
@@ -168,14 +186,40 @@
           return base|0;
         }catch{ return 0; }
       })();
-      const res = _searchFindNext(pat, flags, dir, fromOff, true);
+      // Prefer sticky position for :s (and :%s) if the previous match still
+      // satisfies the refined pattern. Use an anchored check at the exact
+      // previous start offset to avoid hopping to later candidates while typing.
+      let res = null;
+      if (mS && _incPrevStickyOff!=null){
+        try{
+          const text = String(editor.value||'');
+          const off = (_incPrevStickyOff|0);
+          if (off >= 0 && off <= text.length){
+            const tail = text.slice(off);
+            // Anchor the pattern at beginning of the tail to ensure we only
+            // accept a match that starts at the same offset as before.
+            const reStick = new RegExp('^(?:' + pat + ')', flags);
+            const mm = reStick.exec(tail);
+            if (mm){
+              const l = ((mm[0]||'').length|0);
+              if (l > 0){ res = { start: off, len: l }; }
+            }
+          }
+        }catch{}
+      }
+      if (!res){
+        res = _searchFindNext(pat, flags, dir, fromOff, true);
+      }
       if (res && Number.isFinite(res.start)){
         // move caret to match start (live preview behavior)
         try{ const rc = _rcFromOffset(res.start); caretRow = rc.r; caretCol = rc.c; ensureScrolloff(); _repositionCaret(); updateGutter(); }catch{}
         // show preview highlight at current line (single-line only)
         _incPrevShowAt(res.start, res.len);
+        // update sticky state for :s
+        if (mS){ _incPrevStickyOff = res.start|0; _incPrevStickySrc = String(pat||''); }
       } else {
         _incPrevHide();
+        if (mS){ _incPrevStickyOff = null; _incPrevStickySrc=''; }
       }
       return true;
     }catch{ _incPrevHide(); return false; }
@@ -270,6 +314,10 @@
     _recomputeHlMatches();
     _renderHlMatchesVisible();
   }
+
+  // When true, ensureScrolloff will skip making automatic adjustments.
+  // Used to suppress viewport jumps while a modal (confirm) is shown.
+  let _suppressScrollDuringModal = false;
 
   // command history (HTA-like)
   const _cmdHistory = [];
@@ -1687,9 +1735,11 @@
    *********************************************************/
   let _scrollGuardUntil = 0; // temporary guard to suppress auto scroll adjustments
   function ensureScrolloff(opts={}){
-    // If paused (e.g., right after '/word' confirm), skip any automatic
-    // re-centering/adjustment. This resumes on next explicit caret move.
+    // If paused (e.g., right after '/word' confirm) or a modal is open and
+    // we're suppressing scroll adjustments, skip any automatic re-centering/adjustment.
+    // This resumes on next explicit caret move or when suppression is cleared.
     if (_scrolloffPaused) return;
+    if (_suppressScrollDuringModal) return;
     try{ if (Date.now() < _scrollGuardUntil) return; }catch{}
     const linesTotal = _totalLines();
     const vis = _visibleLinesExact();
@@ -1948,7 +1998,7 @@
   /*********************************************************
    * runCommand (:N)
    *********************************************************/
-  function runCommand(cmd){
+  async function runCommand(cmd){
     // '/' and '?' — regex search with optional trailing flags (e.g., /foo/i)
     // Accept both '/...' and ':/...' (cmdinput may prefix ':')
     try{
@@ -1994,6 +2044,239 @@
           try{ _incSearchAnchorOff = null; }catch{}
           return;
         }
+      }
+    }catch{}
+
+    // :s and :%s — substitute, with flags [g][i][c]
+    try{
+      const ms = cmd && cmd.match(/^:?\s*(%?)\s*s(?:ubstitute)?\/(.*?)\/(.*?)(?:\/([A-Za-z]*))?\s*$/i);
+      if (ms){
+        const isAll = !!ms[1];
+        const pat = String(ms[2]||'');
+        const repl = String(ms[3]||'');
+        const flagsGiven = String(ms[4]||'');
+        if (!pat){ toast('empty pattern'); return; }
+        let reFlags = '';
+        if (/i/.test(flagsGiven)) reFlags += 'i';
+        // We'll use a global regex for scan; per-line non-g behavior is handled manually
+        let reAll = null; try{ reAll = new RegExp(pat, reFlags+'g'); }catch{ reAll=null; }
+        if (!reAll){ toast('invalid pattern'); return; }
+        const wantGlobalPerLine = /g/.test(flagsGiven);
+        const needConfirm = /c/.test(flagsGiven);
+
+        const orig = String(editor.value||'');
+        // Push undo snapshot once (compound)
+        _pushUndoSnapshot('substitute');
+
+        // Helper to preview a match in current evolving text without causing visible scroll
+        function previewAt(start,len, textForPreview){
+          try{
+            const stKeep = (editor && typeof editor.scrollTop === 'number') ? editor.scrollTop : 0;
+            editor.value = textForPreview; // show live text for correct measurement
+            try{ editor.scrollTop = stKeep; }catch{}
+            const rc = _rcFromOffset(start);
+            caretRow = rc.r; caretCol = rc.c;
+            // Sync native selection to overlay caret, but immediately restore scrollTop
+            try{ const stSel = editor.scrollTop; _syncNativeSelectionToCaret(); editor.scrollTop = stSel; }catch{}
+            // ensureScrolloff() is suppressed during modal by caller, but safe to call
+            ensureScrolloff();
+            _repositionCaret(); updateGutter();
+            _incPrevShowAt(start, len);
+          }catch{}
+        }
+
+        let replaced = 0;
+        let firstReplaceStart = -1;
+
+        if (isAll){
+          // Whole buffer
+          let text = orig;
+          let acceptAll = false;
+          const seenLineFirst = new Set();
+          // Decision stack for step-back undo (store state before a decision is made)
+          const _decStack = [];
+          reAll.lastIndex = 0; let m;
+          while ((m = reAll.exec(text))){
+            const start = m.index|0; const len = ((m[0]||'').length|0); if (!(len>0)) { reAll.lastIndex++; continue; }
+            // Per-line non-g: only first per line
+            let row=0; try{ row = _rcFromOffset(start).r|0; }catch{}
+            if (!wantGlobalPerLine){ if (seenLineFirst.has(row)) continue; seenLineFirst.add(row); }
+            let doReplace = true;
+            if (needConfirm && !acceptAll){
+              // count remaining if All now
+              const countRemaining = (()=>{
+                try{
+                  const tempSeen = new Set(seenLineFirst);
+                  const rc = new RegExp(pat, reFlags+'g');
+                  rc.lastIndex = start; // include current match
+                  let cnt = 0; let mm;
+                  while ((mm = rc.exec(text))){
+                    const st = (mm.index|0); const ln = ((mm[0]||'').length|0); if (!(ln>0)){ rc.lastIndex++; continue; }
+                    let r0=0; try{ r0 = _rcFromOffset(st).r|0; }catch{}
+                    if (!wantGlobalPerLine){ if (tempSeen.has(r0)) continue; tempSeen.add(r0); }
+                    cnt++;
+                  }
+                  return cnt|0;
+                }catch{ return 0; }
+              })();
+              // Push snapshot before asking (for step-back undo)
+              _decStack.push({
+                text,
+                resumeIndex: start,
+                replacedBefore: replaced,
+                firstReplaceStartBefore: firstReplaceStart,
+                seenLineFirst: new Set(seenLineFirst)
+              });
+              // Suppress automatic scroll adjustments while the confirm modal is shown
+              // to avoid viewport jumps when the modal opens.
+              const stBeforeModal = (editor && typeof editor.scrollTop === 'number') ? editor.scrollTop : 0;
+              try{
+                _suppressScrollDuringModal = true;
+                // Also suppress scroll snapping while modal is up
+                try{ _zoomGuardUntil = Date.now() + 2000; }catch{}
+                previewAt(start, len, text);
+                const cmdLabel = ':' + (isAll? '%s' : 's') + '/' + pat + '/' + repl + '/' + flagsGiven;
+                const ch = await _subConfirmModal((countRemaining>0? (countRemaining+" matches left.\n") : '') + 'Replace this match?', { cmdLabel, canUndo: (_decStack.length>=2) });
+                if (ch==='q'){ _incPrevHide(); break; }
+                else if (ch==='u'){
+                  // Step back to previous decision (if any)
+                  _incPrevHide();
+                  // discard the snapshot for current candidate
+                  _decStack.pop();
+                  const prev = _decStack.pop();
+                  if (prev){
+                    text = prev.text;
+                    replaced = prev.replacedBefore|0;
+                    firstReplaceStart = (prev.firstReplaceStartBefore|0);
+                    // restore seen per-line state
+                    try{ if (prev.seenLineFirst){
+                      // reset and copy
+                      seenLineFirst.clear();
+                      prev.seenLineFirst.forEach(v=> seenLineFirst.add(v));
+                    } }catch{}
+                    // restore scan position to re-show that previous match
+                    try{ reAll.lastIndex = Math.max(0, prev.resumeIndex|0); }catch{}
+                    // restart loop so that the previous match is encountered again
+                    continue;
+                  } else {
+                    // nothing to undo; re-show current match
+                    try{ reAll.lastIndex = Math.max(0, start|0); }catch{}
+                    try{ if (!wantGlobalPerLine){ seenLineFirst.delete(row); } }catch{}
+                    continue;
+                  }
+                }
+                else if (ch==='a'){ acceptAll=true; doReplace=true; }
+                else if (ch==='y'){ doReplace=true; }
+                else if (ch==='n'){ doReplace=false; }
+                else { doReplace=false; }
+              } finally {
+                _suppressScrollDuringModal = false;
+                try{ if (editor) editor.scrollTop = stBeforeModal; }catch{}
+              }
+            }
+            if (doReplace){
+              const rep = _expandReplacement(repl, m);
+              text = text.slice(0, start) + rep + text.slice(start + len);
+              replaced++; if (firstReplaceStart<0) firstReplaceStart = start;
+              reAll.lastIndex = start + rep.length;
+            }
+          }
+          _incPrevHide();
+          if (replaced>0){ editor.value = text; _touchBufferModified(); }
+          else { editor.value = orig; toast('replaced: 0'); }
+        } else {
+          // Current line only
+          const lines = _splitLines();
+          const r = Math.max(0, Math.min(lines.length-1, caretRow|0));
+          const line = String(lines[r]||'');
+          // For scanning within the line, clone regex for this scope
+          let reLine = null; try{ reLine = new RegExp(pat, reFlags + 'g'); }catch{ reLine=null; }
+          if (!reLine){ toast('invalid pattern'); return; }
+          let m; reLine.lastIndex = 0; let accLine = line; let acceptAll=false; let baseStartOff = (function(){ try{ return _offsetFromRC(r,0)|0; }catch{ return 0; } })();
+          const _decStackLine = [];
+          while ((m = reLine.exec(accLine))){
+            const startInLine = m.index|0; const len = ((m[0]||'').length|0); if (!(len>0)) { reLine.lastIndex++; continue; }
+            // non-g per line: only first match
+            let doReplace = true;
+            if (!wantGlobalPerLine && reLine.lastIndex>0 && replaced>=0){
+              // Already replaced one? Then skip further (we'll end after this continue)
+              // Implement by flagging after a replace below
+            }
+            if (needConfirm && !acceptAll){
+              const absStart = baseStartOff + startInLine;
+              // Preview using composed text (orig with current accLine)
+              const textForPreview = orig.slice(0, baseStartOff) + accLine + orig.slice(baseStartOff + line.length);
+              // count remaining for this line if All now
+              const countRemaining = (()=>{
+                try{
+                  const rc = new RegExp(pat, reFlags+'g');
+                  rc.lastIndex = startInLine; // include current match
+                  let cnt = 0; let mm;
+                  while ((mm = rc.exec(accLine))){ const ln = ((mm[0]||'').length|0); if (!(ln>0)){ rc.lastIndex++; continue; } cnt++; if (!wantGlobalPerLine) break; }
+                  return cnt|0;
+                }catch{ return 0; }
+              })();
+              _decStackLine.push({
+                accLine,
+                resumeIndex: startInLine,
+                replacedBefore: replaced,
+                firstReplaceStartBefore: firstReplaceStart
+              });
+              // Suppress automatic scroll adjustments while the confirm modal is shown
+              const stBeforeModalLine = (editor && typeof editor.scrollTop === 'number') ? editor.scrollTop : 0;
+              try{
+                _suppressScrollDuringModal = true;
+                try{ _zoomGuardUntil = Date.now() + 2000; }catch{}
+                previewAt(absStart, len, textForPreview);
+                const cmdLabel = ':' + (isAll? '%s' : 's') + '/' + pat + '/' + repl + '/' + flagsGiven;
+                const ch = await _subConfirmModal((countRemaining>0? (countRemaining+" matches left.\n") : '') + 'Replace this match?', { cmdLabel, canUndo: (_decStackLine.length>=2) });
+                if (ch==='q'){ _incPrevHide(); break; }
+                else if (ch==='u'){
+                  _incPrevHide();
+                  _decStackLine.pop();
+                  const prev = _decStackLine.pop();
+                  if (prev){
+                    accLine = prev.accLine;
+                    replaced = prev.replacedBefore|0;
+                    firstReplaceStart = (prev.firstReplaceStartBefore|0);
+                    try{ reLine.lastIndex = Math.max(0, prev.resumeIndex|0); }catch{}
+                    continue;
+                  } else {
+                    // nothing to undo; re-show current match
+                    try{ reLine.lastIndex = Math.max(0, startInLine|0); }catch{}
+                    continue;
+                  }
+                }
+                else if (ch==='a'){ acceptAll=true; doReplace=true; }
+                else if (ch==='y'){ doReplace=true; }
+                else if (ch==='n'){ doReplace=false; }
+                else { doReplace=false; }
+              } finally {
+                _suppressScrollDuringModal = false;
+                try{ if (editor) editor.scrollTop = stBeforeModalLine; }catch{}
+              }
+            }
+            if (doReplace){
+              const rep = _expandReplacement(repl, m);
+              accLine = accLine.slice(0, startInLine) + rep + accLine.slice(startInLine + len);
+              replaced++; if (firstReplaceStart<0) firstReplaceStart = baseStartOff + startInLine;
+              reLine.lastIndex = startInLine + rep.length;
+              if (!wantGlobalPerLine) { break; }
+            }
+          }
+          _incPrevHide();
+          if (replaced>0){
+            lines[r] = accLine; const out = lines.join('\n'); editor.value = out; _touchBufferModified();
+          } else { editor.value = orig; toast('replaced: 0'); }
+        }
+
+        if (replaced>0){
+          try{ const pos = (firstReplaceStart>=0? firstReplaceStart : 0); const rc = _rcFromOffset(pos); caretRow = rc.r; caretCol = rc.c; }catch{}
+          ensureScrolloff(); _repositionCaret(); updateGutter(); toast('replaced: ' + replaced, 1500);
+        }
+        try{ _incSearchAnchorOff = null; }catch{}
+        try{ setTimeout(()=>{ try{ editor && editor.focus && editor.focus(); }catch{} }, 0); }catch{}
+        return;
       }
     }catch{}
     // :b [N|query] — Enter で確定（数字のみは優先）
@@ -2495,6 +2778,59 @@
   const _modalTitle   = document.getElementById('modalTitle');
   const _modalDetail  = document.getElementById('modalDetail');
   const _modalButtons = document.getElementById('modalButtons');
+
+  // modal box element (for dragging)
+  const _modalBox = document.getElementById('modalBox');
+  // Simple drag support for the modal box using the title bar.
+  (function(){
+    try{
+      if (!_modalBox || !_modalTitle) return;
+      const state = { active: false, startX:0, startY:0, boxLeft:0, boxTop:0 };
+      const onMove = (ev)=>{
+        if (!state.active) return;
+        try{
+          ev.preventDefault();
+          const pt = (ev.touches && ev.touches[0]) ? ev.touches[0] : ev;
+          const nx = state.boxLeft + (pt.clientX - state.startX);
+          const ny = state.boxTop  + (pt.clientY - state.startY);
+          // clamp to viewport a little bit (modal should remain visible)
+          const vw = Math.max(100, window.innerWidth||0);
+          const vh = Math.max(100, window.innerHeight||0);
+          const rect = _modalBox.getBoundingClientRect();
+          const w = rect.width || 400; const h = rect.height || 120;
+          const left = Math.min(Math.max(-w + 24, nx), vw - 24);
+          const top  = Math.min(Math.max(8, ny), vh - 24);
+          _modalBox.style.left = left + 'px';
+          _modalBox.style.top  = top  + 'px';
+          _modalBox.style.right = 'auto';
+        }catch{}
+      };
+      const onUp = ()=>{
+        if (!state.active) return; state.active=false; document.removeEventListener('mousemove', onMove); document.removeEventListener('mouseup', onUp); document.removeEventListener('touchmove', onMove); document.removeEventListener('touchend', onUp); try{ _modalTitle.style.cursor='grab'; }catch{}
+      };
+      const onDown = (ev)=>{
+        try{
+          const pt = (ev.touches && ev.touches[0]) ? ev.touches[0] : ev;
+          const rect = _modalBox.getBoundingClientRect();
+          // put modalBox into fixed coordinates so left/top can be set
+          _modalBox.style.position = 'fixed';
+          _modalBox.style.margin = '0';
+          _modalBox.style.left = rect.left + 'px';
+          _modalBox.style.top  = rect.top  + 'px';
+          state.active = true;
+          state.startX = pt.clientX; state.startY = pt.clientY;
+          state.boxLeft = rect.left; state.boxTop = rect.top;
+          document.addEventListener('mousemove', onMove); document.addEventListener('mouseup', onUp);
+          document.addEventListener('touchmove', onMove, { passive:false }); document.addEventListener('touchend', onUp);
+          try{ _modalTitle.style.cursor='grabbing'; }catch{}
+          ev.preventDefault();
+        }catch{}
+      };
+      _modalTitle.style.cursor = 'grab';
+      _modalTitle.addEventListener('mousedown', onDown);
+      _modalTitle.addEventListener('touchstart', onDown, { passive:false });
+    }catch{}
+  })();
   function _hideModal(){ if (_modalOverlay) _modalOverlay.style.display='none'; try{ _modalButtons && (_modalButtons.innerHTML=''); }catch{} }
   function _showModal(){ if (_modalOverlay) _modalOverlay.style.display='flex'; }
   function confirmModal(opts){
@@ -2641,6 +2977,85 @@
     });
   }
 
+  // Substitute confirmation modal (y/n/a/q) without numeric shortcuts
+  async function _subConfirmModal(detail, opts){
+    return new Promise((resolve)=>{
+      try{
+        if (!_modalOverlay || !_modalTitle || !_modalDetail || !_modalButtons){
+          const ok = window.confirm(String(detail||'Replace?'));
+          resolve(ok ? 'y' : 'n');
+          return;
+        }
+  // Always restore focus to editor per spec
+  const restoreEl = editor;
+        const cmdLabel = opts && opts.cmdLabel ? String(opts.cmdLabel) : '';
+        const canUndo = !!(opts && opts.canUndo);
+        // Build title with 4rem gap between label and command
+        try{
+          _modalTitle.textContent = '';
+          const spanTitle = document.createElement('span');
+          spanTitle.textContent = 'Substitute(置換)';
+          const spanCmd = document.createElement('span');
+          spanCmd.textContent = cmdLabel;
+          spanCmd.style.marginLeft = '4rem';
+          _modalTitle.appendChild(spanTitle);
+          if (cmdLabel){ _modalTitle.appendChild(spanCmd); }
+        }catch{
+          // Fallback to simple text if DOM ops fail
+          _modalTitle.textContent = 'Substitute(置換)' + (cmdLabel? ('    ' + cmdLabel) : '');
+        }
+        _modalDetail.textContent = String(detail||'Replace this occurrence?');
+        _modalButtons.innerHTML = '';
+        const btnY = document.createElement('button'); btnY.textContent='Yes (y)'; btnY.classList.add('primary');
+        const btnN = document.createElement('button'); btnN.textContent='No (n)';
+        const btnA = document.createElement('button'); btnA.textContent='All (a)';
+        const btnQ = document.createElement('button'); btnQ.textContent='Quit (q)'; btnQ.classList.add('danger');
+  const btnU = document.createElement('button'); btnU.textContent='Undo (u)'; btnU.disabled = !canUndo; if (btnU.disabled){ btnU.style.color = 'gray'; }
+        _modalButtons.appendChild(btnY); _modalButtons.appendChild(btnN); _modalButtons.appendChild(btnA); _modalButtons.appendChild(btnU); _modalButtons.appendChild(btnQ);
+        const buttons = { y:btnY, n:btnN, a:btnA, u:btnU, q:btnQ };
+        const cleanup = ()=>{ try{ document.removeEventListener('keydown', onKey); }catch{} _hideModal(); try{ setTimeout(()=>{ try{ restoreEl && restoreEl.focus && restoreEl.focus(); }catch{} }, 0); }catch{} };
+        const finish = (ch)=>{ try{ const el=buttons[ch]; el && el.focus && el.focus(); }catch{} cleanup(); resolve(ch); };
+        btnY.addEventListener('click', ()=>finish('y'), { once:true });
+        btnN.addEventListener('click', ()=>finish('n'), { once:true });
+        btnA.addEventListener('click', ()=>finish('a'), { once:true });
+        btnU.addEventListener('click', ()=>{ if (!btnU.disabled) finish('u'); }, { once:true });
+        btnQ.addEventListener('click', ()=>finish('q'), { once:true });
+        const onKey = (e)=>{
+          if (e.key==='Escape'){ e.preventDefault(); finish('q'); }
+          else if (e.key==='Enter'){ e.preventDefault(); finish('y'); }
+          else if (e.key==='y' || e.key==='Y'){ e.preventDefault(); finish('y'); }
+          else if (e.key==='n' || e.key==='N'){ e.preventDefault(); finish('n'); }
+          else if (e.key==='a' || e.key==='A'){ e.preventDefault(); finish('a'); }
+          else if (e.key==='u' || e.key==='U'){ e.preventDefault(); if (!btnU.disabled) finish('u'); }
+          else if (e.key==='q' || e.key==='Q'){ e.preventDefault(); finish('q'); }
+          else if (e.key==='Tab'){
+            // Trap focus among enabled buttons only
+            e.preventDefault();
+            const btns=[btnY,btnN,btnA,btnU,btnQ].filter(b=>!b.disabled);
+            const idx = btns.findIndex(el=> el===document.activeElement);
+            const dir = e.shiftKey ? -1 : 1;
+            const next = (idx>=0 ? (idx+dir+btns.length)%btns.length : (dir>0?0:btns.length-1));
+            try{ btns[next].focus(); }catch{}
+          }
+        };
+        document.addEventListener('keydown', onKey);
+        _showModal();
+        try{ btnY.focus(); }catch{}
+      }catch{ resolve('n'); }
+    });
+  }
+
+  function _expandReplacement(template, match){
+    try{
+      const src = String(template||'');
+      return src.replace(/\$(\d|&)/g, (m, g1)=>{
+        if (g1 === '&') return String(match[0]||'');
+        const idx = parseInt(g1,10);
+        return String(match[idx]||'');
+      });
+    }catch{ return String(template||''); }
+  }
+
   // Aggregated multi-save dialog for :wq (no bang)
   function multiSaveDialog(modifiedItems){
     // modifiedItems: Array<{b,i}>
@@ -2760,7 +3175,7 @@
       }catch{}
       // Hide mouse cursor when visible range changes shortly after caret moved
       if ((Date.now() - _lastCaretMovedAt) < 120){ _hideCursor(); }
-      _repositionCaret(); updateGutter(); _renderHlMatchesVisible();
+      _repositionCaret(); updateGutter(); _renderHlMatchesVisible(); _incPrevRefresh();
     });
   };
   viewport.addEventListener('scroll', scheduleScrollRender);
@@ -2815,7 +3230,7 @@
     });
     editor.addEventListener('keyup', (e)=>{ if(e.key==='Enter') ensureScrolloff(); _repositionCaret(); updateGutter(); });
     editor.addEventListener('click', ()=>{ _repositionCaret(); updateGutter(); });
-  window.addEventListener('resize', ()=>{ _syncEditorMetrics(); clampViewportExactLines(); _exactLineLockAdjust(); ensureScrolloff(); _repositionCaret(); updateGutter(); _renderHlMatchesVisible(); });
+  window.addEventListener('resize', ()=>{ _syncEditorMetrics(); clampViewportExactLines(); _exactLineLockAdjust(); ensureScrolloff(); _repositionCaret(); updateGutter(); _renderHlMatchesVisible(); _incPrevRefresh(); });
     editor.addEventListener('keydown', (e)=>{
       if (_mode === 'CMD') return;
       if (_mode === 'INSERT'){
