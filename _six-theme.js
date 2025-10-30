@@ -28,7 +28,7 @@ window.THEME = {
   tabBarBg: "rgb(27,47,15)",
   tabBarFg: "rgb(0,95,31)",
   // Visual selection default colors
-  selectionBg: "cyan",
+  selectionBg: "#607080",
   selectionFg: "white",
   // Command input colors (requested: white text on black background)
   cmdInputFg: "white",
@@ -38,5 +38,8 @@ window.THEME = {
   incPreviewOutline: "rgba(128,192,255,0.55)",
   // hlsearch (all matches) highlight; default to yellow
   hlsearchBg: "rgba(255,255,0,0.35)",
-  hlsearchOutline: "rgba(255,255,0,0.55)"
+  hlsearchOutline: "rgba(255,255,0,0.55)",
+  // VISUAL after ':' selection overlay
+  visCmdSelBg: "rgba(20, 192, 192, 0.2)",
+  visCmdSelOutline: "rgba(0, 80, 120, 0.55)"
 };

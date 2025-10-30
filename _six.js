@@ -81,6 +81,13 @@
   let _visualLinewise = false;
   let _visualAnchorR = 0;
   let _visualAnchorC = 0;
+  // CMD エントリが VISUAL から始まったか（Esc キャンセル時に VISUAL をリセットするため）
+  let _cmdFromVisual = false;
+  // VISUAL から ':' で CMD に入ったときの範囲スナップショット（'<,'> 用）
+  let _visCmdActive = false;
+  let _visCmdLinewise = false;
+  let _visCmdAnchorR = 0, _visCmdAnchorC = 0;
+  let _visCmdCaretR = 0, _visCmdCaretC = 0;
   let _pendingNormal = null;
   let _pendingTimer = null;
   // delete operator state (for d + motion)
@@ -163,11 +170,11 @@
       // Examples: "/foo", "/foo/i", "?bar", "?bar?i" (case-insensitive)
       const mF = s.match(/^\s*:?\s*\/(.*?)(?:\/(?:([A-Za-z]*))?)?\s*$/);
       const mB = (!mF) ? s.match(/^\s*:?\s*\?(.*?)(?:\?(?:([A-Za-z]*))?)?\s*$/) : null;
-      // Also accept :s and %:s incremental preview on the search part (before replacement)
-      const mS = (!mF && !mB) ? s.match(/^\s*:?(%?)\s*s\/(.*?)(?:\/|$)/i) : null;
+  // Also accept :s, %:s, and :'<'','>'s incremental preview on the search part (before replacement)
+  const mS = (!mF && !mB) ? s.match(/^\s*:?(?:('<,'>))?(%?)\s*s\/(.*?)(?:\/|$)/i) : null;
       if (!mF && !mB && !mS){ _incPrevHide(); return false; }
       const dir = mF ? 'fwd' : (mB ? 'bwd' : 'fwd');
-      let pat = String((mF?mF[1]:(mB?mB[1]:(mS?mS[2]:'')))||'');
+    let pat = String((mF?mF[1]:(mB?mB[1]:(mS?mS[3]:'')))||'');
       const flagsGiven = String((mF?mF[2]:(mB?mB[2]:''))||'');
       const flags = (/i/.test(flagsGiven)?'i':'');
       // For :s incremental preview: capture a stable anchor once at first pattern detection
@@ -179,10 +186,32 @@
       // Try compile regex quickly; invalid → hide
       let reOk = true; try{ new RegExp(pat, flags); }catch{ reOk=false; }
       if (!reOk){ _incPrevHide(); return true; }
-      // Use stable anchor captured when entering search CMD; fallback to current caret if missing
+      // Determine search scope and anchor
+      let selStart=null, selEnd=null, limitToVisual=false;
+      const hasVisToken = !!(mS && mS[1]==="'<,'>");
+      if (hasVisToken && _visCmdActive){
+        limitToVisual = true;
+        try{
+          if (_visCmdLinewise){
+            const rs = Math.min(_visCmdAnchorR|0, _visCmdCaretR|0);
+            const re = Math.max(_visCmdAnchorR|0, _visCmdCaretR|0);
+            selStart = _offsetFromRC(rs, 0)|0;
+            const linesAll = _splitLines();
+            const lastLen = String(linesAll[re]||'').length;
+            selEnd = _offsetFromRC(re, lastLen)|0;
+          } else {
+            const sOff = _offsetFromRC(_visCmdAnchorR|0, _visCmdAnchorC|0)|0;
+            const eOff = _offsetFromRC(_visCmdCaretR|0, _visCmdCaretC|0)|0;
+            selStart = Math.min(sOff, eOff)|0;
+            selEnd = Math.max(sOff, eOff)|0;
+          }
+        }catch{ selStart=null; selEnd=null; limitToVisual=false; }
+      }
+      // Use stable anchor captured when entering CMD; clamp to selection when needed
       const fromOff = (function(){
         try{
-          const base = (typeof _incSearchAnchorOff === 'number' && _incSearchAnchorOff>=0) ? _incSearchAnchorOff : _offsetFromRC(caretRow, caretCol)|0;
+          let base = (typeof _incSearchAnchorOff === 'number' && _incSearchAnchorOff>=0) ? _incSearchAnchorOff : (_offsetFromRC(caretRow, caretCol)|0);
+          if (limitToVisual && selStart!=null && selEnd!=null){ base = Math.max(selStart, Math.min(base, selEnd)); }
           return base|0;
         }catch{ return 0; }
       })();
@@ -202,13 +231,29 @@
             const mm = reStick.exec(tail);
             if (mm){
               const l = ((mm[0]||'').length|0);
-              if (l > 0){ res = { start: off, len: l }; }
+              if (l > 0){
+                // Respect visual selection limits
+                if (!limitToVisual || (off>=selStart && (off+l)<=selEnd)){
+                  res = { start: off, len: l };
+                }
+              }
             }
           }
         }catch{}
       }
       if (!res){
-        res = _searchFindNext(pat, flags, dir, fromOff, true);
+        if (!limitToVisual){
+          res = _searchFindNext(pat, flags, dir, fromOff, true);
+        } else {
+          // Manual scan within [selStart, selEnd)
+          try{
+            const text = String(editor.value||'');
+            const sub = text.slice(selStart, selEnd);
+            const re = new RegExp(pat, flags);
+            const m = re.exec(sub);
+            if (m && m[0]){ res = { start: selStart + (m.index|0), len: (m[0]||'').length|0 }; }
+          }catch{}
+        }
       }
       if (res && Number.isFinite(res.start)){
         // move caret to match start (live preview behavior)
@@ -229,6 +274,78 @@
   let _optHlsearch = false;          // :set hlsearch / :set nohlsearch
   let _hlLayer = null;               // container for match rectangles
   let _hlMatches = null;             // cached [{start,len}] for _lastSearch over current text
+
+  // --- VISUAL selection overlay during CMD (keep highlight visible) ---
+  let _visSelLayer = null;           // container for visual selection rectangles when _visCmdActive
+  function _visSelEnsureLayer(){
+    if (!_visSelLayer){
+      const d = document.createElement('div');
+      d.style.position = 'absolute';
+      d.style.inset = '0 0 0 0';
+      d.style.pointerEvents = 'none';
+      _visSelLayer = d;
+    }
+    if (_visSelLayer.parentNode !== caretLayer){ try{ caretLayer.appendChild(_visSelLayer); }catch{} }
+  }
+  function _visSelClear(){
+    try{
+      if (_visSelLayer){ while (_visSelLayer.firstChild){ _visSelLayer.removeChild(_visSelLayer.firstChild); } }
+    }catch{}
+  }
+  function _renderVisSelOverlay(){
+    try{
+      if (!_visCmdActive){ _visSelClear(); return; }
+      _visSelEnsureLayer();
+      _visSelClear();
+      // Compute absolute selection offsets from the snapshot
+      const linewise = !!_visCmdLinewise;
+      const aR = _visCmdAnchorR|0, aC = _visCmdAnchorC|0;
+      const bR = _visCmdCaretR|0,  bC = _visCmdCaretC|0;
+      const rs = Math.min(aR, bR), re = Math.max(aR, bR);
+      let selStart = 0, selEnd = 0;
+      if (linewise){
+        selStart = _offsetFromRC(rs, 0)|0;
+        const linesAll = _splitLines();
+        const lastLen = String(linesAll[re]||'').length;
+        selEnd = _offsetFromRC(re, lastLen)|0;
+      } else {
+        const sOff = _offsetFromRC(aR, aC)|0;
+        const eOff = _offsetFromRC(bR, bC)|0;
+        selStart = Math.min(sOff, eOff)|0;
+        selEnd = Math.max(sOff, eOff)|0;
+      }
+      if (!(selEnd>selStart)) return;
+      const lines = _splitLines();
+      // Iterate rows within selection and draw segments
+      for (let r=rs; r<=re; r++){
+        const line = String(lines[r]||'');
+        let c1 = 0, c2 = line.length;
+        if (!linewise){
+          if (r === rs){ c1 = (aR<=bR ? (aR===rs ? aC : 0) : (bR===rs ? bC : 0)); }
+          if (r === re){ c2 = (aR>=bR ? (aR===re ? aC : line.length) : (bR===re ? bC : line.length)); }
+          c1 = Math.max(0, Math.min(line.length, c1|0));
+          c2 = Math.max(c1, Math.min(line.length, c2|0));
+        }
+        // Measure x positions
+        _measureSpan.textContent = line.slice(0, c1);
+        const x1 = _measureSpan.getBoundingClientRect().width;
+        _measureSpan.textContent = line.slice(0, c2);
+        const x2 = _measureSpan.getBoundingClientRect().width;
+        if (!(x2 > x1)) continue;
+        const topLine = _topLine();
+        const row1 = r + 1;
+        const topPx = (row1 - topLine) * LINE_HEIGHT;
+  const el = document.createElement('div');
+  // dedicated style for CMD-time visual selection
+  el.className = 'viscmdsel';
+        el.style.left = x1 + 'px';
+        el.style.top = topPx + 'px';
+        el.style.width = Math.max(1, Math.round(x2 - x1)) + 'px';
+        el.style.height = Math.max(1, Math.round(LINE_HEIGHT)) + 'px';
+        _visSelLayer.appendChild(el);
+      }
+    }catch{}
+  }
 
   function _hlEnsureLayer(){
     if (!_hlLayer){
@@ -663,6 +780,9 @@
   // hlsearch (all matches) highlight
   setVar('hlsearchBg', t.hlsearchBg);
   setVar('hlsearchOutline', t.hlsearchOutline);
+  // VISUAL after ':' selection overlay
+  setVar('visCmdSelBg', t.visCmdSelBg);
+  setVar('visCmdSelOutline', t.visCmdSelOutline);
       // apply persisted scale if any
       try{
         const s = localStorage.getItem('six.edScale');
@@ -1458,6 +1578,8 @@
     _visualActive = false; _visualLinewise = false;
     _setMode('NORMAL');
     _syncNativeSelectionToCaret();
+    // Ensure any CMD-time visual overlay is cleared when leaving VISUAL
+    try{ _visCmdActive = false; _cmdFromVisual = false; _visSelClear(); }catch{}
   }
   function _hasAnyModifiedBuffers(){
     try{
@@ -2049,9 +2171,10 @@
 
     // :s and :%s — substitute, with flags [g][i][c]
     try{
-      const ms = cmd && cmd.match(/^:?\s*(%?)\s*s(?:ubstitute)?\/(.*?)\/(.*?)(?:\/([A-Za-z]*))?\s*$/i);
+      const ms = cmd && cmd.match(/^:?\s*(%|'<,'>)?\s*s(?:ubstitute)?\/(.*?)\/(.*?)(?:\/([A-Za-z]*))?\s*$/i);
       if (ms){
-        const isAll = !!ms[1];
+        const rangeTok = String(ms[1]||'');
+        const isAll = (rangeTok === '%');
         const pat = String(ms[2]||'');
         const repl = String(ms[3]||'');
         const flagsGiven = String(ms[4]||'');
@@ -2061,12 +2184,13 @@
         // We'll use a global regex for scan; per-line non-g behavior is handled manually
         let reAll = null; try{ reAll = new RegExp(pat, reFlags+'g'); }catch{ reAll=null; }
         if (!reAll){ toast('invalid pattern'); return; }
-        const wantGlobalPerLine = /g/.test(flagsGiven);
+  const wantGlobalPerLine = /g/.test(flagsGiven);
         const needConfirm = /c/.test(flagsGiven);
 
-        const orig = String(editor.value||'');
-        // Push undo snapshot once (compound)
-        _pushUndoSnapshot('substitute');
+  const orig = String(editor.value||'');
+  // Lazily push undo snapshot on first actual change to avoid empty snapshots (#308)
+  let _subUndoPushed = false;
+  const _pushSubUndoOnce = ()=>{ if (!_subUndoPushed){ _pushUndoSnapshot('substitute'); _subUndoPushed = true; } };
 
         // Helper to preview a match in current evolving text without causing visible scroll
         function previewAt(start,len, textForPreview){
@@ -2082,12 +2206,15 @@
             ensureScrolloff();
             _repositionCaret(); updateGutter();
             _incPrevShowAt(start, len);
+            // Keep visual selection overlay visible during the confirm modal
+            try{ _renderVisSelOverlay(); }catch{}
           }catch{}
         }
 
-        let replaced = 0;
-        let firstReplaceStart = -1;
+  let replaced = 0;
+  let firstReplaceStart = -1;
 
+  const inVisual = (!!_visualActive) || (rangeTok === "'<,'>");
         if (isAll){
           // Whole buffer
           let text = orig;
@@ -2095,11 +2222,22 @@
           const seenLineFirst = new Set();
           // Decision stack for step-back undo (store state before a decision is made)
           const _decStack = [];
+          // helper: compute row index from absolute offset within evolving `text`
+          const rowFromOffAll = (off)=>{
+            try{
+              let idx = 0, row=0;
+              while (true){
+                const p = text.indexOf('\n', idx);
+                if (p<0 || p>=off) return row;
+                row++; idx = p+1;
+              }
+            }catch{ return 0; }
+          };
           reAll.lastIndex = 0; let m;
           while ((m = reAll.exec(text))){
             const start = m.index|0; const len = ((m[0]||'').length|0); if (!(len>0)) { reAll.lastIndex++; continue; }
             // Per-line non-g: only first per line
-            let row=0; try{ row = _rcFromOffset(start).r|0; }catch{}
+            let row=0; try{ row = rowFromOffAll(start)|0; }catch{}
             if (!wantGlobalPerLine){ if (seenLineFirst.has(row)) continue; seenLineFirst.add(row); }
             let doReplace = true;
             if (needConfirm && !acceptAll){
@@ -2112,7 +2250,7 @@
                   let cnt = 0; let mm;
                   while ((mm = rc.exec(text))){
                     const st = (mm.index|0); const ln = ((mm[0]||'').length|0); if (!(ln>0)){ rc.lastIndex++; continue; }
-                    let r0=0; try{ r0 = _rcFromOffset(st).r|0; }catch{}
+                    let r0=0; try{ r0 = rowFromOffAll(st)|0; }catch{}
                     if (!wantGlobalPerLine){ if (tempSeen.has(r0)) continue; tempSeen.add(r0); }
                     cnt++;
                   }
@@ -2139,31 +2277,36 @@
                 const ch = await _subConfirmModal((countRemaining>0? (countRemaining+" matches left.\n") : '') + 'Replace this match?', { cmdLabel, canUndo: (_decStack.length>=2) });
                 if (ch==='q'){ _incPrevHide(); break; }
                 else if (ch==='u'){
-                  // Step back to previous decision (if any)
+                  // Step back to previous decision (if any). Also move the scan pointer back.
                   _incPrevHide();
-                  // discard the snapshot for current candidate
-                  _decStack.pop();
-                  const prev = _decStack.pop();
-                  if (prev){
-                    text = prev.text;
-                    replaced = prev.replacedBefore|0;
-                    firstReplaceStart = (prev.firstReplaceStartBefore|0);
-                    // restore seen per-line state
-                    try{ if (prev.seenLineFirst){
-                      // reset and copy
-                      seenLineFirst.clear();
-                      prev.seenLineFirst.forEach(v=> seenLineFirst.add(v));
-                    } }catch{}
-                    // restore scan position to re-show that previous match
-                    try{ reAll.lastIndex = Math.max(0, prev.resumeIndex|0); }catch{}
-                    // restart loop so that the previous match is encountered again
-                    continue;
-                  } else {
-                    // nothing to undo; re-show current match
-                    try{ reAll.lastIndex = Math.max(0, start|0); }catch{}
-                    try{ if (!wantGlobalPerLine){ seenLineFirst.delete(row); } }catch{}
-                    continue;
+                  const before = text;
+                  // Discard snapshot for current candidate; keep the previous one to allow multi-step undo
+                  if (_decStack.length >= 2){
+                    _decStack.pop();
+                    let prev = _decStack[_decStack.length-1];
+                    // If prev produces no visible change (duplicate snapshot), try stepping back one more (#309)
+                    if (prev && String(prev.text||'') === String(before||'') && _decStack.length >= 2){
+                      _decStack.pop();
+                      prev = _decStack[_decStack.length-1];
+                    }
+                    if (prev){
+                      text = prev.text;
+                      replaced = prev.replacedBefore|0;
+                      firstReplaceStart = (prev.firstReplaceStartBefore|0);
+                      // restore seen per-line state
+                      try{ if (prev.seenLineFirst){
+                        seenLineFirst.clear();
+                        prev.seenLineFirst.forEach(v=> seenLineFirst.add(v));
+                      } }catch{}
+                      // restore scan position to re-show that previous match
+                      try{ reAll.lastIndex = Math.max(0, prev.resumeIndex|0); }catch{}
+                      continue;
+                    }
                   }
+                  // nothing to undo; re-show current match
+                  try{ reAll.lastIndex = Math.max(0, start|0); }catch{}
+                  try{ if (!wantGlobalPerLine){ seenLineFirst.delete(row); } }catch{}
+                  continue;
                 }
                 else if (ch==='a'){ acceptAll=true; doReplace=true; }
                 else if (ch==='y'){ doReplace=true; }
@@ -2175,6 +2318,7 @@
               }
             }
             if (doReplace){
+              _pushSubUndoOnce();
               const rep = _expandReplacement(repl, m);
               text = text.slice(0, start) + rep + text.slice(start + len);
               replaced++; if (firstReplaceStart<0) firstReplaceStart = start;
@@ -2184,6 +2328,140 @@
           _incPrevHide();
           if (replaced>0){ editor.value = text; _touchBufferModified(); }
           else { editor.value = orig; toast('replaced: 0'); }
+        } else if (inVisual){
+          // Visual selection range only (character-wise or line-wise)
+          // Determine absolute selection range [selStart, selEnd)
+          let selStart = 0, selEnd = 0;
+          try{
+            // '<,'> が明示されており、かつ CMD エントリ時の VISUAL スナップショットがあればそれを優先
+            const useSnap = (rangeTok === "'<,'>" && _visCmdActive);
+            const linewiseNow = useSnap ? _visCmdLinewise : _visualLinewise;
+            if (linewiseNow){
+              const aR = useSnap ? (_visCmdAnchorR|0) : (_visualAnchorR|0);
+              const aC = useSnap ? (_visCmdAnchorC|0) : (_visualAnchorC|0); // 未使用（整合のため保持）
+              const bR = useSnap ? (_visCmdCaretR|0)  : (caretRow|0);
+              const rs = Math.min(aR, bR);
+              const re = Math.max(aR, bR);
+              selStart = _offsetFromRC(rs, 0)|0;
+              const linesAll = _splitLines();
+              const lastLen = String(linesAll[re]||'').length;
+              selEnd = _offsetFromRC(re, lastLen)|0;
+            } else {
+              const aR = useSnap ? (_visCmdAnchorR|0) : (_visualAnchorR|0);
+              const aC = useSnap ? (_visCmdAnchorC|0) : (_visualAnchorC|0);
+              const bR = useSnap ? (_visCmdCaretR|0)  : (caretRow|0);
+              const bC = useSnap ? (_visCmdCaretC|0)  : (caretCol|0);
+              const sOff = _offsetFromRC(aR, aC)|0;
+              const eOff = _offsetFromRC(bR, bC)|0;
+              selStart = Math.min(sOff, eOff)|0;
+              selEnd = Math.max(sOff, eOff)|0;
+            }
+          }catch{ selStart=0; selEnd=0; }
+          if (!(selEnd>selStart)){
+            // empty selection → nothing to do
+            toast('replaced: 0');
+            try{ _exitVisual(); }catch{}
+            // CMD 由来の VISUAL スナップショットは消去
+            _visCmdActive = false; _cmdFromVisual = false;
+            return;
+          }
+          const pre = orig.slice(0, selStart);
+          let mid = orig.slice(selStart, selEnd);
+          const post = orig.slice(selEnd);
+          // For scanning within the selection, clone regex for this scope
+          let reMid = null; try{ reMid = new RegExp(pat, reFlags + 'g'); }catch{ reMid=null; }
+          if (!reMid){ toast('invalid pattern'); try{ _exitVisual(); }catch{} return; }
+          const seenLineFirst = new Set(); // track first match per (relative) line when !g
+          const linesInMid = mid.split('\n');
+          // helper: row index in mid from offset
+          const midRowFromOff = (off)=>{
+            try{
+              let idx = 0, row=0;
+              while (true){
+                const p = mid.indexOf('\n', idx);
+                if (p<0 || p>=off) return row;
+                row++; idx = p+1;
+              }
+            }catch{ return 0; }
+          };
+          let m; reMid.lastIndex = 0; let acceptAll=false; const _decStackSel = [];
+          while ((m = reMid.exec(mid))){
+            const startInMid = m.index|0; const len = ((m[0]||'').length|0); if (!(len>0)){ reMid.lastIndex++; continue; }
+            // Per-line non-g: only first per relative line
+            let doReplace = true;
+            let relRow = 0; try{ relRow = midRowFromOff(startInMid)|0; }catch{ relRow=0; }
+            if (!wantGlobalPerLine){ if (seenLineFirst.has(relRow)) continue; }
+            if (needConfirm && !acceptAll){
+              const absStart = selStart + startInMid;
+              // Preview using composed text (orig with current mid)
+              const textForPreview = pre + mid + post;
+              // count remaining within selection if All now
+              const countRemaining = ( ()=>{
+                try{
+                  const rc = new RegExp(pat, reFlags+'g');
+                  rc.lastIndex = startInMid; // include current match
+                  let cnt=0; let mm; const tempSeen = new Set(seenLineFirst);
+                  while ((mm = rc.exec(mid))){ const ln = ((mm[0]||'').length|0); if (!(ln>0)){ rc.lastIndex++; continue; }
+                    const st = (mm.index|0); let rr=0; try{ rr = midRowFromOff(st)|0; }catch{}
+                    if (!wantGlobalPerLine){ if (tempSeen.has(rr)) continue; tempSeen.add(rr); }
+                    cnt++; }
+                  return cnt|0;
+                }catch{ return 0; }
+              })();
+              _decStackSel.push({ mid, resumeIndex: startInMid, replacedBefore: replaced, firstReplaceStartBefore: firstReplaceStart, seenLineFirst: new Set(seenLineFirst) });
+              const stBeforeModal = (editor && typeof editor.scrollTop === 'number') ? editor.scrollTop : 0;
+              try{
+                _suppressScrollDuringModal = true;
+                try{ _zoomGuardUntil = Date.now() + 2000; }catch{}
+                previewAt(absStart, len, textForPreview);
+                const cmdLabel = ':' + 's' + '/' + pat + '/' + repl + '/' + flagsGiven;
+                const ch = await _subConfirmModal((countRemaining>0? (countRemaining+" matches left.\n") : '') + 'Replace this match?', { cmdLabel, canUndo: (_decStackSel.length>=2) });
+                if (ch==='q'){ _incPrevHide(); break; }
+                else if (ch==='u'){
+                  _incPrevHide();
+                  const before = mid;
+                  if (_decStackSel.length >= 2){
+                    _decStackSel.pop();
+                    let prev = _decStackSel[_decStackSel.length-1];
+                    if (prev && String(prev.mid||'') === String(before||'') && _decStackSel.length >= 2){
+                      _decStackSel.pop();
+                      prev = _decStackSel[_decStackSel.length-1];
+                    }
+                    if (prev){
+                      mid = prev.mid;
+                      replaced = prev.replacedBefore|0;
+                      firstReplaceStart = (prev.firstReplaceStartBefore|0);
+                      seenLineFirst.clear();
+                      try{ prev.seenLineFirst.forEach(v=> seenLineFirst.add(v)); }catch{}
+                      try{ reMid.lastIndex = Math.max(0, prev.resumeIndex|0); }catch{}
+                      continue;
+                    }
+                  }
+                  { try{ reMid.lastIndex = Math.max(0, startInMid|0); }catch{}; continue; }
+                }
+                else if (ch==='a'){ acceptAll=true; doReplace=true; }
+                else if (ch==='y'){ doReplace=true; }
+                else if (ch==='n'){ doReplace=false; }
+                else { doReplace=false; }
+              } finally {
+                _suppressScrollDuringModal = false; try{ if (editor) editor.scrollTop = stBeforeModal; }catch{}
+              }
+            }
+            if (doReplace){
+              _pushSubUndoOnce();
+              const rep = _expandReplacement(repl, m);
+              mid = mid.slice(0, startInMid) + rep + mid.slice(startInMid + len);
+              replaced++; if (firstReplaceStart<0) firstReplaceStart = selStart + startInMid;
+              reMid.lastIndex = startInMid + rep.length;
+              if (!wantGlobalPerLine){ seenLineFirst.add(relRow); }
+            }
+          }
+          _incPrevHide();
+          if (replaced>0){ editor.value = pre + mid + post; _touchBufferModified(); }
+          else { editor.value = orig; toast('replaced: 0'); }
+          try{ _exitVisual(); }catch{}
+          // スナップショット/フラグをクリア
+          _visCmdActive = false; _cmdFromVisual = false;
         } else {
           // Current line only
           const lines = _splitLines();
@@ -2233,19 +2511,25 @@
                 if (ch==='q'){ _incPrevHide(); break; }
                 else if (ch==='u'){
                   _incPrevHide();
-                  _decStackLine.pop();
-                  const prev = _decStackLine.pop();
-                  if (prev){
-                    accLine = prev.accLine;
-                    replaced = prev.replacedBefore|0;
-                    firstReplaceStart = (prev.firstReplaceStartBefore|0);
-                    try{ reLine.lastIndex = Math.max(0, prev.resumeIndex|0); }catch{}
-                    continue;
-                  } else {
-                    // nothing to undo; re-show current match
-                    try{ reLine.lastIndex = Math.max(0, startInLine|0); }catch{}
-                    continue;
+                  const before = accLine;
+                  if (_decStackLine.length >= 2){
+                    _decStackLine.pop();
+                    let prev = _decStackLine[_decStackLine.length-1];
+                    if (prev && String(prev.accLine||'') === String(before||'') && _decStackLine.length >= 2){
+                      _decStackLine.pop();
+                      prev = _decStackLine[_decStackLine.length-1];
+                    }
+                    if (prev){
+                      accLine = prev.accLine;
+                      replaced = prev.replacedBefore|0;
+                      firstReplaceStart = (prev.firstReplaceStartBefore|0);
+                      try{ reLine.lastIndex = Math.max(0, prev.resumeIndex|0); }catch{}
+                      continue;
+                    }
                   }
+                  // nothing to undo; re-show current match
+                  try{ reLine.lastIndex = Math.max(0, startInLine|0); }catch{}
+                  continue;
                 }
                 else if (ch==='a'){ acceptAll=true; doReplace=true; }
                 else if (ch==='y'){ doReplace=true; }
@@ -2257,6 +2541,7 @@
               }
             }
             if (doReplace){
+              _pushSubUndoOnce();
               const rep = _expandReplacement(repl, m);
               accLine = accLine.slice(0, startInLine) + rep + accLine.slice(startInLine + len);
               replaced++; if (firstReplaceStart<0) firstReplaceStart = baseStartOff + startInLine;
@@ -2271,10 +2556,29 @@
         }
 
         if (replaced>0){
-          try{ const pos = (firstReplaceStart>=0? firstReplaceStart : 0); const rc = _rcFromOffset(pos); caretRow = rc.r; caretCol = rc.c; }catch{}
-          ensureScrolloff(); _repositionCaret(); updateGutter(); toast('replaced: ' + replaced, 1500);
+          try{
+            const pos = (firstReplaceStart>=0? firstReplaceStart : 0);
+            const rc = _rcFromOffset(pos);
+            caretRow = rc.r; caretCol = rc.c;
+            // Suppress the first scrolloff after substitute finishes (#306)
+            _scrolloffPaused = true; _scrolloffPauseAnchorR = rc.r; _scrolloffPauseAnchorC = rc.c;
+            // Keep native selection in sync without moving viewport
+            const stKeep = (editor && typeof editor.scrollTop === 'number') ? editor.scrollTop : 0;
+            _syncNativeSelectionToCaret();
+            try{ editor.scrollTop = stKeep; }catch{}
+            // Snap scrollTop to the nearest line boundary to avoid half-line state (#307)
+            try{
+              const snapped = Math.round((editor.scrollTop||0)/LINE_HEIGHT)*LINE_HEIGHT;
+              if (Math.abs(snapped - (editor.scrollTop||0)) > 0.1){ editor.scrollTop = snapped; }
+            }catch{}
+          }catch{}
+          _repositionCaret(); updateGutter(); _renderHlMatchesVisible(); toast('replaced: ' + replaced, 1500);
+        } else {
+          // 置換無し: undo スナップショットは作っていない（lazy push）ので特別な後始末は不要
         }
         try{ _incSearchAnchorOff = null; }catch{}
+        // Ensure we always return to NORMAL mode after :s completes, and clear any pending ops/counts.
+        try{ _setMode('NORMAL'); _clearPending(); _clearPendingOp(); }catch{}
         try{ setTimeout(()=>{ try{ editor && editor.focus && editor.focus(); }catch{} }, 0); }catch{}
         return;
       }
@@ -2609,7 +2913,7 @@
           try{
             const was = b.path||null;
             if (was !== targetUrl){ b.path = targetUrl; b.name = _basename(targetUrl); }
-            b.text = editor.value||''; b.savedText = editor.value||''; b.modified = false;
+            b.text = editor.value||''; b.savedText = editor.value||''; b._savedTick = (b._changeTick|0); b.modified = false;
           }catch{}
           _setTitle(); _renderTabbar();
           toast('written: ' + _prettyFileUrlLabel(targetUrl));
@@ -3032,7 +3336,7 @@
   const btnU = document.createElement('button'); btnU.textContent='Undo (u)'; btnU.disabled = !canUndo; if (btnU.disabled){ btnU.style.color = 'gray'; }
         _modalButtons.appendChild(btnY); _modalButtons.appendChild(btnN); _modalButtons.appendChild(btnA); _modalButtons.appendChild(btnU); _modalButtons.appendChild(btnQ);
         const buttons = { y:btnY, n:btnN, a:btnA, u:btnU, q:btnQ };
-        const cleanup = ()=>{ try{ document.removeEventListener('keydown', onKey); }catch{} _hideModal(); try{ setTimeout(()=>{ try{ restoreEl && restoreEl.focus && restoreEl.focus(); }catch{} }, 0); }catch{} };
+  const cleanup = ()=>{ try{ document.removeEventListener('keydown', onKey); }catch{} _hideModal(); try{ setTimeout(()=>{ try{ restoreEl && restoreEl.focus && restoreEl.focus(); _renderVisSelOverlay(); }catch{} }, 0); }catch{} };
         const finish = (ch)=>{ try{ const el=buttons[ch]; el && el.focus && el.focus(); }catch{} cleanup(); resolve(ch); };
         btnY.addEventListener('click', ()=>finish('y'), { once:true });
         btnN.addEventListener('click', ()=>finish('n'), { once:true });
@@ -3040,16 +3344,17 @@
         btnU.addEventListener('click', ()=>{ if (!btnU.disabled) finish('u'); }, { once:true });
         btnQ.addEventListener('click', ()=>finish('q'), { once:true });
         const onKey = (e)=>{
-          if (e.key==='Escape'){ e.preventDefault(); finish('q'); }
-          else if (e.key==='Enter'){ e.preventDefault(); finish('y'); }
-          else if (e.key==='y' || e.key==='Y'){ e.preventDefault(); finish('y'); }
-          else if (e.key==='n' || e.key==='N'){ e.preventDefault(); finish('n'); }
-          else if (e.key==='a' || e.key==='A'){ e.preventDefault(); finish('a'); }
-          else if (e.key==='u' || e.key==='U'){ e.preventDefault(); if (!btnU.disabled) finish('u'); }
-          else if (e.key==='q' || e.key==='Q'){ e.preventDefault(); finish('q'); }
+          try{ _renderVisSelOverlay(); }catch{}
+          if (e.key==='Escape'){ e.preventDefault(); e.stopPropagation(); finish('q'); }
+          else if (e.key==='Enter'){ e.preventDefault(); e.stopPropagation(); finish('y'); }
+          else if (e.key==='y' || e.key==='Y'){ e.preventDefault(); e.stopPropagation(); finish('y'); }
+          else if (e.key==='n' || e.key==='N'){ e.preventDefault(); e.stopPropagation(); finish('n'); }
+          else if (e.key==='a' || e.key==='A'){ e.preventDefault(); e.stopPropagation(); finish('a'); }
+          else if (e.key==='u' || e.key==='U'){ e.preventDefault(); e.stopPropagation(); if (!btnU.disabled) finish('u'); }
+          else if (e.key==='q' || e.key==='Q'){ e.preventDefault(); e.stopPropagation(); finish('q'); }
           else if (e.key==='Tab'){
             // Trap focus among enabled buttons only
-            e.preventDefault();
+            e.preventDefault(); e.stopPropagation();
             const btns=[btnY,btnN,btnA,btnU,btnQ].filter(b=>!b.disabled);
             const idx = btns.findIndex(el=> el===document.activeElement);
             const dir = e.shiftKey ? -1 : 1;
@@ -3057,8 +3362,9 @@
             try{ btns[next].focus(); }catch{}
           }
         };
-        document.addEventListener('keydown', onKey);
-        _showModal();
+  document.addEventListener('keydown', onKey);
+  _showModal();
+  try{ _renderVisSelOverlay(); }catch{}
         try{ btnY.focus(); }catch{}
       }catch{ resolve('n'); }
     });
@@ -3108,7 +3414,7 @@
           const removeRow = ()=>{ try{ listWrap.removeChild(row); rows.delete(i); }catch{} };
           btnSave.addEventListener('click', async()=>{
             btnSave.disabled = true; btnSkip.disabled=true;
-            if (b.path){ const textData = (i===currentIdx)?(editor.value||''):(b.text||''); const ok = await _saveToURL(b.path, textData); if (!ok){ toast('write failed: ' + (b.name||'')); btnSave.disabled=false; btnSkip.disabled=false; return; } try{ b.text=textData; b.savedText=textData; b.modified=false; }catch{} }
+            if (b.path){ const textData = (i===currentIdx)?(editor.value||''):(b.text||''); const ok = await _saveToURL(b.path, textData); if (!ok){ toast('write failed: ' + (b.name||'')); btnSave.disabled=false; btnSkip.disabled=false; return; } try{ b.text=textData; b.savedText=textData; b._savedTick = (b._changeTick|0); b.modified=false; }catch{} }
             removeRow(); maybeFinish();
           });
           btnSkip.addEventListener('click', ()=>{ removeRow(); maybeFinish(); });
@@ -3133,7 +3439,7 @@
               const textData = (i===currentIdx)?(editor.value||''):(b.text||'');
               const ok = await _saveToURL(b.path, textData);
               if (!ok){ toast('write failed: ' + (b.name||'')); btnAll.disabled=false; btnCancel.disabled=false; return; }
-              try{ b.text=textData; b.savedText=textData; b.modified=false; }catch{}
+              try{ b.text=textData; b.savedText=textData; b._savedTick = (b._changeTick|0); b.modified=false; }catch{}
             }
             try{ listWrap.removeChild(obj.row); rows.delete(i); }catch{}
           }
@@ -3194,7 +3500,7 @@
       }catch{}
       // Hide mouse cursor when visible range changes shortly after caret moved
       if ((Date.now() - _lastCaretMovedAt) < 120){ _hideCursor(); }
-      _repositionCaret(); updateGutter(); _renderHlMatchesVisible(); _incPrevRefresh();
+      _repositionCaret(); updateGutter(); _renderHlMatchesVisible(); _incPrevRefresh(); _renderVisSelOverlay();
     });
   };
   viewport.addEventListener('scroll', scheduleScrollRender);
@@ -3249,7 +3555,7 @@
     });
     editor.addEventListener('keyup', (e)=>{ if(e.key==='Enter') ensureScrolloff(); _repositionCaret(); updateGutter(); });
     editor.addEventListener('click', ()=>{ _repositionCaret(); updateGutter(); });
-  window.addEventListener('resize', ()=>{ _syncEditorMetrics(); clampViewportExactLines(); _exactLineLockAdjust(); ensureScrolloff(); _repositionCaret(); updateGutter(); _renderHlMatchesVisible(); _incPrevRefresh(); });
+  window.addEventListener('resize', ()=>{ _syncEditorMetrics(); clampViewportExactLines(); _exactLineLockAdjust(); ensureScrolloff(); _repositionCaret(); updateGutter(); _renderHlMatchesVisible(); _incPrevRefresh(); _renderVisSelOverlay(); });
     editor.addEventListener('keydown', (e)=>{
       if (_mode === 'CMD') return;
       if (_mode === 'INSERT'){
@@ -3277,6 +3583,33 @@
       }
       if (_mode === 'VISUAL'){
         // VISUAL mode key handling
+        if (e.key===':' && !e.ctrlKey){
+          // Open command prompt while keeping VISUAL selection active
+          e.preventDefault();
+          // VISUAL 選択のスナップショットを保存（'<,'>' 範囲評価に使用）
+          _cmdFromVisual = true;
+          _visCmdActive = true;
+          _visCmdLinewise = !!_visualLinewise;
+          _visCmdAnchorR = _visualAnchorR|0; _visCmdAnchorC = _visualAnchorC|0;
+          _visCmdCaretR  = caretRow|0;       _visCmdCaretC  = caretCol|0;
+          _setMode('CMD');
+          _clearPending();
+          _incPrevHide();
+          _incSearchAnchorOff = null; _incSearchDir = 'fwd';
+          try{ _cmdHistBrowsing=false; _cmdHistIndex=_cmdHistory.length; _cmdHistTemp=''; }catch{}
+          if (cmdinput){
+            // Prefill with visual range
+            cmdinput.value = ":'<,'>";
+            // フォーカスを cmdinput に移した後でも、ネイティブ選択を再適用して
+            // 選択ハイライトが残るようにする（環境によっては blur で消える対策）
+            Promise.resolve().then(()=>{
+              try{ cmdinput.focus(); const pos=(cmdinput.value||'').length; cmdinput.setSelectionRange(pos,pos); }catch{}
+              try{ _updateVisualSelection(); }catch{}
+              try{ _renderVisSelOverlay(); }catch{}
+            });
+          }
+          return;
+        }
         if (e.key==='Escape'){ e.preventDefault(); _exitVisual(); _repositionCaret(); updateGutter(); return; }
         // toggle char/line visual
         if (e.key==='v' && !e.ctrlKey && !e.metaKey && !e.altKey){ e.preventDefault(); _exitVisual(); _repositionCaret(); updateGutter(); return; }
@@ -3730,6 +4063,8 @@
               // Delegate to runCommand and exit early
               runCommand(normCmd);
               cmdinput.value = '';
+              // VISUAL からの CMD だった場合はここで VISUAL を終了（オーバレイもクリア）
+              if (_cmdFromVisual){ try{ _exitVisual(); }catch{} _cmdFromVisual=false; _visCmdActive=false; try{ _visSelClear(); }catch{} }
               _setMode('NORMAL');
               _bufPopupHide();
               setTimeout(()=>editor.focus(), 0);
@@ -4017,6 +4352,8 @@
             runCommand(raw.startsWith(':')?raw:(':'+raw));
           }
           cmdinput.value = '';
+          // VISUAL からの CMD だった場合はここで VISUAL を終了（オーバレイもクリア）
+          if (_cmdFromVisual){ try{ _exitVisual(); }catch{} _cmdFromVisual=false; _visCmdActive=false; try{ _visSelClear(); }catch{} }
           _setMode('NORMAL');
           _bufPopupHide();
           // Enter の keyup が editor に落ちないよう、フォーカス復帰を遅延
@@ -4030,10 +4367,17 @@
           // CMD 終了時の一瞬のスクロール揺れ（EOF 付近へ飛ぶ）を抑止するガードと座標再適用
           let st = editor.scrollTop, cr = caretRow, cc = caretCol;
           let selS = 0, selE = 0; try{ selS = editor.selectionStart; selE = editor.selectionEnd; }catch{}
+          const fromVis = !!_cmdFromVisual;
+          // Esc キャンセル時は VISUAL をリセットし、選択復元は行わない
+          if (fromVis){
+            try{ _exitVisual(); }catch{}
+            _cmdFromVisual = false; _visCmdActive = false; try{ _visSelClear(); }catch{}
+          }
           _scrollGuardUntil = Date.now() + 900; // 短期ガード
           const restoreView = ()=>{
             try{
-              try{ editor.setSelectionRange(selS, selE); }catch{}
+              // VISUAL 由来の CMD を Esc で抜けたときは、選択の復元はしない
+              if (!fromVis){ try{ editor.setSelectionRange(selS, selE); }catch{} }
               caretRow = cr; caretCol = cc; editor.scrollTop = st;
               _repositionCaret(); updateGutter();
             }catch{}
