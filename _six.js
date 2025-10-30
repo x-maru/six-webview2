@@ -1922,13 +1922,28 @@
         if (pat){
           const dir = forward? 'fwd':'bwd';
           const flags = (flagsGiven || (_lastSearch && _lastSearch.src===pat ? _lastSearch.flags : ''));
-          const fromOff = (function(){ try{ return _offsetFromRC(caretRow, caretCol)|0; }catch{ return 0; } })();
+          // Use the stable anchor captured when entering the search prompt so
+          // confirmation jumps to the nearest match from the original caret.
+          const fromOff = (function(){
+            try{
+              if (typeof _incSearchAnchorOff === 'number' && _incSearchAnchorOff >= 0){ return (_incSearchAnchorOff|0); }
+              return _offsetFromRC(caretRow, caretCol)|0;
+            }catch{ return 0; }
+          })();
           const res = _searchFindNext(pat, flags, dir, fromOff, true);
           if (res && Number.isFinite(res.start)){
-            try{ const rc = _rcFromOffset(res.start); caretRow = rc.r; caretCol = rc.c; ensureScrolloff(); _repositionCaret(); updateGutter(); _lastSearch = { src: pat, flags: flags||'', dir }; _updateHlsearchFull(); }catch{}
+            try{
+              const rc = _rcFromOffset(res.start);
+              caretRow = rc.r; caretCol = rc.c;
+              ensureScrolloff(); _repositionCaret(); updateGutter();
+              _lastSearch = { src: pat, flags: flags||'', dir };
+              _updateHlsearchFull();
+            }catch{}
           } else {
             toast('no match');
           }
+          // Clear the incremental search anchor after a confirmed search
+          try{ _incSearchAnchorOff = null; }catch{}
           return;
         }
       }
@@ -2762,6 +2777,19 @@
           try{ const off = editor.selectionStart|0; const rc = _rcFromOffset(off); caretRow = rc.r; caretCol = rc.c; }catch{}
           _setMode('NORMAL');
           return;
+        }
+        // Allow native editing behavior, but keep overlays in sync when moving the caret
+        if (e.key==='ArrowLeft' || e.key==='ArrowRight' || e.key==='ArrowUp' || e.key==='ArrowDown' ||
+            e.key==='Home' || e.key==='End' || e.key==='PageUp' || e.key==='PageDown'){
+          // Defer until after the browser updates selection/caret
+          setTimeout(()=>{
+            try{ const off = editor.selectionStart|0; const rc = _rcFromOffset(off); caretRow = rc.r; caretCol = rc.c; }catch{}
+            // Keep scrolloff for vertical moves
+            if (e.key==='ArrowUp' || e.key==='ArrowDown' || e.key==='PageUp' || e.key==='PageDown'){
+              try{ ensureScrolloff(); }catch{}
+            }
+            _repositionCaret(); updateGutter();
+          }, 0);
         }
         return; // テキスト入力はデフォルトに委ねる
       }

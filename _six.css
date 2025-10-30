@@ -51,7 +51,7 @@ body { font: var(--fontBase, 18px)/20px Consolas, 'Courier New', monospace; over
 #gutter { width: var(--gw); flex: 0 0 var(--gw);
 	/* Base: per-line tiled inactive gradient to avoid per-row repaint flicker */
 	background:
-		linear-gradient(to bottom, var(--inactiveGutterGradStart, rgb(235,239,235)), var(--inactiveGutterGradEnd, rgb(219,227,219))) 0 0 / 100% var(--lh) repeat-y,
+		linear-gradient(to bottom, var(--inactiveGutterGradStart, rgb(235,239,235)), var(--inactiveGutterGradEnd, rgb(219,227,219))) 0 0 / 100% var(--lhEff, var(--lh)) repeat-y,
 		linear-gradient(var(--gutterGradientStart, #141821), var(--gutterGradientEnd, #0f1117));
 	color: var(--gutterNumberColor, #57607a); text-align:right; padding-right: 0; box-sizing:border-box;
 	font-size: calc(var(--editorFontBase, 20px) * var(--edScale));
