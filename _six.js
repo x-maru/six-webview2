@@ -2626,9 +2626,28 @@
       if (!arg){
         // 引数なし
         if (bang){
-          // :e! は再読込
+          // :e! は再読込（現バッファの変更を破棄）
           const b = currentBuffer();
-          if (b && b.path){ _loadFromPath(b.path, null, { mode:'replace' }); }
+          if (b){
+            if (b.path){
+              // 既存ファイル → ディスクから読み直し
+              _loadFromPath(b.path, null, { mode:'replace' });
+            } else {
+              // 無名/未保存バッファ → savedText に戻す
+              try{
+                const t = (typeof b.savedText === 'string') ? b.savedText : (b.text||'');
+                editor.value = String(t||'');
+                // caret/scroll を初期化
+                caretRow = 0; caretCol = 0; editor.scrollTop = 0;
+                _centerScrolloffOnce = true; ensureScrolloff({centerOnce:true});
+                try{ _repositionCaret(); updateGutter(); }catch{}
+                // バッファ状態を saved に戻す
+                b.text = editor.value||''; b.savedText = b.text; b.modified = false; b._changeTick=0; b._savedTick=0;
+                try{ b._undo=[]; b._redo=[]; }catch{}
+                try{ _setTitle(); _renderTabbar(); }catch{}
+              }catch{}
+            }
+          }
           _setMode('NORMAL');
           return;
         }
@@ -3717,10 +3736,19 @@
               return;
             }
           }catch{}
-          // popup 非表示かつ先頭が :e のときは、Enter で :e の動作を確定（ファイルを開く）。
+          // popup 非表示かつ先頭が :e のときは、Enter で :e の動作を確定。
+          // ただし ':e!'（および ':e !'）はファイル名ではなく再読込として runCommand に委譲する。
           try{
             if (!_filePopupVisible()){
               const vNow = String(cmdinput.value||'');
+              // :e!（空白許容）→ runCommand へ委譲
+              if (/^\s*:e\s*!\s*$/i.test(vNow)){
+                const norm = vNow.trim();
+                _cmdHistoryMaybePush(norm);
+                runCommand(norm);
+                cmdinput.value=''; _setMode('NORMAL'); _bufPopupHide(); setTimeout(()=>editor.focus(),0);
+                return;
+              }
               const m = vNow.match(/^\s*:?(?:e\b)\s*(.*)$/i);
               if (m){
                 const after = (m[1]||'').trim();
@@ -4289,10 +4317,10 @@
 
         // ---- :e 入力に応じたファイルポップアップ処理（":e " の時点で発火）----
         let me;
-        // :e の検出は先頭コロンを1個のみ許容（"::e" は不正扱い）
-        if ((me = v.match(/^\s*:?(?:e\b)(.*)$/i))){
-          // 履歴から ":e ..." を呼び出しても即ポップアップは開かない。
-          // 先頭が ":e" で、後続が空白のみ（" :e" or ":e "）ならポップアップを開く。
+        // 発火条件を厳密化: 「:e」のみでは開かず、「:e 」とスペースが入った時点で開く
+        // 先頭コロンは1個まで許容（"::e" は別扱い）
+        if ((me = v.match(/^\s*:?\s*e\s+(.*)$/i))){
+          // 後続が空白のみ（" :e" or ":e ")ならポップアップを開く。
           const tail = (me[1]||'');
           const onlySpaces = /^\s*$/.test(tail);
           if (onlySpaces){
@@ -4332,12 +4360,10 @@
             return;
           }
 
-          // 先頭が :e でも、後続に文字がある（履歴呼出を含む）場合は、ここではポップアップを開かない。
-          // ただし既に開いているケース（手入力派生）は従来どおり処理。
+          // 以降は従来の処理（手入力＝すでにポップアップ開いている場合の更新）
           if (!_filePopupVisible()){
-            return; // 後続キー（Tab/Enter）に任せる
+            return; // まだ開いていないなら Enter/Tab に委譲
           }
-          // 以降は従来の処理（手入力＝ポップアップ開いている前提）
           // :e 入力時のポップアップ
           // 新規に :e 入力を開始したときの基点は常に「現バッファのディレクトリ」。
           // 以前のセッション由来の一時基点は使わずクリアしておく（#178）。
