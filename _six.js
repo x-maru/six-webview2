@@ -1594,6 +1594,15 @@
     const b=currentBuffer();
     return { text: String(editor.value||''), caretRow, caretCol, scrollTop: (editor.scrollTop||0), changeTick: (b? (b._changeTick|0) : 0) };
   }
+  function _pushUndoSnapshotObj(kind, snap){
+    try{
+      const st=_currentStacks(); if (!st) return;
+      const u = st._undo || (st._undo=[]);
+      u.push({ ...(snap||{}), kind: kind||null });
+      if (u.length>UNDO_LIMIT) u.splice(0, u.length-UNDO_LIMIT);
+      st._redo = [];
+    }catch{}
+  }
   function _applySnapshot(s){
     if (!s) return;
     editor.value = String(s.text||'');
@@ -2177,7 +2186,10 @@
         const isAll = (rangeTok === '%');
         const pat = String(ms[2]||'');
         const repl = String(ms[3]||'');
-        const flagsGiven = String(ms[4]||'');
+  const flagsGiven = String(ms[4]||'');
+  // Validate flags: allow only lowercase g, i, c, n (uppercase should be invalid)
+  const invalid = flagsGiven.replace(/[gicn]/g, '');
+    if (invalid){ toast('invalid flags: ' + invalid); return; }
         if (!pat){ toast('empty pattern'); return; }
         let reFlags = '';
         if (/i/.test(flagsGiven)) reFlags += 'i';
@@ -2185,12 +2197,12 @@
         let reAll = null; try{ reAll = new RegExp(pat, reFlags+'g'); }catch{ reAll=null; }
         if (!reAll){ toast('invalid pattern'); return; }
   const wantGlobalPerLine = /g/.test(flagsGiven);
-        const needConfirm = /c/.test(flagsGiven);
+    const reportOnly = /n/.test(flagsGiven);
+    const needConfirm = /c/.test(flagsGiven) && !reportOnly;
 
   const orig = String(editor.value||'');
-  // Lazily push undo snapshot on first actual change to avoid empty snapshots (#308)
-  let _subUndoPushed = false;
-  const _pushSubUndoOnce = ()=>{ if (!_subUndoPushed){ _pushUndoSnapshot('substitute'); _subUndoPushed = true; } };
+  // Capture pre-substitute snapshot upfront and push it at the end iff any change occurred (#312)
+  const _preSubSnap = _makeSnapshot();
 
         // Helper to preview a match in current evolving text without causing visible scroll
         function previewAt(start,len, textForPreview){
@@ -2220,6 +2232,8 @@
           let text = orig;
           let acceptAll = false;
           const seenLineFirst = new Set();
+          // For report-only: track unique affected lines regardless of g
+          const affectedRows = new Set();
           // Decision stack for step-back undo (store state before a decision is made)
           const _decStack = [];
           // helper: compute row index from absolute offset within evolving `text`
@@ -2318,15 +2332,21 @@
               }
             }
             if (doReplace){
-              _pushSubUndoOnce();
-              const rep = _expandReplacement(repl, m);
-              text = text.slice(0, start) + rep + text.slice(start + len);
-              replaced++; if (firstReplaceStart<0) firstReplaceStart = start;
-              reAll.lastIndex = start + rep.length;
+              if (reportOnly){
+                replaced++; if (firstReplaceStart<0) firstReplaceStart = start;
+                try{ affectedRows.add(row); }catch{}
+                // Do not mutate text; lastIndex already advanced by exec
+              } else {
+                const rep = _expandReplacement(repl, m);
+                text = text.slice(0, start) + rep + text.slice(start + len);
+                replaced++; if (firstReplaceStart<0) firstReplaceStart = start;
+                reAll.lastIndex = start + rep.length;
+              }
             }
           }
           _incPrevHide();
-          if (replaced>0){ editor.value = text; _touchBufferModified(); }
+          if (reportOnly){ editor.value = orig; toast(replaced + ' matches on ' + affectedRows.size + ' lines'); }
+          else if (replaced>0){ editor.value = text; _touchBufferModified(); try{ _pushUndoSnapshotObj('substitute', _preSubSnap); }catch{} }
           else { editor.value = orig; toast('replaced: 0'); }
         } else if (inVisual){
           // Visual selection range only (character-wise or line-wise)
@@ -2372,6 +2392,8 @@
           let reMid = null; try{ reMid = new RegExp(pat, reFlags + 'g'); }catch{ reMid=null; }
           if (!reMid){ toast('invalid pattern'); try{ _exitVisual(); }catch{} return; }
           const seenLineFirst = new Set(); // track first match per (relative) line when !g
+          // For report-only: count unique relative rows within selection
+          const affectedRows = new Set();
           const linesInMid = mid.split('\n');
           // helper: row index in mid from offset
           const midRowFromOff = (off)=>{
@@ -2448,16 +2470,24 @@
               }
             }
             if (doReplace){
-              _pushSubUndoOnce();
-              const rep = _expandReplacement(repl, m);
-              mid = mid.slice(0, startInMid) + rep + mid.slice(startInMid + len);
-              replaced++; if (firstReplaceStart<0) firstReplaceStart = selStart + startInMid;
-              reMid.lastIndex = startInMid + rep.length;
-              if (!wantGlobalPerLine){ seenLineFirst.add(relRow); }
+              if (reportOnly){
+                replaced++; if (firstReplaceStart<0) firstReplaceStart = selStart + startInMid;
+                try{ affectedRows.add(relRow); }catch{}
+                if (!wantGlobalPerLine){ seenLineFirst.add(relRow); }
+                // Do not mutate mid; lastIndex already advanced by exec
+                if (!wantGlobalPerLine){ /* only first per line counted */ }
+              } else {
+                const rep = _expandReplacement(repl, m);
+                mid = mid.slice(0, startInMid) + rep + mid.slice(startInMid + len);
+                replaced++; if (firstReplaceStart<0) firstReplaceStart = selStart + startInMid;
+                reMid.lastIndex = startInMid + rep.length;
+                if (!wantGlobalPerLine){ seenLineFirst.add(relRow); }
+              }
             }
           }
           _incPrevHide();
-          if (replaced>0){ editor.value = pre + mid + post; _touchBufferModified(); }
+          if (reportOnly){ editor.value = orig; toast(replaced + ' matches on ' + affectedRows.size + ' lines'); }
+          else if (replaced>0){ editor.value = pre + mid + post; _touchBufferModified(); try{ _pushUndoSnapshotObj('substitute', _preSubSnap); }catch{} }
           else { editor.value = orig; toast('replaced: 0'); }
           try{ _exitVisual(); }catch{}
           // スナップショット/フラグをクリア
@@ -2470,6 +2500,7 @@
           // For scanning within the line, clone regex for this scope
           let reLine = null; try{ reLine = new RegExp(pat, reFlags + 'g'); }catch{ reLine=null; }
           if (!reLine){ toast('invalid pattern'); return; }
+          const affectedRows = new Set();
           let m; reLine.lastIndex = 0; let accLine = line; let acceptAll=false; let baseStartOff = (function(){ try{ return _offsetFromRC(r,0)|0; }catch{ return 0; } })();
           const _decStackLine = [];
           while ((m = reLine.exec(accLine))){
@@ -2541,40 +2572,48 @@
               }
             }
             if (doReplace){
-              _pushSubUndoOnce();
-              const rep = _expandReplacement(repl, m);
-              accLine = accLine.slice(0, startInLine) + rep + accLine.slice(startInLine + len);
-              replaced++; if (firstReplaceStart<0) firstReplaceStart = baseStartOff + startInLine;
-              reLine.lastIndex = startInLine + rep.length;
-              if (!wantGlobalPerLine) { break; }
+              if (reportOnly){
+                replaced++; if (firstReplaceStart<0) firstReplaceStart = baseStartOff + startInLine;
+                try{ affectedRows.add(0); }catch{}
+                if (!wantGlobalPerLine) { break; }
+              } else {
+                const rep = _expandReplacement(repl, m);
+                accLine = accLine.slice(0, startInLine) + rep + accLine.slice(startInLine + len);
+                replaced++; if (firstReplaceStart<0) firstReplaceStart = baseStartOff + startInLine;
+                reLine.lastIndex = startInLine + rep.length;
+                if (!wantGlobalPerLine) { break; }
+              }
             }
           }
           _incPrevHide();
-          if (replaced>0){
-            lines[r] = accLine; const out = lines.join('\n'); editor.value = out; _touchBufferModified();
+          if (reportOnly){ editor.value = orig; toast(replaced + ' matches on ' + affectedRows.size + ' lines'); }
+          else if (replaced>0){
+            lines[r] = accLine; const out = lines.join('\n'); editor.value = out; _touchBufferModified(); try{ _pushUndoSnapshotObj('substitute', _preSubSnap); }catch{}
           } else { editor.value = orig; toast('replaced: 0'); }
         }
 
-        if (replaced>0){
-          try{
-            const pos = (firstReplaceStart>=0? firstReplaceStart : 0);
-            const rc = _rcFromOffset(pos);
-            caretRow = rc.r; caretCol = rc.c;
-            // Suppress the first scrolloff after substitute finishes (#306)
-            _scrolloffPaused = true; _scrolloffPauseAnchorR = rc.r; _scrolloffPauseAnchorC = rc.c;
-            // Keep native selection in sync without moving viewport
-            const stKeep = (editor && typeof editor.scrollTop === 'number') ? editor.scrollTop : 0;
-            _syncNativeSelectionToCaret();
-            try{ editor.scrollTop = stKeep; }catch{}
-            // Snap scrollTop to the nearest line boundary to avoid half-line state (#307)
+        if (!reportOnly){
+          if (replaced>0){
             try{
-              const snapped = Math.round((editor.scrollTop||0)/LINE_HEIGHT)*LINE_HEIGHT;
-              if (Math.abs(snapped - (editor.scrollTop||0)) > 0.1){ editor.scrollTop = snapped; }
+              const pos = (firstReplaceStart>=0? firstReplaceStart : 0);
+              const rc = _rcFromOffset(pos);
+              caretRow = rc.r; caretCol = rc.c;
+              // Suppress the first scrolloff after substitute finishes (#306)
+              _scrolloffPaused = true; _scrolloffPauseAnchorR = rc.r; _scrolloffPauseAnchorC = rc.c;
+              // Keep native selection in sync without moving viewport
+              const stKeep = (editor && typeof editor.scrollTop === 'number') ? editor.scrollTop : 0;
+              _syncNativeSelectionToCaret();
+              try{ editor.scrollTop = stKeep; }catch{}
+              // Snap scrollTop to the nearest line boundary to avoid half-line state (#307)
+              try{
+                const snapped = Math.round((editor.scrollTop||0)/LINE_HEIGHT)*LINE_HEIGHT;
+                if (Math.abs(snapped - (editor.scrollTop||0)) > 0.1){ editor.scrollTop = snapped; }
+              }catch{}
             }catch{}
-          }catch{}
-          _repositionCaret(); updateGutter(); _renderHlMatchesVisible(); toast('replaced: ' + replaced, 1500);
-        } else {
-          // 置換無し: undo スナップショットは作っていない（lazy push）ので特別な後始末は不要
+            _repositionCaret(); updateGutter(); _renderHlMatchesVisible(); toast('replaced: ' + replaced, 1500);
+          } else {
+            // 置換無し: undo スナップショットは作っていない（lazy push）ので特別な後始末は不要
+          }
         }
         try{ _incSearchAnchorOff = null; }catch{}
         // Ensure we always return to NORMAL mode after :s completes, and clear any pending ops/counts.
