@@ -3592,7 +3592,7 @@
             wrap.appendChild(mkList(winList.map(x=>[x])));
           } else if (curTab==='cmd'){
             // 先頭の「コマンド」見出しは不要
-            const strongHeadings = new Set(['置換','読み込み','保存・終了','検索・ハイライト','表示','その他']);
+            const strongHeadings = new Set(['置換','読み込み','保存・終了','検索・ハイライト','検索ハイライト','ジャンプ','表示','その他']);
             const section = (title, items)=>{
               const h = mkH(title);
               if (strongHeadings.has(title)){
@@ -3677,11 +3677,10 @@
               [K(':help'), sep(' このヘルプを開く')]
             ]);
           } else if (curTab==='normal'){
-            wrap.appendChild(mkH('NORMAL'));
             const mkSec = (title)=>{ const h=mkH(title); try{ h.style.fontSize='1.1em'; h.style.fontWeight='700'; }catch{} return h; };
 
             // 移動
-            wrap.appendChild(mkSec('移動'));
+            wrap.appendChild(mkSec('移動(モーション)'));
             wrap.appendChild(mkList([
               [K('h'), sep(' / '), K('←'), sep(' 左へ1文字')],
               [K('j'), sep(' / '), K('↓'), sep(' 下へ1行')],
@@ -3689,33 +3688,57 @@
               [K('l'), sep(' / '), K('→'), sep(' 右へ1文字')],
               [K('gg'), sep('  先頭へ')],
               [K('G'), sep('  末尾へ')],
+              [K('0'), sep('  行頭へ')],
+              [K('^'), sep('  空白文字に続く行頭へ')],
+              [K('$'), sep('  行末へ')],
               [K('w'), sep(' / '), K('b'), sep('  単語の先頭へ進む/戻る')],
               [K('W'), sep(' / '), K('B'), sep('  WORD（空白区切りの大きな語）単位で進む/戻る')],
-              [K('Nw'), sep(' / '), K('Nb'), sep(' / '), K('NW'), sep(' / '), K('NB'), sep('  N回分まとめて移動（例: '), K('3w'), sep('）')]
+              [K('Nw'), sep(' / '), K('Nb'), sep(' / '), K('NW'), sep(' / '), K('NB'), sep('  N回分まとめて移動（例: '), K('3w'), sep('）')],
+              [K('{'), sep('  段落/空行区切りの前へ')],
+              [K('}'), sep('  段落/空行区切りの次へ')]
             ]));
 
             // オペレータ
             wrap.appendChild(mkSec('オペレータ'));
             wrap.appendChild(mkList([
-              [K('d'), sep(' / '), K('y'), sep(' / '), K('c'), sep('  削除 / ヤンク / 変更（いずれもモーションと組み合わせ）')],
-              [K('cw'), sep(' は '), K('dw'), sep(' と異なり、末尾の空白を含めない（Vim準拠）')],
-              [K('cW'), sep(' / '), K('cB'), sep('  WORD 単位の変更に対応')],
-              [K('Ncw'), sep('  カウント付き（例: '), K('2cw'), sep('）')],
-              [K('v'), sep('  VISUAL モードへ(文字単位選択)')],
-              [K('V'), sep('  VISUAL モードへ(行単位選択)')]
+              [K('x'), sep('  caret直下の1文字削除')],
+              [K('dd'), sep(' 行削除')],
+              [K('d モーション'), sep(' 削除 ※範囲はモーションによる')], 
+              [K('Nd モーション'), sep('  カウント付き（例: '), K('2dw'), sep('）')],
+              [K('yy'), sep(' 行ヤンク(行コピー) ')],
+              [K('y モーション'), sep(' ヤンク(コピー) ※範囲はモーションによる ')],
+              [K('p'), sep('  caret行の下に行ペースト')],
+              [K('P'), sep('  caret行の上に行ペースト')]
             ]));
 
             // 検索
             wrap.appendChild(mkSec('検索'));
             wrap.appendChild(mkList([
-              [K('/'), sep(' でEOF方向にインクリメンタル検索（確定で最後の検索状態を更新）')],
-              [K('?'), sep(' でファイル先頭方向にインクリメンタル検索（確定で最後の検索状態を更新）')]
+              [K('/'), sep(' EOF方向にインクリメンタル検索（確定で最後の検索状態を更新）')],
+              [K('?'), sep(' ファイル先頭方向にインクリメンタル検索（確定で最後の検索状態を更新）')],
+              [K('n'), sep(' 最後の検索語を検索方向に沿って検索('), K('/'), sep('による検索ならEOF方向、'), K('?'), sep('による検索ならファイル先頭方向)')],
+              [K('N'), sep(' 最後の検索語を検索方向の逆方向に検索('), K('/'), sep('による検索ならファイル先頭方向、'), K('?'), sep('による検索ならEOF方向)')]
+            ]));
+
+            // モード切替
+            wrap.appendChild(mkSec('モード切替'));
+            wrap.appendChild(mkList([
+              [K('v'), sep('  VISUAL モードへ(文字単位選択)')],
+              [K('V'), sep('  VISUAL モードへ(行単位選択)')],
+              [K('i'), sep('  INSERT モードへ(caret位置そのまま)')],
+              [K('I'), sep('  行頭へ移動 & INSERT モードへ')],
+              [K('a'), sep('  INSERT モードへ(caretを右に1文字移動してから)')],
+              [K('A'), sep('  行末へ移動 & INSERT モードへ')],
+              [K('o'), sep('  caret行の下に空行作成 & INSERTモード')],
+              [K('O'), sep('  caret行の上に空行作成 & INSERTモード')],
+              [K('cc'), sep('  行削除 & INSERTモード')],
+              [K('c モーション'), sep('  削除 & INSERTモード ※削除範囲はモーションによる')],
+              [K('Nc モーション'), sep('  カウント付き（例: '), K('2cw'), sep('）')]
             ]));
           } else if (curTab==='insert'){
             wrap.appendChild(mkH('INSERT'));
             wrap.appendChild(mkP('文字入力とUndoスナップショットの扱い。'));
           } else if (curTab==='visual'){
-            wrap.appendChild(mkH('VISUAL'));
             const p = document.createElement('div');
             p.style.whiteSpace='pre-wrap';
             p.appendChild(document.createTextNode('選択範囲の操作。:s との連携（'));
