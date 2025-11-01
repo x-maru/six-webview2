@@ -4017,30 +4017,33 @@
         }
         // cw special-case (Vim: cw behaves like ce; unlike dw it does not eat trailing spaces)
         if (e.key==='w'){
-          const mcount = (_countAcc==null?1:_countAcc); _countAcc=null;
-          // Implement only single-word behavior (count>1 treated as 1 for now)
+          // cw behaves like ce, and with count N it changes up to the end of the Nth word
+          const motionCount = (_countAcc==null?1:_countAcc); _countAcc=null;
+          const totalWords = Math.max(1, (_pendingOpCount||1) * motionCount);
           const line = (_splitLines()[caretRow]||'');
           const n = line.length;
           let i = caretCol;
-          if (i < n){
-            // If currently on spaces, skip spaces to next non-space and then take that run
-            const isSpaceAt = (idx)=>{ const t=_wordTypeAtInLine(line, idx); return t===_WT_SPACE; };
-            let j = i;
-            if (isSpaceAt(j)){
-              while (j < n && isSpaceAt(j)) j = _nextIndex(line, j);
-            }
-            // Now consume one non-space run (word) to its end
-            if (j < n){
-              const tRun = _wordTypeAtInLine(line, j);
-              while (j < n && _wordTypeAtInLine(line, j) === tRun){ j = _nextIndex(line, j); }
-              // Delete from original caret (i) to end of this run (j) but do NOT include trailing spaces
-              const start={ r: caretRow, c: i };
-              const end  ={ r: caretRow, c: j };
-              if (!(start.r===end.r && start.c===end.c)) _deleteRangePos(start, end);
-              _clearPendingOp(); ensureScrolloff(); _repositionCaret(); updateGutter();
-              _suppressInsertSnapshotOnce = true; _setMode('INSERT');
-              return;
-            }
+          let j = i;
+          const isSpaceAt = (idx)=>{ const t=_wordTypeAtInLine(line, idx); return t===_WT_SPACE; };
+          let consumed = 0;
+          // Advance j to end of the totalWords-th word run; include inter-word spaces but not trailing space after last word
+          while (consumed < totalWords && j < n){
+            // Skip any leading spaces to the next word
+            while (j < n && isSpaceAt(j)) j = _nextIndex(line, j);
+            if (j >= n) break;
+            // Consume one non-space run to its end
+            const tRun = _wordTypeAtInLine(line, j);
+            while (j < n && _wordTypeAtInLine(line, j) === tRun){ j = _nextIndex(line, j); }
+            consumed++;
+          }
+          // Delete from original caret (i) to j; do NOT include trailing spaces after the last word
+          const start={ r: caretRow, c: i };
+          const end  ={ r: caretRow, c: j };
+          if (!(start.r===end.r && start.c===end.c)){
+            _deleteRangePos(start, end);
+            _clearPendingOp(); ensureScrolloff(); _repositionCaret(); updateGutter();
+            _suppressInsertSnapshotOnce = true; _setMode('INSERT');
+            return;
           }
           _clearPendingOp(); return;
         }
