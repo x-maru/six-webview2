@@ -40,6 +40,8 @@
   const _showCursor = ()=>{ try{ if (_cursorHidden){ document.body.classList.remove('hide-cursor'); _cursorHidden=false; } }catch{} };
   // editor zoom state (scale only editor/gutter, not global UI)
   let _edScale = 1;
+  // short guard to ignore stray key events immediately after modal close
+  let _kbdGuardUntil = 0;
   // guard window to avoid scroll snapping while zooming via wheel
   let _zoomGuardUntil = 0;
   // fixed zoom steps (percent): 50,75,90,100,110,133,180,250,300
@@ -783,6 +785,18 @@
   // VISUAL after ':' selection overlay
   setVar('visCmdSelBg', t.visCmdSelBg);
   setVar('visCmdSelOutline', t.visCmdSelOutline);
+  // Help modal (tabs/colors)
+  setVar('six-help-tab-active-bg', t.helpTabActiveBg);
+  setVar('six-help-tab-active-fg', t.helpTabActiveFg);
+  setVar('six-help-tab-bg', t.helpTabBg);
+  setVar('six-help-tab-fg', t.helpTabFg);
+  setVar('six-modal-bg', t.helpModalBg);
+  setVar('six-help-kbd-bg', t.helpKbdBg);
+  setVar('six-help-kbd-fg', t.helpKbdFg);
+  // Help close button colors
+  setVar('six-help-close-bg', t.helpCloseBg);
+  setVar('six-help-close-fg', t.helpCloseFg);
+  setVar('six-help-close-border', t.helpCloseBorder);
       // apply persisted scale if any
       try{
         const s = localStorage.getItem('six.edScale');
@@ -1807,6 +1821,8 @@
       case 'k': moveLines(-times); break;
       case 'w': { let r0=rr,c0=cc; for(let i=0;i<times;i++){ const p=_nextWordStart(r0,c0); r0=p.r; c0=p.c; } rr=r0; cc=c0; break; }
       case 'b': { let r0=rr,c0=cc; for(let i=0;i<times;i++){ const p=_prevWordStart(r0,c0); r0=p.r; c0=p.c; } rr=r0; cc=c0; break; }
+      case 'W': { let r0=rr,c0=cc; for(let i=0;i<times;i++){ const p=_nextWORDStart(r0,c0); r0=p.r; c0=p.c; } rr=r0; cc=c0; break; }
+      case 'B': { let r0=rr,c0=cc; for(let i=0;i<times;i++){ const p=_prevWORDStart(r0,c0); r0=p.r; c0=p.c; } rr=r0; cc=c0; break; }
       case '^': { rr=rr; cc=_firstNonBlankColOf(lines[rr]||''); break; }
       case '0': { cc=0; break; }
       case '$': {
@@ -2123,6 +2139,59 @@
   }
   function _moveWordW(count){ let r=caretRow, c=caretCol; const times=Math.max(1,count|0); for(let i=0;i<times;i++){ const p=_nextWordStart(r,c); r=p.r; c=p.c; } _setCaret(r,c); }
   function _moveWordB(count){ let r=caretRow, c=caretCol; const times=Math.max(1,count|0); for(let i=0;i<times;i++){ const p=_prevWordStart(r,c); r=p.r; c=p.c; } _setCaret(r,c); }
+  // WORD (capital W/B) motions: treat any non-space run as one WORD
+  function _nextWORDStart(row, col){
+    const lines = _splitLines();
+    let r = row, c = col;
+    for(;;){
+      if (r >= lines.length) return { r: lines.length-1, c: _lineLen(lines.length-1) };
+      const line = lines[r] || '';
+      const n = line.length;
+      if (c > n) c = n;
+      if (c >= n){ r++; c = 0; continue; }
+      // skip spaces first
+      while (c < n && _wordTypeAtInLine(line, c) === _WT_SPACE){ c = _nextIndex(line, c); }
+      if (c < n){
+        // in a non-space run: leave this run, then skip spaces to the next start
+        while (c < n && _wordTypeAtInLine(line, c) !== _WT_SPACE){ c = _nextIndex(line, c); }
+        while (c < n && _wordTypeAtInLine(line, c) === _WT_SPACE){ c = _nextIndex(line, c); }
+        if (c < n) return { r, c };
+      }
+      r++; c = 0;
+    }
+  }
+  function _prevWORDStart(row, col){
+    const lines = _splitLines();
+    let r = row, c = col;
+    for(;;){
+      if (r < 0) return { r:0, c:0 };
+      const line = (r>=0 && r<lines.length) ? (lines[r]||'') : '';
+      const n = line.length;
+      if (c > n) c = n;
+      if (c > 0){
+        // step left one code point first
+        c = _prevIndex(line, c);
+        // skip spaces to the left
+        while (c >= 0 && _wordTypeAtInLine(line, c) === _WT_SPACE){
+          if (c === 0){ c = -1; break; }
+          c = _prevIndex(line, c);
+        }
+        if (c < 0){ r--; c = (r>=0 ? (lines[r]||'').length : 0); continue; }
+        // move to start of this non-space run
+        while (c > 0){
+          const prev = _prevIndex(line, c);
+          if (prev < 0) break;
+          if (_wordTypeAtInLine(line, prev) === _WT_SPACE) break;
+          c = prev;
+        }
+        return { r, c };
+      } else {
+        r--; c = (r>=0 ? (lines[r]||'').length : 0);
+      }
+    }
+  }
+  function _moveWORDW(count){ let r=caretRow, c=caretCol; const times=Math.max(1,count|0); for(let i=0;i<times;i++){ const p=_nextWORDStart(r,c); r=p.r; c=p.c; } _setCaret(r,c); }
+  function _moveWORDB(count){ let r=caretRow, c=caretCol; const times=Math.max(1,count|0); for(let i=0;i<times;i++){ const p=_prevWORDStart(r,c); r=p.r; c=p.c; } _setCaret(r,c); }
   function _moveParagraphNext(count){ const lines=_splitLines(); let r=caretRow; const times=Math.max(1,count|0); for(let i=0;i<times;i++){ let j=r+1; while (j<lines.length && !/^\s*$/.test(lines[j]||'')) j++; while (j<lines.length && /^\s*$/.test(lines[j]||'')) j++; if (j>=lines.length){ r=lines.length-1; break; } r=j; } const col=_firstNonBlankColOf(lines[r]||''); _setCaret(r,col); }
   function _moveParagraphPrev(count){ const lines=_splitLines(); let r=caretRow; const times=Math.max(1,count|0); for(let i=0;i<times;i++){ let j=r-1; while (j>=0 && !/^\s*$/.test(lines[j]||'')) j--; while (j>=0 && /^\s*$/.test(lines[j]||'')) j--; if (j<0){ r=0; break; } let k=j; while (k>0 && !/^\s*$/.test(lines[k-1]||'')) k--; r=k; } const col=_firstNonBlankColOf(lines[r]||''); _setCaret(r,col); }
 
@@ -2622,6 +2691,14 @@
         return;
       }
     }catch{}
+    // :help — ヘルプモーダルを表示（[コマンド]タブをデフォルト選択）
+    if (/^:help\b/i.test(cmd||'')){
+      try{ await helpModal({ defaultTab: 'cmd' }); }catch{}
+      _setMode('NORMAL');
+      try{ setTimeout(()=>{ try{ editor && editor.focus && editor.focus(); }catch{} }, 0); }catch{}
+      return;
+    }
+
     // :b [N|query] — Enter で確定（数字のみは優先）
     if (/^:b/i.test(cmd)){
       const mNum = cmd.match(/^:b\s*(\d+)\s*$/i);
@@ -3339,6 +3416,418 @@
     });
   }
 
+  // Help modal (:help)
+  function helpModal(opts){
+    // opts: { defaultTab: 'all'|'cmd'|'normal'|'insert'|'visual' }
+    return new Promise((resolve)=>{
+      try{
+    if (!_modalOverlay || !_modalTitle || !_modalDetail || !_modalButtons){
+          try{ alert('Help is not available in this environment.'); }catch{}
+          resolve();
+          return;
+        }
+  // Prevent any editor scrolling while help is open
+  const stKeep = (editor && typeof editor.scrollTop === 'number') ? editor.scrollTop : 0;
+  try{ _suppressScrollDuringModal = true; _scrollGuardUntil = Date.now() + 2000; _zoomGuardUntil = Date.now() + 2000; }catch{}
+  // Build modal chrome
+  const prevBtnsDisp = _modalButtons && _modalButtons.style ? _modalButtons.style.display : '';
+  try{ if (_modalButtons) _modalButtons.style.display = 'none'; }catch{}
+  const prevBoxBg = _modalBox && _modalBox.style ? _modalBox.style.background : '';
+  try{ if (_modalBox) _modalBox.style.background = 'var(--six-modal-bg, #1e1e1e)'; }catch{}
+  const prevDetailPad = _modalDetail && _modalDetail.style ? _modalDetail.style.padding : '';
+  try{ if (_modalDetail) _modalDetail.style.padding = '0'; }catch{}
+  _modalButtons.innerHTML = '';
+        // Title
+        try{ _modalTitle.textContent = 'Six ヘルプ'; }catch{}
+
+        // Prepare content skeleton
+    _modalDetail.innerHTML = '';
+  const root = document.createElement('div');
+  root.id = 'help';
+    root.style.display = 'flex';
+        root.style.flexDirection = 'column';
+        root.style.width = '72vw';
+        root.style.maxWidth = '1000px';
+  root.style.height = '68vh';
+        root.style.maxHeight = '80vh';
+  root.style.margin = '0';
+  root.style.fontSize = '15px';
+
+        // Tabs bar
+        const tabsBar = document.createElement('div');
+        tabsBar.style.display = 'flex';
+        tabsBar.style.gap = '8px';
+  tabsBar.style.borderBottom = '1px solid var(--six-border,#888)';
+  tabsBar.style.paddingBottom = '6px';
+  tabsBar.style.outline = 'none';
+
+        // Scrollable content area
+        const sc = document.createElement('div');
+        sc.style.flex = '1 1 auto';
+        sc.style.overflow = 'auto';
+  sc.style.padding = '8px 2px 8px 2px';
+  sc.tabIndex = -1; // focus stays on modal, not scroll area
+  sc.style.outline = 'none';
+
+        // Bottom ops line (non-scroll)
+        const ops = document.createElement('div');
+        ops.style.flex = '0 0 auto';
+        ops.style.display = 'flex';
+        ops.style.borderTop = '1px solid var(--six-border,#888)';
+        ops.style.alignItems = 'center';
+  ops.style.padding = '6px 0 0 0';
+  ops.style.margin = '0';
+
+        const opsLeft = document.createElement('div');
+        opsLeft.style.whiteSpace = 'nowrap';
+        opsLeft.style.overflow = 'hidden';
+        opsLeft.style.textOverflow = 'ellipsis';
+        // Esc は記載しない（ボタンに表示）
+        const keys = ['j','k','↓','↑','SPACE','Shift+SPACE','gg','G','Tab','Shift+Tab'];
+        const styleKbd = (el)=>{
+          try{
+            el.style.background = 'var(--six-help-kbd-bg, rgb(95,143,223))';
+            el.style.color = 'var(--six-help-kbd-fg, #000)';
+            el.style.borderRadius = '0.18rem';
+            el.style.padding = '0 0.22rem';
+            el.style.margin = '0 2px';
+          }catch{}
+        };
+        keys.forEach((k, idx)=>{
+          const kbd = document.createElement('kbd'); kbd.textContent = k; styleKbd(kbd);
+          opsLeft.appendChild(kbd);
+          if (idx < keys.length-1){ opsLeft.appendChild(document.createTextNode(' / ')); }
+        });
+        const opsRight = document.createElement('div');
+        opsRight.style.marginLeft = 'auto';
+  const btnClose = document.createElement('button');
+  btnClose.textContent = '閉じる(Esc)';
+  // Match Unsaved changes [Save] look (themeable)
+  btnClose.style.minWidth = '80px';
+  btnClose.style.border = '1px solid var(--six-help-close-border, #2f4064)';
+  btnClose.style.background = 'var(--six-help-close-bg, #2a3756)';
+  btnClose.style.color = 'var(--six-help-close-fg, #e6e6e6)';
+  btnClose.style.padding = '6px 10px';
+  btnClose.style.borderRadius = '6px';
+  btnClose.style.cursor = 'pointer';
+        opsRight.appendChild(btnClose);
+        ops.appendChild(opsLeft);
+        ops.appendChild(opsRight);
+
+        // Assemble
+        root.appendChild(tabsBar);
+        root.appendChild(sc);
+        root.appendChild(ops);
+        _modalDetail.appendChild(root);
+
+        // Tabs
+        const TABS = [
+          { id:'all', label:'全体' },
+          { id:'cmd', label:'コマンド' },
+          { id:'normal', label:'NORMAL' },
+          { id:'insert', label:'INSERT' },
+          { id:'visual', label:'VISUAL' }
+        ];
+        let curTab = (opts && opts.defaultTab) || 'cmd';
+        if (!TABS.some(t=>t.id===curTab)) curTab = 'cmd';
+
+        const tabButtons = new Map();
+        function applyTabStyles(){
+          for (const [id, el] of tabButtons.entries()){
+            if (id === curTab){
+              el.style.borderBottom = '2px solid var(--six-accent,#4b8)';
+              el.style.background = 'var(--six-help-tab-active-bg, rgba(0,0,0,0.06))';
+              el.style.color = 'var(--six-help-tab-active-fg, inherit)';
+              el.setAttribute('aria-selected','true');
+            } else {
+              el.style.borderBottom = '2px solid transparent';
+              el.style.background = 'var(--six-help-tab-bg, transparent)';
+              el.style.color = 'var(--six-help-tab-fg, inherit)';
+              el.setAttribute('aria-selected','false');
+            }
+          }
+        }
+        function renderContent(){
+          sc.innerHTML = '';
+          const wrap = document.createElement('div');
+          wrap.style.padding = '4px 8px';
+          wrap.style.lineHeight = '1.55';
+          wrap.style.margin = '0';
+
+          const mkH = (txt)=>{ const h=document.createElement('div'); h.textContent = txt; h.style.fontWeight='600'; h.style.margin='6px 0'; return h; };
+          const mkP = (txt)=>{ const p=document.createElement('div'); p.textContent = txt; p.style.whiteSpace='pre-wrap'; return p; };
+          const mkList = (items)=>{
+            const ul = document.createElement('ul'); ul.style.margin='6px 0 10px 1.2em'; ul.style.padding='0';
+            items.forEach(item=>{
+              const li=document.createElement('li');
+              if (typeof item === 'string'){ li.textContent=item; }
+              else if (Array.isArray(item)){
+                item.forEach((node, idx)=>{
+                  if (typeof node === 'string'){ li.appendChild(document.createTextNode(node)); }
+                  else { li.appendChild(node); }
+                });
+              }
+              ul.appendChild(li);
+            });
+            return ul;
+          };
+          const K = (txt)=>{ const k=document.createElement('kbd'); k.textContent=txt; styleKbd(k); return k; };
+          const sep = (s)=> document.createTextNode(s);
+
+          if (curTab==='all'){
+            // 起動後に変更可能なパラメータの初期値
+            wrap.appendChild(mkH('起動後に変更可能なパラメータの初期値'));
+            const initList = [
+              'scrolloff = 3',
+              '検索ハイライト hlsearch = off'
+            ];
+            initList.forEach(s=>{ const d=document.createElement('div'); d.textContent=s; wrap.appendChild(d); });
+            // ウインドウ
+            wrap.appendChild(mkH('ウインドウ'));
+            const winList = [
+              'エディタ拡大率は Ctrl+ホイール で変更可能で、前回終了時の拡大率を維持',
+              '1行の文字数：110 (半角)',
+              '行数：32'
+            ];
+            wrap.appendChild(mkList(winList.map(x=>[x])));
+          } else if (curTab==='cmd'){
+            // 先頭の「コマンド」見出しは不要
+            const strongHeadings = new Set(['置換','読み込み','保存・終了','検索・ハイライト','表示','その他']);
+            const section = (title, items)=>{
+              const h = mkH(title);
+              if (strongHeadings.has(title)){
+                try{ h.style.fontSize = '1.1em'; h.style.fontWeight = '700'; }catch{}
+              }
+              wrap.appendChild(h);
+              wrap.appendChild(mkList(items));
+            };
+            const sectionSub = (title, items)=>{
+              const subWrap = document.createElement('div');
+              subWrap.style.marginLeft = '1.2em';
+              const h = mkH(title);
+              try{ h.style.margin = '6px 0 2px 0'; }catch{}
+              const list = mkList(items);
+              try{ list.style.marginLeft = '1.2em'; }catch{}
+              subWrap.appendChild(h);
+              subWrap.appendChild(list);
+              wrap.appendChild(subWrap);
+            };
+            // 読み込み
+            section('読み込み', [
+              [K(':e '), sep('（半角スペースまで入力で）ファイル選択ポップアップ')],
+              [K(':e!'), sep(' 現バッファを再読込（変更破棄）。ファイル名は不要・無視')]
+            ]);
+            // 保存・終了
+            section('保存・終了', [
+              [K(':w'), sep(' 保存 / '), K(':wa'), sep(' すべて保存 / '), K(':wq'), sep(' 保存して終了 / '), K(':wqa'), sep(' すべて保存して終了')],
+              [K(':w!'), sep(' 強制保存（許可されている場合）')],
+              [K(':q'), sep(' 終了 / '), K(':q!'), sep(' 変更破棄して終了 / '), K(':qa'), sep(' すべて終了')]
+            ]);
+            // ジャンプ
+            section('ジャンプ', [
+              [K(':N'), sep('N行目にジャンプ')]
+	    ]);
+            // 置換
+            section('置換', [
+              [K(':s'), sep('(1行のみ) / '), K(':%s'), sep('(ファイル全体) / '), K(":'<,'>s"), sep('（VISUAL 範囲）でテキストを置換')],
+              ['置換はデフォルトで各行の最初の一致のみ。', K('g'), sep(' フラグで行内全一致に')]
+            ]);
+            sectionSub('書式', [
+              [K(':s/pat/repl/flags')],
+              [K(':%s/pat/repl/flags')],
+              [K(":'\u003c,'\u003e s/pat/repl/flags")]
+            ]);
+            sectionSub('フラグ', [
+              [K('g'), sep(' 行内の全一致を置換（無指定時は各行内で最初の1箇所のみ）')],
+              [K('i'), sep(' 大文字小文字を無視する（case-insensitive）')],
+              [K('c'), sep(' 各候補ごとに確認モーダルを表示（y/n/a/q/u）')],
+              [K('n'), sep(' 件数のみを表示し、テキストは変更しない（非破壊） ※replは無視')]
+            ]);
+            sectionSub('確認モーダル操作', [
+              [K('y'), sep(' 置換 / '), K('n'), sep(' スキップ / '), K('a'), sep(' 以降すべて置換 / '), K('q'), sep(' 中止 / '), K('u'), sep(' 1手戻す（モーダル内）')]
+            ]);
+            sectionSub('範囲指定', [
+              [K('%'), sep(' バッファ全体')],
+              [K("'\u003c,'\u003e"), sep(' VISUAL 範囲（VISUAL 中に '), K(':'), sep(' を押すと自動付与）')]
+            ]);
+            sectionSub('メッセージ', [
+              [K('replaced: N'), sep(' 置換数（0 の場合も '), K('replaced: 0'), sep(' を表示）')],
+              [K('X matches on Y lines'), sep(' '), K('n'), sep(' フラグ時の件数表示（非破壊）')]
+            ]);
+            sectionSub('エラー', [
+              ['不正なフラグ（大文字など）が含まれる場合、エラーを表示し置換は実行しない'],
+              ['正規表現コンパイルに失敗した場合も実行しない']
+            ]);
+            sectionSub('例', [
+              [K(':%s/foo/bar/g'), sep(' 全行で '), K('foo'), sep(' を '), K('bar'), sep(' に全置換')],
+              [K(":'\u003c,\u003e s/\\bdog\\b/cat/g"), sep(' 選択範囲で単語 '), K('dog'), sep(' を '), K('cat'), sep(' に')],
+              [K(':s/^\\s\u002b//'), sep(' 先頭の空白を1箇所削除（現在行）')]
+            ]);
+            // 検索ハイライト
+            section('検索ハイライト', [
+              [K(':set hlsearch'), sep(' 有効 / '), K(':set nohlsearch'), sep(' 無効 / '), K(':set hlsearch!'), sep(' トグル')]
+            ]);
+            // 表示
+            section('表示', [
+              [K(':set scrolloff=N'), sep(' スクロールオフ（上下の余白行数）'), K('set so=N'), sep('でも同じ')]
+            ]);
+            // その他
+            section('その他', [
+              [K(':pick'), sep(' ピッカー起動 / '), K(':pick!'), sep(' 強制起動')],
+              [K(':help'), sep(' このヘルプを開く')]
+            ]);
+          } else if (curTab==='normal'){
+            wrap.appendChild(mkH('NORMAL'));
+            const mkSec = (title)=>{ const h=mkH(title); try{ h.style.fontSize='1.1em'; h.style.fontWeight='700'; }catch{} return h; };
+
+            // 移動
+            wrap.appendChild(mkSec('移動'));
+            wrap.appendChild(mkList([
+              [K('h'), sep(' / '), K('←'), sep(' 左へ1文字')],
+              [K('j'), sep(' / '), K('↓'), sep(' 下へ1行')],
+              [K('k'), sep(' / '), K('↑'), sep(' 上へ1行')],
+              [K('l'), sep(' / '), K('→'), sep(' 右へ1文字')],
+              [K('gg'), sep('  先頭へ')],
+              [K('G'), sep('  末尾へ')],
+              [K('w'), sep(' / '), K('b'), sep('  単語の先頭へ進む/戻る')],
+              [K('W'), sep(' / '), K('B'), sep('  WORD（空白区切りの大きな語）単位で進む/戻る')],
+              [K('Nw'), sep(' / '), K('Nb'), sep(' / '), K('NW'), sep(' / '), K('NB'), sep('  N回分まとめて移動（例: '), K('3w'), sep('）')]
+            ]));
+
+            // オペレータ
+            wrap.appendChild(mkSec('オペレータ'));
+            wrap.appendChild(mkList([
+              [K('d'), sep(' / '), K('y'), sep(' / '), K('c'), sep('  削除 / ヤンク / 変更（いずれもモーションと組み合わせ）')],
+              [K('cw'), sep(' は '), K('dw'), sep(' と異なり、末尾の空白を含めない（Vim準拠）')],
+              [K('cW'), sep(' / '), K('cB'), sep('  WORD 単位の変更に対応')],
+              [K('Ncw'), sep('  カウント付き（例: '), K('2cw'), sep('）')],
+              [K('v'), sep('  VISUAL モードへ(文字単位選択)')],
+              [K('V'), sep('  VISUAL モードへ(行単位選択)')]
+            ]));
+
+            // 検索
+            wrap.appendChild(mkSec('検索'));
+            wrap.appendChild(mkList([
+              [K('/'), sep(' でEOF方向にインクリメンタル検索（確定で最後の検索状態を更新）')],
+              [K('?'), sep(' でファイル先頭方向にインクリメンタル検索（確定で最後の検索状態を更新）')]
+            ]));
+          } else if (curTab==='insert'){
+            wrap.appendChild(mkH('INSERT'));
+            wrap.appendChild(mkP('文字入力とUndoスナップショットの扱い。'));
+          } else if (curTab==='visual'){
+            wrap.appendChild(mkH('VISUAL'));
+            const p = document.createElement('div');
+            p.style.whiteSpace='pre-wrap';
+            p.appendChild(document.createTextNode('選択範囲の操作。:s との連携（'));
+            p.appendChild(K(":'<,'>"));
+            p.appendChild(document.createTextNode(' 自動挿入・ハイライト維持）。'));
+            wrap.appendChild(p);
+          }
+
+          sc.appendChild(wrap);
+          // reset scroll on tab switch
+          try{ sc.scrollTop = 0; }catch{}
+        }
+
+        tabsBar.innerHTML = '';
+        for (const t of TABS){
+          const b = document.createElement('button');
+          b.textContent = t.label;
+          b.setAttribute('role','tab');
+          b.style.background = 'transparent';
+          b.style.border = 'none';
+          b.style.padding = '6px 8px';
+          b.style.cursor = 'pointer';
+          b.style.outline = 'none'; b.style.boxShadow = 'none';
+          b.setAttribute('tabindex','-1');
+          b.addEventListener('click', (ev)=>{ ev.preventDefault(); curTab = t.id; applyTabStyles(); renderContent(); try{ b.blur(); }catch{} });
+          tabsBar.appendChild(b);
+          tabButtons.set(t.id, b);
+        }
+  applyTabStyles(); renderContent();
+  // Prevent focusing tabs/content area by mouse (avoid focus ring after click)
+  try{ tabsBar.addEventListener('mousedown', (e)=>{ e.preventDefault(); }, true); }catch{}
+  try{ sc.addEventListener('mousedown', (e)=>{ e.preventDefault(); }, true); }catch{}
+
+        // Key handling (trap inside modal)
+        let gPending = false; let gTimer = 0;
+        const cleanup = ()=>{
+          try{ document.removeEventListener('keydown', onKey, true); }catch{}
+          _hideModal();
+          try{ setTimeout(()=>{ try{ _setMode && _setMode('NORMAL'); editor && editor.focus && editor.focus(); }catch{} }, 0); }catch{}
+          try{ if (_modalButtons) _modalButtons.style.display = prevBtnsDisp; }catch{}
+          try{ if (_modalBox) _modalBox.style.background = prevBoxBg; }catch{}
+          try{ if (_modalDetail) _modalDetail.style.padding = prevDetailPad; }catch{}
+          try{ if (typeof stKeep === 'number' && editor) editor.scrollTop = stKeep; }catch{}
+          try{ _suppressScrollDuringModal = false; }catch{}
+          try{
+            // absorb stray keys and reinforce scrollTop to avoid any jump
+            _kbdGuardUntil = Date.now() + 350; _clearPending();
+            const reinforce = ()=>{ try{ if (editor && typeof stKeep==='number') editor.scrollTop = stKeep; }catch{} };
+            reinforce();
+            if (window.requestAnimationFrame){
+              requestAnimationFrame(()=>{ reinforce(); requestAnimationFrame(()=>reinforce()); });
+            }
+            setTimeout(reinforce, 120);
+            _scrollGuardUntil = Date.now() + 500;
+          }catch{}
+          resolve();
+        };
+        const scrollByLines = (n)=>{
+          try{
+            const lh = (typeof LINE_HEIGHT==='number' && LINE_HEIGHT>0) ? LINE_HEIGHT : 20;
+            sc.scrollTop = Math.max(0, sc.scrollTop + n*lh);
+          }catch{}
+        };
+        const switchTab = (dir)=>{
+          try{
+            const idx = TABS.findIndex(t=>t.id===curTab);
+            const next = (idx+dir+TABS.length)%TABS.length;
+            curTab = TABS[next].id; applyTabStyles(); renderContent();
+          }catch{}
+        };
+        const onKey = (e)=>{
+          // Prevent leaking to editor
+          try{ e.stopPropagation(); }catch{}
+          if (e.key==='Escape'){ e.preventDefault(); cleanup(); return; }
+          // hidden shortcuts: q/Q/F1 to close
+          if (e.key==='q' || e.key==='Q' || e.key==='F1'){ e.preventDefault(); cleanup(); return; }
+          // Tab / Shift+Tab
+          if (e.key==='Tab'){ e.preventDefault(); switchTab(e.shiftKey?-1:1); return; }
+          // Ctrl+I / Ctrl+Shift+I as Tab / Shift+Tab equivalents
+          if (e.ctrlKey && !e.altKey && !e.metaKey && (e.key==='i' || e.key==='I')){ e.preventDefault(); switchTab(e.shiftKey?-1:1); return; }
+          if (e.key==='j' || e.key==='ArrowDown'){ e.preventDefault(); scrollByLines(1); return; }
+          if (e.key==='k' || e.key==='ArrowUp'){ e.preventDefault(); scrollByLines(-1); return; }
+          if (e.key===' '){ e.preventDefault(); scrollByLines(e.shiftKey ? -1 : 1); return; }
+          if (e.key==='G'){ e.preventDefault(); sc.scrollTop = sc.scrollHeight; return; }
+          if (e.key==='g'){
+            e.preventDefault();
+            if (gPending){
+              // gg
+              gPending = false; try{ clearTimeout(gTimer); }catch{}
+              sc.scrollTop = 0; return;
+            } else {
+              gPending = true; try{ clearTimeout(gTimer); }catch{} gTimer = setTimeout(()=>{ gPending=false; }, 700);
+              return;
+            }
+          }
+        };
+        document.addEventListener('keydown', onKey, true);
+        btnClose.addEventListener('click', ()=> cleanup(), { once:true });
+        _showModal();
+        try{ editor && (editor.scrollTop = stKeep); }catch{}
+        try{
+          const reinforce = ()=>{ try{ if (editor) editor.scrollTop = stKeep; }catch{} };
+          reinforce();
+          if (window.requestAnimationFrame){
+            requestAnimationFrame(()=>{ reinforce(); requestAnimationFrame(()=>reinforce()); });
+          }
+          setTimeout(reinforce, 120);
+        }catch{}
+      }catch{ resolve(); }
+    });
+  }
+
   // Substitute confirmation modal (y/n/a/q) without numeric shortcuts
   async function _subConfirmModal(detail, opts){
     return new Promise((resolve)=>{
@@ -3596,6 +4085,8 @@
     editor.addEventListener('click', ()=>{ _repositionCaret(); updateGutter(); });
   window.addEventListener('resize', ()=>{ _syncEditorMetrics(); clampViewportExactLines(); _exactLineLockAdjust(); ensureScrolloff(); _repositionCaret(); updateGutter(); _renderHlMatchesVisible(); _incPrevRefresh(); _renderVisSelOverlay(); });
     editor.addEventListener('keydown', (e)=>{
+      // Short guard: absorb any stray keydown right after modal close
+      if (Date.now() < _kbdGuardUntil){ try{ e.preventDefault(); e.stopPropagation(); }catch{} return; }
       if (_mode === 'CMD') return;
       if (_mode === 'INSERT'){
         if (e.key==='Escape'){
@@ -3678,6 +4169,8 @@
         if (e.key==='l' || e.key==='ArrowRight'){ e.preventDefault(); const n=_consumeCount(); moveAndUpdate(()=>_moveCaretCols(n)); return; }
         if (e.key==='w' && !e.ctrlKey && !e.metaKey && !e.altKey){ e.preventDefault(); const n=_consumeCount(); moveAndUpdate(()=>_moveWordW(n)); return; }
         if (e.key==='b' && !e.ctrlKey && !e.metaKey && !e.altKey){ e.preventDefault(); const n=_consumeCount(); moveAndUpdate(()=>_moveWordB(n)); return; }
+  if (e.key==='W' && !e.ctrlKey && !e.metaKey && !e.altKey){ e.preventDefault(); const n=_consumeCount(); moveAndUpdate(()=>_moveWORDW(n)); return; }
+  if (e.key==='B' && !e.ctrlKey && !e.metaKey && !e.altKey){ e.preventDefault(); const n=_consumeCount(); moveAndUpdate(()=>_moveWORDB(n)); return; }
         if (e.key==='^'){ e.preventDefault(); const _n=_consumeCount(); const line=(_splitLines()[caretRow]||''); _setCaret(caretRow, _firstNonBlankColOf(line)); _repositionCaret(); _updateVisualSelection(); return; }
         if (e.key==='0' && _countAcc==null){ e.preventDefault(); _setCaret(caretRow, 0); _repositionCaret(); _updateVisualSelection(); return; }
         if (e.key==='$'){ e.preventDefault(); const n=_consumeCount(); let r=caretRow; if (n>1){ _moveCaretLines(n-1); r=caretRow; } const len=_lineLen(r); _setCaret(r, len); _repositionCaret(); updateGutter(); _updateVisualSelection(); return; }
@@ -3724,55 +4217,9 @@
         if (isPrintable){ e.preventDefault(); return; }
         return;
       }
-      // NORMAL
+    // NORMAL
   // Pending yank operator: interpret next key as motion or line-wise command
   if (_pendingOp === 'y'){
-  // allow composing count for motion (digits only when Shift is NOT held)
-  if (e.key>='1' && e.key<='9' && !e.shiftKey && !e.ctrlKey && !e.metaKey && !e.altKey){ e.preventDefault(); _countAcc = (_countAcc==null?0:_countAcc)*10 + parseInt(e.key,10); _armPendingOpTimeout(); return; }
-  if (e.key==='0' && !e.shiftKey && !e.ctrlKey && !e.metaKey && !e.altKey && _countAcc!=null){ e.preventDefault(); _countAcc = _countAcc*10; _armPendingOpTimeout(); return; }
-        if (e.key==='Escape'){ e.preventDefault(); _clearPendingOp(); _countAcc=null; return; }
-        // Ignore standalone modifier keys while waiting for the motion key
-        if (e.key==='Shift' || e.key==='Control' || e.key==='Alt' || e.key==='Meta'){
-          return;
-        }
-        e.preventDefault();
-        // yy (yank N lines)
-        if (e.key==='y'){
-          const mcount = (_countAcc==null?1:_countAcc); _countAcc=null;
-          const total = Math.max(1, (_pendingOpCount||1) * mcount);
-          _yankWholeLines(caretRow, total);
-          _clearPendingOp(); _repositionCaret(); updateGutter();
-          return;
-        }
-        // ygg / yNgg
-        if (e.key==='g'){
-          if (_pendingOpSeq === 'g'){
-            const mcount = (_countAcc==null?1:_countAcc); _countAcc=null;
-            const targetLine = Math.max(1, mcount) - 1;
-            const r0 = caretRow;
-            const r1 = Math.max(0, Math.min(_totalLines()-1, targetLine));
-            const rs = Math.min(r0, r1);
-            const re = Math.max(r0, r1);
-            _yankWholeLines(rs, re-rs+1);
-            _clearPendingOp(); _repositionCaret(); updateGutter();
-            return;
-          } else {
-            _pendingOpSeq = 'g'; _armPendingOpTimeout(); return;
-          }
-        }
-  // yG / yNG (N as target line) — linewise (use literal 'G')
-  if (e.key==='G'){
-          const mcount = (_countAcc==null?0:_countAcc); _countAcc=null;
-          const r0 = caretRow; const total=_totalLines();
-          let r1;
-          if (mcount && mcount>0){ r1 = Math.max(0, Math.min(total-1, mcount-1)); }
-          else { r1 = total-1; }
-          const rs = Math.min(r0, r1);
-          const re = Math.max(r0, r1);
-          _yankWholeLines(rs, re-rs+1);
-          _clearPendingOp(); _repositionCaret(); updateGutter();
-          return;
-        }
   // y$ — charwise to end-of-line (or across lines if count>1)
   if (e.key==='$'){
           const mcount = (_countAcc==null?1:_countAcc); _countAcc=null;
@@ -4015,8 +4462,8 @@
           _suppressInsertSnapshotOnce = true; _setMode('INSERT');
           return;
         }
-        // cw special-case (Vim: cw behaves like ce; unlike dw it does not eat trailing spaces)
-        if (e.key==='w'){
+        // cw/cW special-case (Vim: cw behaves like ce; cW like cE for WORD)
+        if (e.key==='w' || e.key==='W'){
           // cw behaves like ce, and with count N it changes up to the end of the Nth word
           const motionCount = (_countAcc==null?1:_countAcc); _countAcc=null;
           const totalWords = Math.max(1, (_pendingOpCount||1) * motionCount);
@@ -4031,9 +4478,14 @@
             // Skip any leading spaces to the next word
             while (j < n && isSpaceAt(j)) j = _nextIndex(line, j);
             if (j >= n) break;
-            // Consume one non-space run to its end
-            const tRun = _wordTypeAtInLine(line, j);
-            while (j < n && _wordTypeAtInLine(line, j) === tRun){ j = _nextIndex(line, j); }
+            if (e.key==='W'){
+              // WORD: consume any non-space run entirely
+              while (j < n && !isSpaceAt(j)){ j = _nextIndex(line, j); }
+            } else {
+              // word: consume one run of the same type (alnum/kana/han/symbol)
+              const tRun = _wordTypeAtInLine(line, j);
+              while (j < n && _wordTypeAtInLine(line, j) === tRun){ j = _nextIndex(line, j); }
+            }
             consumed++;
           }
           // Delete from original caret (i) to j; do NOT include trailing spaces after the last word
@@ -4114,6 +4566,8 @@
       // word motions (w: next word start, b: prev word start)
       if (e.key==='w' && !e.ctrlKey && !e.metaKey && !e.altKey){ e.preventDefault(); const n=_consumeCount(); _moveWordW(n); ensureScrolloff(); _repositionCaret(); updateGutter(); return; }
       if (e.key==='b' && !e.ctrlKey && !e.metaKey && !e.altKey){ e.preventDefault(); const n=_consumeCount(); _moveWordB(n); ensureScrolloff(); _repositionCaret(); updateGutter(); return; }
+  if (e.key==='W' && !e.ctrlKey && !e.metaKey && !e.altKey){ e.preventDefault(); const n=_consumeCount(); _moveWORDW(n); ensureScrolloff(); _repositionCaret(); updateGutter(); return; }
+  if (e.key==='B' && !e.ctrlKey && !e.metaKey && !e.altKey){ e.preventDefault(); const n=_consumeCount(); _moveWORDB(n); ensureScrolloff(); _repositionCaret(); updateGutter(); return; }
       // line anchors ^, 0, $
       if (e.key==='^'){ e.preventDefault(); const _n=_consumeCount(); const line=(_splitLines()[caretRow]||''); _setCaret(caretRow, _firstNonBlankColOf(line)); _repositionCaret(); return; }
       // '0' as a command only when no count prefix in progress

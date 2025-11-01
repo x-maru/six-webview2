@@ -41,5 +41,17 @@ window.THEME = {
   hlsearchOutline: "rgba(255,255,0,0.55)",
   // VISUAL after ':' selection overlay
   visCmdSelBg: "rgba(20, 192, 192, 0.2)",
-  visCmdSelOutline: "rgba(0, 80, 120, 0.55)"
+  visCmdSelOutline: "rgba(0, 80, 120, 0.55)",
+  // Help modal theming
+  helpTabActiveBg: "#2b7050",
+  helpTabActiveFg: "#e0efe6",
+  helpTabBg: "#1e241a",
+  helpTabFg: "#a0aaa0",
+  helpModalBg: "#041a10",
+  helpKbdBg: "#1c282a",
+  helpKbdFg: "#90aada",
+  // Help close button (themeable)
+  helpCloseBg: "#3a3a56",
+  helpCloseFg: "#e6e6e6",
+  helpCloseBorder: "#3f5074"
 };
