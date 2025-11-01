@@ -3656,6 +3656,20 @@
         // yank/delete selection in VISUAL
         if (e.key==='y' && !e.ctrlKey && !e.metaKey && !e.altKey){ e.preventDefault(); if (_visualLinewise){ const rs=Math.min(_visualAnchorR, caretRow); const re=Math.max(_visualAnchorR, caretRow); _yankWholeLines(rs, re-rs+1); } else { const a={r:_visualAnchorR,c:_visualAnchorC}; const b={r:caretRow,c:caretCol}; _yankRangePos(a,b); } _exitVisual(); _repositionCaret(); updateGutter(); return; }
         if (e.key==='d' && !e.ctrlKey && !e.metaKey && !e.altKey){ e.preventDefault(); if (_visualLinewise){ const rs=Math.min(_visualAnchorR, caretRow); const re=Math.max(_visualAnchorR, caretRow); _deleteWholeLines(rs, re-rs+1); } else { const a={r:_visualAnchorR,c:_visualAnchorC}; const b={r:caretRow,c:caretCol}; _deleteRangePos(a,b); } _exitVisual(); ensureScrolloff(); _repositionCaret(); updateGutter(); return; }
+        // VISUAL change: delete selection immediately and enter INSERT
+        if (e.key==='c' && !e.ctrlKey && !e.metaKey && !e.altKey){
+          e.preventDefault();
+          if (_visualLinewise){
+            const rs=Math.min(_visualAnchorR, caretRow); const re=Math.max(_visualAnchorR, caretRow);
+            _deleteWholeLines(rs, re-rs+1);
+          } else {
+            const a={r:_visualAnchorR,c:_visualAnchorC}; const b={r:caretRow,c:caretCol};
+            _deleteRangePos(a,b);
+          }
+          _exitVisual(); ensureScrolloff(); _repositionCaret(); updateGutter();
+          _suppressInsertSnapshotOnce = true; _setMode('INSERT');
+          return;
+        }
         // Motions extend selection
         const moveAndUpdate=(fn)=>{ fn(); ensureScrolloff(); _repositionCaret(); updateGutter(); _updateVisualSelection(); };
         if (e.key==='j' || e.key==='ArrowDown'){ e.preventDefault(); const n=_consumeCount(); moveAndUpdate(()=>_moveCaretLines(n)); return; }
@@ -3913,6 +3927,139 @@
         // unknown motion → cancel operator
         _clearPendingOp(); return;
       }
+  // Pending change operator: interpret next key as motion or line-wise command, then enter INSERT
+  if (_pendingOp === 'c'){
+  // allow composing count for motion (digits only when Shift is NOT held)
+  if (e.key>='1' && e.key<='9' && !e.shiftKey && !e.ctrlKey && !e.metaKey && !e.altKey){ e.preventDefault(); _countAcc = (_countAcc==null?0:_countAcc)*10 + parseInt(e.key,10); _armPendingOpTimeout(); return; }
+  if (e.key==='0' && !e.shiftKey && !e.ctrlKey && !e.metaKey && !e.altKey && _countAcc!=null){ e.preventDefault(); _countAcc = _countAcc*10; _armPendingOpTimeout(); return; }
+        if (e.key==='Escape'){ e.preventDefault(); _clearPendingOp(); _countAcc=null; return; }
+        // Ignore standalone modifier keys while waiting for the motion key
+        if (e.key==='Shift' || e.key==='Control' || e.key==='Alt' || e.key==='Meta'){
+          return;
+        }
+        e.preventDefault();
+        // cc (change N lines)
+        if (e.key==='c'){
+          const mcount = (_countAcc==null?1:_countAcc); _countAcc=null;
+          const total = Math.max(1, (_pendingOpCount||1) * mcount);
+          _deleteWholeLines(caretRow, total);
+          _clearPendingOp(); ensureScrolloff(); _repositionCaret(); updateGutter();
+          _suppressInsertSnapshotOnce = true; _setMode('INSERT');
+          return;
+        }
+        // cgg / cNgg
+        if (e.key==='g'){
+          if (_pendingOpSeq === 'g'){
+            const mcount = (_countAcc==null?1:_countAcc); _countAcc=null;
+            const targetLine = Math.max(1, mcount) - 1;
+            const r0 = caretRow;
+            const r1 = Math.max(0, Math.min(_totalLines()-1, targetLine));
+            const rs = Math.min(r0, r1);
+            const re = Math.max(r0, r1);
+            _deleteWholeLines(rs, re-rs+1);
+            _clearPendingOp(); ensureScrolloff(); _repositionCaret(); updateGutter();
+            _suppressInsertSnapshotOnce = true; _setMode('INSERT');
+            return;
+          } else {
+            _pendingOpSeq = 'g'; _armPendingOpTimeout(); return;
+          }
+        }
+  // cG / cNG (N as target line)
+  if (e.key==='G'){
+          const mcount = (_countAcc==null?0:_countAcc); _countAcc=null;
+          const r0 = caretRow; const total=_totalLines();
+          let r1;
+          if (mcount && mcount>0){ r1 = Math.max(0, Math.min(total-1, mcount-1)); }
+          else { r1 = total-1; }
+          const rs = Math.min(r0, r1);
+          const re = Math.max(r0, r1);
+          _deleteWholeLines(rs, re-rs+1);
+          _clearPendingOp(); ensureScrolloff(); _repositionCaret(); updateGutter();
+          _suppressInsertSnapshotOnce = true; _setMode('INSERT');
+          return;
+        }
+  // c$ — charwise to end-of-line (or across lines if count>1)
+  if (e.key==='$'){
+          const mcount = (_countAcc==null?1:_countAcc); _countAcc=null;
+          let rS = caretRow, cS = caretCol;
+          let rE = rS, cE = (_splitLines()[rS]||'').length;
+          if (mcount > 1){
+            const last = _totalLines()-1;
+            rE = Math.min(last, rS + (mcount-1));
+            cE = (_splitLines()[rE]||'').length;
+          }
+          const start={r:rS, c:cS}, end={r:rE, c:cE};
+          if (!(start.r===end.r && start.c===end.c)) _deleteRangePos(start, end);
+          _clearPendingOp(); ensureScrolloff(); _repositionCaret(); updateGutter();
+          _suppressInsertSnapshotOnce = true; _setMode('INSERT');
+          return;
+        }
+  // c} / c{ — linewise change by paragraph
+  if (e.key==='}'){
+          const mcount = (_countAcc==null?1:_countAcc); _countAcc=null;
+          const next = _paragraphNextPos(caretRow, mcount);
+          const rs = caretRow;
+          const re = Math.max(rs, Math.max(0, Math.min(_totalLines()-1, next.r-1)));
+          if (re >= rs){ _deleteWholeLines(rs, re-rs+1); }
+          _clearPendingOp(); ensureScrolloff(); _repositionCaret(); updateGutter();
+          _suppressInsertSnapshotOnce = true; _setMode('INSERT');
+          return;
+        }
+  if (e.key==='{'){
+          const mcount = (_countAcc==null?1:_countAcc); _countAcc=null;
+          const prev = _paragraphPrevPos(caretRow, mcount);
+          const rs = Math.min(prev.r, caretRow);
+          const re = caretRow;
+          if (re >= rs){ _deleteWholeLines(rs, re-rs+1); }
+          _clearPendingOp(); ensureScrolloff(); _repositionCaret(); updateGutter();
+          _suppressInsertSnapshotOnce = true; _setMode('INSERT');
+          return;
+        }
+        // cw special-case (Vim: cw behaves like ce; unlike dw it does not eat trailing spaces)
+        if (e.key==='w'){
+          const mcount = (_countAcc==null?1:_countAcc); _countAcc=null;
+          // Implement only single-word behavior (count>1 treated as 1 for now)
+          const line = (_splitLines()[caretRow]||'');
+          const n = line.length;
+          let i = caretCol;
+          if (i < n){
+            // If currently on spaces, skip spaces to next non-space and then take that run
+            const isSpaceAt = (idx)=>{ const t=_wordTypeAtInLine(line, idx); return t===_WT_SPACE; };
+            let j = i;
+            if (isSpaceAt(j)){
+              while (j < n && isSpaceAt(j)) j = _nextIndex(line, j);
+            }
+            // Now consume one non-space run (word) to its end
+            if (j < n){
+              const tRun = _wordTypeAtInLine(line, j);
+              while (j < n && _wordTypeAtInLine(line, j) === tRun){ j = _nextIndex(line, j); }
+              // Delete from original caret (i) to end of this run (j) but do NOT include trailing spaces
+              const start={ r: caretRow, c: i };
+              const end  ={ r: caretRow, c: j };
+              if (!(start.r===end.r && start.c===end.c)) _deleteRangePos(start, end);
+              _clearPendingOp(); ensureScrolloff(); _repositionCaret(); updateGutter();
+              _suppressInsertSnapshotOnce = true; _setMode('INSERT');
+              return;
+            }
+          }
+          _clearPendingOp(); return;
+        }
+        // generic c + motion (charwise)
+        const mcount = (_countAcc==null?1:_countAcc); _countAcc=null;
+        const totalCount = Math.max(1, (_pendingOpCount||1) * mcount);
+        const target = _computeMotionTarget(caretRow, caretCol, e.key, totalCount);
+        if (target){
+          const start = { r: caretRow, c: caretCol };
+          const end   = target;
+          if (!(start.r===end.r && start.c===end.c)){
+            _deleteRangePos(start, end);
+          }
+          _clearPendingOp(); ensureScrolloff(); _repositionCaret(); updateGutter();
+          _suppressInsertSnapshotOnce = true; _setMode('INSERT');
+          return;
+        }
+        _clearPendingOp(); return;
+      }
       if (e.key===':' && !e.ctrlKey){
         e.preventDefault();
         _setMode('CMD');
@@ -3959,6 +4106,8 @@
   if (e.key==='d' && !e.ctrlKey && !e.metaKey && !e.altKey){ e.preventDefault(); _pendingOp='d'; _pendingOpCount=_consumeCount(); if (!_pendingOpCount || _pendingOpCount<1) _pendingOpCount=1; _pendingOpSeq=null; _armPendingOpTimeout(); return; }
   // yank operator: y + motion
   if (e.key==='y' && !e.ctrlKey && !e.metaKey && !e.altKey){ e.preventDefault(); _pendingOp='y'; _pendingOpCount=_consumeCount(); if (!_pendingOpCount || _pendingOpCount<1) _pendingOpCount=1; _pendingOpSeq=null; _armPendingOpTimeout(); return; }
+  // change operator: c + motion
+  if (e.key==='c' && !e.ctrlKey && !e.metaKey && !e.altKey){ e.preventDefault(); _pendingOp='c'; _pendingOpCount=_consumeCount(); if (!_pendingOpCount || _pendingOpCount<1) _pendingOpCount=1; _pendingOpSeq=null; _armPendingOpTimeout(); return; }
       // word motions (w: next word start, b: prev word start)
       if (e.key==='w' && !e.ctrlKey && !e.metaKey && !e.altKey){ e.preventDefault(); const n=_consumeCount(); _moveWordW(n); ensureScrolloff(); _repositionCaret(); updateGutter(); return; }
       if (e.key==='b' && !e.ctrlKey && !e.metaKey && !e.altKey){ e.preventDefault(); const n=_consumeCount(); _moveWordB(n); ensureScrolloff(); _repositionCaret(); updateGutter(); return; }
