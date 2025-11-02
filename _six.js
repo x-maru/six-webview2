@@ -2836,13 +2836,13 @@
     }
     // :set hlsearch / :set nohlsearch / :set hlsearch!
     if (/^:set\s+hlsearch\s*$/i.test(cmd)){
-      _optHlsearch = true; _updateHlsearchFull(); toast('hlsearch: on', 900); return;
+      _optHlsearch = true; _updateHlsearchFull(); try{ _updateOverlayHlsearchVisual(); }catch{} toast('hlsearch: on', 900); return;
     }
     if (/^:set\s+nohlsearch\s*$/i.test(cmd)){
-      _optHlsearch = false; _updateHlsearchFull(); toast('hlsearch: off', 900); return;
+      _optHlsearch = false; _updateHlsearchFull(); try{ _updateOverlayHlsearchVisual(); }catch{} toast('hlsearch: off', 900); return;
     }
     if (/^:set\s+hlsearch!\s*$/i.test(cmd)){
-      _optHlsearch = !_optHlsearch; _updateHlsearchFull(); toast('hlsearch: ' + (_optHlsearch?'on':'off'), 900); return;
+      _optHlsearch = !_optHlsearch; _updateHlsearchFull(); try{ _updateOverlayHlsearchVisual(); }catch{} toast('hlsearch: ' + (_optHlsearch?'on':'off'), 900); return;
     }
     // :wqa[!] [path?] — write all & quit (use previous :wq behavior)
     const wqam = cmd.match(/^:(wqa!?)(?:\s*(.*))?$/i);
@@ -6502,6 +6502,156 @@
   /*********************************************************
    * Bootstrap
    *********************************************************/
+  // Overlay palette (bottom-right buttons over editor)
+  function _initOverlayPalette(){
+    try{
+      const viewport = document.getElementById('editorViewport');
+      if (!viewport) return;
+      // Create root once
+      let pal = document.getElementById('overlayPalette');
+      if (!pal){
+        pal = document.createElement('div');
+        pal.id = 'overlayPalette';
+        pal.style.position = 'absolute';
+        pal.style.right = '8px';
+        pal.style.bottom = '8px';
+        pal.style.zIndex = '3'; // above caret layer (2)
+        pal.style.pointerEvents = 'auto';
+        pal.style.display = 'flex';
+        pal.style.gap = '8px';
+        pal.style.alignItems = 'flex-end';
+        viewport.appendChild(pal);
+      }
+      pal.innerHTML = '';
+      // 検索ハイライトトグルボタン（左側）
+      const hlBtn = document.createElement('button');
+      hlBtn.type = 'button';
+      hlBtn.id = 'overlayBtnHlsearch';
+      hlBtn.style.minWidth = '112px';
+      hlBtn.style.border = '1px solid #2a3244';
+      hlBtn.style.background = '#1a2030';
+      hlBtn.style.color = '#e6e6e6';
+      hlBtn.style.borderRadius = '6px';
+      hlBtn.style.padding = '6px 8px';
+      hlBtn.style.cursor = 'pointer';
+      hlBtn.style.font = "12px/1.25 system-ui, -apple-system, 'Segoe UI', sans-serif";
+      hlBtn.style.opacity = '0.92';
+      hlBtn.style.userSelect = 'none';
+      hlBtn.style.outline = 'none';
+      // inner layout
+      const hlWrap = document.createElement('div');
+      hlWrap.style.display = 'flex';
+      hlWrap.style.flexDirection = 'column';
+      hlWrap.style.gap = '2px';
+      const hlTitle = document.createElement('div');
+      hlTitle.textContent = '検索ハイライト';
+      hlTitle.style.textAlign = 'center';
+      hlTitle.style.fontWeight = '500';
+      const hlLine = document.createElement('div');
+      hlLine.style.display = 'flex';
+      hlLine.style.justifyContent = 'center';
+      hlLine.style.gap = '6px';
+      const pillBase = (label, id)=>{
+        const s = document.createElement('span');
+        s.id = id;
+        s.textContent = label;
+        s.style.display = 'inline-block';
+        s.style.padding = '1px 8px';
+        s.style.border = '1px solid #2a3244';
+        s.style.borderRadius = '999px';
+        s.style.fontSize = '11px';
+        s.style.lineHeight = '1.5';
+        s.style.userSelect = 'none';
+        return s;
+      };
+      const pillOff = pillBase('OFF', 'overlayBtnHl_off');
+      const pillOn  = pillBase('ON',  'overlayBtnHl_on');
+      hlLine.appendChild(pillOff);
+      hlLine.appendChild(pillOn);
+      hlWrap.appendChild(hlTitle);
+      hlWrap.appendChild(hlLine);
+      hlBtn.appendChild(hlWrap);
+      hlBtn.addEventListener('click', (e)=>{
+        try{ e.preventDefault(); e.stopPropagation(); }catch{}
+        try{
+          _optHlsearch = !_optHlsearch;
+          _updateHlsearchFull();
+          try{ toast('hlsearch: ' + (_optHlsearch?'on':'off'), 900); }catch{}
+          try{ _updateOverlayHlsearchVisual(); }catch{}
+        }catch{}
+        try{ hlBtn.blur(); }catch{}
+      });
+      pal.appendChild(hlBtn);
+
+      // Help button (two-line label: ヘルプ / F1,:help)
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.textContent = 'ヘルプ\nF1,:help';
+      btn.style.whiteSpace = 'pre';
+      btn.style.minWidth = '64px';
+      btn.style.border = '1px solid #2a3244';
+      btn.style.background = '#1a2030';
+      btn.style.color = '#e6e6e6';
+      btn.style.borderRadius = '6px';
+      btn.style.padding = '6px 8px';
+      btn.style.cursor = 'pointer';
+      btn.style.font = '12px/1.25 system-ui, -apple-system, \'Segoe UI\', sans-serif';
+      btn.style.opacity = '0.92';
+      btn.style.userSelect = 'none';
+      btn.style.outline = 'none';
+      btn.addEventListener('click', (e)=>{
+        try{ e.preventDefault(); e.stopPropagation(); }catch{}
+        try{ helpModal({ defaultTab: 'cmd' }); }catch{}
+        try{ btn.blur(); }catch{}
+      });
+      pal.appendChild(btn);
+
+      // initialize visual state for hlsearch pills
+      try{ _updateOverlayHlsearchVisual(); }catch{}
+    }catch{}
+  }
+
+  // Reflect current hlsearch state to overlay button
+  function _updateOverlayHlsearchVisual(){
+    try{
+      const off = document.getElementById('overlayBtnHl_off');
+      const on  = document.getElementById('overlayBtnHl_on');
+      if (!off || !on) return;
+      // colors
+      const gray = '#9aa0aa';
+      const green = '#49e26f';
+      // reset
+      off.style.background = 'transparent';
+      on.style.background  = 'transparent';
+      off.style.color = '#e6e6e6';
+      on .style.color = '#e6e6e6';
+      // active
+      if (_optHlsearch){
+        on.style.background = green; on.style.color = '#000';
+      }else{
+        off.style.background = gray; off.style.color = '#000';
+      }
+    }catch{}
+  }
+
+  function _wireHelpOpenShortcut(){
+    // Open help with F1 when modal is not visible (Esc remains close/cancel as既存)
+    try{
+      window.addEventListener('keydown', (e)=>{
+        try{
+          if (e.key === 'F1'){
+            // If help modal is already open, let help modal handler close it
+            const isModalOpen = !!(_modalOverlay && _modalOverlay.style && _modalOverlay.style.display !== 'none');
+            if (!isModalOpen){
+              e.preventDefault(); e.stopPropagation();
+              helpModal({ defaultTab: 'cmd' });
+            }
+          }
+        }catch{}
+      }, true);
+    }catch{}
+  }
+
   function _bootstrap(){
     try{
       _readApiFromHash();
@@ -6524,6 +6674,8 @@
         _repositionCaret();
         updateGutter();
         _renderTabbar();
+        _initOverlayPalette();
+        _wireHelpOpenShortcut();
         // hide boot sentinel if present
         try{ const bw = document.getElementById('bootwarn'); if (bw) bw.style.display='none'; }catch{}
         setTimeout(()=>{ try{ editor.focus(); }catch{} }, 0);
