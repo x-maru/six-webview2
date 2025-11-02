@@ -312,3 +312,15 @@ hlsearch状態の反映・変更の挙動はOK。
 - オーバーレイパレットを塗りつぶしにしよう。角丸淵なしでrgba(0,15,0,0.3)で。
 - ボタン間の隙間を今の半分くらいにしたい。
 
+#333
+- six.ps1起動後に_six.htmlと同じディレクトリに置いたTODO.mdが:e popupの一覧に現れない。NG
+  - `:e TODO.md`で正常に開けるが、その後に再度:e popupを出しても一覧に含まれていない。
+- 本文textareaをclickしてもcaretが移動しない。NG
+  - clickだけでなくドラッグして1文字でも選択するとcaretが移動する
+
+#334
+- six.ps1起動後に_six.htmlと同じディレクトリに置いたTODO.mdが:e popupの一覧に現れない。NG
+  - `:e TODO.md`で正常に開けるが、その後に再度:e popupを出しても一覧に含まれていない。
+- 本文textareaをclickしてもcaretが移動しない。
+  - 修正された。OK。
+

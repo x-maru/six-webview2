@@ -3084,6 +3084,8 @@
         _filePopupShow();
         (function(){
           const reqKey = (function(){ try{ return _ensureSlash(_fileBaseURL)?.toString()||null; }catch{ return null; } })();
+          // Freshen directory listing on popup open to include newly added files (e.g., TODO.md)
+          try{ if (reqKey && _dirCache && _dirCache.delete) _dirCache.delete(reqKey); }catch{}
           _listDirEntries(_fileBaseURL)
             .then(list=>{
               try{
@@ -3124,6 +3126,8 @@
             _filePopupShow();
             (function(){
               const reqKey = (function(){ try{ return _ensureSlash(_fileBaseURL)?.toString()||null; }catch{ return null; } })();
+              // Freshen directory listing on popup open (dir hint) to include newly added files
+              try{ if (reqKey && _dirCache && _dirCache.delete) _dirCache.delete(reqKey); }catch{}
               _listDirEntries(_fileBaseURL)
                 .then(list=>{
                   try{
@@ -4089,21 +4093,17 @@
       }
       _exactLineLockAdjust(); _repositionCaret(); updateGutter(); _updateHlsearchFull();
     });
-    // Mouse click: move caret to clicked position in NORMAL mode
+    // Mouse selection/click: sync overlay caret with native selection
     const syncCaretFromSelection = ()=>{
-      if (_mode !== 'NORMAL') return;
       try{ const off = editor.selectionStart|0; const rc = _rcFromOffset(off); caretRow = rc.r; caretCol = rc.c; }catch{}
       _repositionCaret(); updateGutter();
     };
+    // Ensure single-click updates after browser updates selection
+    editor.addEventListener('mousedown', ()=>{ setTimeout(syncCaretFromSelection, 0); });
     editor.addEventListener('mouseup', syncCaretFromSelection);
     editor.addEventListener('click', syncCaretFromSelection);
-    // selection moves in INSERT mode (arrows/mouse) — keep overlay caret in sync
-    editor.addEventListener('select', ()=>{
-      if (_mode === 'INSERT'){
-        try{ const off = editor.selectionStart|0; const rc = _rcFromOffset(off); caretRow = rc.r; caretCol = rc.c; }catch{}
-        _repositionCaret(); updateGutter();
-      }
-    });
+    // selection change — keep overlay caret in sync in all modes
+    editor.addEventListener('select', ()=>{ try{ const off = editor.selectionStart|0; const rc = _rcFromOffset(off); caretRow = rc.r; caretCol = rc.c; }catch{} _repositionCaret(); updateGutter(); });
     editor.addEventListener('keyup', (e)=>{ if(e.key==='Enter') ensureScrolloff(); _repositionCaret(); updateGutter(); });
     editor.addEventListener('click', ()=>{ _repositionCaret(); updateGutter(); });
   window.addEventListener('resize', ()=>{ _syncEditorMetrics(); clampViewportExactLines(); _exactLineLockAdjust(); ensureScrolloff(); _repositionCaret(); updateGutter(); _renderHlMatchesVisible(); _incPrevRefresh(); _renderVisSelOverlay(); });
@@ -5153,6 +5153,8 @@
                 if (!_filePopupVisible()) _filePopupShow(); else _filePopupRender();
                 (function(){
                   const reqKey = (function(){ try{ return _ensureSlash(_fileBaseURL)?.toString()||null; }catch{ return null; } })();
+                  // Freshen directory listing on popup open via Tab to include newly added files
+                  try{ if (reqKey && _dirCache && _dirCache.delete) _dirCache.delete(reqKey); }catch{}
                   _listDirEntries(_fileBaseURL)
                     .then(list=>{
                       try{
@@ -6513,16 +6515,25 @@
         pal = document.createElement('div');
         pal.id = 'overlayPalette';
         pal.style.position = 'absolute';
-        pal.style.right = '8px';
-        pal.style.bottom = '8px';
+        // Move 0.5rem further up/left from previous 8px
+        pal.style.right = '1rem';
+        pal.style.bottom = '1rem';
         pal.style.zIndex = '3'; // above caret layer (2)
         pal.style.pointerEvents = 'auto';
         pal.style.display = 'flex';
-        pal.style.gap = '8px';
+        // Narrow down gap between buttons ~half
+        pal.style.gap = '4px';
         pal.style.alignItems = 'flex-end';
+        // Fill background without round corners/border as requested
+        pal.style.background = 'rgba(0,15,0,0.1)';
+        pal.style.border = 'none';
+        pal.style.borderRadius = '0';
+        pal.style.padding = '4px';
         viewport.appendChild(pal);
       }
       pal.innerHTML = '';
+      // Track and restore focus around clicks to keep pre-click focus
+      let lastFocusedEl = null;
       // 検索ハイライトトグルボタン（左側）
       const hlBtn = document.createElement('button');
       hlBtn.type = 'button';
@@ -6538,6 +6549,8 @@
       hlBtn.style.opacity = '0.92';
       hlBtn.style.userSelect = 'none';
       hlBtn.style.outline = 'none';
+      // Prevent focus change on mouse click
+      hlBtn.addEventListener('mousedown', (e)=>{ try{ lastFocusedEl = document.activeElement; e.preventDefault(); }catch{} });
       // inner layout
       const hlWrap = document.createElement('div');
       hlWrap.style.display = 'flex';
@@ -6579,7 +6592,12 @@
           try{ toast('hlsearch: ' + (_optHlsearch?'on':'off'), 900); }catch{}
           try{ _updateOverlayHlsearchVisual(); }catch{}
         }catch{}
-        try{ hlBtn.blur(); }catch{}
+        // Restore pre-click focus if possible
+        try{
+          if (lastFocusedEl && typeof lastFocusedEl.focus === 'function'){
+            lastFocusedEl.focus();
+          }
+        }catch{}
       });
       pal.appendChild(hlBtn);
 
@@ -6599,10 +6617,19 @@
       btn.style.opacity = '0.92';
       btn.style.userSelect = 'none';
       btn.style.outline = 'none';
+      // Prevent focus change on mouse click
+      btn.addEventListener('mousedown', (e)=>{ try{ lastFocusedEl = document.activeElement; e.preventDefault(); }catch{} });
       btn.addEventListener('click', (e)=>{
         try{ e.preventDefault(); e.stopPropagation(); }catch{}
         try{ helpModal({ defaultTab: 'cmd' }); }catch{}
-        try{ btn.blur(); }catch{}
+        // Restore pre-click focus after opening modal will be managed by modal; if not open, restore focus
+        try{
+          if (!_modalOverlay || _modalOverlay.style.display === 'none'){
+            if (lastFocusedEl && typeof lastFocusedEl.focus === 'function'){
+              lastFocusedEl.focus();
+            }
+          }
+        }catch{}
       });
       pal.appendChild(btn);
 
