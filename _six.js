@@ -968,6 +968,7 @@
         if (q === '..'){
           // 親へ移動（フィルタは使わず、入力欄は末尾セグメントを残した表示に）
           try{
+            _fileReflectGuardUntil = Date.now() + 700;
             const parent = _ensureSlash(new URL('../', _fileBaseURL));
             // 末尾セグメント（元いたフォルダ名）を抽出
             let s = (_fileTypedDirRaw||'').replace(/\\/g,'/').replace(/\/+$/,'');
@@ -975,28 +976,40 @@
             const prevSeg = (idx>=0 ? s.slice(idx+1) : s);
             // 親一覧で直前セグメントをハイライトするため保持
             _filePostSelectName = prevSeg || null;
-            _fileBaseURL = parent; _fileTypedDirRaw = (idx>=0? s.slice(0,idx+1) : ''); _fileFilter='';
+            // 入力側の新しいディレクトリ表記（空の場合はURLから絶対表記を生成）
+            let newTypedRaw = (idx>=0? s.slice(0,idx+1) : '');
+            if (!newTypedRaw){ try{ newTypedRaw = _inputDirRawFromURL(parent); }catch{ newTypedRaw=''; } }
+            _fileBaseURL = parent; _fileTypedDirRaw = newTypedRaw; _fileFilter='';
+            // 仕様 #349: 親ディレクトリへ移動したタイミングで、入力欄の ".../foo/.." を ".../foo" に正規化して表示更新
+            try{
+              if (cmdinput){
+                cmdinput.value = ':e ' + _collapseDotDotPath(String(newTypedRaw||'') + String(prevSeg||''));
+                const pos=(cmdinput.value||'').length; try{ cmdinput.setSelectionRange(pos,pos); }catch{}
+                try { cmdinput.dispatchEvent(new Event('input', { bubbles:true })); } catch {}
+              }
+            }catch{}
             const parentNow = _ensureSlash(_fileBaseURL);
             if (parentNow && _isHostRoot(parentNow)){
               // 親がホスト直下: 入力は //host/ に置換し、shares を再読込（".." は非表示）。選択は直前セグメント名に。
               _fileTypedDirRaw = '//' + parentNow.host + '/'; _fileFilter=''; _filePopupNoUp = true;
               _fileEntries = []; _fileSel = 0; _fileLoading = true; if (_filePopupVisible()) _filePopupRender();
               _loadSharesForHost(parentNow.host, prevSeg).finally(()=>{
-                try{ if (cmdinput){ cmdinput.value=':e ' + _fileTypedDirRaw; const pos=(cmdinput.value||'').length; cmdinput.setSelectionRange(pos,pos); } }catch{}
+                // 仕様 #348: 一覧走査の完了タイミングでは入力欄へ反映しない
               });
             } else {
               const reqKey = (function(){ try{ return _ensureSlash(_fileBaseURL)?.toString()||null; }catch{ return null; } })();
-              _listDirEntries(_fileBaseURL).then(list2=>{
+              _listDirEntriesWithQuickRetry(_fileBaseURL).then(list2=>{
                 try{
                   const curKey = _ensureSlash(_fileBaseURL)?.toString()||null;
                   if (!reqKey || curKey===reqKey){
                     _fileEntries = Array.isArray(list2) ? list2 : [];
                     if (Array.isArray(list2) && list2.length>0){ _fileStableEntries = list2.slice(); _fileStableBaseKey = curKey; }
-                    let sel = 0; const idx2 = _fileEntries.findIndex(e=> e && e.name===prevSeg); if (idx2>=0) sel = idx2 + (_filePopupNoUp?0:1); _fileSel = sel;
+                    // Prefer selecting the previous folder (directory) in the parent listing
+                    let sel = 0; const idx2 = _fileEntries.findIndex(e=> e && e.isDir && e.name===prevSeg); if (idx2>=0) sel = idx2 + (_filePopupNoUp?0:1); _fileSel = sel;
                   }
                 }catch{}
                 _filePopupRender();
-              }).finally(()=>{ try{ if (cmdinput){ cmdinput.value=':e ' + _collapseDotDotPath(_fileTypedDirRaw + prevSeg); const pos = (cmdinput.value||'').length; cmdinput.setSelectionRange(pos, pos); } }catch{} });
+              }).finally(()=>{ /* #348: listing completion should not reflect to input */ });
             }
             return true;
           }catch{}
@@ -1015,7 +1028,7 @@
         // ポップアップは補完専用: 入力欄を更新し、あとは input ハンドラに任せる
         try{
           const nextBase = _ensureSlash(new URL(it.url, _fileBaseURL));
-          _fileJustNavAt = Date.now();
+          _fileJustNavAt = Date.now(); _fileReflectGuardUntil = Date.now() + 700;
           _fileNavRetryCount = 0; // 遷移直後の短期リトライを毎回リセット
           _fileTypedDirRaw = it._up
             ? (function(){
@@ -4772,6 +4785,19 @@
           }catch{}
           // まず、:e のファイルポップアップが表示中なら Enter はポップアップに対する確定/ドリルダウンとして扱う
           if (_filePopupVisible()){
+            // #348: 入力欄が空白または末尾が区切り文字('/', '\\', ':')のときは Enter で何もしない
+            try{
+              const vNow0 = String(cmdinput.value||'');
+              const mTail0 = vNow0.match(/^\s*:?\s*e\s*(.*)$/i);
+              const tail0 = (mTail0? mTail0[1] : '');
+              const lastNonSpace = (function(s){
+                for (let i=s.length-1;i>=0;i--){ const ch=s[i]; if (ch!==" " && ch!=="\t" && ch!=="\r" && ch!=="\n"){ return ch; } }
+                return '';
+              })(tail0);
+              if (!lastNonSpace || lastNonSpace==='/' || lastNonSpace==='\\' || lastNonSpace===':'){
+                return;
+              }
+            }catch{}
             // #164: 入力欄が '/' で終わっていない場合は、入力文字列を優先して確定
             try{
               const vNow = cmdinput.value;
@@ -4779,11 +4805,15 @@
               const typed = String(parsed.typedDirRaw||'');
               const filt = String(parsed.filter||'');
               const endsWithSlash = (filt.length === 0);
+              // ディレクトリ移動直後の短期は、末尾が'/'（=filter空）なら Enter は何もしない（#344, #347）
+              try{ if (Date.now() < (_fileReflectGuardUntil||0)) { if (endsWithSlash) return; } }catch{}
               if (!endsWithSlash){
                 const q = filt.trim();
                 if (q === '..'){
                   // 親ディレクトリへ（入力優先の Enter でも有効）
                   try{
+                    // 直後ガード
+                    _fileReflectGuardUntil = Date.now() + 700;
                     const parent = _ensureSlash(new URL('../', _fileBaseURL));
                     // 直前ディレクトリ名は baseURL から頑健に取得
                     let prevSeg = '';
@@ -4802,18 +4832,27 @@
                     // 親一覧で直前セグメントをハイライトするため保持
                     _filePostSelectName = prevSeg || null;
                     _fileBaseURL = parent; _fileTypedDirRaw = newTyped; _fileFilter = ''; _fileSelMuted = false;
+                    // 仕様 #349: 親へ移動した時点で入力欄を "<parent>/<prevSeg>" に正規化し、一覧完了時の反映は継続抑止
+                    try{
+                      if (cmdinput){
+                        cmdinput.value = ':e ' + _collapseDotDotPath(String(_fileTypedDirRaw||'') + String(prevSeg||''));
+                        const pos=(cmdinput.value||'').length; try{ cmdinput.setSelectionRange(pos,pos); }catch{}
+                        try { cmdinput.dispatchEvent(new Event('input', { bubbles:true })); } catch {}
+                      }
+                    }catch{}
                     const reqKey = (function(){ try{ return _ensureSlash(_fileBaseURL)?.toString()||null; }catch{ return null; } })();
-                    _listDirEntries(_fileBaseURL).then(list2=>{
+                    _listDirEntriesWithQuickRetry(_fileBaseURL).then(list2=>{
                       try{
                         const curKey = _ensureSlash(_fileBaseURL)?.toString()||null;
                         if (!reqKey || curKey===reqKey){
                           _fileEntries = Array.isArray(list2) ? list2 : [];
                           if (Array.isArray(list2) && list2.length>0){ _fileStableEntries = list2.slice(); _fileStableBaseKey = curKey; }
-                          let sel = 0; const idx2 = _fileEntries.findIndex(e=> e && e.name===prevSeg); if (idx2>=0) sel = idx2 + (_filePopupNoUp?0:1); _fileSel = sel;
+                          // Select previously-visited directory only (avoid accidentally selecting a file with the same name)
+                          let sel = 0; const idx2 = _fileEntries.findIndex(e=> e && e.isDir && e.name===prevSeg); if (idx2>=0) sel = idx2 + (_filePopupNoUp?0:1); _fileSel = sel;
                         }
                       }catch{}
                       _filePopupRender();
-                    }).finally(()=>{ try{ if (cmdinput){ cmdinput.value=':e ' + _collapseDotDotPath(_fileTypedDirRaw + prevSeg); const pos = (cmdinput.value||'').length; cmdinput.setSelectionRange(pos, pos); } }catch{} });
+                    }).finally(()=>{ /* #348: listing completion should not reflect to input */ });
                     return;
                   }catch{}
                 }
@@ -4825,7 +4864,7 @@
                   const ent = (_fileEntries||[]).find(e=> e && eq(String(e.name||''), q));
                   if (ent && ent.isDir){
                     // ドリルダウン（補完専用）
-                    _fileJustNavAt = Date.now(); _fileNavRetryCount = 0; _fileFilter = ''; _fileSelMuted = false;
+                    _fileJustNavAt = Date.now(); _fileReflectGuardUntil = Date.now() + 700; _fileNavRetryCount = 0; _fileFilter = ''; _fileSelMuted = false;
                     _fileTypedDirRaw = (_fileTypedDirRaw||'') + q + '/';
                     if (cmdinput){ cmdinput.value=':e ' + _collapseDotDotPath(_fileTypedDirRaw); try { cmdinput.dispatchEvent(new Event('input', { bubbles:true })); } catch {} }
                     return;
@@ -4846,7 +4885,7 @@
                     if (!one) return false;
                     if (one.isDir){
                       // ドリルダウン（補完専用）
-                      _fileJustNavAt = Date.now(); _fileNavRetryCount = 0; _fileFilter = ''; _fileSelMuted = false;
+                      _fileJustNavAt = Date.now(); _fileReflectGuardUntil = Date.now() + 700; _fileNavRetryCount = 0; _fileFilter = ''; _fileSelMuted = false;
                       _fileTypedDirRaw = (_fileTypedDirRaw||'') + String(one.name||'') + '/';
                       if (cmdinput){ cmdinput.value=':e ' + _collapseDotDotPath(_fileTypedDirRaw); try { cmdinput.dispatchEvent(new Event('input', { bubbles:true })); } catch {} }
                       return true;
@@ -4875,6 +4914,8 @@
                     }
                   }catch{}
                   // 未一致 → 入力優先で開く（無ければ新規）
+                  // ただし一覧ローディング中は誤確定を防ぐため保留
+                  if (_fileLoading){ return; }
                   (async()=>{
                     const ok = await _loadFromPath(q, _fileBaseURL, { silentOnFail:true, mode:'new' });
                     if (!ok){
@@ -4921,21 +4962,24 @@
                   _filePostSelectName = prevSeg || null;
                   _fileBaseURL = parent; _fileTypedDirRaw = newTyped; _fileFilter = '';
                   const reqKey = (function(){ try{ return _ensureSlash(_fileBaseURL)?.toString()||null; }catch{ return null; } })();
-                  _listDirEntries(_fileBaseURL).then(list2=>{
+                  _listDirEntriesWithQuickRetry(_fileBaseURL).then(list2=>{
                     try{
                       const curKey = _ensureSlash(_fileBaseURL)?.toString()||null;
                       if (!reqKey || curKey===reqKey){
                         _fileEntries = Array.isArray(list2) ? list2 : [];
                         if (Array.isArray(list2) && list2.length>0){ _fileStableEntries = list2.slice(); _fileStableBaseKey = curKey; }
-                        let sel = 0; const idx2 = _fileEntries.findIndex(e=> e && e.name===prevSeg); if (idx2>=0) sel = idx2 + (_filePopupNoUp?0:1); _fileSel = sel;
+                        // Select the previous directory only to avoid landing on a file with the same name
+                        let sel = 0; const idx2 = _fileEntries.findIndex(e=> e && e.isDir && e.name===prevSeg); if (idx2>=0) sel = idx2 + (_filePopupNoUp?0:1); _fileSel = sel;
                       }
                     }catch{}
                     _filePopupRender();
-                  }).finally(()=>{ try{ if (cmdinput){ cmdinput.value=':e ' + _collapseDotDotPath(_fileTypedDirRaw + prevSeg); const pos = (cmdinput.value||'').length; cmdinput.setSelectionRange(pos, pos); } }catch{} });
+                  }).finally(()=>{ /* #348: listing completion should not reflect to input */ });
                   return;
                 }catch{}
               }
               // 入力がある → 直接読み込みを試み、失敗したら新規作成
+              // ただし一覧ローディング中は誤確定を防ぐため保留
+              if (_fileLoading){ return; }
               (async()=>{
                 const ok = await _loadFromPath(q, _fileBaseURL, { silentOnFail:true, mode:'new' });
                 if (!ok){
@@ -4960,7 +5004,7 @@
                 // ディレクトリは補完専用: 入力欄更新→input ハンドラに統一委譲
                 try{
                   const nextBase = _ensureSlash(new URL(it.url, _fileBaseURL));
-                  _fileJustNavAt = Date.now();
+                  _fileJustNavAt = Date.now(); _fileReflectGuardUntil = Date.now() + 700;
                   _fileNavRetryCount = 0; // 遷移直後の短期リトライを毎回リセット
                   _fileFilter = '';
                   if (it._up){
@@ -4979,6 +5023,8 @@
                     _filePostSelectName = prevSeg || null;
                     // ここで基点を確実に親へ更新（入力解析に依存しない）
                     _fileBaseURL = nextBase;
+                    // 即座にローディングへ切り替え（旧一覧が残らないように）
+                    _fileEntries = []; _fileSel = 0; _fileLoading = true; if (_filePopupVisible()) _filePopupRender();
                     if (cmdinput){ cmdinput.value=':e ' + _collapseDotDotPath(_fileTypedDirRaw + prevSeg); }
                   } else {
                     // 子へ進む: ホスト直下へ進む場合は //host/ を直接設定
@@ -4987,6 +5033,8 @@
                     if (cmdinput){ cmdinput.value=':e ' + _collapseDotDotPath(_fileTypedDirRaw); }
                     // 基点も進める（入力解析待ちで遅延しないように）
                     _fileBaseURL = nextBase;
+                    // 即座にローディングへ切り替え
+                    _fileEntries = []; _fileSel = 0; _fileLoading = true; if (_filePopupVisible()) _filePopupRender();
                   }
                   _fileNavPendingKey = null;
                   if (cmdinput){ try { cmdinput.dispatchEvent(new Event('input', { bubbles:true })); } catch {} }
@@ -5081,6 +5129,16 @@
               // 末尾スラ判定は「直近セグメントが空（=filter空）」で判定
               const endsWithSlash = (filt.length === 0);
               if (endsWithSlash){
+                // '..' 上での Tab は ".." を入力欄に挿入し、ナビゲーションは行わない
+                try{
+                  if (it && it._up){
+                    const next = ':e ' + String(typed) + '..';
+                    cmdinput.value = next;
+                    try{ const pos=(cmdinput.value||'').length; cmdinput.setSelectionRange(pos,pos); }catch{}
+                    try { cmdinput.dispatchEvent(new Event('input', { bubbles:true })); } catch {}
+                    return;
+                  }
+                }catch{}
                 // 例外: '../' 以外の候補が1つだけ（または'../'ともう1つだけ）のとき、その候補名まで補完
                 // 仕様 #163: 末尾が '/' のときに ".." 上での Tab = Enter 相当は廃止。
                 // よって、候補が単一のときのみ補完し、それ以外は何もしない。
@@ -5145,11 +5203,14 @@
                 _fileNextStartBaseURL = null;
                 try{ const b=_ensureSlash(_fileBaseURL); _filePopupNoUp = !!(b && (_isHostRoot(b) || _isUncShareRoot(b))); }catch{ _filePopupNoUp=false; }
                 _fileJustNavAt = Date.now(); _fileNavRetryCount = 0;
+                // 起動直後は Enter を無効化（Tab は可）
+                _fileReflectGuardUntil = Date.now() + 700;
                 _fileTypedDirRaw = '';
                 _fileFilter = '';
                 _fileInvalid = false;
                 _fileLoading = true;
                 _fileEntries = []; _fileSel = 0;
+                _fileReflectedOnOpen = false;
                 if (!_filePopupVisible()) _filePopupShow(); else _filePopupRender();
                 (function(){
                   const reqKey = (function(){ try{ return _ensureSlash(_fileBaseURL)?.toString()||null; }catch{ return null; } })();
@@ -5334,6 +5395,8 @@
         // 発火条件を厳密化: 「:e」のみでは開かず、「:e 」とスペースが入った時点で開く
         // 先頭コロンは1個まで許容（"::e" は別扱い）
         if ((me = v.match(/^\s*:?\s*e\s+(.*)$/i))){
+          // Ensure buffer popup is not shown when switching to :e (#343)
+          try{ _bufPopupHide(); }catch{}
           // 後続が空白のみ（" :e" or ":e ")ならポップアップを開く。
           const tail = (me[1]||'');
           const onlySpaces = /^\s*$/.test(tail);
@@ -5346,6 +5409,8 @@
                 _fileNextStartBaseURL = null;
                 try{ const b=_ensureSlash(_fileBaseURL); _filePopupNoUp = !!(b && (_isHostRoot(b) || _isUncShareRoot(b))); }catch{ _filePopupNoUp=false; }
                 _fileJustNavAt = Date.now(); _fileNavRetryCount = 0;
+                // 起動直後は Enter を無効化（Tab は可）
+                _fileReflectGuardUntil = Date.now() + 700;
               }
             }catch{}
             // 入力直後に列挙を開始（この時点の自動選択は有効）
@@ -5355,10 +5420,13 @@
             _fileInvalid = false;
             _fileLoading = true;
             _fileEntries = []; _fileSel = 0;
+            _fileReflectedOnOpen = false;
             if (!_filePopupVisible()) _filePopupShow(); else _filePopupRender();
             (function(){
               const reqKey = (function(){ try{ return _ensureSlash(_fileBaseURL)?.toString()||null; }catch{ return null; } })();
-              _listDirEntries(_fileBaseURL)
+              // Freshen directory listing on ":e " popup open to include newly added files
+              try{ if (reqKey && _dirCache && _dirCache.delete) _dirCache.delete(reqKey); }catch{}
+              _listDirEntriesWithQuickRetry(_fileBaseURL)
                 .then(list=>{
                   try{
                     const curKey = _ensureSlash(_fileBaseURL)?.toString()||null;
@@ -5522,6 +5590,8 @@
           // 有効になったら列挙（この時点で base を更新）。
           // ベース変更時のみ列挙。フィルタ変更のみは描画のみ（デバウンス）。
           const prevKey = (function(){ try{ return _ensureSlash(_fileBaseURL)?.toString()||null; }catch{ return null; } })();
+          // 変更前の基点URLオブジェクト（"../" 入力時の表示正規化に使用）
+          const prevBaseObj = (function(){ try{ return _ensureSlash(_fileBaseURL); }catch{ return null; } })();
           if (parsed.baseURL){ _fileBaseURL = parsed.baseURL; }
           let newKey = null; try{ newKey = _ensureSlash(_fileBaseURL)?.toString()||null; }catch{}
           _fileInvalid = false;
@@ -5538,6 +5608,36 @@
             _fileNavRetryCount = 0;
             if (_fileListTimer){ try{ clearTimeout(_fileListTimer); }catch{} _fileListTimer=null; }
             if (_filePopupVisible()) _filePopupRender();
+            // 入力で "../" を付与して親へ遷移した場合、入力表示を正規化し、短期ガードを有効化
+            try{
+              const typedNow = String(_fileTypedDirRaw||'').replace(/\\/g,'/');
+              const wentParent = /(^|\/)\.\.\/$/.test(typedNow) && String(_fileFilter||'')==='';
+              if (wentParent){
+                // 旧基点から直前セグメント名を取得し、親一覧で選択するために保持
+                let prevSeg = '';
+                try{
+                  const b = prevBaseObj;
+                  let p = decodeURIComponent((b && b.pathname) || '');
+                  p = p.replace(/\/+$/,'');
+                  const i2 = p.lastIndexOf('/');
+                  prevSeg = (i2>=0 ? p.slice(i2+1) : p);
+                }catch{}
+                _filePostSelectName = prevSeg || null;
+                // 新しい基点に対するディレクトリ表記へ置換
+                try{ _fileTypedDirRaw = _inputDirRawFromURL(_fileBaseURL); }catch{}
+                // 表示は "<parent>/<prevSeg>" の形にして、prevSeg をフィルタとして反映
+                try{
+                  if (cmdinput){
+                    cmdinput.value = ':e ' + _collapseDotDotPath(String(_fileTypedDirRaw||'') + String(prevSeg||''));
+                    const pos=(cmdinput.value||'').length; cmdinput.setSelectionRange(pos,pos);
+                    try { cmdinput.dispatchEvent(new Event('input', { bubbles:true })); } catch {}
+                  }
+                }catch{}
+                // 直後の Enter と選択反映を抑止
+                _fileReflectGuardUntil = Date.now() + 700;
+                _fileJustNavAt = Date.now();
+              }
+            }catch{}
             const doList = ()=>{
               const reqKey = (function(){ try{ return _ensureSlash(_fileBaseURL)?.toString()||null; }catch{ return null; } })();
               _listDirEntriesWithQuickRetry(_fileBaseURL)
@@ -5556,7 +5656,7 @@
                           try{
                             const baseNow = _ensureSlash(_fileBaseURL);
                             const suppressUp = (!!_filePopupNoUp) || (baseNow && (_isHostRoot(baseNow) || _isUncShareRoot(baseNow)));
-                            const idx2 = _fileEntries.findIndex(e=> e && e.name === _filePostSelectName);
+                            const idx2 = _fileEntries.findIndex(e=> e && e.isDir && e.name === _filePostSelectName);
                             if (idx2>=0){ _fileSel = idx2 + (suppressUp?0:1); }
                           }catch{}
                           _filePostSelectName = null;
@@ -5654,7 +5754,7 @@
             if (_filePopupVisible()) _filePopupRender();
             (function(){
               const reqKey = (function(){ try{ return _ensureSlash(_fileBaseURL)?.toString()||null; }catch{ return null; } })();
-              _listDirEntries(_fileBaseURL)
+              _listDirEntriesWithQuickRetry(_fileBaseURL)
                 .then(list=>{
                   try{
                     const curKey = _ensureSlash(_fileBaseURL)?.toString()||null;
@@ -5869,6 +5969,11 @@
   let _fileStartBaseURL = null;
   // Esc キャンセル後、次の引数なし :e の開始基点を上書きするための一時記憶
   let _fileNextStartBaseURL = null;
+  // ポップアップ起動直後に現在選択（通常 ".."）を入力欄へ1度だけ反映するためのフラグ
+  let _fileReflectedOnOpen = false;
+  // ディレクトリ移動直後のみ、ポップアップ選択→入力欄への反映を抑止し、Enterも無効化するための猶予ガード
+  // Tab 補完は引き続き有効。タイムスタンプで短時間のみ適用する。
+  let _fileReflectGuardUntil = 0;
 
   function _ensureSlash(u){
     try{
@@ -6211,28 +6316,50 @@
   }
   function _collapseDotDotPath(s){
     if (!s) return '';
-    // 相対表現のみを対象に簡易正規化（絶対は触らない）
+    // 絶対/相対を問わず ".." を畳み込む（UNC "//host/..." や Windows ドライブ "C:/..." も考慮）
     const norm = s.replace(/\\/g,'/');
-    const isAbsLike = /^(?:\/[\/]|[A-Za-z]:\/|\/)/.test(norm);
-    if (isAbsLike) return norm;
     const hadTrail = norm.endsWith('/');
-    const parts = norm.split('/');
+    let prefix = '';
+    let rest = norm;
+    // UNC 先頭 "//"
+    if (rest.startsWith('//')){
+      prefix = '//';
+      rest = rest.slice(2);
+    } else if (/^[A-Za-z]:\//.test(rest)){
+      // Windows ドライブ
+      prefix = rest.slice(0, 3); // 例: "C:/"
+      rest = rest.slice(3);
+    } else if (rest.startsWith('/')){
+      // ルート開始（POSIX）
+      prefix = '/';
+      rest = rest.slice(1);
+    }
+    const parts = rest.split('/');
     const stack = [];
-    for (const seg of parts){
+    const isAbsolute = !!prefix;
+    for (const raw of parts){
+      const seg = raw.trim();
       if (!seg || seg === '.') continue;
       if (seg === '..'){
-        if (stack.length>0 && stack[stack.length-1] !== '..') stack.pop(); else stack.push('..');
+        if (stack.length > 0){
+          stack.pop();
+        } else {
+          // 絶対パスではこれ以上は遡らない。相対なら先頭に残す。
+          if (!isAbsolute) stack.push('..');
+        }
       } else {
         stack.push(seg);
       }
     }
-    let out = stack.join('/');
+    let out = prefix + stack.join('/');
     if (hadTrail && out && !out.endsWith('/')) out += '/';
     return out;
   }
 
   function _filePopupRender(){
     if (!bufpopup || !bufpopupInner) return;
+    // Re-entrancy guard to prevent overlapping renders causing visual glitches
+    if (window.__sixFileRendering) return; window.__sixFileRendering = true;
     bufpopup.dataset.kind = 'file';
     bufpopupInner.innerHTML = '';
   if (_fileInvalid){
@@ -6243,6 +6370,8 @@
     const name = document.createElement('span'); name.className='name'; name.textContent = '********';
     row.appendChild(num); row.appendChild(name);
     bufpopupInner.appendChild(row);
+    // ensure render guard is released even on early return
+    window.__sixFileRendering = false;
     return;
   }
   const list = _filePopupComputeList();
@@ -6260,15 +6389,17 @@
   const name = document.createElement('span'); name.className='name'; name.textContent = ((_fileLoading || forceLoading) ? '(loading…)' : '(no entries)');
       empty.appendChild(num); empty.appendChild(name);
       bufpopupInner.appendChild(empty);
-      return;
+      window.__sixFileRendering = false; return;
     }
+    // 仕様変更 (#343): ポップアップ開いた直後に自動で".."を挿入しない
+    // 利用者がそのまま "//wsl.localhost/..." をタイピングできるようにするため。
     // 親へ戻った直後に選択ターゲットがあれば、ここでも最終的に優先適用（安全ネット）
     try{
       if (_filePostSelectName){
         // '..' 抑止状況を再評価（インデックス算出は list 側で '..' を含む前提）
         let suppressUp = false;
         try{ const baseNow = _ensureSlash(_fileBaseURL); suppressUp = (!!_filePopupNoUp) || (baseNow && (_isHostRoot(baseNow) || _isUncShareRoot(baseNow))); }catch{}
-        const idx2 = list.findIndex(e=> e && !e._up && e.name === _filePostSelectName);
+  const idx2 = list.findIndex(e=> e && !e._up && e.isDir && e.name === _filePostSelectName);
         if (idx2>=0){
           _fileSel = idx2; _fileSelMuted = false; // list には '..' が含まれているため、そのままのインデックスでよい
           _filePostSelectName = null; // 適用できたときだけクリア
@@ -6281,25 +6412,37 @@
       const qRawOrig = String(_fileFilter||'');
       const qTrim = qRawOrig.replace(/\/+$/,'');
       if (qTrim){
+        // Special-case: when filtering with "..", treat it as the parent selector and don't mute
+        if (qTrim === '..'){
+          _fileSelMuted = false;
+        } else {
         let caseSensitive = false;
         try{ const b = _ensureSlash(_fileBaseURL); if (b && b.protocol==='file:' && b.host && b.host.toLowerCase()==='wsl.localhost') caseSensitive = true; }catch{}
         const pred = (nm)=>{
           if (caseSensitive) return nm.startsWith(qTrim);
           return nm.toLowerCase().startsWith(qTrim.toLowerCase());
         };
-        const idxMatch = list.findIndex(e=> e && !e._up && pred(String(e.name||'')));
-        if (idxMatch>=0){
-          // 自動選択は input 直後のみ有効。矢印ナビ後は維持。
-          if (_fileSelAuto){ _fileSel = idxMatch; }
-          _fileSelMuted = false;
-        } else {
-          _fileSelMuted = true;
+          const idxMatch = list.findIndex(e=> e && !e._up && pred(String(e.name||'')));
+          if (idxMatch>=0){
+            // 自動選択は input 直後のみ有効。矢印ナビ後は維持。
+            if (_fileSelAuto){ _fileSel = idxMatch; }
+            _fileSelMuted = false;
+          } else {
+            _fileSelMuted = true;
+          }
+        }
+        // #345: '.' 入力時は '../' を優先的に選択する
+        if (qTrim === '.'){
+          try{
+            const idxUp = list.findIndex(e=> e && e._up);
+            if (idxUp >= 0){ _fileSel = idxUp; _fileSelMuted = false; }
+          }catch{}
         }
       } else {
         _fileSelMuted = false;
       }
     }catch{}
-    _fileSel = Math.max(0, Math.min(list.length-1, _fileSel));
+  _fileSel = Math.max(0, Math.min(list.length-1, _fileSel));
     for (let i=0;i<list.length;i++){
       const it = list[i];
   const div = document.createElement('div');
@@ -6317,12 +6460,38 @@
         // クリック時も補完専用: 入力欄に貼り付けて input ハンドラに委譲
         if (it.isDir){
           try{
+            // 直後ガード中かつフィルタ空（末尾スラッシュ状態）で ".." をクリックした場合は
+            // ナビゲーションせず ".." を入力欄に補完するだけに留める（#344/#347）
+            try{
+              const guardActive = (Date.now() < (_fileReflectGuardUntil||0));
+              // 現在のフィルタ末尾がスラッシュかどうかを入力から再評価
+              let endsWithSlashNow = false;
+              try{
+                const vNow = (cmdinput && cmdinput.value) || '';
+                const parsedNow = _eParseInput(vNow);
+                const filtNow = String(parsedNow && parsedNow.filter || '');
+                endsWithSlashNow = (filtNow.length === 0);
+              }catch{}
+              if (guardActive && endsWithSlashNow && it._up){
+                if (cmdinput){
+                  const next = ':e ' + String(_fileTypedDirRaw||'') + '..';
+                  cmdinput.value = next;
+                  try{ const pos=(cmdinput.value||'').length; cmdinput.setSelectionRange(pos,pos); }catch{}
+                  try { cmdinput.dispatchEvent(new Event('input', { bubbles:true })); } catch {}
+                }
+                return; // 補完のみで抜ける
+              }
+            }catch{}
             const nextBase = _ensureSlash(new URL(it.url, _fileBaseURL));
             // 選択直後の短期リトライウィンドウを開始
             _fileJustNavAt = Date.now();
+            // 直後の反映/Enterガードを短期オン
+            _fileReflectGuardUntil = Date.now() + 700;
             _fileNavRetryCount = 0;
             _fileFilter = '';
             _fileSelMuted = false;
+            // 旧一覧のまま残らないよう直ちにローディング表示へ
+            _fileEntries = []; _fileSel = 0; _fileLoading = true; if (_filePopupVisible()) _filePopupRender();
             if (it._up){
               // 親: 直前セグメントは baseURL から頑健に取得し、基点も即更新
               let s = (_fileTypedDirRaw||'').replace(/\\/g,'/').replace(/\/+$/,'');
@@ -6373,9 +6542,10 @@
     }
   // アクティブ（またはミュート）項目が見切れていれば可視範囲にスクロール
   try{ const act = bufpopupInner.querySelector('.item.active, .item.muted'); if (act && act.scrollIntoView) act.scrollIntoView({block:'nearest', inline:'nearest'}); }catch{}
+  window.__sixFileRendering = false;
   }
   function _filePopupShow(){ if (!bufpopup) return; bufpopup.dataset.kind='file'; bufpopup.style.display=''; _filePopupRender(); }
-  function _filePopupHide(){ if (!bufpopup) return; if (_filePopupVisible()){ bufpopup.style.display='none'; _fileLoading=false; } }
+  function _filePopupHide(){ if (!bufpopup) return; if (_filePopupVisible()){ bufpopup.style.display='none'; _fileLoading=false; try{ _fileReflectedOnOpen=false; }catch{} try{ window.__sixFileRendering=false; }catch{} } }
   // 旧: 一覧の単純移動は廃止（反映ロジック付きの新実装は下）
   // ↑↓で選択を動かしたときは、即座に入力欄へ反映（末尾 '/' なし、".." は例外で反映しない）
   function _filePopupMove(d){
@@ -6386,10 +6556,20 @@
     _fileSelMuted = false; // 矢印移動で通常のハイライトに復帰
     try{
       const it = list[_fileSel];
-      if (cmdinput && it && !it._up){
-        const val = ':e ' + _collapseDotDotPath((_fileTypedDirRaw||'') + String(it.name||''));
-        cmdinput.value = val;
+      if (cmdinput && it){
+        // ディレクトリ移動直後の短期は、選択反映をスキップ
+        const guardActive = (Date.now() < (_fileReflectGuardUntil||0));
+        if (!guardActive){
+        if (!it._up){
+          const val = ':e ' + _collapseDotDotPath((_fileTypedDirRaw||'') + String(it.name||''));
+          cmdinput.value = val;
+        } else {
+          // 親("..")上にカーソルがあるときは正規化せず ".." をそのまま可視化
+          const val = ':e ' + String(_fileTypedDirRaw||'') + '..';
+          cmdinput.value = val;
+        }
         try{ const pos=(cmdinput.value||'').length; cmdinput.setSelectionRange(pos,pos); }catch{}
+        }
       }
     }catch{}
     _filePopupRender();
@@ -6412,8 +6592,35 @@
   }
 
   function _currentDirBase(){
-    const cur = currentBuffer();
-    if (cur && cur.path){ return _dirnameURL(cur.path); }
+    // Prefer the directory of the current buffer when available
+    try{
+      const cur = currentBuffer();
+      if (cur && cur.path){ return _dirnameURL(cur.path); }
+    }catch{}
+    // If a next-start base was preserved (e.g., after Esc cancel), prefer it
+    try{
+      if (_fileNextStartBaseURL){ const u = _ensureSlash(_fileNextStartBaseURL); if (u) return u; }
+    }catch{}
+    // Fall back to the most recently visible base of :e popup (what the user last saw)
+    try{
+      if (_fileVisibleBaseKey){
+        const u = _ensureSlash(_fileVisibleBaseKey);
+        if (u) return u;
+      }
+    }catch{}
+    // Then fall back to the last stable listed base (what we last successfully loaded)
+    try{
+      if (_fileStableBaseKey){
+        const u = _ensureSlash(_fileStableBaseKey);
+        if (u) return u;
+      }
+    }catch{}
+    // As an additional fallback, use any other buffer that has a path
+    try{
+      const any = (buffers||[]).find(b=> b && b.path);
+      if (any && any.path){ return _dirnameURL(any.path); }
+    }catch{}
+    // Finally, default to the app HTML base directory
     return _htmlBaseURL();
   }
 
@@ -6525,7 +6732,7 @@
         pal.style.gap = '4px';
         pal.style.alignItems = 'flex-end';
         // Fill background without round corners/border as requested
-        pal.style.background = 'rgba(0,15,0,0.1)';
+  pal.style.background = 'rgba(0,15,0,0.3)';
         pal.style.border = 'none';
         pal.style.borderRadius = '0';
         pal.style.padding = '4px';
