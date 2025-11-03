@@ -4254,6 +4254,43 @@
     // NORMAL
   // Pending yank operator: interpret next key as motion or line-wise command
   if (_pendingOp === 'y'){
+  // allow composing count for motion (digits only when Shift is NOT held)
+  if (e.key>='1' && e.key<='9' && !e.shiftKey && !e.ctrlKey && !e.metaKey && !e.altKey){ e.preventDefault(); _countAcc = (_countAcc==null?0:_countAcc)*10 + parseInt(e.key,10); _armPendingOpTimeout(); return; }
+  if (e.key==='0' && !e.shiftKey && !e.ctrlKey && !e.metaKey && !e.altKey && _countAcc!=null){ e.preventDefault(); _countAcc = _countAcc*10; _armPendingOpTimeout(); return; }
+        if (e.key==='Escape'){ e.preventDefault(); _clearPendingOp(); _countAcc=null; return; }
+        // Ignore standalone modifier keys while waiting for the motion key
+        if (e.key==='Shift' || e.key==='Control' || e.key==='Alt' || e.key==='Meta'){
+          // Do not clear or consume the operator; wait for the actual motion key
+          return;
+        }
+        e.preventDefault();
+        // yy (yank N lines)
+        if (e.key==='y'){
+          const mcount = (_countAcc==null?1:_countAcc); _countAcc=null;
+          const total = Math.max(1, (_pendingOpCount||1) * mcount);
+          _yankWholeLines(caretRow, total);
+          _clearPendingOp(); _repositionCaret(); updateGutter();
+          return;
+        }
+        // ygg / yNgg
+        if (e.key==='g'){
+          if (_pendingOpSeq === 'g'){
+            // second 'g' -> gg
+            const mcount = (_countAcc==null?1:_countAcc); _countAcc=null;
+            // gg count means go to line N (default 1)
+            const targetLine = Math.max(1, mcount) - 1;
+            const r0 = caretRow;
+            const r1 = Math.max(0, Math.min(_totalLines()-1, targetLine));
+            const rs = Math.min(r0, r1);
+            const re = Math.max(r0, r1);
+            // yank complete lines between rs..re inclusive
+            _yankWholeLines(rs, re-rs+1);
+            _clearPendingOp(); _repositionCaret(); updateGutter();
+            return;
+          } else {
+            _pendingOpSeq = 'g'; _armPendingOpTimeout(); return;
+          }
+        }
   // y$ — charwise to end-of-line (or across lines if count>1)
   if (e.key==='$'){
           const mcount = (_countAcc==null?1:_countAcc); _countAcc=null;
@@ -4266,6 +4303,19 @@
           }
           const start={r:rS, c:cS}, end={r:rE, c:cE};
           if (!(start.r===end.r && start.c===end.c)) _yankRangePos(start, end);
+          _clearPendingOp(); _repositionCaret(); updateGutter();
+          return;
+        }
+  // yG / yNG (N as target line) — linewise yank (use literal 'G')
+  if (e.key==='G'){
+          const mcount = (_countAcc==null?0:_countAcc); _countAcc=null;
+          const r0 = caretRow; const total=_totalLines();
+          let r1;
+          if (mcount && mcount>0){ r1 = Math.max(0, Math.min(total-1, mcount-1)); }
+          else { r1 = total-1; }
+          const rs = Math.min(r0, r1);
+          const re = Math.max(r0, r1);
+          _yankWholeLines(rs, re-rs+1);
           _clearPendingOp(); _repositionCaret(); updateGutter();
           return;
         }
