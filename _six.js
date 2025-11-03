@@ -29,6 +29,8 @@
   let _lastCaretCol = -1;
   // track last time caret moved (for distinguishing caret-induced scroll vs manual scroll)
   let _lastCaretMovedAt = 0;
+  // global mouse cursor visibility state
+  let _cursorHidden = false;
   // scrolloff pause control: temporarily suppress ensureScrolloff after search confirm
   let _scrolloffPaused = false;
   let _scrolloffPauseAnchorR = -1;
@@ -911,7 +913,11 @@
         _changeTick: 0,
         _savedTick: 0,
         _undo: [],
-        _redo: []
+        _redo: [],
+        // per-buffer view/caret state (restored on tab switch)
+        viewRow: 0,
+        viewCol: 0,
+        viewScrollTop: 0
       });
       if (currentIdx<0) currentIdx=0;
     }catch{}
@@ -919,13 +925,67 @@
   function _switchToBuffer(i){
     try{
       if (!(i>=0 && i<buffers.length)) return;
+      // 1) Save current buffer's view state before switching away
+      if (currentIdx>=0 && currentIdx<buffers.length){
+        try{
+          const prev = buffers[currentIdx];
+          prev.viewRow = caretRow|0;
+          prev.viewCol = caretCol|0;
+          prev.viewScrollTop = (editor.scrollTop||0)|0;
+        }catch{}
+      }
+      // 2) Switch current index
       currentIdx = i;
       const b = buffers[i];
+      // 3) Load text into editor
       editor.value = String(b.text||'');
-      caretRow = 0; caretCol = 0; editor.scrollTop = 0;
-      // clear redo stack visual side-effects; keep per-buffer stacks as-is
-      _centerScrolloffOnce = true; ensureScrolloff({centerOnce:true});
+      // 4) Restore caret and scroll position for this buffer
+      const vr = Number.isFinite(b.viewRow) ? (b.viewRow|0) : 0;
+      const vc = Number.isFinite(b.viewCol) ? (b.viewCol|0) : 0;
+      let vs = Number.isFinite(b.viewScrollTop) ? (b.viewScrollTop|0) : 0;
+      _setCaret(vr, vc);
+      // Validate viewport: if saved scrollTop does not include the caret (e.g., corrupted to EOF),
+      // compute a safe fallback that centers the caret within the viewport to avoid "G-like" jumps (#359/#360)
+      try{
+        const vis = Math.max(1, _visibleLinesExact());
+        const caretLine1 = (vr|0) + 1;
+        const savedTop1 = Math.floor(Math.max(0, vs)/LINE_HEIGHT) + 1;
+        const savedBottom1 = savedTop1 + vis - 1;
+        // If caret would be off-screen with saved vs, recalc vs from caret
+        if (caretLine1 < savedTop1 || caretLine1 > savedBottom1){
+          let top1 = Math.max(1, caretLine1 - Math.floor(vis/2));
+          const linesTotal = _totalLines();
+          const baseMaxTop = Math.max(1, linesTotal - vis + 1);
+          const maxTopWithPad = Math.min(linesTotal, baseMaxTop + 1);
+          top1 = Math.min(top1, maxTopWithPad);
+          vs = (top1-1) * LINE_HEIGHT;
+        }
+      }catch{}
+      // Restore viewport scroll top (validated)
+      try{ editor.scrollTop = Math.max(0, vs); }catch{}
+      // Do NOT recentre on switch; keep exact previous viewport
+      _centerScrolloffOnce = false;
       _repositionCaret(); updateGutter();
+      // Some browsers/layouts may adjust scrollTop after content/overlays settle.
+      // Re-apply saved scroll position on the next frame and shortly after to ensure it sticks.
+      try{
+        const applyScroll = ()=>{
+          try{ editor.scrollTop = Math.max(0, vs); }catch{}
+          try{ _repositionCaret(); updateGutter(); }catch{}
+          // Persist the restored viewport to the buffer as the new baseline
+          try{ b.viewScrollTop = (editor.scrollTop||0)|0; b.viewRow = caretRow|0; b.viewCol = caretCol|0; }catch{}
+        };
+        if (window.requestAnimationFrame){ requestAnimationFrame(applyScroll); }
+        setTimeout(applyScroll, 0);
+        setTimeout(applyScroll, 80);
+        // Add one more delayed reinforcement to defeat late layout/scroll listeners
+        setTimeout(applyScroll, 180);
+        // Suppress any automatic scroll adjustments briefly after switching buffers
+        // to prevent ensureScrolloff or other flows from recentering the viewport (#357)
+        try{ _scrollGuardUntil = Date.now() + 1400; }catch{}
+      }catch{}
+      // Also record immediately (in case no scroll events fire)
+      try{ b.viewScrollTop = (editor.scrollTop||0)|0; b.viewRow = caretRow|0; b.viewCol = caretCol|0; }catch{}
       _setTitle(); _renderTabbar();
       _updateHlsearchFull();
     }catch{}
@@ -1239,18 +1299,28 @@
         }
       }
       t = txt.replace(/\r\n?/g,'\n');
-      editor.value = t;
-      loadedIntoEditor = true;
-      caretRow = 0; caretCol = 0; editor.scrollTop = 0;
-      _centerScrolloffOnce = true; ensureScrolloff({centerOnce:true});
-      try{ _repositionCaret(); updateGutter(); }catch{}
       const mode = opts.mode || (buffers.length===0 ? 'new' : 'replace');
       if (mode === 'new'){
         const exist = _findBufferByURL(urlStr);
-        if (exist >= 0){ _switchToBuffer(exist); }
-        else { _addBuffer({ name: _basename(path), path: urlStr, text: t, modified:false }); _switchToBuffer(buffers.length-1); }
+        if (exist >= 0){
+          // Switch to existing buffer without disturbing current editor state before switch
+          _switchToBuffer(exist);
+        } else {
+          // Create buffer first; _switchToBuffer will load its text and keep previous buffer's view saved correctly
+          _addBuffer({ name: _basename(path), path: urlStr, text: t, modified:false });
+          _switchToBuffer(buffers.length-1);
+        }
       } else {
-  const b=currentBuffer(); if (b){ b.path = urlStr; b.name = _basename(path); b.text = t; b.savedText = t; b._changeTick=0; b._savedTick=0; b.modified=false; try{ b._undo=[]; b._redo=[]; }catch{} }
+        // Replace current buffer content in-place
+        const b=currentBuffer();
+        if (b){
+          b.path = urlStr; b.name = _basename(path); b.text = t; b.savedText = t; b._changeTick=0; b._savedTick=0; b.modified=false; try{ b._undo=[]; b._redo=[]; }catch{}
+        }
+        // Reflect into editor now since we stay on the same buffer
+        editor.value = t; loadedIntoEditor = true;
+        caretRow = 0; caretCol = 0; editor.scrollTop = 0;
+        _centerScrolloffOnce = true; ensureScrolloff({centerOnce:true});
+        try{ _repositionCaret(); updateGutter(); }catch{}
       }
       try{ _setTitle(); _renderTabbar(); }catch{}
       return true;
@@ -1517,6 +1587,16 @@
     }catch{}
     // keep hlsearch overlay in sync with caret/scroll
     _renderHlMatchesVisible();
+    // Persist caret (and current viewport) to the active buffer so its view state
+    // survives a tab switch even if no scroll event occurs yet (#358)
+    try{
+      const b = currentBuffer();
+      if (b){
+        b.viewRow = caretRow|0; b.viewCol = caretCol|0;
+        // Use current scrollTop (snapped by scheduleScrollRender soon after)
+        b.viewScrollTop = (editor.scrollTop||0)|0;
+      }
+    }catch{}
   }
 
   // ---- Buffer/text helpers for editing ----
@@ -2759,6 +2839,21 @@
       reinforce();
       try{ if (window.requestAnimationFrame){ requestAnimationFrame(()=>{ reinforce(); requestAnimationFrame(()=>reinforce()); }); } }catch{}
       try{ setTimeout(reinforce, 140); }catch{}
+      // 直後にタブ切替してもこのジャンプ位置が確実に記憶されるよう、即時にビュー状態を保存 (#359)
+      try{
+        const b = currentBuffer();
+        if (b){
+          b.viewRow = caretRow|0;
+          b.viewCol = caretCol|0;
+          b.viewScrollTop = (editor.scrollTop||0)|0;
+        }
+      }catch{}
+      // レイアウト確定後にももう一度保存して、最終的なscrollTopをベースラインにする
+      try{
+        const persist = ()=>{ try{ const bb=currentBuffer(); if (bb){ bb.viewRow=caretRow|0; bb.viewCol=caretCol|0; bb.viewScrollTop=(editor.scrollTop||0)|0; } }catch{} };
+        if (window.requestAnimationFrame){ requestAnimationFrame(persist); }
+        setTimeout(persist, 80);
+      }catch{}
       _setMode('NORMAL');
       return;
     }
@@ -4052,6 +4147,8 @@
   // Show cursor on any mouse move or window blur
   window.addEventListener('mousemove', _showCursor, { passive:true });
   window.addEventListener('blur', _showCursor);
+  // When window becomes active, make caret active (hide mouse cursor briefly)
+  window.addEventListener('focus', ()=>{ try{ _hideCursor(); _repositionCaret(); updateGutter(); }catch{} });
   // Unified scroll handler: snap to line grid and render once per frame
   let _scrollRAF = 0;
   const scheduleScrollRender = ()=>{
@@ -4067,6 +4164,15 @@
       // Hide mouse cursor when visible range changes shortly after caret moved
       if ((Date.now() - _lastCaretMovedAt) < 120){ _hideCursor(); }
       _repositionCaret(); updateGutter(); _renderHlMatchesVisible(); _incPrevRefresh(); _renderVisSelOverlay();
+      // Persist current buffer's view state (scroll and caret) on every scroll frame
+      try{
+        const b = currentBuffer();
+        if (b){
+          b.viewScrollTop = (editor.scrollTop||0)|0;
+          b.viewRow = caretRow|0;
+          b.viewCol = caretCol|0;
+        }
+      }catch{}
     });
   };
   viewport.addEventListener('scroll', scheduleScrollRender);
@@ -4114,7 +4220,24 @@
     editor.addEventListener('mouseup', syncCaretFromSelection);
     editor.addEventListener('click', syncCaretFromSelection);
     // selection change — keep overlay caret in sync in all modes
-    editor.addEventListener('select', ()=>{ try{ const off = editor.selectionStart|0; const rc = _rcFromOffset(off); caretRow = rc.r; caretCol = rc.c; }catch{} _repositionCaret(); updateGutter(); });
+    // In VISUAL mode, prefer tracking the moving edge of the selection (the end farther from the anchor)
+    editor.addEventListener('select', ()=>{
+      try{
+        let off = editor.selectionStart|0;
+        if (_visualActive){
+          const s = editor.selectionStart|0;
+          const e = editor.selectionEnd|0;
+          const a = _offsetFromRC(_visualAnchorR, _visualAnchorC)|0;
+          // Choose the endpoint farther from the anchor as the caret position
+          const ds = Math.abs(s - a);
+          const de = Math.abs(e - a);
+          off = (de >= ds) ? e : s;
+        }
+        const rc = _rcFromOffset(off);
+        caretRow = rc.r; caretCol = rc.c;
+      }catch{}
+      _repositionCaret(); updateGutter();
+    });
     editor.addEventListener('keyup', (e)=>{ if(e.key==='Enter') ensureScrolloff(); _repositionCaret(); updateGutter(); });
     editor.addEventListener('click', ()=>{ _repositionCaret(); updateGutter(); });
   window.addEventListener('resize', ()=>{ _syncEditorMetrics(); clampViewportExactLines(); _exactLineLockAdjust(); ensureScrolloff(); _repositionCaret(); updateGutter(); _renderHlMatchesVisible(); _incPrevRefresh(); _renderVisSelOverlay(); });
