@@ -158,8 +158,9 @@
       if (!_incPrevEl){ _incPrevEl = document.createElement('div'); _incPrevEl.className = 'incprev'; }
       // attach to caretLayer (follows transform remainder compensation)
       if (_incPrevEl.parentNode !== caretLayer){ try{ caretLayer.appendChild(_incPrevEl); }catch{} }
-      // position and size
-      _incPrevEl.style.left = x1 + 'px';
+  // position and size (adjust by horizontal scroll)
+  let _hs = 0; try{ _hs = (editor.scrollLeft||0); }catch{}
+  _incPrevEl.style.left = (x1 - _hs) + 'px';
       _incPrevEl.style.top = topPx + 'px';
       _incPrevEl.style.width = Math.max(1, Math.round(x2 - x1)) + 'px';
       _incPrevEl.style.height = Math.max(1, Math.round(LINE_HEIGHT)) + 'px';
@@ -340,7 +341,9 @@
   const el = document.createElement('div');
   // dedicated style for CMD-time visual selection
   el.className = 'viscmdsel';
-        el.style.left = x1 + 'px';
+  // Adjust by horizontal scroll
+  let _hs = 0; try{ _hs = (editor.scrollLeft||0); }catch{}
+  el.style.left = (x1 - _hs) + 'px';
         el.style.top = topPx + 'px';
         el.style.width = Math.max(1, Math.round(x2 - x1)) + 'px';
         el.style.height = Math.max(1, Math.round(LINE_HEIGHT)) + 'px';
@@ -416,8 +419,10 @@
         if (!(x2 > x1)) continue;
         const topPx = (row1 - topLine) * LINE_HEIGHT;
         const el = document.createElement('div');
-        el.className = 'hlmatch';
-        el.style.left = x1 + 'px';
+  el.className = 'hlmatch';
+  // Adjust by horizontal scroll
+  let _hs = 0; try{ _hs = (editor.scrollLeft||0); }catch{}
+  el.style.left = (x1 - _hs) + 'px';
         el.style.top = topPx + 'px';
         el.style.width = Math.max(1, Math.round(x2 - x1)) + 'px';
         el.style.height = Math.max(1, Math.round(LINE_HEIGHT)) + 'px';
@@ -1589,7 +1594,9 @@
         x = baseX + sum;
       }
     }catch{}
-    caret.style.left = x + 'px';
+  // Adjust by horizontal scroll (textarea scrollLeft)
+  let _hs = 0; try{ _hs = (editor.scrollLeft||0); }catch{}
+  caret.style.left = (x - _hs) + 'px';
   // Make caret height match the full line box
   caret.style.top = topPx + 'px';
   caret.style.height = Math.max(1, Math.round(LINE_HEIGHT)) + 'px';
@@ -2043,17 +2050,25 @@
     const caretLine1 = caretRow + 1;
     const centerOnce = opts.centerOnce || _centerScrolloffOnce;
     const big = scrolloff >= 99999;
-    // Allow one extra "virtual" page step so EOF の下に 1 行分の余白が見える
+    // Allow extra "virtual" page steps so EOF の下に N 行分の余白が見える
     const baseMaxTop = Math.max(1, linesTotal - vis + 1);
-    const maxTopWithPad = Math.min(linesTotal, baseMaxTop + 1);
+    const _readEofPadLines = ()=>{
+      try{
+        const r = getComputedStyle(document.documentElement).getPropertyValue('--eofPadLines');
+        const n = parseInt(String(r||'').trim(), 10);
+        return (Number.isFinite(n) && n>=0) ? n : 1;
+      }catch{ return 1; }
+    };
+    const _eofPad = _readEofPadLines();
+    const maxTopWithPad = Math.min(linesTotal, baseMaxTop + _eofPad);
 
     if (big || centerOnce || scrolloff >= Math.floor(vis/2)){
       let targetTop = Math.max(1, caretLine1 - Math.floor(vis/2));
-      // When explicitly requested (e.g., 'G'), prefer showing 1-line EOF pad
+      // When explicitly requested (e.g., 'G'), prefer showing EOF pad
       if (opts.preferEOFPad && caretLine1 === linesTotal){
         targetTop = Math.min(maxTopWithPad, Math.max(1, targetTop));
       }
-      // clamp to at most one-line pad range
+      // clamp within pad range
       targetTop = Math.min(targetTop, maxTopWithPad);
       editor.scrollTop = (targetTop-1) * LINE_HEIGHT;
       _centerScrolloffOnce = false;
