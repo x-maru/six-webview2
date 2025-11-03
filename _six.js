@@ -1,6 +1,5 @@
 ﻿// six migration oriented bootstrap (spec-aligned skeleton with file load)
 (function(){
-  'use strict';
 
   // DOM elements
   const viewport   = document.getElementById('editorViewport');
@@ -35,7 +34,6 @@
   let _scrolloffPauseAnchorR = -1;
   let _scrolloffPauseAnchorC = -1;
   // global mouse cursor visibility state and helpers (used across modules)
-  let _cursorHidden = false;
   const _hideCursor = ()=>{ try{ if (!_cursorHidden){ document.body.classList.add('hide-cursor'); _cursorHidden=true; } }catch{} };
   const _showCursor = ()=>{ try{ if (_cursorHidden){ document.body.classList.remove('hide-cursor'); _cursorHidden=false; } }catch{} };
   // editor zoom state (scale only editor/gutter, not global UI)
@@ -6513,6 +6511,37 @@
               _filePostSelectName = prevSeg || null;
               _fileBaseURL = nextBase;
               if (cmdinput){ cmdinput.value=':e ' + _collapseDotDotPath(_fileTypedDirRaw + prevSeg); }
+              // クリック移動では明示的に列挙を開始し、(loading...) のままにならないようにする（#350）
+              try{
+                const baseNow = _ensureSlash(_fileBaseURL);
+                if (baseNow && _isHostRoot(baseNow)){
+                  // ホスト直下: 共有一覧
+                  _fileTypedDirRaw = '//' + baseNow.host + '/'; _fileFilter=''; _filePopupNoUp = true;
+                  _fileEntries = []; _fileSel = 0; _fileLoading = true; if (_filePopupVisible()) _filePopupRender();
+                  _loadSharesForHost(baseNow.host, prevSeg)
+                    .finally(()=>{ _fileLoading=false; if (_filePopupVisible()) _filePopupRender(); });
+                } else {
+                  const reqKey = (function(){ try{ return _ensureSlash(_fileBaseURL)?.toString()||null; }catch{ return null; } })();
+                  _listDirEntriesWithQuickRetry(_fileBaseURL)
+                    .then(list2=>{
+                      try{
+                        const curKey = _ensureSlash(_fileBaseURL)?.toString()||null;
+                        if (!reqKey || curKey===reqKey){
+                          _fileEntries = Array.isArray(list2) ? list2 : [];
+                          if (Array.isArray(list2) && list2.length>0){ _fileStableEntries = list2.slice(); _fileStableBaseKey = curKey; }
+                          // 親で直前セグメントを選択
+                          try{
+                            const baseNow2 = _ensureSlash(_fileBaseURL);
+                            const suppressUp = (!!_filePopupNoUp) || (baseNow2 && (_isHostRoot(baseNow2) || _isUncShareRoot(baseNow2)));
+                            const idx2 = _fileEntries.findIndex(e=> e && e.isDir && e.name===prevSeg);
+                            if (idx2>=0){ _fileSel = idx2 + (suppressUp?0:1); }
+                          }catch{}
+                        }
+                      }catch{}
+                    })
+                    .finally(()=>{ _fileLoading=false; if (_filePopupVisible()) _filePopupRender(); });
+                }
+              }catch{}
             } else {
               // Enter/Tab と同じ補完のみに徹する。"//" 段階で "wsl.localhost/" を選んだ場合は先頭 "//" を保持。
               // "/" はローカルルートとして通常処理（UNC化しない）。
@@ -6525,6 +6554,28 @@
               if (cmdinput){ cmdinput.value=':e ' + _collapseDotDotPath(_fileTypedDirRaw); }
               // 基点も進める
               _fileBaseURL = nextBase;
+              // 子ディレクトリへのクリック移動でも即列挙を開始（#350）
+              try{
+                const baseNow = _ensureSlash(_fileBaseURL);
+                try{ _filePopupNoUp = !!(baseNow && (_isHostRoot(baseNow) || _isUncShareRoot(baseNow))); }catch{ /* keep as-is */ }
+                const reqKey = (function(){ try{ return _ensureSlash(_fileBaseURL)?.toString()||null; }catch{ return null; } })();
+                _listDirEntriesWithQuickRetry(_fileBaseURL)
+                  .then(list2=>{
+                    try{
+                      const curKey = _ensureSlash(_fileBaseURL)?.toString()||null;
+                      if (!reqKey || curKey===reqKey){
+                        _fileEntries = Array.isArray(list2) ? list2 : [];
+                        if (Array.isArray(list2) && list2.length>0){ _fileStableEntries = list2.slice(); _fileStableBaseKey = curKey; }
+                        // 先頭選択（".." 抑止に応じて）
+                        try{
+                          const suppressUp = (!!_filePopupNoUp) || (baseNow && (_isHostRoot(baseNow) || _isUncShareRoot(baseNow)));
+                          _fileSel = (suppressUp?0:1);
+                        }catch{}
+                      }
+                    }catch{}
+                  })
+                  .finally(()=>{ _fileLoading=false; if (_filePopupVisible()) _filePopupRender(); });
+              }catch{}
             }
             try{ _fileNavPendingKey = _ensureSlash(nextBase)?.toString()||null; }catch{ _fileNavPendingKey=null; }
             if (cmdinput){ try { cmdinput.dispatchEvent(new Event('input', { bubbles:true })); } catch {} }
