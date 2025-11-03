@@ -497,6 +497,14 @@
     // Set a default; will be synced to editor computed styles at bootstrap/resize
   s.style.font = '200 20px/20px "Cascadia Code", "Cascadia Mono", "JetBrains Mono", "Fira Code", "Consolas", "游ゴシック Light", "Yu Gothic", "Meiryo", "MS Gothic", monospace';
   s.style.fontWeight = '200';
+    // Disable kerning/ligatures and enforce full-width East Asian variants for stable measurement
+    try{
+      s.style.fontKerning = 'none';
+      s.style.fontVariantLigatures = 'none';
+      // Keep East Asian variants normal to match editor rendering; we'll measure full-width via specific characters
+      // Some browsers require camelCase property
+      s.style.fontVariantEastAsian = 'normal';
+    }catch{}
     document.body.appendChild(s);
     return s;
   })();
@@ -539,6 +547,10 @@
         if (cs && cs.fontWeight) _measureSpan.style.fontWeight = cs.fontWeight;
         if (Number.isFinite(FONT_SIZE)) _measureSpan.style.fontSize = FONT_SIZE + 'px';
         if (Number.isFinite(LINE_HEIGHT)) _measureSpan.style.lineHeight = LINE_HEIGHT + 'px';
+        // Keep measurement behavior consistent with editor rendering
+        _measureSpan.style.fontKerning = 'none';
+        _measureSpan.style.fontVariantLigatures = 'none';
+        _measureSpan.style.fontVariantEastAsian = 'normal';
       }catch{}
       // Compute caret vertical offset: center font box within line box
       const off = (LINE_HEIGHT - FONT_SIZE) / 2;
@@ -1538,9 +1550,45 @@
     }
     const lines = _splitLines();
     const line = lines[caretRow] || '';
-    // use measurement: set content to substring up to caretCol
-    _measureSpan.textContent = line.slice(0, caretCol);
-    const x = _measureSpan.getBoundingClientRect().width; // px
+    // Helper: read half/full-width reference widths
+    const _measureRefWidths = ()=>{
+      _measureSpan.textContent = 'W';
+      const halfW = _measureSpan.getBoundingClientRect().width || 1;
+      _measureSpan.textContent = '\u3000'; // IDEOGRAPHIC SPACE
+      const fullW = _measureSpan.getBoundingClientRect().width || (halfW*2);
+      return { halfW, fullW };
+    };
+    const { halfW: _halfRefW, fullW: _fullRefW } = _measureRefWidths();
+    const _charWidth = (ch)=>{
+      try{
+        if (!ch) return _halfRefW;
+        _measureSpan.textContent = ch;
+        const w = _measureSpan.getBoundingClientRect().width;
+        return (w && w>0) ? w : (_isFullwidth(ch) ? _fullRefW : _halfRefW);
+      }catch{ return _halfRefW; }
+    };
+    const _isHangablePunct = (ch)=> /[\u3001\u3002\uFF0C\uFF0E]/.test(ch||'');
+    const _isFullwidth = (ch)=> /[\u1100-\u115F\u2E80-\uA4CF\uAC00-\uD7A3\uF900-\uFAFF\uFE10-\uFE19\uFE30-\uFE6F\u3000-\u303F\uFF01-\uFF60\uFFE0-\uFFE6]/.test(ch||'');
+    // Primary width measurement up to caretCol
+    _measureSpan.textContent = line.slice(0, Math.max(0, caretCol));
+    let x = _measureSpan.getBoundingClientRect().width; // px
+    // If the tail just before caret consists of hangable CJK punctuation (e.g., '、、' '。'),
+    // some fonts may apply hanging/kerning so substr width does not grow. Recompute locally.
+    try{
+      let k = Math.max(0, caretCol-1);
+      while (k>=0 && _isHangablePunct(line[k])) k--;
+      const clusterStart = k+1;
+      if (clusterStart < caretCol){
+        // width before the cluster via direct measure
+        _measureSpan.textContent = line.slice(0, clusterStart);
+        const baseX = _measureSpan.getBoundingClientRect().width || 0;
+        let sum = 0;
+        for (let i=clusterStart; i<caretCol; i++){
+          sum += _charWidth(line[i]);
+        }
+        x = baseX + sum;
+      }
+    }catch{}
     caret.style.left = x + 'px';
   // Make caret height match the full line box
   caret.style.top = topPx + 'px';
@@ -1552,15 +1600,25 @@
       _measureSpan.textContent = line.slice(0, caretCol+1);
       const x2 = _measureSpan.getBoundingClientRect().width;
       chW = Math.max(0, x2 - x);
+      if (!(chW>0)){
+        // fallback to per-char width (e.g., hanging punctuation cluster)
+        chW = _charWidth(line[caretCol]||'');
+      }
     } else {
       // at EOL: use half-width box width (measure with 'W')
       _measureSpan.textContent = 'W';
       chW = _measureSpan.getBoundingClientRect().width;
     }
+    // Guard: if measurement collapsed (e.g., hanging punctuation), fallback by character class
     if (!(chW > 0)){
-      _measureSpan.textContent = 'W';
-      chW = _measureSpan.getBoundingClientRect().width;
+      const ch = line[caretCol] || '';
+      chW = _charWidth(ch);
     }
+    // Additional guard: tiny width due to kerning → treat as full-width for CJK punctuation
+    try{
+      const ch = line[caretCol] || '';
+      if (_isHangablePunct(ch) && chW < _halfRefW*0.6){ chW = Math.max(_charWidth(ch), _halfRefW); }
+    }catch{}
     const cw = Math.max(1, Math.round(chW * 0.9));
     try{ caret.style.setProperty('--caretWidth', cw + 'px'); }catch{}
     // Apply the same remainder compensation to caret overlay container
