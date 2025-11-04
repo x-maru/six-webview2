@@ -9,6 +9,8 @@
   const edstripe   = document.getElementById('edstripe');
   const tabbarEl   = document.getElementById('tabbar');
   const tabbarTabs = tabbarEl ? tabbarEl.querySelector('.tabs') : null;
+  const tabbarTools = tabbarEl ? tabbarEl.querySelector('#tabtools') : null;
+  const encBtn    = document.getElementById('encBtn');
   const cmdinput   = document.getElementById('cmdinput');
   const modestatus = document.getElementById('modestatus');
 
@@ -73,48 +75,159 @@
   const _isWebView2 = !!(window.chrome && window.chrome.webview);
   // numeric count prefix for NORMAL motions (e.g., 5l)
   let _countAcc = null;
+  // pending operator state for NORMAL/VISUAL (e.g., d/y/c sequences)
+  let _pendingOp = null;        // current operator key (e.g., 'd','y','c') or null
+  let _pendingOpCount = 1;      // numeric count prefix captured before motion
+  let _pendingOpSeq = null;     // sequence helper for multi-key ops (e.g., 'g')
+  let _pendingOpTimer = null;   // reserved for timeouts (currently unused but cleared)
+  // pending normal sequence (e.g., waiting for second 'g' in 'gg') and its timer
+  let _pendingNormal = null;
+  let _pendingTimer = null;
+  // unnamed register (yank/delete/paste). Initialize to avoid ReferenceError on read.
+  let _regUnnamed = null;
+  // --- VISUAL mode state (ensure declared before any reads) ---
+  let _visualActive = false;      // currently in VISUAL mode
+  let _visualLinewise = false;    // VISUAL linewise flag
+  let _visualAnchorR = 0;         // VISUAL anchor row
+  let _visualAnchorC = 0;         // VISUAL anchor col
+  // --- VISUAL snapshot during CMD (:"…" entered from VISUAL) ---
+  let _visCmdActive = false;      // whether VISUAL snapshot is active during CMD
+  let _cmdFromVisual = false;     // entered CMD via ':' while in VISUAL
+  let _visCmdLinewise = false;    // VISUAL linewise flag at CMD entry
+  let _visCmdAnchorR = 0, _visCmdAnchorC = 0; // anchor at CMD entry
+  let _visCmdCaretR = 0,  _visCmdCaretC  = 0; // caret at CMD entry
+  // --- Incremental search anchor (used by '/', '?', and :s preview) ---
+  let _incSearchAnchorOff = null; // absolute offset anchor for incremental search
+  let _incSearchDir = 'fwd';      // last incremental search direction
   let scrolloff = 3;
   let _cachedVisibleCount = 0;
   let _lineLockActive = false;
   let _centerScrolloffOnce = false;
   let _mode = 'NORMAL';
-  // Visual mode state
-  let _visualActive = false;
-  let _visualLinewise = false;
-  let _visualAnchorR = 0;
-  let _visualAnchorC = 0;
-  // CMD エントリが VISUAL から始まったか（Esc キャンセル時に VISUAL をリセットするため）
-  let _cmdFromVisual = false;
-  // VISUAL から ':' で CMD に入ったときの範囲スナップショット（'<,'> 用）
-  let _visCmdActive = false;
-  let _visCmdLinewise = false;
-  let _visCmdAnchorR = 0, _visCmdAnchorC = 0;
-  let _visCmdCaretR = 0, _visCmdCaretC = 0;
-  let _pendingNormal = null;
-  let _pendingTimer = null;
-  // delete operator state (for d + motion)
-  let _pendingOp = null;           // e.g., 'd'
-  let _pendingOpCount = 1;         // count before operator
-  let _pendingOpSeq = null;        // sub-sequence (e.g., 'g' of 'gg')
-  let _pendingOpTimer = null;      // timer to clear pending operator
-
-  // simple unnamed register for yank/delete (for p/P)
-  let _regUnnamed = { text: '', linewise: false };
-  // suppress extra snapshot when entering INSERT immediately after o/O
-  let _suppressInsertSnapshotOnce = false;
-
-  // Last search state for '/' and '?' commands (pattern, flags, direction)
-  // flags: currently only 'i' (case-insensitive) supported
-  let _lastSearch = null; // { src:string, flags:string, dir:'fwd'|'bwd' }
-  // Incremental search anchor: absolute offset captured when entering '/' or '?' CMD
-  let _incSearchAnchorOff = null; // number|null
-  let _incSearchDir = 'fwd';
-
-  // Incremental search preview overlay element (reused)
-  let _incPrevEl = null; // DOMElement or null
-  let _incPrevLastStart = null; // number|null
-  let _incPrevLastLen = 0;
+  // global key routing guard (to avoid recursion when synthesizing events)
+  let _globalKeyRouting = false;
+  // encoding options (limited set)
+  const _allowedEncodeSets = [
+    { enc:'utf-8', ff:'unix', bom:false },
+    { enc:'utf-8', ff:'unix', bom:true  },
+    { enc:'utf-8', ff:'dos',  bom:false },
+    { enc:'utf-8', ff:'dos',  bom:true  },
+    { enc:'shift_jis', ff:'dos',  bom:false },
+    { enc:'shift_jis', ff:'unix', bom:false }
+  ];
+  function _encDisplayLines(meta){
+    const e = (meta&&meta.enc)||'utf-8';
+    const ff = (meta&&meta.ff)||'unix';
+    const bom = !!(meta&&meta.bom);
+    const line1 = e + ' ' + ff;
+    const line2 = (e==='utf-8' && bom) ? 'bomb' : '';
+    return { line1, line2 };
+  }
+  function _updateEncBtnLabel(){
+    try{
+      if (!encBtn) return;
+      const b=currentBuffer();
+      const meta = b ? { enc:b.enc||'utf-8', ff:b.ff||'unix', bom:!!b.bom } : { enc:'utf-8', ff:'unix', bom:false };
+      const d = _encDisplayLines(meta);
+      const text = d.line2 ? (d.line1 + '\n' + d.line2) : d.line1;
+      encBtn.textContent = text;
+    }catch{}
+  }
+  // ---- Encoding popup helpers ----
+  let _encSel = 0;
+  function _encMetaEquals(a, b){
+    return !!a && !!b && (String(a.enc||'utf-8')===String(b.enc||'utf-8')) && (String(a.ff||'unix')===String(b.ff||'unix')) && (!!a.bom === !!b.bom);
+  }
+  function _encCurrentMeta(){
+    try{ const b=currentBuffer(); return b? { enc:b.enc||'utf-8', ff:b.ff||'unix', bom:!!b.bom } : { enc:'utf-8', ff:'unix', bom:false }; }catch{ return { enc:'utf-8', ff:'unix', bom:false }; }
+  }
+  function _encFindIndex(meta){
+    try{
+      const m = meta||_encCurrentMeta();
+      const idx = _allowedEncodeSets.findIndex(x=>_encMetaEquals(x, m));
+      return (idx>=0?idx:0)|0;
+    }catch{ return 0; }
+  }
+  function _encPopupVisible(){
+    try{ const pop = document.getElementById('encpopup'); return !!(pop && pop.style.display !== 'none'); }catch{ return false; }
+  }
+  function _encPopupHide(){ try{ const pop=document.getElementById('encpopup'); if (pop) pop.style.display='none'; }catch{} }
+  function _encPopupRender(){
+    try{
+      const pop = document.getElementById('encpopup'); if (!pop) return;
+      pop.innerHTML = '';
+      const inner = document.createElement('div'); inner.className='inner'; pop.appendChild(inner);
+      // Do NOT override current selection on re-render; only initialize if invalid
+      const cur = _encCurrentMeta();
+      if (!Number.isFinite(_encSel)){
+        _encSel = _encFindIndex(cur);
+      } else {
+        // clamp within bounds
+        const n = _allowedEncodeSets.length|0;
+        _encSel = Math.max(0, Math.min(n>0?n-1:0, _encSel|0));
+      }
+      _allowedEncodeSets.forEach((meta, i)=>{
+        const item = document.createElement('div'); item.className='item'; if (i===_encSel) item.classList.add('active');
+        // marker
+        const mark = document.createElement('span'); mark.textContent = (i===_encSel)?'●':'○'; mark.style.width='1.2em'; mark.style.textAlign='center'; mark.style.opacity='0.8';
+        // name (popupは" bomb"を同一行に付与する)
+        const name = document.createElement('div'); name.className='name'; const d=_encDisplayLines(meta); name.textContent = d.line2 ? (d.line1+' '+d.line2) : d.line1; name.style.whiteSpace='pre';
+        item.appendChild(mark); item.appendChild(name);
+        // Apply immediately on mousedown to maximize reliability across environments
+        item.addEventListener('mousedown', (ev)=>{ try{ ev.preventDefault(); ev.stopPropagation(); }catch{}; try{ _encSel = i; }catch{}; try{ _applyEncodeMeta(meta); }catch{} _encPopupHide(); setTimeout(()=>{ try{ editor && editor.focus && editor.focus(); }catch{} },0); });
+        // Hover updates visual selection when not clicking
+        item.addEventListener('mouseenter', ()=>{ try{ _encSel=i; _encPopupRender(); }catch{} });
+        // Click kept as a safety net (some platforms synthesize click differently)
+        item.addEventListener('click', (ev)=>{ try{ ev.preventDefault(); ev.stopPropagation(); }catch{}; try{ _encSel = i; }catch{}; try{ _applyEncodeMeta(meta); }catch{} _encPopupHide(); setTimeout(()=>{ try{ editor && editor.focus && editor.focus(); }catch{} },0); });
+        inner.appendChild(item);
+      });
+    }catch{}
+  }
+  function _encPopupShow(){
+    try{
+      const pop = document.getElementById('encpopup'); if (!pop) return;
+      pop.style.display = '';
+      // Initialize selection to current buffer meta on first show
+      try{ _encSel = _encFindIndex(_encCurrentMeta()); }catch{ _encSel = 0; }
+      _encPopupRender();
+      // position near the button
+      if (encBtn){
+        const r = encBtn.getBoundingClientRect();
+        // temporary visibility to measure
+        const vw = (window.innerWidth||0), vh=(window.innerHeight||0);
+        const pw = (pop.offsetWidth||240), ph=(pop.offsetHeight||200);
+        let left = Math.max(8, Math.min(vw - pw - 8, Math.round(r.right - pw))); // align right edges roughly
+        let top  = Math.max(8, Math.min(vh - ph - 8, Math.round(r.bottom + 6)));
+        pop.style.left = left + 'px';
+        pop.style.top  = top + 'px';
+      }
+    }catch{}
+  }
+  function _encPopupMoveSel(dir){
+    try{ const n=_allowedEncodeSets.length|0; if (!n) return; _encSel = ( (_encSel|0) + (dir>0?1:-1) + n ) % n; _encPopupRender(); }catch{}
+  }
+  function _applyEncodeMeta(meta){
+    try{
+      if (!meta) return;
+      const b = currentBuffer(); if (!b) return;
+      const before = { enc:b.enc||'utf-8', ff:b.ff||'unix', bom:!!b.bom };
+      if (_encMetaEquals(before, meta)) return;
+      // one undo unit (metadata only)
+      _pushUndoSnapshot('enc-change');
+      b.enc = String(meta.enc||'utf-8');
+      b.ff  = String(meta.ff||'unix');
+      b.bom = !!meta.bom;
+      // mark modified due to metadata change (without touching text)
+      try{ b._changeTick = ((b._changeTick|0) + 1)|0; b.modified = ((b._changeTick|0) !== (b._savedTick|0)); }catch{}
+      _updateEncBtnLabel();
+      try{ _setTitle && _setTitle(); _renderTabbar && _renderTabbar(); }catch{}
+      try{ toast('encode set: ' + ((_encDisplayLines(meta).line2)? (_encDisplayLines(meta).line1+' bomb') : _encDisplayLines(meta).line1), 900); }catch{}
+    }catch{}
+  }
   // Sticky preview for :s — keep previous match position while pattern grows if it still matches
+  let _incPrevEl = null;        // DOM element for incremental preview highlight
+  let _incPrevLastStart = null; // last preview start offset
+  let _incPrevLastLen = 0;      // last preview length
   let _incPrevStickyOff = null; // number|null
   let _incPrevStickySrc = '';
   function _incPrevHide(){ try{ if (_incPrevEl && _incPrevEl.parentNode){ _incPrevEl.parentNode.removeChild(_incPrevEl); } _incPrevEl=null; }catch{ _incPrevEl=null; } _incPrevLastStart=null; _incPrevLastLen=0; }
@@ -814,6 +927,8 @@
   setVar('six-help-close-bg', t.helpCloseBg);
   setVar('six-help-close-fg', t.helpCloseFg);
   setVar('six-help-close-border', t.helpCloseBorder);
+  // Popup active line color (encodeSet popup etc.)
+  setVar('popupActiveLine', t.popupActiveLine);
       // apply persisted scale if any
       try{
         const s = localStorage.getItem('six.edScale');
@@ -931,6 +1046,10 @@
         _savedTick: 0,
         _undo: [],
         _redo: [],
+        // encoding/newline metadata
+        enc: (b.enc||'utf-8'),      // 'utf-8' | 'shift_jis'
+        ff:  (b.ff||'unix'),        // 'unix' | 'dos'
+        bom: !!b.bom,               // true only meaningful for utf-8
         // per-buffer view/caret state (restored on tab switch)
         viewRow: 0,
         viewCol: 0,
@@ -983,6 +1102,7 @@
       // Do NOT recentre on switch; keep exact previous viewport
       _centerScrolloffOnce = false;
       _repositionCaret(); updateGutter();
+  _updateEncBtnLabel();
       // Some browsers/layouts may adjust scrollTop after content/overlays settle.
       // Re-apply saved scroll position on the next frame and shortly after to ensure it sticks.
       try{
@@ -1203,6 +1323,7 @@
     if (activeEl && typeof activeEl.scrollIntoView === 'function'){
       activeEl.scrollIntoView({block:'nearest', inline:'nearest'});
     }
+    try{ _updateEncBtnLabel(); }catch{}
   }
 
   function _isDirHint(s){
@@ -1315,7 +1436,10 @@
           } catch(eApi){ throw eFetch; }
         }
       }
-      t = txt.replace(/\r\n?/g,'\n');
+      // detect ff + BOM (utf-8 BOM appears as U+FEFF at string start)
+      let ff = (txt.indexOf('\r')>=0) ? 'dos' : 'unix';
+      const hasBomChar = (txt.length>0 && txt.charCodeAt(0)===0xFEFF);
+      t = (hasBomChar ? txt.slice(1) : txt).replace(/\r\n?/g,'\n');
       const mode = opts.mode || (buffers.length===0 ? 'new' : 'replace');
       if (mode === 'new'){
         const exist = _findBufferByURL(urlStr);
@@ -1324,7 +1448,7 @@
           _switchToBuffer(exist);
         } else {
           // Create buffer first; _switchToBuffer will load its text and keep previous buffer's view saved correctly
-          _addBuffer({ name: _basename(path), path: urlStr, text: t, modified:false });
+          _addBuffer({ name: _basename(path), path: urlStr, text: t, modified:false, enc:'utf-8', ff, bom: hasBomChar });
           _switchToBuffer(buffers.length-1);
         }
       } else {
@@ -1332,6 +1456,7 @@
         const b=currentBuffer();
         if (b){
           b.path = urlStr; b.name = _basename(path); b.text = t; b.savedText = t; b._changeTick=0; b._savedTick=0; b.modified=false; try{ b._undo=[]; b._redo=[]; }catch{}
+          try{ b.enc='utf-8'; b.ff=ff; b.bom=hasBomChar; }catch{}
         }
         // Reflect into editor now since we stay on the same buffer
         editor.value = t; loadedIntoEditor = true;
@@ -1375,16 +1500,19 @@
         if (!f){ document.body.removeChild(inp); return resolve(false); }
         const r = new FileReader();
         r.onload = ()=>{
-          const txt = String(r.result || '').replace(/\r\n?/g,'\n');
+          const raw = String(r.result || '');
+          const hasBomChar = (raw.length>0 && raw.charCodeAt(0)===0xFEFF);
+          const ff = (raw.indexOf('\r')>=0) ? 'dos' : 'unix';
+          const txt = (hasBomChar ? raw.slice(1) : raw).replace(/\r\n?/g,'\n');
           editor.value = txt;
           caretRow = 0; caretCol = 0; editor.scrollTop = 0;
           _centerScrolloffOnce = true; ensureScrolloff({centerOnce:true});
           _repositionCaret(); updateGutter();
           const mode = opts.mode || (buffers.length===0 ? 'new' : 'replace');
           if (mode === 'new'){
-            _addBuffer({ name: f.name, path: null, text: txt, modified:false });
+            _addBuffer({ name: f.name, path: null, text: txt, modified:false, enc:'utf-8', ff, bom: hasBomChar });
           } else {
-            const b=currentBuffer(); if (b){ b.path = null; b.name = f.name; b.text = txt; b.savedText = txt; b._changeTick=0; b._savedTick=0; b.modified=false; }
+            const b=currentBuffer(); if (b){ b.path = null; b.name = f.name; b.text = txt; b.savedText = txt; b._changeTick=0; b._savedTick=0; b.modified=false; b.enc='utf-8'; b.ff=ff; b.bom=hasBomChar; }
           }
           _setTitle(); _renderTabbar();
           document.body.removeChild(inp);
@@ -1440,8 +1568,11 @@
             } else if (docIt) {
               try { t = await _fetchTextSmart(docIt); } catch { t = ''; }
             }
-            t = String(t||'').replace(/\r\n?/g,'\n');
-            _addBuffer({ name: nameIt, path: docIt, text: t, modified:false });
+            const raw = String(t||'');
+            const ff = (raw.indexOf('\r')>=0) ? 'dos' : 'unix';
+            const hasBomChar = (raw.length>0 && raw.charCodeAt(0)===0xFEFF);
+            const norm = (hasBomChar ? raw.slice(1) : raw).replace(/\r\n?/g,'\n');
+            _addBuffer({ name: nameIt, path: docIt, text: norm, modified:false, enc:'utf-8', ff, bom: hasBomChar });
           });
           return Promise.all(promises).then(()=>{
             _switchToBuffer(0);
@@ -1455,10 +1586,12 @@
       try {
         const bin = dataB64.length ? Uint8Array.from(atob(dataB64), c=>c.charCodeAt(0)) : new Uint8Array();
         const txt = new TextDecoder('utf-8').decode(bin);
-    const t = txt.replace(/\r\n?/g,'\n');
+    const ff = (txt.indexOf('\r')>=0) ? 'dos' : 'unix';
+    const hasBomChar = (bin.length>=3 && bin[0]===0xEF && bin[1]===0xBB && bin[2]===0xBF);
+    const t = (hasBomChar ? txt.slice(1) : txt).replace(/\r\n?/g,'\n');
     editor.value = t;
-    if (buffers.length===0){ _addBuffer({ name: name||null, path: doc||null, text: t, modified:false }); }
-  else { const b=currentBuffer(); b.name = name||b.name; b.path = doc||b.path; b.text = t; b.savedText = t; b._changeTick=0; b._savedTick=0; b.modified=false; }
+    if (buffers.length===0){ _addBuffer({ name: name||null, path: doc||null, text: t, modified:false, enc:'utf-8', ff, bom: hasBomChar }); }
+  else { const b=currentBuffer(); b.name = name||b.name; b.path = doc||b.path; b.text = t; b.savedText = t; b._changeTick=0; b._savedTick=0; b.modified=false; b.enc='utf-8'; b.ff=ff; b.bom=hasBomChar; }
     _setTitle(); _renderTabbar();
     // Ensure initial view is at top (avoid unintended 'G'-like position)
     try{
@@ -1474,10 +1607,12 @@
   // Resolve doc relative to _six.html base when not absolute
   try { if (doc && !/^([a-z][a-z0-9+.-]*:)/i.test(doc)) { doc = new URL(doc, _htmlBaseURL()).toString(); } } catch {}
   return _fetchTextSmart(doc).then(txt=>{
-    const t = txt.replace(/\r\n?/g,'\n');
+    const ff = (txt.indexOf('\r')>=0) ? 'dos' : 'unix';
+    const hasBomChar = (txt.length>0 && txt.charCodeAt(0)===0xFEFF);
+    const t = (hasBomChar ? txt.slice(1) : txt).replace(/\r\n?/g,'\n');
     editor.value = t;
-    if (buffers.length===0){ _addBuffer({ name: name||null, path: doc||null, text: t, modified:false }); }
-  else { const b=currentBuffer(); if(name) b.name = name; b.path = doc; b.text = t; b.savedText = t; b._changeTick=0; b._savedTick=0; b.modified=false; }
+    if (buffers.length===0){ _addBuffer({ name: name||null, path: doc||null, text: t, modified:false, enc:'utf-8', ff, bom: hasBomChar }); }
+  else { const b=currentBuffer(); if(name) b.name = name; b.path = doc; b.text = t; b.savedText = t; b._changeTick=0; b._savedTick=0; b.modified=false; b.enc='utf-8'; b.ff=ff; b.bom=hasBomChar; }
     _setTitle(); _renderTabbar();
       try{
         caretRow=0; caretCol=0; editor.scrollTop=0; _centerScrolloffOnce=false; _scrollGuardUntil = Date.now() + 800;
@@ -1781,7 +1916,7 @@
   function _currentStacks(){ const b=currentBuffer(); return b ? b : null; }
   function _makeSnapshot(){
     const b=currentBuffer();
-    return { text: String(editor.value||''), caretRow, caretCol, scrollTop: (editor.scrollTop||0), changeTick: (b? (b._changeTick|0) : 0) };
+    return { text: String(editor.value||''), caretRow, caretCol, scrollTop: (editor.scrollTop||0), changeTick: (b? (b._changeTick|0) : 0), enc: (b? b.enc : 'utf-8'), ff: (b? b.ff : 'unix'), bom: (b? !!b.bom : false) };
   }
   function _pushUndoSnapshotObj(kind, snap){
     try{
@@ -1802,6 +1937,8 @@
     try{ const b=currentBuffer(); if (b){ b._changeTick = (s.changeTick|0); } }catch{}
     _syncModifiedFromTick();
     ensureScrolloff(); _repositionCaret(); updateGutter();
+    // restore encoding meta if present
+    try{ const b=currentBuffer(); if (b && s && typeof s.enc !== 'undefined'){ b.enc = s.enc||'utf-8'; b.ff = s.ff||'unix'; b.bom = !!s.bom; _updateEncBtnLabel(); } }catch{}
   }
   function _pushUndoSnapshot(kind){ try{ const st=_currentStacks(); if (!st) return; const snap=_makeSnapshot(); // push current state as undo checkpoint
     const u = st._undo || (st._undo=[]); u.push({ ...snap, kind: kind||null }); if (u.length>UNDO_LIMIT) u.splice(0, u.length-UNDO_LIMIT); // clear redo on new branch
@@ -3404,6 +3541,11 @@
   function _setMode(m){
     _mode = m;
     if (modestatus) modestatus.textContent = '['+_mode+']';
+    // While in CMD, prefer a hollow caret (no gradient fill/blink)
+    // by ensuring the global 'hide-cursor' class is cleared.
+    if (m === 'CMD'){
+      try{ _showCursor(); }catch{}
+    }
     // Begin an INSERT compound edit by pushing a snapshot before edits start
     if (m==='INSERT'){
       if (!_suppressInsertSnapshotOnce){
@@ -4347,7 +4489,7 @@
     editor.addEventListener('keyup', (e)=>{ if(e.key==='Enter') ensureScrolloff(); _repositionCaret(); updateGutter(); });
     editor.addEventListener('click', ()=>{ _repositionCaret(); updateGutter(); });
   window.addEventListener('resize', ()=>{ _syncEditorMetrics(); clampViewportExactLines(); _exactLineLockAdjust(); ensureScrolloff(); _repositionCaret(); updateGutter(); _renderHlMatchesVisible(); _incPrevRefresh(); _renderVisSelOverlay(); });
-    editor.addEventListener('keydown', (e)=>{
+  editor.addEventListener('keydown', (e)=>{
       // Short guard: absorb any stray keydown right after modal close
       if (Date.now() < _kbdGuardUntil){ try{ e.preventDefault(); e.stopPropagation(); }catch{} return; }
       if (_mode === 'CMD') return;
@@ -5005,6 +5147,62 @@
       const isEditKey = ['Enter','Tab','Backspace','Delete','Insert'].includes(e.key);
       if (isPrintable || isEditKey){ e.preventDefault(); return; }
     });
+    // Global fallback: when focus is not on the editor/cmdinput and no modal/popup is open,
+    // route keystrokes to the editor so NORMAL/VISUAL keys work on startup and after stray focus.
+    try{
+      const _globalKeyRouter = (e)=>{
+        try{
+          if (_globalKeyRouting) return;
+          // If a modal is open, or enc popup is visible, do not steal
+          const modalOpen = !!(_modalOverlay && _modalOverlay.style && _modalOverlay.style.display !== 'none');
+          if (modalOpen) return;
+          try{ if (typeof _encPopupVisible === 'function' && _encPopupVisible()) return; }catch{}
+          const ae = document.activeElement;
+          const isEditor = (ae === editor);
+          const isCmd = (cmdinput && ae === cmdinput);
+          const tag = (ae && ae.tagName ? ae.tagName.toLowerCase() : '');
+          const isFormEl = (tag==='input' || tag==='textarea' || (ae && ae.isContentEditable));
+          // Route keys to editor in NORMAL/VISUAL when focus is outside editor and not in another form control.
+          // This avoids interfering with native textarea events when editor already has focus, while still
+          // ensuring NORMAL/VISUAL keys work on startup or after stray focus.
+          if (_mode !== 'INSERT' && !isCmd && !isEditor && !isFormEl){
+            // Let F1 fall through so help shortcut works
+            if (e.key === 'F1') return;
+            // Avoid hijacking OS/meta shortcuts
+            if (e.metaKey) return;
+            _globalKeyRouting = true;
+            try{
+              // ensure subsequent input goes to editor
+              try{ editor && editor.focus && editor.focus(); }catch{}
+              const evInit = {
+                key: e.key,
+                code: (e.code||''),
+                ctrlKey: !!e.ctrlKey,
+                altKey: !!e.altKey,
+                shiftKey: !!e.shiftKey,
+                metaKey: !!e.metaKey,
+                repeat: !!e.repeat,
+                location: (e.location||0),
+                bubbles: true,
+                cancelable: true,
+                composed: true
+              };
+              // Dispatch asynchronously after focusing so editor's own keydown handler surely receives it
+              const ev = new KeyboardEvent('keydown', evInit);
+              setTimeout(()=>{ try{ editor && editor.dispatchEvent && editor.dispatchEvent(ev); }catch{} }, 0);
+              // Prevent the original from bubbling to unrelated elements
+              try{ e.preventDefault(); }catch{}
+              try{ e.stopPropagation(); }catch{}
+            } finally {
+              _globalKeyRouting = false;
+            }
+          }
+        }catch{}
+      };
+      // Capture on both window and document to cover environments where one of them swallows events
+      window.addEventListener('keydown', _globalKeyRouter, true);
+      document.addEventListener('keydown', _globalKeyRouter, true);
+    }catch{}
     if (cmdinput){
       cmdinput.addEventListener('keydown',(e)=>{
         if (e.key==='Enter'){
@@ -5389,6 +5587,8 @@
           _fileFilter = '';
           cmdinput.value = '';
           _setMode('NORMAL');
+          // Esc 直後は中抜きから塗りキャレットへ戻す（見た目の一貫性）
+          try{ _hideCursor(); }catch{}
           _bufPopupHide(); _filePopupHide();
           setTimeout(()=>{ try{ editor.focus(); restoreView(); if (window.requestAnimationFrame){ requestAnimationFrame(()=>restoreView()); } setTimeout(restoreView, 120); }catch{} }, 0);
         } else if (e.key==='Tab'){
@@ -6200,7 +6400,7 @@
       _fileVisibleEntries = (_fileEntries && Array.isArray(_fileEntries)) ? _fileEntries.slice() : [];
     }catch{}
   }
-  function _bufPopupShow(){ if (!bufpopup) return; bufpopup.dataset.kind='buf'; bufpopup.style.display=''; if (!(_bufSel>=0)) _bufSel=Math.max(0,Math.min(buffers.length-1,currentIdx)); _bufPopupRender(); }
+  function _bufPopupShow(){ if (!bufpopup) return; try{ if (typeof _encPopupHide==='function') _encPopupHide(); }catch{} bufpopup.dataset.kind='buf'; bufpopup.style.display=''; if (!(_bufSel>=0)) _bufSel=Math.max(0,Math.min(buffers.length-1,currentIdx)); _bufPopupRender(); }
   function _bufPopupHide(){ if (!bufpopup) return; if (_bufPopupVisible()) bufpopup.style.display='none'; }
   function _bufPopupMove(d){ if (!bufpopup) return; _bufSel=_bufSel+d; if (_bufSel<0) _bufSel=0; _bufPopupRender(); }
 
@@ -6286,14 +6486,48 @@
       if (!_apiBase) { toast('save unavailable (no API)'); return false; }
       const u = new URL(urlStr);
       if (u.protocol !== 'file:'){ toast('save only supports file://'); return false; }
-  // 保存時は改行コードを変更しない（そのまま保存）
-  const payload = String(textUtf8||'');
+  // 保存時はバッファの encodeSet に従って改行/BOM/エンコーディングを適用
+  const b = currentBuffer();
+  const enc = (b&&b.enc)||'utf-8';
+  const ff = (b&&b.ff)||'unix';
+  const bom = !!(b&&b.bom);
+  let out = String(textUtf8||'');
+  if (ff === 'dos'){ out = out.replace(/\n/g, '\r\n'); }
+  let payloadBytes = null;
+  if (enc === 'utf-8'){
+    let s = out; if (bom){ s = '\uFEFF' + s; }
+    payloadBytes = new TextEncoder().encode(s);
+  } else if (enc === 'shift_jis'){
+    try{
+      payloadBytes = _encodeShiftJIS(out);
+      if (!(payloadBytes instanceof Uint8Array)) throw new Error('sjis encode failed');
+    }catch{
+      // Fallback without BOM (avoid mislabel as UTF-8 BOM)
+      toast('Shift_JIS エンコード未対応のため UTF-8 で保存します', 1800);
+      payloadBytes = new TextEncoder().encode(out);
+    }
+  } else {
+    payloadBytes = new TextEncoder().encode(out);
+  }
+  // Safety: if encoding yielded zero bytes but we have non-empty content, fall back to UTF-8
+  try{ if ((payloadBytes && payloadBytes.byteLength===0) && out && out.length>0){ payloadBytes = new TextEncoder().encode(out); } }catch{}
       let fsPath = _fsPathFromFileURL(u);
       if (!fsPath){ toast('invalid target path'); return false; }
       const apiUrl = _apiBase + 'write?fs=' + encodeURIComponent(fsPath);
       const ac = (window.AbortController ? new AbortController() : null);
       const to = setTimeout(()=>{ try{ ac && ac.abort(); }catch{} }, 8000);
-      const resp = await fetch(apiUrl, { method:'POST', body: new TextEncoder().encode(payload), headers: { 'Content-Type':'text/plain; charset=utf-8' }, signal: (ac?ac.signal:undefined) });
+      // Send raw bytes without setting Content-Type to avoid CORS preflight (#380)
+      // Use the exact Uint8Array view to prevent implicit Blob type headers.
+      let body;
+      try{
+        // If TextEncoder produced a view with non-zero byteOffset, create a tight copy
+        if (payloadBytes && (payloadBytes.byteOffset!==0 || payloadBytes.byteLength !== payloadBytes.buffer.byteLength)){
+          body = new Uint8Array(payloadBytes); // copies the slice
+        } else {
+          body = payloadBytes; // direct
+        }
+      }catch{ body = payloadBytes; }
+  const resp = await fetch(apiUrl, { method:'POST', body, signal: (ac?ac.signal:undefined) });
       try{ clearTimeout(to); }catch{}
       if (!resp.ok) {
         let msg = 'write failed';
@@ -6302,6 +6536,8 @@
           try{ const j = JSON.parse(rt); if (j && j.error) msg = 'write failed: ' + j.error; else if (rt) msg = 'write failed: ' + rt; }
           catch{ if (rt) msg = 'write failed: ' + rt; }
         }catch{}
+        // Fallback: include HTTP status if no body message
+        try{ if ((!msg || msg==='write failed') && resp){ msg = 'write failed: ' + resp.status + ' ' + (resp.statusText||''); } }catch{}
         try{ _apiNoteFailure(); }catch{}
         toast(msg);
         return false;
@@ -6309,6 +6545,32 @@
       try{ _apiNoteSuccess(); }catch{}
       return true;
     }catch(e){ toast('write failed'); return false; }
+  }
+
+  // Minimal Shift_JIS encoder (ASCII + halfwidth-kana + common mappings). Returns Uint8Array.
+  function _encodeShiftJIS(str){
+    const bytes = [];
+    for (let i=0;i<str.length;i++){
+      let code = str.charCodeAt(i);
+      // Surrogate pair collapse to replacement
+      if (code >= 0xD800 && code <= 0xDBFF && i+1<str.length){
+        const low = str.charCodeAt(i+1);
+        if (low >= 0xDC00 && low <= 0xDFFF){ i++; code = 0x003F; } // '?'
+      }
+      if (code <= 0x7F){
+        // ASCII as-is (except map U+005C backslash remains 0x5C)
+        bytes.push(code);
+        continue;
+      }
+      // Map common single-byte overrides in CP932
+      if (code === 0x00A5){ bytes.push(0x5C); continue; }        // U+00A5 YEN SIGN -> 0x5C
+      if (code === 0x203E){ bytes.push(0x7E); continue; }        // U+203E OVERLINE -> 0x7E
+      // Halfwidth katakana U+FF61..U+FF9F -> 0xA1..0xDF
+      if (code >= 0xFF61 && code <= 0xFF9F){ bytes.push(0xA1 + (code - 0xFF61)); continue; }
+      // Not supported: map to '?'
+      bytes.push(0x3F);
+    }
+    return new Uint8Array(bytes);
   }
 
   // UNC 共有ルート判定: file:////host/share/ （先頭セグメントが1個のみ）
@@ -6874,7 +7136,7 @@
   try{ const act = bufpopupInner.querySelector('.item.active, .item.muted'); if (act && act.scrollIntoView) act.scrollIntoView({block:'nearest', inline:'nearest'}); }catch{}
   window.__sixFileRendering = false;
   }
-  function _filePopupShow(){ if (!bufpopup) return; bufpopup.dataset.kind='file'; bufpopup.style.display=''; _filePopupRender(); }
+  function _filePopupShow(){ if (!bufpopup) return; try{ if (typeof _encPopupHide==='function') _encPopupHide(); }catch{} bufpopup.dataset.kind='file'; bufpopup.style.display=''; _filePopupRender(); }
   function _filePopupHide(){ if (!bufpopup) return; if (_filePopupVisible()){ bufpopup.style.display='none'; _fileLoading=false; try{ _fileReflectedOnOpen=false; }catch{} try{ window.__sixFileRendering=false; }catch{} } }
   // 旧: 一覧の単純移動は廃止（反映ロジック付きの新実装は下）
   // ↑↓で選択を動かしたときは、即座に入力欄へ反映（末尾 '/' なし、".." は例外で反映しない）
@@ -7123,12 +7385,12 @@
       hlBtn.appendChild(hlWrap);
       hlBtn.addEventListener('click', (e)=>{
         try{ e.preventDefault(); e.stopPropagation(); }catch{}
-        try{
-          _optHlsearch = !_optHlsearch;
-          _updateHlsearchFull();
-          try{ toast('hlsearch: ' + (_optHlsearch?'on':'off'), 900); }catch{}
-          try{ _updateOverlayHlsearchVisual(); }catch{}
-        }catch{}
+        // Toggle first
+        try{ _optHlsearch = !_optHlsearch; }catch{}
+        // Try to recompute highlights, but don't block UI feedback if it fails
+        try{ _updateHlsearchFull(); }catch{}
+        try{ _updateOverlayHlsearchVisual(); }catch{}
+        try{ toast('hlsearch: ' + (_optHlsearch?'on':'off'), 900); }catch{}
         // Restore pre-click focus if possible
         try{
           if (lastFocusedEl && typeof lastFocusedEl.focus === 'function'){
@@ -7240,6 +7502,60 @@
         _renderTabbar();
         _initOverlayPalette();
         _wireHelpOpenShortcut();
+        // Wire encoding button and popup interactions
+        try{
+          if (encBtn){
+            encBtn.style.whiteSpace = 'pre';
+            encBtn.addEventListener('mousedown', (e)=>{ e.preventDefault(); });
+            encBtn.addEventListener('click', (e)=>{ try{ e.preventDefault(); e.stopPropagation(); }catch{}; if (_encPopupVisible()){ _encPopupHide(); } else { _encPopupShow(); }});
+          }
+          // Close on outside click
+          document.addEventListener('mousedown', (e)=>{
+            try{
+              const pop = document.getElementById('encpopup');
+              if (!pop || pop.style.display==='none') return;
+              const withinPopup = pop.contains(e.target);
+              const withinBtn = encBtn && encBtn.contains && encBtn.contains(e.target);
+              if (!withinPopup && !withinBtn){ _encPopupHide(); }
+            }catch{}
+          }, true);
+          // Keyboard navigation for popup (capture-phase)
+          window.addEventListener('keydown', (e)=>{
+            try{
+              if (!_encPopupVisible()) return;
+              const key = e.key;
+              if (key==='Escape'){ e.preventDefault(); e.stopPropagation(); _encPopupHide(); return; }
+              if (key==='ArrowUp' || key==='k'){ e.preventDefault(); e.stopPropagation(); _encPopupMoveSel(-1); return; }
+              if (key==='ArrowDown' || key==='j' || key==='Tab'){ e.preventDefault(); e.stopPropagation(); _encPopupMoveSel(+1); return; }
+              if (key==='Home'){ e.preventDefault(); e.stopPropagation(); try{ _encSel = 0; _encPopupRender(); }catch{} return; }
+              if (key==='End'){ e.preventDefault(); e.stopPropagation(); try{ _encSel = Math.max(0, _allowedEncodeSets.length-1); _encPopupRender(); }catch{} return; }
+              if (key==='PageUp'){ e.preventDefault(); e.stopPropagation(); try{ _encPopupMoveSel(-4); }catch{} return; }
+              if (key==='PageDown'){ e.preventDefault(); e.stopPropagation(); try{ _encPopupMoveSel(+4); }catch{} return; }
+              if (e.key==='Enter'){
+                e.preventDefault(); e.stopPropagation();
+                const idx = Math.max(0, Math.min(_allowedEncodeSets.length-1, _encSel|0));
+                const meta = _allowedEncodeSets[idx] || null;
+                if (meta) _applyEncodeMeta(meta);
+                _encPopupHide();
+                setTimeout(()=>{ try{ editor && editor.focus && editor.focus(); }catch{} }, 0);
+                return;
+              }
+            }catch{}
+          }, true);
+          // Ensure Esc closes :e file popup even when focus is not in cmdinput
+          window.addEventListener('keydown', (e)=>{
+            try{
+              if (!_filePopupVisible || !_filePopupVisible()) return;
+              if (e.key==='Escape'){
+                e.preventDefault(); e.stopPropagation();
+                try{ _filePopupHide(); }catch{}
+                // keep CMD input as-is; focus back to cmdinput if present
+                try{ if (cmdinput && typeof cmdinput.focus==='function'){ cmdinput.focus(); } }catch{}
+                return;
+              }
+            }catch{}
+          }, true);
+        }catch{}
         // hide boot sentinel if present
         try{ const bw = document.getElementById('bootwarn'); if (bw) bw.style.display='none'; }catch{}
         setTimeout(()=>{ try{ editor.focus(); }catch{} }, 0);

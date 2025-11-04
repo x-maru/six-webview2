@@ -53,5 +53,7 @@ window.THEME = {
   // Help close button (themeable)
   helpCloseBg: "#3a3a56",
   helpCloseFg: "#e6e6e6",
-  helpCloseBorder: "#3f5074"
+  helpCloseBorder: "#3f5074",
+  // Popup active line highlight (encodeSet popupなど)
+  popupActiveLine: "#00a090"
 };

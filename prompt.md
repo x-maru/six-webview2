@@ -557,3 +557,179 @@ $361
       - encodeSetはundo対象(1単位)とする
     - タブバー全体の高さをボタンに合わせる(ラベル2行分)
 
+#371
+- 起動直後から操作不能状態
+  - [utf8 unix]のボタンをclickしても何も起きず
+  - [検索ハイライト]をclickしてoffになるときだけトーストが出るがonになってもボタン描画も変化しないしトーストも出ない
+    - ただしもう一度クリックするとoffのトーストが出る(偶数click目)
+  - ヘルプボタンをclickするとヘルプダイアログが開き、ダイアログ内の操作はひととおり問題ない
+  - hjklなどでcaretも動かないし:も受け付けない
+  - textarea内をclickするとcaretがそこに飛ぶが、やはり動かせない
+
+#372
+encodeSetのポップアップが開くようになっただけ。他はいずれも改善されず。
+encodeSetのポップアップが出た状態で候補をclickしてもpopup内カーソルも動かない、↑↓もEnterも効かない。
+- [検索ハイライト]をclickしてoffになるときだけトーストが出るがonになってもボタン描画も変化しないしトーストも出ない
+- ただしもう一度クリックするとoffのトーストが出る(偶数click目)
+- ヘルプボタンをclickするとヘルプダイアログが開き、ダイアログ内の操作はひととおり問題ない
+- hjklなどでcaretも動かないし:も受け付けない
+
+#373
+[検索ハイライト]ボタンはclickのたびにOFF<->ONがトグルで切り替わるようになった。OK
+- encodeSetのpopupがclickや↑↓を受け付けない件は解消せず
+  - encodeSetのpopupでEnterは反応するようになった。
+    - 元々"utf8 unix"のところに選択肢も"utf8 unix"でEnterによりpopupが閉じただけで、実際に効いたのかは不明
+- textareaでhjkl, :等を受け付けないのは解消せず
+- コマンド入力欄をclickすればキー入力を受け付け、:e popupを出したり:qで終了したりできる
+  - :e popupをEscで閉じようと思っても無視された
+
+#374
+- encodeSetのpopupがclickや↑↓を受け付けない件は解消せず
+  - encodeSetのpopupでEnterは反応するようになった。
+    - 元々"utf8 unix"のところに選択肢も"utf8 unix"でEnterによりpopupが閉じただけで、実際に効いたのかは不明
+- textareaでhjkl, :等を受け付けないのは解消せず
+- コマンド入力欄をclickすればキー入力を受け付け、:e popupを出したり:qで終了したりできる
+  - :e popupをEscで閉じられるようになった。OK
+- :eでファイルを開き、コマンド欄clickからの:b popupでバッファを切り替えたりタブバーのタブclickで切り替える動作はOK
+
+#375
+- 引数無しで起動した直後からtextareaでhjkl, :等を受け付けない。textareaをclickしたあとでも変わらず。
+- encodeSetのpopupがclick,↑↓,Enter,Escを受け付けるようになった。コマンド欄のフォーカス有無によらずEscで閉じる。OK
+  - カレントのencodeSetと異なるencodeSetを選ぶとタブにmodifiedの印(*)が付く。→OK
+    - textareaでuが受け付けられないのでUndoが効くかどうかは確認不能
+    - 元々"utf8 unix"のバッファ(初回untitledのbrown foxテキスト)を"utf8 dos"に変更して`:w dos.txt`で保存したところ中身が空のファイルとして保存された(なので改行コードの確認できず)
+- Ctrl+ホイールによる拡大縮小およびボタンからの＋ー,リセットも正常に動作している。
+- コマンド入力欄をclickすればキー入力を受け付け、:e popupを出したり:qで終了したりできる
+
+#376
+- 引数無しで起動した直後にhjkl, :等を受け付けない。textareaをclickしたあとでも変わらず。
+- :w dos.txt → "write failed"
+- :w exist_file → Overwrite? dialog → Save → "write failed"
+- DevToolsで_six.jsのL.2293(_moveCaretLines()先頭), L.2300(_moveCaretCols()先頭)にbreakpointを置いてh,j,k,l等と入力してもbreakしない。
+
+#377
+- 引数無しで起動した直後にhjkl, :等を受け付けない。textareaをclickしたあとでも変わらず。
+- :w dos.txt → "write failed"
+- :w exist_file → Overwrite? dialog → Save → "write failed"
+- encodeSetのpopupでclickが効かなくなった。Enterは効いている。
+- 引数無しで起動した直後にDevToolsのConsoleに下記エラーが出ている
+```
+_six.js:4591  Uncaught ReferenceError: _pendingOp is not defined
+    at HTMLTextAreaElement.<anonymous> (_six.js:4591:3)
+```
+- document.activeElement
+  - textarea#editor
+
+#378
+- 引数無しで起動した直後にhjkl, :等を受け付けるが、`:`を入力するとフォーカスが消える。
+  - コマンド入力欄をclickすると入力できるがEscは効かず、`:set hlsearch`などとしてトーストが出てもフォーカスはコマンド入力欄のまま。
+- 引数無しで起動した直後にj,k,:など入力したときのDevToolsのConsole:
+```
+_six.js:4359  Uncaught ReferenceError: _pendingTimer is not defined
+    at _clearPending (_six.js:4359:5)
+    at HTMLTextAreaElement.<anonymous> (_six.js:5115:7)
+_six.js:213  Uncaught ReferenceError: _incPrevEl is not defined
+    at _incPrevRefresh (_six.js:213:5)
+    at _six.js:4385:70
+_incPrevRefresh @ _six.js:213
+(匿名) @ _six.js:4385
+requestAnimationFrame
+scheduleScrollRender @ _six.js:4375
+scroll
+_globalKeyRouter @ _six.js:5147
+_six.js:213  Uncaught ReferenceError: _incPrevEl is not defined
+    at _incPrevRefresh (_six.js:213:5)
+    at _six.js:4385:70
+_incPrevRefresh @ _six.js:213
+(匿名) @ _six.js:4385
+requestAnimationFrame
+scheduleScrollRender @ _six.js:4375
+scroll
+(匿名) @ _six.js:4380
+requestAnimationFrame
+scheduleScrollRender @ _six.js:4375
+scroll
+_globalKeyRouter @ _six.js:5147
+_six.js:4359  Uncaught ReferenceError: _pendingTimer is not defined
+    at _clearPending (_six.js:4359:5)
+    at HTMLTextAreaElement.<anonymous> (_six.js:5115:7)
+_clearPending @ _six.js:4359
+(匿名) @ _six.js:5115
+_six.js:4359  Uncaught ReferenceError: _pendingTimer is not defined
+    at _clearPending (_six.js:4359:5)
+    at HTMLTextAreaElement.<anonymous> (_six.js:5115:7)
+_clearPending @ _six.js:4359
+(匿名) @ _six.js:5115
+_six.js:4359  Uncaught ReferenceError: _pendingTimer is not defined
+    at _clearPending (_six.js:4359:5)
+    at HTMLTextAreaElement.<anonymous> (_six.js:4947:9)
+_clearPending @ _six.js:4359
+(匿名) @ _six.js:4947
+```
+
+#379
+- `:`でコマンド入力欄に入るようになったが、Escを入力したときのConsole:
+```
+_six.js:5538  Uncaught ReferenceError: _cmdFromVisual is not defined
+    at HTMLInputElement.<anonymous> (_six.js:5538:27)
+(匿名) @ _six.js:5538
+```
+- `w exist.txt`でOverwriteダイアログ→"Save"→"write failed"
+```
+_six.js:5524  Uncaught ReferenceError: _cmdFromVisual is not defined
+    at HTMLInputElement.<anonymous> (_six.js:5524:11)
+(匿名) @ _six.js:5524
+_six.html#api=http%3A%2F%2F127.0.0.1%3A27035%2F:1  Access to fetch at 'http://127.0.0.1:27035/write?fs=C%3A%5CUsers%5Cymaru%5CWebView2%5Csix%5Ca' from origin 'file://' has been blocked by CORS policy: Request header field content-type is not allowed by Access-Control-Allow-Headers in preflight response.
+_six.js:6505   POST http://127.0.0.1:27035/write?fs=C%3A%5CUsers%5Cymaru%5CWebView2%5Csix%5Ca net::ERR_FAILED
+_saveToURL @ _six.js:6505
+(匿名) @ _six.js:3358
+await in (匿名)
+runCommand @ _six.js:3368
+(匿名) @ _six.js:5520
+```
+
+#380
+- 文字入力できない不具合は解消したようだ。OK
+- `:`でコマンド入力欄にフォーカスが移ったらtextareaの赤caretは中抜き表示になる方がいいな。
+- (untitled)バッファを`:w exist`で保存しようとしたOverwrite→SaveでのConsole:
+```
+_six.html#api=http%3A%2F%2F127.0.0.1%3A57346%2F:1  Access to fetch at 'http://127.0.0.1:57346/write?fs=C%3A%5CUsers%5Cymaru%5CWebView2%5Csix%5Ca' from origin 'file://' has been blocked by CORS policy: Request header field content-type is not allowed by Access-Control-Allow-Headers in preflight response.
+_six.js:6519   POST http://127.0.0.1:57346/write?fs=C%3A%5CUsers%5Cymaru%5CWebView2%5Csix%5Ca net::ERR_FAILED
+_saveToURL @ _six.js:6519
+(匿名) @ _six.js:3372
+await in (匿名)
+runCommand @ _six.js:3382
+(匿名) @ _six.js:5534
+```
+
+#381
+- `:`でコマンド入力欄に移ったときの本文caret →OK。中抜き。
+- コマンド入力欄から`Esc`で抜けたとき →NG。中抜きのまま。
+- encodeSet popupをclickで選択できない。NG。
+- encodeSet popup内で" bomb"を2行に分けずに前行にappendして。
+- encodeSet "utf8 unix"から"utf8 dos"に替えて:w →OK。sixを起動し直して読み込んでも"utf8 dos"になっている。
+- encodeSet変換後のUndo/Redoも正常。OK。
+- "utf8 unix"から"shift_jis dos"に変換して:wで保存しても"utf8 unix"のまま。これは制限だっけ？TODOだっけ？
+
+#382
+- encodeSet popup内のカーソル行の色をもう少し明るい色にしたい。window.THEMEに"popupActiveLine"として"#00a090"で定義して。
+- コマンド入力欄から`Esc`で抜けたとき →OK
+- encodeSet popupが出ているときに:e popupや:b popupを出したらencodeSet popupは閉じるようにして。
+- (untitled)を"utf8 unix"から"shift_jis dos"に変換して//wsl.localhost/Ubuntu/tmp/shift_jis_dosとして保存して、
+```
+$ file /tmp/shift_jis_dos
+/tmp/shift_jis_dos: Unicode text, UTF-8 (with BOM) text, with CRLF line terminators
+```
+  - sixを閉じて開くと"utf-8 dos"になる
+
+#383
+- encodeSet popupをclickで選択できない。NG。
+- popupActiveLine →OK
+- encodeSet popup中の:e/:b popup →OK
+- タブバー内のタブ群を下揃えにして。
+
+#384
+- encodeSet popupをclickで選択 →OK
+- "_six-theme.js"を"_six.customize"にリネームして。(中身はそのままjsファイル)
+  - `:set xxxxx`でコントロールできるオプションの定義を_six.customizeに移動して。
+

@@ -17,7 +17,7 @@
   </style>
 </head>
 <body>
-  <div id="tabbar"><div class="tabs"></div></div>
+  <div id="tabbar"><div class="tabs"></div><div id="tabtools"><button id="encBtn" type="button" title="文字コード/改行の変更"></button></div></div>
   <div id="pane">
     <div id="editorViewport">
       <div id="editWrap">
@@ -31,6 +31,10 @@
   <div id="cmdbar"><span id="modestatus">[NORMAL]</span><span id="cmdprefix"></span><input id="cmdinput" type="text" spellcheck="false" placeholder="command" /></div>
 
   <div id="bufpopup" style="display:none">
+    <div class="inner"></div>
+  </div>
+
+  <div id="encpopup" style="display:none">
     <div class="inner"></div>
   </div>
 

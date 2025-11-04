@@ -28,20 +28,23 @@ html, body { height: 100%; margin: 0; background: var(--bodyBGColor, #0b0d12); c
 /* Keep global UI (tabbar/cmdbar) unaffected by editor zoom */
 body { font: var(--fontBase, 18px)/20px Consolas, 'Courier New', monospace; overflow: hidden; }
 
-#tabbar { height: 24px; background: var(--tabBarBg, #0f1117); color: var(--tabBarFg, #a6accd); display:flex; align-items:center; padding:0 4px; border-bottom:1px solid #1c2230; overflow:hidden; }
-#tabbar .tabs { display:flex; gap:4px; align-items:stretch; width:100%; overflow-x:auto; overflow-y:hidden; scrollbar-width: thin; }
-#tabbar .tab { flex: 0 0 auto; min-width: 80px; padding:0 10px; height: 18px; line-height: 18px; margin: 2px 0; border-radius:4px 4px 0 0; background:#131722; color:#a6accd; display:flex; align-items:center; border:1px solid #1c2230; border-bottom-color:#0f1117; box-sizing:border-box; cursor:pointer; }
+#tabbar { height: 36px; background: var(--tabBarBg, #0f1117); color: var(--tabBarFg, #a6accd); display:flex; align-items:stretch; padding:0 4px; border-bottom:1px solid #1c2230; overflow:hidden; }
+#tabbar .tabs { display:flex; gap:4px; align-items:flex-end; flex:1 1 auto; overflow-x:auto; overflow-y:hidden; scrollbar-width: thin; }
+#tabbar #tabtools { flex: 0 0 auto; display:flex; align-items:center; gap:6px; padding-left:6px; }
+#tabbar .tab { flex: 0 0 auto; min-width: 80px; padding:0 10px; height: 18px; line-height: 18px; margin: 0 0 2px 0; border-radius:4px 4px 0 0; background:#131722; color:#a6accd; display:flex; align-items:center; border:1px solid #1c2230; border-bottom-color:#0f1117; box-sizing:border-box; cursor:pointer; }
 #tabbar .tab:hover { filter: brightness(1.05); }
 #tabbar .tab.active { background:#1a2030; color:#e6e6e6; border-bottom-color:#1a2030; font-weight:600; }
 #tabbar .tab .name { white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
 #tabbar .tab .name::first-letter { font-size: 1.1em; vertical-align: -1px; }
 #tabbar .tab .mod { color:#ff5b5b; margin-left:6px; font-weight:700; }
+#encBtn { white-space: pre; min-width: 84px; border:1px solid #2a3244; background:#1a2030; color:#e6e6e6; border-radius:6px; padding:4px 8px; cursor:pointer; font: 12px/1.25 system-ui, -apple-system, 'Segoe UI', sans-serif; opacity:0.92; user-select:none; outline:none; height: 28px; display:flex; align-items:center; }
+#encBtn:hover{ filter: brightness(1.06); }
 #cmdbar { position:fixed; left:0; right:0; bottom:0; height: 24px; background: var(--tabBarBg); color: var(--tabBarFg); display:flex; align-items:center; padding:0 8px; border-top:1px solid #1c2230; gap:8px; z-index: 9999; }
 #modestatus { font-weight:600; opacity:0.9; }
 #cmdprefix { opacity: 0.85; }
 #cmdinput { flex:1; background: var(--cmdInputBg, transparent); color: var(--cmdInputFg, var(--tabBarFg)); border:0; outline:0; font: inherit; height:100%; }
 
-#pane { position: absolute; top: 24px; bottom: 24px; left: 0; right: 0; display:flex; }
+#pane { position: absolute; top: 36px; bottom: 24px; left: 0; right: 0; display:flex; }
 #editorViewport {
 	position: relative;
 	flex: 1;
@@ -144,6 +147,13 @@ body { font: var(--fontBase, 18px)/20px Consolas, 'Courier New', monospace; over
 /* toast */
 #toast { position: fixed; left: 50%; transform: translateX(-50%); bottom: 48px; background: rgba(26,32,48,0.96); color:#e6e6e6; border:1px solid #2a3244; border-radius: 6px; padding:8px 12px; z-index:10001; box-shadow: 0 8px 18px rgba(0,0,0,0.35); max-width: 80vw; }
 #toast .msg { white-space: nowrap; }
+
+/* enc popup */
+#encpopup { position: fixed; max-height: 45vh; background:#0f1117; color:#e6e6e6; border:1px solid #2a3244; box-shadow: 0 10px 24px rgba(0,0,0,0.4); z-index: 10000; border-radius: 6px; overflow: hidden; }
+#encpopup .inner { max-height: 45vh; overflow: auto; }
+#encpopup .item { display:flex; gap:8px; align-items:center; padding:6px 10px; cursor: default; }
+#encpopup .item.active { background: var(--popupActiveLine, #1a2030); }
+#encpopup .name { flex:1; white-space: pre; }
 
 /* Zoom HUD (over tabbar) */
 #zoomhud { position: fixed; right: 10px; top: 2px; z-index: 10002; display:none; }
