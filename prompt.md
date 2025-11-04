@@ -535,3 +535,25 @@ $361
 - EOF行下の余白 →OK
 - NORMAL/VISUALで左右の画面外にcaretが移動する際にcaretが見えるよう自動で横スクロールするようにしたい。
 - :wで保存した際に表示範囲が変わるのを抑止したい(不要な画面再描画が走っているのでは？)
+
+#370
+- 画面外へのcaret追従 →OK
+- :w保存時のスクロール抑止 →OK
+次は、文字コードと改行文字の変換に対応したい。
+- Vimのenc(fenc), fileformat(ff), bombから固定の組み合わせ(encodeSet)のみ扱う。
+  - "utf-8 unix nobomb", "utf-8 unix bomb", "utf-8 dos nobomb", "utf-8 dos bomb", "shift_jis dos", "shift_jis unix"
+  - ファイルを開く際には、
+    - encodeSetのいずれかに合致するならそのまま読み込む
+    - encodeSetのいずれにも合致しない場合は開けない旨のトーストを出してファイルオープンは失敗にする
+  - ファイルを保存する際にencodeSetは変更しない。
+  - タブバー内の右端(タブ群の右側)にボタンを表示する(スタイルはオーバーレイパレット内のボタンと同じ)
+    - ボタンラベルには現在のencodeSetを表示する。
+      - " nobomb"は表示を省略する
+      - "bomb"は2行目に表示する
+    - ボタンをclickするとencodeSet一覧のpopupが現れる (nobombは表記を省略)
+      - まずは、clickの他はEscでpopupキャンセルのみ扱う(popup以外をclickした場合もキャンセル)
+      - clickで選択された選択肢が現バッファのencodeSetと異なる場合は、現バッファに対してencodeSetを変換する
+      - ボタンラベルは変換後のencodeSetに更新する
+      - encodeSetはundo対象(1単位)とする
+    - タブバー全体の高さをボタンに合わせる(ラベル2行分)
+

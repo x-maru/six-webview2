@@ -1594,9 +1594,6 @@
         x = baseX + sum;
       }
     }catch{}
-  // Adjust by horizontal scroll (textarea scrollLeft)
-  let _hs = 0; try{ _hs = (editor.scrollLeft||0); }catch{}
-  caret.style.left = (x - _hs) + 'px';
   // Make caret height match the full line box
   caret.style.top = topPx + 'px';
   caret.style.height = Math.max(1, Math.round(LINE_HEIGHT)) + 'px';
@@ -1628,6 +1625,28 @@
     }catch{}
     const cw = Math.max(1, Math.round(chW * 0.9));
     try{ caret.style.setProperty('--caretWidth', cw + 'px'); }catch{}
+    // Auto horizontal scroll to keep caret visible in NORMAL/VISUAL
+    try{
+      if (_mode === 'NORMAL' || _mode === 'VISUAL'){
+        const gw = (gutter && gutter.clientWidth) ? gutter.clientWidth : 0;
+        const visW = Math.max(0, (viewport && viewport.clientWidth ? viewport.clientWidth : 0) - gw);
+        let hscroll = (editor && typeof editor.scrollLeft === 'number') ? (editor.scrollLeft|0) : 0;
+        const margin = Math.max(4, Math.round(FONT_SIZE * 0.6));
+        const caretXInView = x - hscroll;
+        const rightLimit = visW - Math.max(4, cw) - margin;
+        let nextScroll = hscroll;
+        if (caretXInView < margin){
+          nextScroll = Math.max(0, Math.round(x - margin));
+        } else if (caretXInView > rightLimit){
+          nextScroll = Math.max(0, Math.round(x - rightLimit));
+        }
+        if (nextScroll !== hscroll){
+          try{ editor.scrollLeft = nextScroll; }catch{}
+        }
+      }
+    }catch{}
+    // Position caret X adjusted by current horizontal scroll
+    try{ let _hs = 0; try{ _hs = (editor.scrollLeft||0); }catch{} caret.style.left = (x - _hs) + 'px'; }catch{}
     // Apply the same remainder compensation to caret overlay container
     try{ caretLayer.style.transform = (Math.abs(rem) > 0.01) ? `translateY(${-rem}px)` : ''; }catch{}
     // Detect caret movement (row/col change) and hide mouse cursor accordingly
@@ -3153,6 +3172,20 @@
       const arg = (wm[2]||'').trim();
       const b = currentBuffer();
       if (!b){ toast('no buffer'); _setMode('NORMAL'); return; }
+      // Capture viewport and selection to stabilize after save
+      let _w_st = 0, _w_sl = 0, _w_cr = caretRow|0, _w_cc = caretCol|0, _w_sS = 0, _w_sE = 0;
+      try{ _w_st = editor.scrollTop|0; _w_sl = editor.scrollLeft|0; _w_sS = editor.selectionStart|0; _w_sE = editor.selectionEnd|0; }catch{}
+      const _w_restore = ()=>{
+        try{
+          _scrollGuardUntil = Date.now() + 1200;
+          // Restore selection first to avoid auto-scroll, then set scrolls
+          try{ editor.setSelectionRange(_w_sS, _w_sE); }catch{}
+          caretRow = _w_cr; caretCol = _w_cc;
+          try{ editor.scrollTop = _w_st; }catch{}
+          try{ editor.scrollLeft = _w_sl; }catch{}
+          _repositionCaret(); updateGutter(); _renderHlMatchesVisible();
+        }catch{}
+      };
       // 変更なし + パス引数なしのときは何もしない（エラーも出さない）
       try{ if (!arg && b && b.modified === false){
         // 強固にチラつき抑止: 一時的にスクロールガードを有効化し、その場で状態を復元
@@ -3213,7 +3246,7 @@
           _setTitle(); _renderTabbar();
           toast('written: ' + _prettyFileUrlLabel(targetUrl));
         }
-      })();
+      })().finally(()=>{ try{ _w_restore(); }catch{} });
       _setMode('NORMAL');
       return;
     }

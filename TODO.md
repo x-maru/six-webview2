@@ -7,10 +7,6 @@
 
 - 制限事項：ウインドウ最小化の実装は断念
 
-six.ps1のショートカットを作成するinstall.cmdって書ける？プロパティの「リンク先」を「C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe -ExecutionPolicy Bypass -File six.ps1」にしたい。
-(powershell.exeのパスは動的に調べるのが望ましい)
-あと「実行時の大きさ」はpowershellコンソールウインドウのことだから「最小化」で。
-
 ### 実装候補
 - 文字コード・改行文字対応。保存時に選ぶのは後回し。カレントバッファの表示と変更を。
 - 仕様変更。:helpをF1からF9に変更し、F1～F8をダイレクトなタブ切替にする。INSERTモード中でもOK
@@ -24,10 +20,13 @@ six.ps1のショートカットを作成するinstall.cmdって書ける？プ�
   - :set list / :set nolist / :set list! を実装する
 - INSERTモード中のTab/Ctrl+IでTABコード挿入
 - タブバーのタブ群の右に[行 X, 列 Y/W]を表示する。Wはcaret行で$としたときの列数。
+- キーバインド追加：
+  - NORMALモードでHOME/END
 - yankバッファ⇔Windowsクリップボード
   - 相互変換
   - デフォ切替
 - s (`cl`と同じ)
+- xやsはyankバッファに格納しないようにする(undoバッファには入る)
 - N桁ごとに背景行グラデーションの色を変える(交互)。
 - wsl上のファイルは':'などNTFSで許されない文字を含むことがあるが、開けなくてもよいが:e popupで文字化けしないように。
 - 最後に開いてたファイル群の再現
@@ -43,6 +42,9 @@ six.ps1のショートカットを作成するinstall.cmdって書ける？プ�
     - `/` EOF方向に検索
     - `?` ファイル先頭方向に検索
 ```
+- six.ps1のショートカットを作成するinstall.cmdって書ける？プロパティの「リンク先」を「C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe -ExecutionPolicy Bypass -File six.ps1」にしたい。
+  - (powershell.exeのパスは動的に調べるのが望ましい)
+  - あと「実行時の大きさ」はpowershellコンソールウインドウのことだから「最小化」で。
 - VISUALモード中のキー操作追加
   - o
   - vi{, vi}, va{, va}
