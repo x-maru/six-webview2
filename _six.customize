@@ -1,4 +1,19 @@
-﻿// six-webview2 theme placeholder (clean)
+﻿// six-webview2 customization entry
+// - Theme colors: window.THEME
+// - Runtime options controllable via :set: window.SIX_OPTIONS
+//   Supported keys (initial defaults):
+//     - scrolloff: number (default 3)
+//     - hlsearch: boolean (default false)
+
+// Initial :set options
+window.SIX_OPTIONS = {
+  // 初期スクロールオフ
+  scrolloff: 3,
+  // 検索ハイライト（:set hlsearch / :set nohlsearch / :set hlsearch!）
+  hlsearch: false
+};
+
+// Theme definition (moved from _six-theme.js)
 window.THEME = {
   bodyBGColor: "#0b0d12",
   lineBaseFill: "#0f1117",

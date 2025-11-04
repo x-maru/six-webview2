@@ -99,7 +99,8 @@
   // --- Incremental search anchor (used by '/', '?', and :s preview) ---
   let _incSearchAnchorOff = null; // absolute offset anchor for incremental search
   let _incSearchDir = 'fwd';      // last incremental search direction
-  let scrolloff = 3;
+  // Initial options may be provided via window.SIX_OPTIONS (from _six.customize)
+  let scrolloff = (function(){ try{ const o=(window&&window.SIX_OPTIONS)||{}; const n=parseInt(o.scrolloff,10); if (Number.isFinite(n)) return n|0; }catch{} return 3; })();
   let _cachedVisibleCount = 0;
   let _lineLockActive = false;
   let _centerScrolloffOnce = false;
@@ -387,7 +388,7 @@
   }
 
   // --- hlsearch (highlight all matches) ---
-  let _optHlsearch = false;          // :set hlsearch / :set nohlsearch
+  let _optHlsearch = (function(){ try{ const o=(window&&window.SIX_OPTIONS)||{}; return !!o.hlsearch; }catch{} return false; })();          // :set hlsearch / :set nohlsearch
   let _hlLayer = null;               // container for match rectangles
   let _hlMatches = null;             // cached [{start,len}] for _lastSearch over current text
 
