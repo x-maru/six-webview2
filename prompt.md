@@ -745,3 +745,46 @@ $ file /tmp/shift_jis_dos
 _six.customizeの反映はOK。
 次はタブごとにモード(NORMAL/INSERT/VISUAL)を記憶するようにしたい。
 
+#387
+- VISUAL/INSERTからコマンド入力に移行してEscで抜けるとNORMALになってしまう (NG)
+  - INSERTからは入力欄をclick→Escの手順
+- INSERTモードでの挿入や削除がcaret位置を無視して常にEOF位置に対して作用してしまう (NG)
+- INSERTモードでの編集内容をundoできない (NG)
+
+#388
+- VISUALからコマンド入力に移行してEscで抜けるとNORMALになってしまう (NG)
+  - INSERT→コマンド入力→Esc→INSERTはOK
+- INSERTモードでの挿入や削除がcaret位置を無視して常にEOF位置に対して作用してしまう (NG)
+- INSERTモードでの編集内容をundoできない (NG)
+
+#389
+- VISUAL→選択→`:`→`Esc` →VISUALが維持され範囲選択も残っているが、コマンド入力中の範囲表示色がEsc後も残ってしまっている (NG)
+- VISUAL→選択→他タブ→戻ってきたら選択がリセットされている→NG。選択状態も維持したい
+- INSERTモードでの挿入や削除がcaret位置を無視して常にEOF位置に対して作用してしまう (NG)
+- INSERTモードでの編集内容をundoできない (NG)
+- 引数無しで起動した直後に`i`とタイプした際のConsole:
+```
+_six.js:3582  Uncaught ReferenceError: _suppressInsertSnapshotOnce is not defined
+    at _setMode (_six.js:3582:7)
+    at HTMLTextAreaElement.<anonymous> (_six.js:5070:41)
+    at _six.js:5225:78
+_setMode @ _six.js:3582
+(匿名) @ _six.js:5070
+(匿名) @ _six.js:5225
+setTimeout
+_globalKeyRouter @ _six.js:5225
+```
+
+#390
+- VISUAL→選択→`:`→`Esc` →OK。VISUALが維持され範囲選択の描画も問題なし
+- VISUAL→選択→他タブ→戻ってきたら →OK。選択状態が維持されている
+- INSERTモードでの挿入や削除位置、undo格納 →OK
+- INSERT/VISUALモード中にヘルプダイアログを開いて閉じたらNORMALになっている →INSERT/VISUALを維持したい
+
+#391
+- INSERT/VISUALモードから`F1`→ヘルプダイアログを閉じる→INSERT/VISUAL維持 →OK
+- INSERT/VISUALモードから`:help`→ヘルプダイアログを閉じる→NORMALに戻る →NG
+
+#392
+- INSERTモードから`:help`→ヘルプダイアログを閉じる→OK
+- VISUALモードから`:help`→ヘルプダイアログを閉じる→NG。VISUALモードは維持されているが選択範囲が消える。

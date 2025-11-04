@@ -93,6 +93,8 @@
   // --- VISUAL snapshot during CMD (:"…" entered from VISUAL) ---
   let _visCmdActive = false;      // whether VISUAL snapshot is active during CMD
   let _cmdFromVisual = false;     // entered CMD via ':' while in VISUAL
+  // The mode to restore when leaving CMD with Escape (e.g., return to INSERT if we came from INSERT)
+  let _preCmdMode = 'NORMAL';
   let _visCmdLinewise = false;    // VISUAL linewise flag at CMD entry
   let _visCmdAnchorR = 0, _visCmdAnchorC = 0; // anchor at CMD entry
   let _visCmdCaretR = 0,  _visCmdCaretC  = 0; // caret at CMD entry
@@ -105,6 +107,8 @@
   let _lineLockActive = false;
   let _centerScrolloffOnce = false;
   let _mode = 'NORMAL';
+  // suppress pushing an extra undo snapshot on the next INSERT mode entry
+  let _suppressInsertSnapshotOnce = false;
   // global key routing guard (to avoid recursion when synthesizing events)
   let _globalKeyRouting = false;
   // encoding options (limited set)
@@ -1051,10 +1055,14 @@
         enc: (b.enc||'utf-8'),      // 'utf-8' | 'shift_jis'
         ff:  (b.ff||'unix'),        // 'unix' | 'dos'
         bom: !!b.bom,               // true only meaningful for utf-8
+        // per-buffer mode (NORMAL/INSERT/VISUAL). Do not persist CMD.
+        savedMode: (b.savedMode||'NORMAL'),
         // per-buffer view/caret state (restored on tab switch)
         viewRow: 0,
         viewCol: 0,
-        viewScrollTop: 0
+        viewScrollTop: 0,
+        // persist VISUAL selection across tabs
+        savedVisual: null
       });
       if (currentIdx<0) currentIdx=0;
     }catch{}
@@ -1069,6 +1077,20 @@
           prev.viewRow = caretRow|0;
           prev.viewCol = caretCol|0;
           prev.viewScrollTop = (editor.scrollTop||0)|0;
+          // Save VISUAL selection snapshot, if active
+          if (_visualActive){
+            prev.savedMode = 'VISUAL';
+            prev.savedVisual = {
+              linewise: !!_visualLinewise,
+              anchorR: _visualAnchorR|0,
+              anchorC: _visualAnchorC|0,
+              caretR: caretRow|0,
+              caretC: caretCol|0
+            };
+          } else {
+            // clear stale snapshot when not in VISUAL
+            prev.savedVisual = null;
+          }
         }catch{}
       }
       // 2) Switch current index
@@ -1126,6 +1148,37 @@
       try{ b.viewScrollTop = (editor.scrollTop||0)|0; b.viewRow = caretRow|0; b.viewCol = caretCol|0; }catch{}
       _setTitle(); _renderTabbar();
       _updateHlsearchFull();
+      // Restore per-buffer mode (NORMAL/INSERT/VISUAL). Exclude transient CMD.
+      try{
+        const want = (b && (b.savedMode||'NORMAL')) || 'NORMAL';
+        if (want === 'VISUAL'){
+          // Restore VISUAL with saved anchor/caret if available
+          // Ensure we leave any previous visual state cleanly
+          if (_visualActive){ try{ _exitVisual(); }catch{} }
+          const sv = b && b.savedVisual;
+          if (sv && Number.isFinite(sv.anchorR) && Number.isFinite(sv.anchorC) && Number.isFinite(sv.caretR) && Number.isFinite(sv.caretC)){
+            _visualActive = true;
+            _visualLinewise = !!sv.linewise;
+            _visualAnchorR = sv.anchorR|0; _visualAnchorC = sv.anchorC|0;
+            _setCaret(sv.caretR|0, sv.caretC|0);
+            _setMode('VISUAL');
+            _updateVisualSelection();
+          } else {
+            // Fallback: enter VISUAL at current caret
+            _enterVisual(false);
+          }
+        } else if (want === 'INSERT'){
+          // Avoid starting a new insert undo snapshot on tab switch
+          _suppressInsertSnapshotOnce = true;
+          // Clear any lingering VISUAL state when entering INSERT
+          try{ _visualActive=false; _visualLinewise=false; _visCmdActive=false; _cmdFromVisual=false; _visSelClear && _visSelClear(); }catch{}
+          _setMode('INSERT');
+        } else {
+          // NORMAL: ensure VISUAL/CMD artifacts are cleared
+          try{ _visualActive=false; _visualLinewise=false; _visCmdActive=false; _cmdFromVisual=false; _visSelClear && _visSelClear(); }catch{}
+          _setMode('NORMAL');
+        }
+      }catch{}
     }catch{}
   }
 
@@ -3014,8 +3067,10 @@
     }catch{}
     // :help — ヘルプモーダルを表示（[コマンド]タブをデフォルト選択）
     if (/^:help\b/i.test(cmd||'')){
-      try{ await helpModal({ defaultTab: 'cmd' }); }catch{}
-      _setMode('NORMAL');
+      // CMD 経由の場合は、閉じた後に CMD 突入前のモードへ復帰させる
+      const restoreMode = (_mode === 'CMD') ? _preCmdMode : _mode;
+      try{ await helpModal({ defaultTab: 'cmd', restoreMode }); }catch{}
+      // helpModal 側で事前モードへ復帰するため、ここではモード切替しない
       try{ setTimeout(()=>{ try{ editor && editor.focus && editor.focus(); }catch{} }, 0); }catch{}
       return;
     }
@@ -3542,6 +3597,12 @@
   function _setMode(m){
     _mode = m;
     if (modestatus) modestatus.textContent = '['+_mode+']';
+    // Persist mode per buffer (exclude transient CMD). VISUAL/INSERT/NORMAL only.
+    try{
+      if (m === 'NORMAL' || m === 'INSERT' || m === 'VISUAL'){
+        const b = currentBuffer(); if (b) b.savedMode = m;
+      }
+    }catch{}
     // While in CMD, prefer a hollow caret (no gradient fill/blink)
     // by ensuring the global 'hide-cursor' class is cleared.
     if (m === 'CMD'){
@@ -3785,6 +3846,8 @@
           resolve();
           return;
         }
+  // Remember mode to restore after closing help
+  const _prevHelpMode = (opts && opts.restoreMode) ? opts.restoreMode : _mode;
   // Prevent any editor scrolling while help is open
   const stKeep = (editor && typeof editor.scrollTop === 'number') ? editor.scrollTop : 0;
   try{ _suppressScrollDuringModal = true; _scrollGuardUntil = Date.now() + 2000; _zoomGuardUntil = Date.now() + 2000; }catch{}
@@ -4136,7 +4199,38 @@
         const cleanup = ()=>{
           try{ document.removeEventListener('keydown', onKey, true); }catch{}
           _hideModal();
-          try{ setTimeout(()=>{ try{ _setMode && _setMode('NORMAL'); editor && editor.focus && editor.focus(); }catch{} }, 0); }catch{}
+          try{
+            setTimeout(()=>{
+              try{
+                // Restore the mode present before opening help
+                if (_prevHelpMode === 'INSERT'){
+                  _suppressInsertSnapshotOnce = true;
+                  _setMode('INSERT');
+                } else if (_prevHelpMode === 'VISUAL'){
+                  // If we came from VISUAL via ':' (CMD), rebuild the selection from the saved snapshot
+                  const hasSnap = Number.isFinite(_visCmdAnchorR) && Number.isFinite(_visCmdAnchorC);
+                  if (hasSnap){
+                    try{
+                      _visualActive = true;
+                      _visualLinewise = !!_visCmdLinewise;
+                      _visualAnchorR = (_visCmdAnchorR|0);
+                      _visualAnchorC = (_visCmdAnchorC|0);
+                      if (Number.isFinite(_visCmdCaretR) && Number.isFinite(_visCmdCaretC)){
+                        caretRow = (_visCmdCaretR|0); caretCol = (_visCmdCaretC|0);
+                      }
+                    }catch{}
+                  }
+                  _setMode('VISUAL');
+                  _updateVisualSelection();
+                  // Clear any CMD-time overlay artifacts
+                  try{ _visCmdActive = false; _cmdFromVisual = false; _visSelClear && _visSelClear(); }catch{}
+                } else {
+                  _setMode('NORMAL');
+                }
+                editor && editor.focus && editor.focus();
+              }catch{}
+            }, 0);
+          }catch{}
           try{ if (_modalButtons) _modalButtons.style.display = prevBtnsDisp; }catch{}
           try{ if (_modalBox) _modalBox.style.background = prevBoxBg; }catch{}
           try{ if (_modalDetail) _modalDetail.style.padding = prevDetailPad; }catch{}
@@ -4523,6 +4617,7 @@
           // Open command prompt while keeping VISUAL selection active
           e.preventDefault();
           // VISUAL 選択のスナップショットを保存（'<,'>' 範囲評価に使用）
+          _preCmdMode = _mode; // remember VISUAL
           _cmdFromVisual = true;
           _visCmdActive = true;
           _visCmdLinewise = !!_visualLinewise;
@@ -4973,6 +5068,7 @@
       }
       if (e.key===':' && !e.ctrlKey){
         e.preventDefault();
+        _preCmdMode = _mode; // NORMAL or INSERT (defensive)
         _setMode('CMD');
         _clearPending();
         _incPrevHide();
@@ -4991,7 +5087,7 @@
       }
       // '/' search prompt (enter CMD with '/' prefilled)
       if (e.key==='/' && !e.ctrlKey && !e.metaKey && !e.altKey){
-        e.preventDefault(); _setMode('CMD'); _clearPending();
+        e.preventDefault(); _preCmdMode = _mode; _setMode('CMD'); _clearPending();
         _incPrevHide();
         try{ _incSearchAnchorOff = _offsetFromRC(caretRow, caretCol)|0; _incSearchDir = 'fwd'; }catch{ _incSearchAnchorOff = null; _incSearchDir='fwd'; }
         try{ _cmdHistBrowsing=false; _cmdHistIndex=_cmdHistory.length; _cmdHistTemp=''; }catch{}
@@ -5000,7 +5096,7 @@
       }
       // '?' backward search prompt
       if (e.key==='?' && !e.ctrlKey && !e.metaKey && !e.altKey){
-        e.preventDefault(); _setMode('CMD'); _clearPending();
+        e.preventDefault(); _preCmdMode = _mode; _setMode('CMD'); _clearPending();
         _incPrevHide();
         try{ _incSearchAnchorOff = _offsetFromRC(caretRow, caretCol)|0; _incSearchDir = 'bwd'; }catch{ _incSearchAnchorOff = null; _incSearchDir='bwd'; }
         try{ _cmdHistBrowsing=false; _cmdHistIndex=_cmdHistory.length; _cmdHistTemp=''; }catch{}
@@ -5205,6 +5301,23 @@
       document.addEventListener('keydown', _globalKeyRouter, true);
     }catch{}
     if (cmdinput){
+      // If user clicks into the cmdinput directly (e.g., while in INSERT/VISUAL), treat it as entering CMD
+      cmdinput.addEventListener('focus', ()=>{
+        try{
+          if (_mode !== 'CMD'){
+            _preCmdMode = _mode; // remember where we came from
+            // If coming from VISUAL via click, capture selection snapshot the same as ':'
+            if (_mode === 'VISUAL'){
+              _cmdFromVisual = true;
+              _visCmdActive = true;
+              _visCmdLinewise = !!_visualLinewise;
+              _visCmdAnchorR = _visualAnchorR|0; _visCmdAnchorC = _visualAnchorC|0;
+              _visCmdCaretR  = caretRow|0;       _visCmdCaretC  = caretCol|0;
+            }
+            _setMode('CMD');
+          }
+        }catch{}
+      });
       cmdinput.addEventListener('keydown',(e)=>{
         if (e.key==='Enter'){
           e.preventDefault(); e.stopPropagation();
@@ -5560,9 +5673,24 @@
           let st = editor.scrollTop, cr = caretRow, cc = caretCol;
           let selS = 0, selE = 0; try{ selS = editor.selectionStart; selE = editor.selectionEnd; }catch{}
           const fromVis = !!_cmdFromVisual;
-          // Esc キャンセル時は VISUAL をリセットし、選択復元は行わない
+          // Esc キャンセル時: VISUAL 由来であれば VISUAL に復帰（選択も復元）
+          // それ以外は後段のモード復帰ロジックに委譲
+          let restoredVisual = false;
           if (fromVis){
-            try{ _exitVisual(); }catch{}
+            try{
+              // restore caret to the visual caret saved on ':' entry
+              if (Number.isFinite(_visCmdCaretR) && Number.isFinite(_visCmdCaretC)){
+                caretRow = _visCmdCaretR|0; caretCol = _visCmdCaretC|0;
+              }
+              // re-enter VISUAL with saved anchor and linewise flag
+              _visualActive = true; _visualLinewise = !!_visCmdLinewise;
+              _visualAnchorR = (_visCmdAnchorR|0); _visualAnchorC = (_visCmdAnchorC|0);
+              _setMode('VISUAL');
+              _updateVisualSelection();
+              try{ _renderVisSelOverlay(); }catch{}
+              restoredVisual = true;
+            }catch{}
+            // clear cmd-from-visual markers regardless
             _cmdFromVisual = false; _visCmdActive = false; try{ _visSelClear(); }catch{}
           }
           _scrollGuardUntil = Date.now() + 900; // 短期ガード
@@ -5587,7 +5715,15 @@
           _fileTypedDirRaw = '';
           _fileFilter = '';
           cmdinput.value = '';
-          _setMode('NORMAL');
+          // Decide which mode to return to on cancel
+          if (!restoredVisual){
+            const target = (_preCmdMode==='INSERT' || _preCmdMode==='VISUAL' || _preCmdMode==='NORMAL') ? _preCmdMode : 'NORMAL';
+            if (target === 'INSERT'){
+              // CancelでINSERTへ戻す際はスナップショットを抑制（余計なUNDO段を作らない）
+              _suppressInsertSnapshotOnce = true;
+            }
+            _setMode(target);
+          }
           // Esc 直後は中抜きから塗りキャレットへ戻す（見た目の一貫性）
           try{ _hideCursor(); }catch{}
           _bufPopupHide(); _filePopupHide();

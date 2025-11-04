@@ -1,4 +1,12 @@
-# six-webview2
+﻿# vi like text editor "six"
+
+# Vimとの大きな違い
+
+- バッファと1対1対応のタブを持ち、split/vsplitは実装予定なし。
+- 編集モード(NORMAL/INSERT/VISUAL)をタブ毎に維持する
+- `$`で行末に飛んだ際、行末文字の下の改行コードにcaretが乗る
+- CUIオンリーではないのでvimのサブセットというよりはgvimのサブセットに近いかも
+
 ## WebView2 ホストのクローズ連携（ネイティブの「移動しますか？」を出さない）
 
 ブラウザ単体（Edge/Chrome 等）で OS のクローズボタンを押した場合、ページ側で :qa 相当の確認を出す前にネイティブの「このサイトから移動しますか？」が先に出ることがあります。これはブラウザの制約で、完全抑止はできません。
@@ -117,4 +125,3 @@ THEME オブジェクト（[`_six-theme.js`](_six-theme.js)）を起動時に [`
 
 移植元: HTA 版 six (/home/ymaru/work/HTA/six/six.hta, https://github.com/x-maru/six.git)  
 ガイド: `migration-prompt-webview2.md`
-
