@@ -65,6 +65,9 @@ window.THEME = {
   helpModalBg: "#041a10",
   helpKbdBg: "#1c282a",
   helpKbdFg: "#90aada",
+  // Global <kbd> colors used in tabbar and :b popup (fallbacks to helpKbd*)
+  KbdBgColor: "#1c282a",
+  KbdFgColor: "#90aada",
   // Help close button (themeable)
   helpCloseBg: "#3a3a56",
   helpCloseFg: "#e6e6e6",
