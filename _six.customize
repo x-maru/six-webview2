@@ -9,6 +9,8 @@
 window.SIX_OPTIONS = {
   // 初期スクロールオフ
   scrolloff: 3,
+  // 即時終了から復帰した後まで引き継ぐアンドゥバッファの深さ(各バッファ毎に持つバッファに対する共通の深さ)
+  UNDO_STEPS_IN_SESSION: 5,
   // 検索ハイライト（:set hlsearch / :set nohlsearch / :set hlsearch!）
   hlsearch: false
 };

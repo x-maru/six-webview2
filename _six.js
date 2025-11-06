@@ -26,6 +26,201 @@
   let currentIdx = -1;
   let caretRow = 0;
   let caretCol = 0;
+  // IME / caret visuals state
+  // IME heuristics removed (#426 request) – no mode-based caret color overrides now
+  // (Previously: _imeActive, _imeFullwidth flags for composition & full-width detection)
+  // We retain baseline caret variables only for theme restoration.
+  let _caretGradStartBase = null, _caretGradMidBase = null; // theme baseline to restore
+  // session/quit control flags
+  let _skipPersistOnUnloadOnce = false; // suppress one-time session persist at unload
+  let _suppressPersistOnQuit = false;   // do not rewrite session on this quit path
+  // session persistence
+  const _SESSION_KEY = 'six.session.v1';
+  let _persistTimer = null;
+  function _syncActiveViewStateIntoBuffer(){
+    try{
+      const b = currentBuffer();
+      if (!b) return;
+      b.viewRow = caretRow|0; b.viewCol = caretCol|0;
+      // snap to line grid for stability
+      const st = (editor && typeof editor.scrollTop==='number') ? (editor.scrollTop|0) : 0;
+      try{ b.viewScrollTop = Math.round(Math.max(0, st)/LINE_HEIGHT)*LINE_HEIGHT; }catch{ b.viewScrollTop = Math.max(0, st); }
+    }catch{}
+  }
+  function _collectSessionPayload(opts={}){
+    // opts.lite: if true, omit text for unmodified file-backed buffers to reduce footprint
+  const lite = !!opts.lite;
+    try{
+      _syncActiveViewStateIntoBuffer();
+      const bufs = buffers.map((b)=>{
+        const isFileBacked = !!(b && b.path && /^file:\/\//i.test(b.path));
+        const omitText = !!(lite && isFileBacked && !b.modified);
+        // Persist limited undo history to improve post-restart UX
+        let undoArr = [];
+        try{
+          const u = Array.isArray(b._undo) ? b._undo : [];
+          const k = Math.max(0, UNDO_STEPS_IN_SESSION|0);
+          const slice = (k>0 ? u.slice(-k) : []);
+          undoArr = slice.map(s=>({
+            text: String(s.text||''),
+            caretRow: s.caretRow|0,
+            caretCol: s.caretCol|0,
+            scrollTop: s.scrollTop|0,
+            changeTick: s.changeTick|0,
+            enc: s.enc||'utf-8',
+            ff: s.ff||'unix',
+            bom: !!s.bom,
+            kind: s.kind||null
+          }));
+        }catch{ undoArr = []; }
+        return {
+          name: b.name||null,
+          path: b.path||null,
+          text: omitText ? null : String(b.text||''),
+          needReload: !!omitText,
+          // savedText は復元時に modified=false の場合のみ意味を持つので、lite では省略可
+          savedText: omitText ? null : (typeof b.savedText==='string' ? String(b.savedText) : null),
+          modified: !!b.modified,
+          enc: b.enc||'utf-8',
+          ff: b.ff||'unix',
+          bom: !!b.bom,
+          viewRow: Number.isFinite(b.viewRow)?(b.viewRow|0):0,
+          viewCol: Number.isFinite(b.viewCol)?(b.viewCol|0):0,
+          viewScrollTop: Number.isFinite(b.viewScrollTop)?(b.viewScrollTop|0):0,
+          savedMode: b.savedMode||'NORMAL',
+          savedVisual: (b.savedVisual ? { linewise: !!b.savedVisual.linewise, anchorR: b.savedVisual.anchorR|0, anchorC: b.savedVisual.anchorC|0, caretR: b.savedVisual.caretR|0, caretC: b.savedVisual.caretC|0 } : null),
+          undo: undoArr
+        };
+      });
+      const payload = {
+        version: 1,
+        when: Date.now(),
+        active: Math.max(0, Math.min((buffers.length?buffers.length-1:0), currentIdx|0)),
+        buffers: bufs
+      };
+      return payload;
+    }catch{ return { version:1, when:Date.now(), active:0, buffers:[] }; }
+  }
+  function _persistClearedSession(){
+    try{
+      const payload = { version:1, when:Date.now(), active:0, buffers:[] };
+      try{ localStorage.setItem(_SESSION_KEY, JSON.stringify(payload)); }catch{}
+    }catch{}
+  }
+  function _persistSessionNow(){
+    try{
+      const p = _collectSessionPayload({ lite:false });
+      try{
+        localStorage.setItem(_SESSION_KEY, JSON.stringify(p));
+        return true;
+      }catch(e){
+        // quota fallback: retry with lite payload
+        try{ const p2 = _collectSessionPayload({ lite:true }); localStorage.setItem(_SESSION_KEY, JSON.stringify(p2)); return true; }catch{ return false; }
+      }
+    }catch{ return false; }
+  }
+  function _schedulePersist(reason){
+    try{
+      if (_persistTimer){ clearTimeout(_persistTimer); _persistTimer=null; }
+      _persistTimer = setTimeout(()=>{ try{ _persistSessionNow(); }catch{} }, 120);
+    }catch{}
+  }
+  function _loadSessionFromStorage(){
+    try{
+      const s = localStorage.getItem(_SESSION_KEY);
+      if (!s) return false;
+      const j = JSON.parse(s);
+      if (!j || !Array.isArray(j.buffers)) return false;
+      // Clear current
+      buffers.length = 0; currentIdx = -1;
+      // Rehydrate buffers
+      for (const it of j.buffers){
+        const name = it && (typeof it.name==='string' ? it.name : null);
+        const path = it && (typeof it.path==='string' ? it.path : null);
+        const text = it && (typeof it.text==='string' ? it.text : '');
+        const modified = !!(it && it.modified);
+        const enc = (it && it.enc) || 'utf-8';
+        const ff  = (it && it.ff)  || 'unix';
+        const bom = !!(it && it.bom);
+        _addBuffer({ name, path, text, modified, enc, ff, bom });
+        try{
+          const b = buffers[buffers.length-1];
+          // If savedText is provided, trust it; otherwise, if not modified, set savedText=text
+          if (it && typeof it.savedText==='string'){ b.savedText = it.savedText; }
+          else if (!modified){ b.savedText = String(text||''); }
+          // restore view
+          b.viewRow = Number.isFinite(it&&it.viewRow)?(it.viewRow|0):0;
+          b.viewCol = Number.isFinite(it&&it.viewCol)?(it.viewCol|0):0;
+          b.viewScrollTop = Number.isFinite(it&&it.viewScrollTop)?(it.viewScrollTop|0):0;
+          // restore saved mode/visual
+          b.savedMode = (it && it.savedMode) || 'NORMAL';
+          const sv = it && it.savedVisual;
+          b.savedVisual = (sv && Number.isFinite(sv.anchorR) && Number.isFinite(sv.anchorC) && Number.isFinite(sv.caretR) && Number.isFinite(sv.caretC))
+            ? { linewise: !!sv.linewise, anchorR: sv.anchorR|0, anchorC: sv.anchorC|0, caretR: sv.caretR|0, caretC: sv.caretC|0 }
+            : null;
+          // recompute ticks from modified flag
+          b._changeTick = modified ? 1 : 0; b._savedTick = 0; b.modified = !!modified;
+          // Restore undo snapshots (limited) if present
+          try{
+            const u = (it && Array.isArray(it.undo)) ? it.undo : [];
+            b._undo = u.map(s=>({
+              text: String(s.text||''),
+              caretRow: s.caretRow|0,
+              caretCol: s.caretCol|0,
+              scrollTop: s.scrollTop|0,
+              changeTick: s.changeTick|0,
+              enc: s.enc||'utf-8',
+              ff: s.ff||'unix',
+              bom: !!s.bom,
+              kind: s.kind||null
+            }));
+            b._redo = [];
+          }catch{ b._undo = b._undo||[]; b._redo = []; }
+          // Seed baseline undo only if none persisted and buffer is modified with savedText available
+          try{
+            if ((!(Array.isArray(b._undo) && b._undo.length)) && modified && typeof b.savedText === 'string' && b.savedText !== b.text){
+              const snap = {
+                text: String(b.savedText||''),
+                caretRow: Number.isFinite(b.viewRow)?(b.viewRow|0):0,
+                caretCol: Number.isFinite(b.viewCol)?(b.viewCol|0):0,
+                scrollTop: Number.isFinite(b.viewScrollTop)?(b.viewScrollTop|0):0,
+                changeTick: 0,
+                enc: b.enc||'utf-8',
+                ff: b.ff||'unix',
+                bom: !!b.bom,
+                kind: 'restore-baseline'
+              };
+              // Avoid duplicating if identical snapshot somehow exists
+              b._undo.push(snap);
+            }
+          }catch{}
+          // If text was omitted and file-backed, try background reload
+          const needReload = !!(it && it.needReload && path && /^file:\/\//i.test(path) && !modified);
+          if (needReload){
+            (async()=>{
+              try{
+                const t2 = await _fetchTextSmart(path);
+                const ff2 = (t2.indexOf('\r')>=0) ? 'dos' : 'unix';
+                const hasBomChar = (t2.length>0 && t2.charCodeAt(0)===0xFEFF);
+                const norm = (hasBomChar ? t2.slice(1) : t2).replace(/\r\n?/g,'\n');
+                b.text = norm; b.savedText = norm; b._changeTick=0; b._savedTick=0; b.modified=false; b.enc='utf-8'; b.ff=ff2; b.bom=hasBomChar;
+                // If current, reflect into editor without disturbing view state
+                if ((buffers.indexOf(b)|0) === (currentIdx|0)){
+                  const stKeep = (editor && typeof editor.scrollTop==='number') ? (editor.scrollTop|0) : 0;
+                  editor.value = norm; _syncModifiedFromTick(); _repositionCaret(); updateGutter();
+                  try{ editor.scrollTop = stKeep; }catch{}
+                }
+                _schedulePersist('reload');
+              }catch{}
+            })();
+          }
+        }catch{}
+      }
+      const act = Math.max(0, Math.min(buffers.length?buffers.length-1:0, (j.active|0)));
+      if (buffers.length>0){ _switchToBuffer(act); _setTitle(); _renderTabbar(); }
+      return buffers.length>0;
+    }catch{ return false; }
+  }
   // track last caret position to detect movement (for cursor hide policy)
   let _lastCaretRow = -1;
   let _lastCaretCol = -1;
@@ -103,6 +298,16 @@
   let _incSearchDir = 'fwd';      // last incremental search direction
   // Initial options may be provided via window.SIX_OPTIONS (from _six.customize)
   let scrolloff = (function(){ try{ const o=(window&&window.SIX_OPTIONS)||{}; const n=parseInt(o.scrolloff,10); if (Number.isFinite(n)) return n|0; }catch{} return 3; })();
+  // How many undo steps to persist into session storage (payload size vs utility)
+  const UNDO_STEPS_IN_SESSION = (function(){
+    try{
+      const o=(window&&window.SIX_OPTIONS)||{};
+      const n=parseInt(o.UNDO_STEPS_IN_SESSION,10);
+      if (Number.isFinite(n)) return Math.max(0, n|0);
+    }catch{}
+    // Default to 1 snapshot in session (minimal footprint); recommend overriding to 5 via SIX_OPTIONS
+    return 1;
+  })();
   let _cachedVisibleCount = 0;
   let _lineLockActive = false;
   let _centerScrolloffOnce = false;
@@ -395,6 +600,7 @@
   let _optHlsearch = (function(){ try{ const o=(window&&window.SIX_OPTIONS)||{}; return !!o.hlsearch; }catch{} return false; })();          // :set hlsearch / :set nohlsearch
   let _hlLayer = null;               // container for match rectangles
   let _hlMatches = null;             // cached [{start,len}] for _lastSearch over current text
+  let _lastSearch = null;            // { src, flags, dir, origDir } last confirmed search; dir may record last movement, origDir is immutable base
 
   // --- VISUAL selection overlay during CMD (keep highlight visible) ---
   let _visSelLayer = null;           // container for visual selection rectangles when _visCmdActive
@@ -664,6 +870,21 @@
       }
       const fs = parseFloat(cs && cs.fontSize);
       if (Number.isFinite(fs) && fs > 0) FONT_SIZE = fs;
+      // Guard: 実際の line box と算出 LINE_HEIGHT が乖離している場合再スナップ (#425 EOFジャンプ後余白対策)
+      try{
+        // 単純に caretRow=0 行幅測定用ダミー span を挿入して高さ測るより、editor 内の 2 行サンプルから平均を取る方が安定
+        const probe = document.createElement('div');
+        probe.textContent = 'W\nW';
+        probe.style.position='absolute'; probe.style.left='-99999px'; probe.style.whiteSpace='pre';
+        probe.style.fontFamily = cs.fontFamily; probe.style.fontSize = FONT_SIZE + 'px'; probe.style.lineHeight = LINE_HEIGHT + 'px';
+        document.body.appendChild(probe);
+        const hProbe = probe.getBoundingClientRect().height; document.body.removeChild(probe);
+        const perLine = hProbe/2;
+        if (Number.isFinite(perLine) && Math.abs(perLine - LINE_HEIGHT) > 0.6){
+          const alt = Math.round(perLine);
+          if (alt>0){ LINE_HEIGHT = alt; root.style.setProperty('--lhEff', alt + 'px'); }
+        }
+      }catch{}
       // Sync measurement span font to editor
       try{
         if (cs && cs.fontFamily) _measureSpan.style.fontFamily = cs.fontFamily;
@@ -945,6 +1166,14 @@
         if (Number.isFinite(n) && n > 0.3 && n < 5){ _edScale = _nearestScale(n); }
       }catch{}
       try{ root.style.setProperty('--edScale', String(_edScale)); }catch{}
+  // Cache baseline caret colors (IME override removed, kept for potential future theming)
+      try{
+        const cs = getComputedStyle(root);
+        const cg0 = cs.getPropertyValue('--caretGradStart');
+        const cg1 = cs.getPropertyValue('--caretGradMid');
+        _caretGradStartBase = (cg0 && cg0.trim()) || '#ff5b5b';
+        _caretGradMidBase   = (cg1 && cg1.trim()) || 'rgba(255,0,0,0.2)';
+      }catch{}
     }catch{}
   }
 
@@ -1143,11 +1372,13 @@
       }catch{}
       // Snap scrollTop to exact line boundary to keep background gradient/gutter aligned
       const vsSnap = (function(){ try{ const n=Math.max(0, vs); return Math.round(n/LINE_HEIGHT)*LINE_HEIGHT; }catch{ return Math.max(0, vs|0); } })();
-      // Restore viewport scroll top (validated)
-      try{ editor.scrollTop = Math.max(0, vsSnap); }catch{}
+  // Restore viewport scroll top (validated)
+  try{ editor.scrollTop = Math.max(0, vsSnap); }catch{}
       // Do NOT recentre on switch; keep exact previous viewport
       _centerScrolloffOnce = false;
-      _repositionCaret(); updateGutter();
+  _repositionCaret(); updateGutter();
+  // Sync native selection to overlay caret to prevent browser auto-scroll on next key/focus
+  try{ const stKeep0 = (editor && typeof editor.scrollTop==='number') ? editor.scrollTop : 0; _syncNativeSelectionToCaret(); if (editor) editor.scrollTop = stKeep0; }catch{}
   _updateEncBtnLabel();
       // Some browsers/layouts may adjust scrollTop after content/overlays settle.
       // Re-apply saved scroll position on the next frame and shortly after to ensure it sticks.
@@ -1155,6 +1386,8 @@
         const applyScroll = ()=>{
           try{ editor.scrollTop = Math.max(0, vsSnap); }catch{}
           try{ _repositionCaret(); updateGutter(); }catch{}
+          // Keep native selection aligned with caret; do not let this change scroll position
+          try{ const stKeep = (editor && typeof editor.scrollTop==='number') ? editor.scrollTop : 0; _syncNativeSelectionToCaret(); if (editor) editor.scrollTop = stKeep; }catch{}
           // Persist the restored viewport to the buffer as the new baseline
           try{
             const st = (editor.scrollTop||0)|0;
@@ -1178,6 +1411,8 @@
         try{ _scrollGuardUntil = Date.now() + 1400; }catch{}
         // Additionally, skip the very next ensureScrolloff once to avoid an immediate EOF snap on first key (#410)
         try{ _skipEnsureOnceAfterSwitch = true; }catch{}
+    // Prefer not to scroll on the very first motion if caret is already visible (#415)
+    try{ _preferNoScrollOnceAfterSwitch = true; }catch{}
       }catch{}
       // Also record immediately (in case no scroll events fire)
       try{
@@ -1186,6 +1421,10 @@
       }catch{}
       _setTitle(); _renderTabbar();
       _updateHlsearchFull();
+      // Ensure editor regains focus after switch (covers INSERT restore as well)
+      try{ setTimeout(()=>{ try{ editor && editor.focus && editor.focus(); }catch{} }, 0); }catch{}
+      // Persist last-active index as part of session (debounced)
+      try{ _schedulePersist('switch'); }catch{}
       // Restore per-buffer mode (NORMAL/INSERT/VISUAL). Exclude transient CMD.
       try{
         const want = (b && (b.savedMode||'NORMAL')) || 'NORMAL';
@@ -1226,7 +1465,11 @@
       if (!(currentIdx>=0 && currentIdx<buffers.length)) return;
       const removedIndex = currentIdx;
       buffers.splice(removedIndex, 1);
+      // Persist removal so closed buffers do not resurrect on next launch
+      try{ _schedulePersist('close-buffer'); }catch{}
       if (buffers.length === 0){
+        // No buffers left → exit immediately (persist cleared session)
+        try{ _persistSessionNow(); }catch{}
         _quittingAll = true; window.close();
         return;
       }
@@ -1940,6 +2183,8 @@
       // Any text edit (including programmatic via commands) hides mouse cursor
       _hideCursor();
       _setTitle(); _renderTabbar();
+      // Persist session after modifications (debounced)
+      _schedulePersist('modify');
     }catch{}
   }
   function _syncModifiedFromTick(){
@@ -2050,7 +2295,7 @@
   }
   function _pushUndoSnapshot(kind){ try{ const st=_currentStacks(); if (!st) return; const snap=_makeSnapshot(); // push current state as undo checkpoint
     const u = st._undo || (st._undo=[]); u.push({ ...snap, kind: kind||null }); if (u.length>UNDO_LIMIT) u.splice(0, u.length-UNDO_LIMIT); // clear redo on new branch
-    st._redo = []; }catch{} }
+    st._redo = []; try{ _schedulePersist('undo-snap'); }catch{} }catch{} }
   function _undo(){ const st=_currentStacks(); if (!st) return; const u=st._undo||[]; if (u.length===0) return; const cur=_makeSnapshot(); const prev=u.pop(); const r=st._redo||(st._redo=[]); r.push(cur); _applySnapshot(prev); }
   function _redo(){ const st=_currentStacks(); if (!st) return; const r=st._redo||[]; if (r.length===0) return; const cur=_makeSnapshot(); const next=r.pop(); const u=st._undo||(st._undo=[]); u.push(cur); _applySnapshot(next); }
   function _cmpPos(a,b){ if (a.r!==b.r) return a.r-b.r; return a.c-b.c; }
@@ -2303,6 +2548,27 @@
   let _scrollGuardUntil = 0; // temporary guard to suppress auto scroll adjustments
   let _skipEnsureOnceAfterSwitch = false; // skip the next ensureScrolloff once right after buffer switch
   let _lastBufferSwitchAt = 0; // timestamp of last successful buffer switch
+  // Prefer not to scroll on the very first motion after a buffer switch when caret is already visible (#415 case1)
+  let _preferNoScrollOnceAfterSwitch = false;
+
+  function _isCaretVisible(){
+    try{
+      const top = _topLine();
+      const vis = _visibleLinesExact();
+      const bot = top + vis - 1;
+      const caret1 = caretRow + 1;
+      return (caret1 >= top && caret1 <= bot);
+    }catch{ return true; }
+  }
+
+  function _ensureAfterMotion(){
+    // If immediately after a buffer switch and caret is visible, skip the first automatic adjustment
+    if (_preferNoScrollOnceAfterSwitch){
+      _preferNoScrollOnceAfterSwitch = false;
+      if (_isCaretVisible()) return;
+    }
+    ensureScrolloff({ force:true });
+  }
   function ensureScrolloff(opts={}){
     // If paused (e.g., right after '/word' confirm) or a modal is open and
     // we're suppressing scroll adjustments, skip any automatic re-centering/adjustment.
@@ -2347,7 +2613,19 @@
       }
       // clamp within pad range
       targetTop = Math.min(targetTop, maxTopWithPad);
-  editor.scrollTop = (targetTop-1) * LINE_HEIGHT;
+      const prevTopLine = _topLine();
+      editor.scrollTop = (targetTop-1) * LINE_HEIGHT;
+      // If caret was already visible and we only scrolled due to centerOnce/preferEOFPad for EOF, avoid introducing visual gap by snapping back when delta is small (#424)
+      try{
+        const caretVisibleBefore = (caretLine1 >= prevTopLine && caretLine1 <= (prevTopLine + vis - 1));
+        if (caretVisibleBefore && !opts.force && opts.preferEOFPad){
+          const newTopLine = _topLine();
+          // If we over-scrolled into showing extra pad while caret comfortably inside upper half, revert
+          if (newTopLine > prevTopLine && (caretLine1 < prevTopLine + Math.floor(vis*0.65))){
+            editor.scrollTop = (prevTopLine-1) * LINE_HEIGHT;
+          }
+        }
+      }catch{}
       _centerScrolloffOnce = false;
     } else {
       if (caretLine1 < topLine + scrolloff){
@@ -2366,10 +2644,25 @@
     if (topLine > maxTop){
       editor.scrollTop = (maxTop-1)*LINE_HEIGHT;
     }
-    // スクロール位置を行境界にスナップして、丸め誤差での1行ズレを防止
+    // スクロール位置を行境界にスナップして、丸め誤差での1行ズレを防止。
+    // EOFジャンプ（preferEOFPad）直後は切り上げよりも切り捨て優先で半行余白を排除 (#424/#429)
     try{
-      const snapped = Math.round((editor.scrollTop||0)/LINE_HEIGHT)*LINE_HEIGHT;
-    if (Math.abs(snapped - (editor.scrollTop||0)) > 0.1){ editor.scrollTop = snapped; }
+      const stCur = (editor.scrollTop||0);
+      const atEOFJump = !!(opts && opts.preferEOFPad && caretLine1 === linesTotal);
+      const snapped = atEOFJump ? (Math.floor(stCur/LINE_HEIGHT)*LINE_HEIGHT)
+                                : (Math.round(stCur/LINE_HEIGHT)*LINE_HEIGHT);
+      if (Math.abs(snapped - stCur) > 0.1){ editor.scrollTop = snapped; }
+      // EOFジャンプ強化: rAF で再度 floor スナップを試行し、微小ズレを完全排除
+      if (atEOFJump && window.requestAnimationFrame){
+        requestAnimationFrame(()=>{
+          try{
+            const st1 = (editor.scrollTop||0);
+            const floor1 = Math.floor(st1/LINE_HEIGHT)*LINE_HEIGHT;
+            if (Math.abs(floor1 - st1) > 0.1){ editor.scrollTop = floor1; }
+            _repositionCaret(); updateGutter();
+          }catch{}
+        });
+      }
     }catch{}
   }
 
@@ -2500,7 +2793,10 @@
     try{
       const st = (editor.scrollTop||0);
       const snapped = Math.round(st/LINE_HEIGHT)*LINE_HEIGHT;
-      if (Math.abs(snapped - st) > 0.25){ editor.scrollTop = snapped; }
+      let _changed = false;
+      if (Math.abs(snapped - st) > 0.25){ editor.scrollTop = snapped; _changed = true; }
+      // If snapping just adjusted scrollTop AFTER a prior _repositionCaret, recompute overlays now to avoid stripe/caret remainder mismatch (#423)
+      if (_changed){ try{ _repositionCaret(); }catch{} }
     }catch{}
     const vis = _visibleLinesExact();
     const top = _topLine();
@@ -2570,8 +2866,8 @@
     caretRow = Math.max(0, Math.min(lines.length-1, caretRow + delta));
     const line = lines[caretRow] || '';
     caretCol = Math.max(0, Math.min(line.length, caretCol));
-    // Force scrolloff even right after a buffer switch so the first motion keeps caret visible
-    ensureScrolloff({ force:true });
+    // Prefer no scroll on first motion after switch if caret is visible; otherwise force ensure
+    _ensureAfterMotion();
   }
   function _moveCaretCols(delta){
     const line = (_splitLines()[caretRow] || '');
@@ -2800,7 +3096,9 @@
               // The match is visible thanks to incremental preview; pause once.
               _scrolloffPaused = true; _scrolloffPauseAnchorR = rc.r; _scrolloffPauseAnchorC = rc.c;
               _repositionCaret(); updateGutter();
-              _lastSearch = { src: pat, flags: flags||'', dir };
+              // Preserve original direction separately so 'n' keeps the original
+              // and 'N' always uses the inverse of that original (avoid bouncing between two matches).
+              _lastSearch = { src: pat, flags: flags||'', dir, origDir: dir };
               _updateHlsearchFull();
             }catch{}
           } else {
@@ -3415,6 +3713,8 @@
               return;
             }
           }
+          // Persist cleared session so closed buffers don't resurrect next launch
+          try{ _persistClearedSession(); }catch{}
           _quittingAll = true; window.close();
         }catch{}
       })();
@@ -3812,6 +4112,16 @@
     }
     // Begin an INSERT compound edit by pushing a snapshot before edits start
     if (m==='INSERT'){
+      // Allow IME in INSERT (best-effort; browsers may ignore)
+      try{ if (editor){ editor.removeAttribute('inputmode'); editor.style.imeMode = ''; } }catch{}
+      // If we previously hinted IME off by focus juggling, restore focus cleanly once here
+      try{ if (editor && document.activeElement !== editor){ editor.focus(); } }catch{}
+      // Snap scrollTop to exact line boundary proactively to avoid half-line misalignment before typing
+      try{
+        const st = (editor && typeof editor.scrollTop==='number') ? editor.scrollTop : 0;
+        const snapped = Math.round(st/LINE_HEIGHT)*LINE_HEIGHT;
+        if (Math.abs(snapped - st) > 0.25){ editor.scrollTop = snapped; }
+      }catch{}
       if (!_suppressInsertSnapshotOnce){
         _pushUndoSnapshot('insert');
       }
@@ -3819,6 +4129,23 @@
       // ensure native textarea caret matches overlay caret position
       try{ editor && editor.focus && editor.focus(); }catch{}
       _syncNativeSelectionToCaret();
+  // Caret color remains baseline (IME visualization removed)
+    } else {
+      // In NON-INSERT modes, hint IME OFF (cannot force at OS level)
+      try{
+        if (editor){
+          editor.setAttribute('inputmode', 'none');
+          editor.style.imeMode = 'disabled';
+          // Heuristic: brief blur→focus to nudge some IME implementations to exit composition when leaving INSERT
+          // (Safe because we immediately resync caret; guarded to avoid infinite loops)
+          const prev = document.activeElement;
+          if (prev === editor){
+            editor.blur();
+            setTimeout(()=>{ try{ editor.focus(); _syncNativeSelectionToCaret(); }catch{} }, 0);
+          }
+        }
+      }catch{}
+  // IME visual reset removed (no longer tracking IME state)
     }
   }
 
@@ -4214,6 +4541,28 @@
               '行数：32'
             ];
             wrap.appendChild(mkList(winList.map(x=>[x])));
+            // 即時終了
+            wrap.appendChild(mkH('即時終了'));
+            // サブセクション: ウインドウのクローズボタン / F10 / ボタンクリック
+            const mkSub = (title, lines)=>{
+              const sub = document.createElement('div');
+              sub.style.marginLeft = '1.2em';
+              const h = mkH(title); try{ h.style.margin = '6px 0 2px 0'; }catch{}
+              const list = mkList(lines.map(x=>[x])); try{ list.style.marginLeft = '1.2em'; }catch{}
+              sub.appendChild(h); sub.appendChild(list); return sub;
+            };
+            wrap.appendChild(mkSub('ウインドウのクローズボタン', [
+              '即時終了と同等。変更の有無にかかわらず確認ダイアログ無しで終了',
+              'セッションはこの終了操作で書き換えない（直前に保存されていたセッションを次回起動時に復元）'
+            ]));
+            wrap.appendChild(mkSub('F10', [
+              '即時終了のショートカット。NORMAL/INSERT/VISUALの各モードで受け付け',
+              'セッションはこの終了操作で書き換えない（直前に保存されていたセッションを次回起動時に復元）'
+            ]));
+            wrap.appendChild(mkSub('ボタンクリック', [
+              '右下オーバーレイの「即時終了/F10」ボタンで同等動作',
+              '未保存の編集内容・モード状態（NORMAL/INSERT/VISUAL）・Undo履歴は通常の作業中に随時セッションへ保存され、次回起動時に復元される'
+            ]));
           } else if (curTab==='cmd'){
             // 先頭の「コマンド」見出しは不要
             const strongHeadings = new Set(['置換','読み込み','保存・終了','検索・ハイライト','検索ハイライト','ジャンプ','表示','その他']);
@@ -4788,6 +5137,48 @@
     });
     editor.addEventListener('keyup', (e)=>{ if(e.key==='Enter') ensureScrolloff(); _repositionCaret(); updateGutter(); });
     editor.addEventListener('click', ()=>{ _repositionCaret(); updateGutter(); });
+    // IME composition events — detect full-width ALNUM mode and reflect on caret color
+  // IME composition listeners removed (#426)
+    editor.addEventListener('compositionupdate', (e)=>{
+      try{
+        if (_mode !== 'INSERT') return;
+        const s = String(e && e.data || '');
+        let fw = false;
+        for (let i=0; i<s.length; i++){
+          const cp = s.codePointAt(i);
+          if (cp>0xFFFF) i++; // skip surrogate pair extra unit
+          if (_isFullwidthAlnumCp(cp|0)){ fw = true; break; }
+        }
+  // IME fullwidth heuristic removed
+      }catch{}
+    });
+  // editor.addEventListener('compositionend', ...) removed
+    // Fallback IME full-width detection for platforms where composition events are sparse or skipped.
+    // If in INSERT and not currently composing, inspect last committed character on input.
+    editor.addEventListener('input', ()=>{
+      try{
+        if (_mode !== 'INSERT') return;
+  // IME composition path removed
+        const v = String(editor.value||'');
+  if (!v) { return; }
+        const ch = v[v.length-1];
+        if (!ch){ return; }
+        const cp = ch.codePointAt(0)|0;
+  // Full-width alnum detection removed
+      }catch{}
+    });
+    // Also watch keydown of direct full-width alnum (rare cases where input fires after key processing with no composition events)
+    editor.addEventListener('keydown', (e)=>{
+      try{
+        if (_mode !== 'INSERT') return;
+  // IME composition in-progress check removed
+        if (!e.key || e.key.length!==1) return;
+        const cp = e.key.codePointAt(0)|0;
+        if (_isFullwidthAlnumCp && _isFullwidthAlnumCp(cp)){
+          // _imeFullwidth visual hint removed
+        }
+      }catch{}
+    });
   window.addEventListener('resize', ()=>{ _syncEditorMetrics(); clampViewportExactLines(); _exactLineLockAdjust(); ensureScrolloff(); _repositionCaret(); updateGutter(); _renderHlMatchesVisible(); _incPrevRefresh(); _renderVisSelOverlay(); });
   editor.addEventListener('keydown', (e)=>{
       // Short guard: absorb any stray keydown right after modal close
@@ -4868,7 +5259,7 @@
           return;
         }
         // Motions extend selection
-  const moveAndUpdate=(fn)=>{ fn(); ensureScrolloff({ force:true }); _repositionCaret(); updateGutter(); _updateVisualSelection(); };
+  const moveAndUpdate=(fn)=>{ fn(); _ensureAfterMotion(); _repositionCaret(); updateGutter(); _updateVisualSelection(); };
         if (e.key==='j' || e.key==='ArrowDown'){ e.preventDefault(); const n=_consumeCount(); moveAndUpdate(()=>_moveCaretLines(n)); return; }
         if (e.key==='k' || e.key==='ArrowUp'){ e.preventDefault(); const n=_consumeCount(); moveAndUpdate(()=>_moveCaretLines(-n)); return; }
         if (e.key==='h' || e.key==='ArrowLeft'){ e.preventDefault(); const n=_consumeCount(); moveAndUpdate(()=>_moveCaretCols(-n)); return; }
@@ -4913,6 +5304,22 @@
           _setCaret(targetRow, newCol);
           ensureScrolloff({centerOnce:true, preferEOFPad:true});
           _repositionCaret(); updateGutter(); _updateVisualSelection();
+          // Reinforce alignment and snap scrollTop to exact line grid over a few frames
+          // to eradicate rare leading blank / half-line drift after large jumps (#423/#424)
+          try{
+            const snapAndResync = ()=>{
+              try{
+                const st0 = (editor.scrollTop||0);
+                const st1 = Math.round(st0/LINE_HEIGHT)*LINE_HEIGHT;
+                if (Math.abs(st1 - st0) > 0.25){ editor.scrollTop = st1; }
+                _repositionCaret(); updateGutter();
+              }catch{}
+            };
+            const reinforce = ()=>{ try{ snapAndResync(); }catch{} };
+            snapAndResync();
+            if (window.requestAnimationFrame){ requestAnimationFrame(()=>{ reinforce(); requestAnimationFrame(reinforce); }); }
+            setTimeout(reinforce, 0); setTimeout(reinforce, 80);
+          }catch{}
           return;
         }
         // counts in VISUAL
@@ -5283,29 +5690,116 @@
         if (cmdinput){
           // コロンは入力欄にそのまま見えるようにする
           cmdinput.value = ':';
-          Promise.resolve().then(()=>{
-            try{ cmdinput.focus(); const pos = (cmdinput.value||'').length; cmdinput.setSelectionRange(pos,pos); }catch{}
-          });
+            // 直後に他のフォーカス復元ロジックが割り込んでしまう競合を避けるため、rAF+setTimeout の二段階でフォーカス確定
+            Promise.resolve().then(()=>{
+              try{ if (_mode==='CMD'){ cmdinput.focus(); const pos=(cmdinput.value||'').length; cmdinput.setSelectionRange(pos,pos); } }catch{}
+              if (window.requestAnimationFrame){
+                requestAnimationFrame(()=>{
+                  try{ if (_mode==='CMD' && document.activeElement !== cmdinput){ cmdinput.focus(); const p=(cmdinput.value||'').length; cmdinput.setSelectionRange(p,p); } }catch{}
+                });
+              }
+              setTimeout(()=>{ try{ if (_mode==='CMD' && document.activeElement !== cmdinput){ cmdinput.focus(); const p=(cmdinput.value||'').length; cmdinput.setSelectionRange(p,p); } }catch{} }, 60);
+            });
           // close interception is now bound at startup; nothing to do here
         }
         return;
       }
-      // '/' search prompt (enter CMD with '/' prefilled)
+      // '/' search prompt (enter CMD with '/' prefilled) with robust multi-frame focus like ':'
       if (e.key==='/' && !e.ctrlKey && !e.metaKey && !e.altKey){
         e.preventDefault(); _preCmdMode = _mode; _setMode('CMD'); _clearPending();
         _incPrevHide();
         try{ _incSearchAnchorOff = _offsetFromRC(caretRow, caretCol)|0; _incSearchDir = 'fwd'; }catch{ _incSearchAnchorOff = null; _incSearchDir='fwd'; }
         try{ _cmdHistBrowsing=false; _cmdHistIndex=_cmdHistory.length; _cmdHistTemp=''; }catch{}
-        if (cmdinput){ cmdinput.value = '/'; Promise.resolve().then(()=>{ try{ cmdinput.focus(); const pos=(cmdinput.value||'').length; cmdinput.setSelectionRange(pos,pos); }catch{} }); }
+        // G/gg直後の残存センタリングフラグによるジャンプを抑止 (#432)
+        try{ _centerScrolloffOnce = false; }catch{}
+        // 直前の大ジャンプ強化用 rAF が CMD 遷移後に二次調整しないよう短時間ガード
+        try{ _scrollGuardUntil = Date.now() + 120; }catch{}
+        // 水平位置保持 (#433)
+        const _holdLeftFwd = (function(){ try{ return editor.scrollLeft|0; }catch{ return 0; } })();
+        // CMD開始直後にスクロール位置が半端値だと先頭余白+背景ズレが発生する (#431)
+        try{
+          const st0 = (editor.scrollTop||0);
+          const flo = Math.floor(st0/LINE_HEIGHT)*LINE_HEIGHT;
+          if (Math.abs(st0 - flo) > 0.1){ editor.scrollTop = flo; }
+          // 直後に再配置して視覚ギャップを排除
+          _repositionCaret(); updateGutter();
+          // 水平位置再適用
+          try{ if (editor && (editor.scrollLeft|0) !== _holdLeftFwd){ editor.scrollLeft = _holdLeftFwd; } }catch{}
+        }catch{}
+        if (cmdinput){
+          cmdinput.value = '/';
+          const stHold = (function(){ try{ return editor.scrollTop|0; }catch{ return 0; } })();
+          Promise.resolve().then(()=>{
+            try{ if (_mode==='CMD'){ cmdinput.focus(); const pos=(cmdinput.value||'').length; cmdinput.setSelectionRange(pos,pos); } }catch{}
+            if (window.requestAnimationFrame){
+              requestAnimationFrame(()=>{ try{
+                if (_mode==='CMD' && document.activeElement !== cmdinput){ cmdinput.focus(); const p=(cmdinput.value||'').length; cmdinput.setSelectionRange(p,p); }
+                // フォーカス操作でブラウザがスクロールを動かした場合でも視界を保持
+                if (_mode==='CMD' && editor){
+                  const flo=Math.floor(stHold/LINE_HEIGHT)*LINE_HEIGHT;
+                  if (Math.abs((editor.scrollTop||0) - flo) > 0.1){ editor.scrollTop = flo; }
+                  _repositionCaret(); updateGutter();
+                  if ((editor.scrollLeft|0) !== _holdLeftFwd){ editor.scrollLeft = _holdLeftFwd; }
+                }
+              }catch{} });
+            }
+            setTimeout(()=>{ try{
+              if (_mode==='CMD' && document.activeElement !== cmdinput){ cmdinput.focus(); const p=(cmdinput.value||'').length; cmdinput.setSelectionRange(p,p); }
+              if (_mode==='CMD' && editor){
+                const flo=Math.floor(stHold/LINE_HEIGHT)*LINE_HEIGHT;
+                if (Math.abs((editor.scrollTop||0) - flo) > 0.1){ editor.scrollTop = flo; }
+                _repositionCaret(); updateGutter();
+                if ((editor.scrollLeft|0) !== _holdLeftFwd){ editor.scrollLeft = _holdLeftFwd; }
+              }
+            }catch{} }, 60);
+          });
+        }
         return;
       }
-      // '?' backward search prompt
+      // '?' backward search prompt with robust multi-frame focus like ':'
       if (e.key==='?' && !e.ctrlKey && !e.metaKey && !e.altKey){
         e.preventDefault(); _preCmdMode = _mode; _setMode('CMD'); _clearPending();
         _incPrevHide();
         try{ _incSearchAnchorOff = _offsetFromRC(caretRow, caretCol)|0; _incSearchDir = 'bwd'; }catch{ _incSearchAnchorOff = null; _incSearchDir='bwd'; }
         try{ _cmdHistBrowsing=false; _cmdHistIndex=_cmdHistory.length; _cmdHistTemp=''; }catch{}
-        if (cmdinput){ cmdinput.value = '?'; Promise.resolve().then(()=>{ try{ cmdinput.focus(); const pos=(cmdinput.value||'').length; cmdinput.setSelectionRange(pos,pos); }catch{} }); }
+        try{ _centerScrolloffOnce = false; }catch{}
+        try{ _scrollGuardUntil = Date.now() + 120; }catch{}
+        const _holdLeftBwd = (function(){ try{ return editor.scrollLeft|0; }catch{ return 0; } })();
+        // '?'開始時も同じ補正 (#431)
+        try{
+          const st0 = (editor.scrollTop||0);
+          const flo = Math.floor(st0/LINE_HEIGHT)*LINE_HEIGHT;
+          if (Math.abs(st0 - flo) > 0.1){ editor.scrollTop = flo; }
+          _repositionCaret(); updateGutter();
+          try{ if (editor && (editor.scrollLeft|0) !== _holdLeftBwd){ editor.scrollLeft = _holdLeftBwd; } }catch{}
+        }catch{}
+        if (cmdinput){
+          cmdinput.value = '?';
+          const stHold = (function(){ try{ return editor.scrollTop|0; }catch{ return 0; } })();
+          Promise.resolve().then(()=>{
+            try{ if (_mode==='CMD'){ cmdinput.focus(); const pos=(cmdinput.value||'').length; cmdinput.setSelectionRange(pos,pos); } }catch{}
+            if (window.requestAnimationFrame){
+              requestAnimationFrame(()=>{ try{
+                if (_mode==='CMD' && document.activeElement !== cmdinput){ cmdinput.focus(); const p=(cmdinput.value||'').length; cmdinput.setSelectionRange(p,p); }
+                if (_mode==='CMD' && editor){
+                  const flo=Math.floor(stHold/LINE_HEIGHT)*LINE_HEIGHT;
+                  if (Math.abs((editor.scrollTop||0) - flo) > 0.1){ editor.scrollTop = flo; }
+                  _repositionCaret(); updateGutter();
+                  if ((editor.scrollLeft|0) !== _holdLeftBwd){ editor.scrollLeft = _holdLeftBwd; }
+                }
+              }catch{} });
+            }
+            setTimeout(()=>{ try{
+              if (_mode==='CMD' && document.activeElement !== cmdinput){ cmdinput.focus(); const p=(cmdinput.value||'').length; cmdinput.setSelectionRange(p,p); }
+              if (_mode==='CMD' && editor){
+                const flo=Math.floor(stHold/LINE_HEIGHT)*LINE_HEIGHT;
+                if (Math.abs((editor.scrollTop||0) - flo) > 0.1){ editor.scrollTop = flo; }
+                _repositionCaret(); updateGutter();
+                if ((editor.scrollLeft|0) !== _holdLeftBwd){ editor.scrollLeft = _holdLeftBwd; }
+              }
+            }catch{} }, 60);
+          });
+        }
         return;
       }
       if (e.key==='j' || e.key==='ArrowDown'){ e.preventDefault(); const n=_consumeCount(); _moveCaretLines(n); _repositionCaret(); updateGutter(); return; }
@@ -5321,18 +5815,18 @@
   // change operator: c + motion
   if (e.key==='c' && !e.ctrlKey && !e.metaKey && !e.altKey){ e.preventDefault(); _pendingOp='c'; _pendingOpCount=_consumeCount(); if (!_pendingOpCount || _pendingOpCount<1) _pendingOpCount=1; _pendingOpSeq=null; _armPendingOpTimeout(); return; }
       // word motions (w: next word start, b: prev word start)
-    if (e.key==='w' && !e.ctrlKey && !e.metaKey && !e.altKey){ e.preventDefault(); const n=_consumeCount(); _moveWordW(n); ensureScrolloff({ force:true }); _repositionCaret(); updateGutter(); return; }
-    if (e.key==='b' && !e.ctrlKey && !e.metaKey && !e.altKey){ e.preventDefault(); const n=_consumeCount(); _moveWordB(n); ensureScrolloff({ force:true }); _repositionCaret(); updateGutter(); return; }
-  if (e.key==='W' && !e.ctrlKey && !e.metaKey && !e.altKey){ e.preventDefault(); const n=_consumeCount(); _moveWORDW(n); ensureScrolloff({ force:true }); _repositionCaret(); updateGutter(); return; }
-  if (e.key==='B' && !e.ctrlKey && !e.metaKey && !e.altKey){ e.preventDefault(); const n=_consumeCount(); _moveWORDB(n); ensureScrolloff({ force:true }); _repositionCaret(); updateGutter(); return; }
+    if (e.key==='w' && !e.ctrlKey && !e.metaKey && !e.altKey){ e.preventDefault(); const n=_consumeCount(); _moveWordW(n); _ensureAfterMotion(); _repositionCaret(); updateGutter(); return; }
+    if (e.key==='b' && !e.ctrlKey && !e.metaKey && !e.altKey){ e.preventDefault(); const n=_consumeCount(); _moveWordB(n); _ensureAfterMotion(); _repositionCaret(); updateGutter(); return; }
+  if (e.key==='W' && !e.ctrlKey && !e.metaKey && !e.altKey){ e.preventDefault(); const n=_consumeCount(); _moveWORDW(n); _ensureAfterMotion(); _repositionCaret(); updateGutter(); return; }
+  if (e.key==='B' && !e.ctrlKey && !e.metaKey && !e.altKey){ e.preventDefault(); const n=_consumeCount(); _moveWORDB(n); _ensureAfterMotion(); _repositionCaret(); updateGutter(); return; }
       // line anchors ^, 0, $
       if (e.key==='^'){ e.preventDefault(); const _n=_consumeCount(); const line=(_splitLines()[caretRow]||''); _setCaret(caretRow, _firstNonBlankColOf(line)); _repositionCaret(); return; }
       // '0' as a command only when no count prefix in progress
       if (e.key==='0' && _countAcc==null){ e.preventDefault(); _setCaret(caretRow, 0); _repositionCaret(); return; }
       if (e.key==='$'){ e.preventDefault(); const n=_consumeCount(); let r=caretRow; if (n>1){ _moveCaretLines(n-1); r=caretRow; } const len=_lineLen(r); _setCaret(r, len); _repositionCaret(); updateGutter(); return; }
       // paragraphs { }
-  if (e.key==='}'){ e.preventDefault(); const n=_consumeCount(); _moveParagraphNext(n); ensureScrolloff({ force:true }); _repositionCaret(); updateGutter(); return; }
-  if (e.key==='{'){ e.preventDefault(); const n=_consumeCount(); _moveParagraphPrev(n); ensureScrolloff({ force:true }); _repositionCaret(); updateGutter(); return; }
+  if (e.key==='}'){ e.preventDefault(); const n=_consumeCount(); _moveParagraphNext(n); _ensureAfterMotion(); _repositionCaret(); updateGutter(); return; }
+  if (e.key==='{'){ e.preventDefault(); const n=_consumeCount(); _moveParagraphPrev(n); _ensureAfterMotion(); _repositionCaret(); updateGutter(); return; }
       // numeric prefix (1-9 start/extend; 0 extends if already started)
       if (e.key>='1' && e.key<='9' && !e.ctrlKey && !e.metaKey && !e.altKey){ e.preventDefault(); _countAcc = (_countAcc==null?0:_countAcc)*10 + parseInt(e.key,10); return; }
       if (e.key==='0' && !e.ctrlKey && !e.metaKey && !e.altKey && _countAcc!=null){ e.preventDefault(); _countAcc = _countAcc*10; return; }
@@ -5417,28 +5911,68 @@
         // clamp caretCol to EOL of last line to avoid stale column causing b to stall
         try{ const len = _lineLen(caretRow); if (caretCol>len) caretCol=len; }catch{}
         _centerScrolloffOnce = true; ensureScrolloff({centerOnce:true, preferEOFPad:true}); _repositionCaret(); updateGutter();
+        // Reinforce: snap scrollTop to exact line grid over a few frames so
+        // leading blank / half-line drift cannot persist after a large jump (#423/#424)
+        try{
+          const snapAndResync = ()=>{
+            try{
+              const st0 = (editor.scrollTop||0);
+              const st1 = Math.round(st0/LINE_HEIGHT)*LINE_HEIGHT;
+              if (Math.abs(st1 - st0) > 0.25){ editor.scrollTop = st1; }
+              _repositionCaret(); updateGutter();
+            }catch{}
+          };
+          const reinforce = ()=>{ try{ snapAndResync(); }catch{} };
+          snapAndResync();
+          if (window.requestAnimationFrame){
+            requestAnimationFrame(()=>{ reinforce(); requestAnimationFrame(reinforce); });
+          }
+          setTimeout(reinforce, 0);
+          setTimeout(reinforce, 80);
+        }catch{}
         return;
       }
       // Repeat last search: n (same direction), N (reverse)
       if ((e.key==='n' || e.key==='N') && !e.ctrlKey && !e.metaKey && !e.altKey){
         e.preventDefault();
+        // Fallback: if no in-memory last search, seed it from the latest search history entry
+        try{
+          if (!(_lastSearch && _lastSearch.src)){
+            const h = (function(){ try{ return _searchHistory||[]; }catch{ return []; } })();
+            const last = h.length ? String(h[h.length-1]||'') : '';
+            if (last){
+              // Accept '/pat[/flags]' or '?pat[?flags]'
+              let m = last.match(/^\/(.*?)(?:\/([A-Za-z]*))?$/);
+              let dir = 'fwd';
+              if (!m){ m = last.match(/^\?(.*?)(?:\?([A-Za-z]*))?$/); dir = 'bwd'; }
+              if (m){
+                const pat = String(m[1]||'');
+                const flg = String(m[2]||'');
+                if (pat){ _lastSearch = { src: pat, flags: flg||'', dir, origDir: dir }; }
+              }
+            }
+          }
+        }catch{}
         if (_lastSearch && _lastSearch.src){
           const rev = (e.key==='N');
-          const dir = (!rev ? _lastSearch.dir : (_lastSearch.dir==='fwd'?'bwd':'fwd'));
+          // Use preserved original search direction; seed if missing (legacy sessions before origDir addition)
+          const origDir = (_lastSearch.origDir ? (_lastSearch.origDir==='bwd'?'bwd':'fwd') : (_lastSearch.dir==='bwd'?'bwd':'fwd'));
+          if (!_lastSearch.origDir){ _lastSearch.origDir = origDir; }
+          const dir = rev ? (origDir==='fwd'?'bwd':'fwd') : origDir;
+          _scrolloffPaused = false; _scrolloffPauseAnchorR = -1; _scrolloffPauseAnchorC = -1;
           const fromOff = (function(){ try{ return _offsetFromRC(caretRow, caretCol)|0; }catch{ return 0; } })();
           const res = _searchFindNext(_lastSearch.src, _lastSearch.flags||'', dir, fromOff, true);
           if (res && Number.isFinite(res.start)){
             try{
               const rc = _rcFromOffset(res.start);
               caretRow = rc.r; caretCol = rc.c;
-              // The first search confirm pauses scrolloff once (#280). For repeats (n/N),
-              // resume scrolloff immediately so the next match is brought into view even
-              // if it's currently off-screen (#283).
-              _scrolloffPaused = false; _scrolloffPauseAnchorR = -1; _scrolloffPauseAnchorC = -1;
               ensureScrolloff();
               _repositionCaret(); updateGutter(); _renderHlMatchesVisible();
+              _lastSearch.dir = dir; // record last movement direction (origDir remains stable)
             }catch{}
           } else { toast('no match'); }
+        } else {
+          toast('no last search');
         }
         return;
       }
@@ -5449,8 +5983,8 @@
       const isEditKey = ['Enter','Tab','Backspace','Delete','Insert'].includes(e.key);
       if (isPrintable || isEditKey){ e.preventDefault(); return; }
     });
-    // Global fallback: when focus is not on the editor/cmdinput and no modal/popup is open,
-    // route keystrokes to the editor so NORMAL/VISUAL keys work on startup and after stray focus.
+      // Global fallback: when focus is not on the editor/cmdinput and no modal/popup is open,
+      // route keystrokes to the editor so keys work on startup and after stray focus.
     try{
       const _globalKeyRouter = (e)=>{
         try{
@@ -5464,10 +5998,10 @@
           const isCmd = (cmdinput && ae === cmdinput);
           const tag = (ae && ae.tagName ? ae.tagName.toLowerCase() : '');
           const isFormEl = (tag==='input' || tag==='textarea' || (ae && ae.isContentEditable));
-          // Route keys to editor in NORMAL/VISUAL when focus is outside editor and not in another form control.
-          // This avoids interfering with native textarea events when editor already has focus, while still
-          // ensuring NORMAL/VISUAL keys work on startup or after stray focus.
-          if (_mode !== 'INSERT' && !isCmd && !isEditor && !isFormEl){
+            // Route keys to editor when focus is outside editor and not in another form control.
+            // INSERT では「印字系/編集系キー」はデフォルト処理に任せるため、フォーカスだけ移してイベントは抑止しない。
+            // これにより、最初のキーが消費されて無視される問題を回避。
+            if (!isCmd && !isEditor && !isFormEl){
             // Let function keys fall through so tab/help shortcuts work (F1–F9)
             if (['F1','F2','F3','F4','F5','F6','F7','F8','F9'].includes(e.key)) return;
             // Avoid hijacking OS/meta shortcuts
@@ -5475,26 +6009,33 @@
             _globalKeyRouting = true;
             try{
               // ensure subsequent input goes to editor
-              try{ editor && editor.focus && editor.focus(); }catch{}
-              const evInit = {
-                key: e.key,
-                code: (e.code||''),
-                ctrlKey: !!e.ctrlKey,
-                altKey: !!e.altKey,
-                shiftKey: !!e.shiftKey,
-                metaKey: !!e.metaKey,
-                repeat: !!e.repeat,
-                location: (e.location||0),
-                bubbles: true,
-                cancelable: true,
-                composed: true
-              };
-              // Dispatch asynchronously after focusing so editor's own keydown handler surely receives it
-              const ev = new KeyboardEvent('keydown', evInit);
-              setTimeout(()=>{ try{ editor && editor.dispatchEvent && editor.dispatchEvent(ev); }catch{} }, 0);
-              // Prevent the original from bubbling to unrelated elements
-              try{ e.preventDefault(); }catch{}
-              try{ e.stopPropagation(); }catch{}
+                try{ editor && editor.focus && editor.focus(); }catch{}
+                const isInsert = (_mode === 'INSERT');
+                const isPrintable = (e.key && e.key.length === 1 && !e.ctrlKey && !e.altKey && !e.metaKey);
+                const isEditKey = ['Enter','Tab','Backspace','Delete','Insert'].includes(e.key);
+                if (!isInsert || (!isPrintable && !isEditKey)){
+                  // NORMAL/VISUAL あるいは非印字系キー: 既存挙動（合成 keydown + 元イベント抑止）
+                  const evInit = {
+                    key: e.key,
+                    code: (e.code||''),
+                    ctrlKey: !!e.ctrlKey,
+                    altKey: !!e.altKey,
+                    shiftKey: !!e.shiftKey,
+                    metaKey: !!e.metaKey,
+                    repeat: !!e.repeat,
+                    location: (e.location||0),
+                    bubbles: true,
+                    cancelable: true,
+                    composed: true
+                  };
+                  const ev = new KeyboardEvent('keydown', evInit);
+                  setTimeout(()=>{ try{ editor && editor.dispatchEvent && editor.dispatchEvent(ev); }catch{} }, 0);
+                  try{ e.preventDefault(); }catch{}
+                  try{ e.stopPropagation(); }catch{}
+                } else {
+                  // INSERT かつ印字/編集キー: フォーカスだけ移し、デフォルト処理でそのまま挿入させる
+                  // → preventDefault しない
+                }
             } finally {
               _globalKeyRouting = false;
             }
@@ -6609,22 +7150,11 @@
                 if (!msg || msg.type !== 'close-request') return;
                 if (_quitInProgress) return;
                 _quitInProgress = true;
-                (async()=>{
-                  let okAll = true;
-                  try{
-                    // Spec: close current first if unmodified
-                    try{ const b0=currentBuffer(); if (b0 && b0.modified===false){ _closeCurrentBuffer(); } }catch{}
-                    const items = buffers.map((b,i)=>({b,i})).filter(x=>x.b && x.b.modified);
-                    if (items.length > 0){
-                      const ok = await multiSaveDialog(items);
-                      if (!ok){ okAll = false; }
-                    }
-                    if (okAll){ _quittingAll = true; }
-                  }catch{ okAll = false; }
-                  try{ window.chrome.webview.postMessage({ type:'close-result', ok: !!okAll }); }catch{}
-                  if (okAll){ try{ window.close(); }catch{} }
-                  _quitInProgress = false;
-                })();
+                // Treat window close as immediate quit (F10 semantics): do not prompt; do not rewrite session
+                try{ _suppressPersistOnQuit = true; _skipPersistOnUnloadOnce = true; _quittingAll = true; _allowUnloadOnce = true; }catch{}
+                try{ window.chrome.webview.postMessage({ type:'close-result', ok: true }); }catch{}
+                try{ window.close(); }catch{}
+                _quitInProgress = false;
               }catch{}
             };
             // Bind once
@@ -6638,26 +7168,10 @@
               try{
                 if (_allowUnloadOnce){ _allowUnloadOnce = false; return; }
                 if (_quittingAll) return;
-                const hasUnsaved = _hasAnyModifiedBuffers();
-                if (!hasUnsaved){
-                  // 未保存なし → そのままアンロード許可（ネイティブ離脱ダイアログを出さない）
-                  return;
-                }
-                // 未保存あり → 既定動作をキャンセルし、アプリ側 :qa 相当を実行
-                e.preventDefault();
-                if (_quitInProgress) return;
-                _quitInProgress = true;
-                (async()=>{
-                  try{
-                    try{ const b0=currentBuffer(); if (b0 && b0.modified===false){ _closeCurrentBuffer(); } }catch{}
-                    const items = buffers.map((b,i)=>({b,i})).filter(x=>x.b && x.b.modified);
-                    if (items.length > 0){
-                      const ok = await multiSaveDialog(items);
-                      if (!ok){ _quitInProgress = false; return; }
-                    }
-                    _quittingAll = true; window.close();
-                  }catch{ _quitInProgress = false; }
-                })();
+                // Treat native window close like F10 immediate quit: don't persist, don't prompt
+                try{ _suppressPersistOnQuit = true; _skipPersistOnUnloadOnce = true; }catch{}
+                // Allow the unload to proceed without intervention
+                return;
               }catch{}
             };
             // ensure no duplicate listeners
@@ -6668,6 +7182,9 @@
       })();
     }
   }
+
+  // Apply caret color depending on IME full-width state
+  // _applyCaretImeVisual removed; caret color no longer toggled by IME state.
 
   /*********************************************************
    * Buffer popup (:b ...)
@@ -7685,8 +8202,8 @@
         // Narrow down gap between buttons ~half
         pal.style.gap = '4px';
         pal.style.alignItems = 'flex-end';
-        // Fill background without round corners/border as requested
-  pal.style.background = 'rgba(0,15,0,0.3)';
+    // Fill background; adjust transparency to 0.06 per request (#431)
+  pal.style.background = 'rgba(0,15,0,0.06)';
         pal.style.border = 'none';
         pal.style.borderRadius = '0';
         pal.style.padding = '4px';
@@ -7695,7 +8212,18 @@
       pal.innerHTML = '';
       // Track and restore focus around clicks to keep pre-click focus
       let lastFocusedEl = null;
-      // 検索ハイライトトグルボタン（左側）
+
+      // Common hover effect (red-ish background while hovering)
+      const attachHover = (el)=>{
+        if (!el) return;
+        const baseBg = '#1a2030';
+        const hovBg  = '#5a1a1a';
+        el.addEventListener('mouseenter', ()=>{ try{ el.style.background = hovBg; }catch{} });
+        el.addEventListener('mouseleave', ()=>{ try{ el.style.background = baseBg; }catch{} });
+      };
+
+      // Create buttons first (but append to a 2x2 grid later)
+      // 検索ハイライトトグルボタン（左下配置）
       const hlBtn = document.createElement('button');
       hlBtn.type = 'button';
       hlBtn.id = 'overlayBtnHlsearch';
@@ -7710,6 +8238,7 @@
       hlBtn.style.opacity = '0.92';
       hlBtn.style.userSelect = 'none';
       hlBtn.style.outline = 'none';
+      attachHover(hlBtn);
       // Prevent focus change on mouse click
       hlBtn.addEventListener('mousedown', (e)=>{ try{ lastFocusedEl = document.activeElement; e.preventDefault(); }catch{} });
       // inner layout
@@ -7747,43 +8276,35 @@
       hlBtn.appendChild(hlWrap);
       hlBtn.addEventListener('click', (e)=>{
         try{ e.preventDefault(); e.stopPropagation(); }catch{}
-        // Toggle first
         try{ _optHlsearch = !_optHlsearch; }catch{}
-        // Try to recompute highlights, but don't block UI feedback if it fails
         try{ _updateHlsearchFull(); }catch{}
         try{ _updateOverlayHlsearchVisual(); }catch{}
         try{ toast('hlsearch: ' + (_optHlsearch?'on':'off'), 900); }catch{}
         // Restore pre-click focus if possible
-        try{
-          if (lastFocusedEl && typeof lastFocusedEl.focus === 'function'){
-            lastFocusedEl.focus();
-          }
-        }catch{}
+        try{ if (lastFocusedEl && typeof lastFocusedEl.focus === 'function'){ lastFocusedEl.focus(); } }catch{}
       });
-      pal.appendChild(hlBtn);
 
-  // Help button (two-line label: ヘルプ / F9,:help)
-      const btn = document.createElement('button');
-      btn.type = 'button';
-  btn.textContent = 'ヘルプ\nF9,:help';
-      btn.style.whiteSpace = 'pre';
-      btn.style.minWidth = '64px';
-      btn.style.border = '1px solid #2a3244';
-      btn.style.background = '#1a2030';
-      btn.style.color = '#e6e6e6';
-      btn.style.borderRadius = '6px';
-      btn.style.padding = '6px 8px';
-      btn.style.cursor = 'pointer';
-      btn.style.font = '12px/1.25 system-ui, -apple-system, \'Segoe UI\', sans-serif';
-      btn.style.opacity = '0.92';
-      btn.style.userSelect = 'none';
-      btn.style.outline = 'none';
-      // Prevent focus change on mouse click
-      btn.addEventListener('mousedown', (e)=>{ try{ lastFocusedEl = document.activeElement; e.preventDefault(); }catch{} });
-      btn.addEventListener('click', (e)=>{
+      // Help button（右下配置, 2行ラベル: ヘルプ / F9,:help）
+      const helpBtn = document.createElement('button');
+      helpBtn.type = 'button';
+      helpBtn.textContent = 'ヘルプ\nF9,:help';
+      helpBtn.style.whiteSpace = 'pre';
+      helpBtn.style.minWidth = '64px';
+      helpBtn.style.border = '1px solid #2a3244';
+      helpBtn.style.background = '#1a2030';
+      helpBtn.style.color = '#e6e6e6';
+      helpBtn.style.borderRadius = '6px';
+      helpBtn.style.padding = '6px 8px';
+      helpBtn.style.cursor = 'pointer';
+      helpBtn.style.font = "12px/1.25 system-ui, -apple-system, 'Segoe UI', sans-serif";
+      helpBtn.style.opacity = '0.92';
+      helpBtn.style.userSelect = 'none';
+      helpBtn.style.outline = 'none';
+      attachHover(helpBtn);
+      helpBtn.addEventListener('mousedown', (e)=>{ try{ lastFocusedEl = document.activeElement; e.preventDefault(); }catch{} });
+      helpBtn.addEventListener('click', (e)=>{
         try{ e.preventDefault(); e.stopPropagation(); }catch{}
         try{ helpModal({ defaultTab: 'cmd' }); }catch{}
-        // Restore pre-click focus after opening modal will be managed by modal; if not open, restore focus
         try{
           if (!_modalOverlay || _modalOverlay.style.display === 'none'){
             if (lastFocusedEl && typeof lastFocusedEl.focus === 'function'){
@@ -7792,10 +8313,53 @@
           }
         }catch{}
       });
-      pal.appendChild(btn);
+
+      // 即時終了ボタン（左上は空欄、右上に配置。ラベル後半は 'F10'）
+      const quitBtn = document.createElement('button');
+      quitBtn.type = 'button';
+      quitBtn.textContent = '即時終了\nF10';
+      quitBtn.style.whiteSpace = 'pre';
+      quitBtn.style.minWidth = '80px';
+      quitBtn.style.border = '1px solid #2a3244';
+      quitBtn.style.background = '#1a2030';
+      quitBtn.style.color = '#e6e6e6';
+      quitBtn.style.borderRadius = '6px';
+      quitBtn.style.padding = '6px 8px';
+      quitBtn.style.cursor = 'pointer';
+      quitBtn.style.font = "12px/1.25 system-ui, -apple-system, 'Segoe UI', sans-serif";
+      quitBtn.style.opacity = '0.92';
+      quitBtn.style.userSelect = 'none';
+      quitBtn.style.outline = 'none';
+      attachHover(quitBtn);
+      let lastFocusedEl2 = null;
+      quitBtn.addEventListener('mousedown', (e)=>{ try{ lastFocusedEl2 = document.activeElement; e.preventDefault(); }catch{} });
+      quitBtn.addEventListener('click', (e)=>{
+        try{ e.preventDefault(); e.stopPropagation(); }catch{}
+        try{ _suppressPersistOnQuit = true; _skipPersistOnUnloadOnce = true; _quittingAll = true; _allowUnloadOnce = true; }catch{}
+        try{ window.close(); }catch{}
+        try{ if (lastFocusedEl2 && typeof lastFocusedEl2.focus==='function') lastFocusedEl2.focus(); }catch{}
+      });
+
+      // Build 2x2 grid (top-left empty)
+      const grid = document.createElement('div');
+      grid.style.display = 'grid';
+      grid.style.gridTemplateColumns = 'auto auto';
+      grid.style.columnGap = '4px';
+      grid.style.rowGap = '4px';
+      const empty = document.createElement('div');
+      empty.style.minWidth = '80px';
+      empty.style.minHeight = '42px';
+      grid.appendChild(empty);      // top-left (empty)
+      grid.appendChild(quitBtn);    // top-right
+      grid.appendChild(hlBtn);      // bottom-left
+      grid.appendChild(helpBtn);    // bottom-right
+
+      pal.appendChild(grid);
 
       // initialize visual state for hlsearch pills
       try{ _updateOverlayHlsearchVisual(); }catch{}
+
+      
     }catch{}
   }
 
@@ -7836,14 +8400,23 @@
           const fileOpen = (typeof _filePopupVisible==='function' && _filePopupVisible());
           const bufOpen  = (typeof _bufPopupVisible==='function' && _bufPopupVisible());
 
-          // F9: open Help (close popups first). If another modal is open, just consume.
-          if (key === 'F9'){
+          // F10: immediate quit (no prompt, do not persist new session state)
+          if (key === 'F10'){
             try{ e.preventDefault(); e.stopPropagation(); }catch{}
+            try{ _suppressPersistOnQuit = true; _skipPersistOnUnloadOnce = true; _quittingAll = true; _allowUnloadOnce = true; }catch{}
+            try{ window.close(); }catch{}
+            return;
+          }
+          // F9: open Help (if no modal). If Help (modal) is open, let F9 pass through so Help's own handler can close it.
+          if (key === 'F9'){
             if (!isModalOpen){
+              try{ e.preventDefault(); e.stopPropagation(); }catch{}
               try{ if (encOpen) _encPopupHide(); }catch{}
               try{ if (fileOpen) _filePopupHide(); }catch{}
               try{ if (bufOpen) _bufPopupHide(); }catch{}
               helpModal({ defaultTab: 'cmd' });
+            } else {
+              // Do not consume; allow Help's onKey handler to see F9 and close
             }
             return;
           }
@@ -7862,7 +8435,7 @@
             return;
           }
 
-          // When any modal or non-buf popup is open, just consume
+          // When any modal or non-buf popup is open, just consume (except F10 handled above)
           if (isModalOpen || encOpen || fileOpen) return;
 
           // F1–F8: direct tab switching (not in CMD)
@@ -7894,10 +8467,15 @@
       // Sync metrics (line-height, font-size, measurement span)
       _syncEditorMetrics();
       _wireZoomHUD();
+      // Save session opportunistically on unload (no prompt)
+  try{ window.addEventListener('beforeunload', ()=>{ try{ if (!_skipPersistOnUnloadOnce) _persistSessionNow(); }catch{} }, { capture:true }); }catch{}
       const loadP = Promise.resolve().then(()=>_loadDocFromQuery()).catch(()=>false);
       const watchdog = new Promise(resolve=> setTimeout(()=>resolve(false), 1500));
       Promise.race([loadP, watchdog]).then(loaded=>{
-        if (!loaded && !editor.value) _seedDemo();
+        // If no ?doc= provided or it failed, try restoring last session
+        let ok = !!loaded;
+        try{ if (!ok){ ok = !!_loadSessionFromStorage(); } }catch{}
+        if (!ok && !editor.value) _seedDemo();
         initialQuickViewportPaint();
         clampViewportExactLines();
         _initLineLock();
@@ -7911,6 +8489,8 @@
         _renderTabbar();
         _initOverlayPalette();
         _wireHelpOpenShortcut();
+  // Ensure initial IME hint/visuals match current mode (typically NORMAL)
+  try{ _setMode(_mode); }catch{}
         // Wire encoding button and popup interactions
         try{
           if (encBtn){
