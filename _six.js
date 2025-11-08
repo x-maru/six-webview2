@@ -5299,18 +5299,38 @@
     // In VISUAL mode, prefer tracking the moving edge of the selection (the end farther from the anchor)
     editor.addEventListener('select', ()=>{
       try{
-        let off = editor.selectionStart|0;
         if (_visualActive){
-          const s = editor.selectionStart|0;
-          const e = editor.selectionEnd|0;
-          const a = _offsetFromRC(_visualAnchorR, _visualAnchorC)|0;
-          // Choose the endpoint farther from the anchor as the caret position
-          const ds = Math.abs(s - a);
-          const de = Math.abs(e - a);
-          off = (de >= ds) ? e : s;
+          // In VISUAL mode, keep overlay caret behavior consistent with our model.
+          // For linewise VISUAL, preserve the caret column and only track the moving edge's ROW.
+          if (_visualLinewise){
+            const s = editor.selectionStart|0;
+            const e = editor.selectionEnd|0;
+            const a = _offsetFromRC(_visualAnchorR, _visualAnchorC)|0;
+            const ds = Math.abs(s - a);
+            const de = Math.abs(e - a);
+            const offEdge = (de >= ds) ? e : s;
+            const rc = _rcFromOffset(offEdge);
+            // Keep column as-is to avoid jumping to line head/tail when entering with 'V' (#448)
+            caretRow = rc.r;
+            // caretCol: no change
+          } else {
+            // Characterwise VISUAL: follow the farther endpoint fully (row+col)
+            let off = editor.selectionStart|0;
+            const s = editor.selectionStart|0;
+            const e = editor.selectionEnd|0;
+            const a = _offsetFromRC(_visualAnchorR, _visualAnchorC)|0;
+            const ds = Math.abs(s - a);
+            const de = Math.abs(e - a);
+            off = (de >= ds) ? e : s;
+            const rc = _rcFromOffset(off);
+            caretRow = rc.r; caretCol = rc.c;
+          }
+        } else {
+          // Non-VISUAL: sync to native insertion point
+          const off = editor.selectionStart|0;
+          const rc = _rcFromOffset(off);
+          caretRow = rc.r; caretCol = rc.c;
         }
-        const rc = _rcFromOffset(off);
-        caretRow = rc.r; caretCol = rc.c;
       }catch{}
       _repositionCaret(); updateGutter();
     });
@@ -5362,6 +5382,8 @@
   editor.addEventListener('keydown', (e)=>{
       // Short guard: absorb any stray keydown right after modal close
       if (Date.now() < _kbdGuardUntil){ try{ e.preventDefault(); e.stopPropagation(); }catch{} return; }
+    // Globally consume Ctrl+U to avoid Edge opening view-source window (#447)
+    if (e && e.ctrlKey && !e.altKey && !e.metaKey && (e.key==='u' || e.key==='U')){ try{ e.preventDefault(); e.stopPropagation(); }catch{} return; }
       if (_mode === 'CMD') return;
       if (_mode === 'INSERT'){
         if (_isEsc(e)){
@@ -5467,8 +5489,8 @@
           _suppressInsertSnapshotOnce = true; _setMode('INSERT');
           return;
         }
-        // Motions extend selection
-  const moveAndUpdate=(fn)=>{ fn(); _ensureAfterMotion(); _repositionCaret(); updateGutter(); _updateVisualSelection(); };
+    // Motions extend selection
+  const moveAndUpdate=(fn)=>{ fn(); try{ _flagCaretMotion(); }catch{} _ensureAfterMotion(); _repositionCaret(); updateGutter(); _updateVisualSelection(); };
         if (e.key==='j' || e.key==='ArrowDown'){ e.preventDefault(); const n=_consumeCount(); moveAndUpdate(()=>_moveCaretLines(n)); return; }
         if (e.key==='k' || e.key==='ArrowUp'){ e.preventDefault(); const n=_consumeCount(); moveAndUpdate(()=>_moveCaretLines(-n)); return; }
         if (e.key==='h' || e.key==='ArrowLeft'){ e.preventDefault(); const n=_consumeCount(); moveAndUpdate(()=>_moveCaretCols(-n)); return; }
@@ -5477,9 +5499,9 @@
         if (e.key==='b' && !e.ctrlKey && !e.metaKey && !e.altKey){ e.preventDefault(); const n=_consumeCount(); moveAndUpdate(()=>_moveWordB(n)); return; }
   if (e.key==='W' && !e.ctrlKey && !e.metaKey && !e.altKey){ e.preventDefault(); const n=_consumeCount(); moveAndUpdate(()=>_moveWORDW(n)); return; }
   if (e.key==='B' && !e.ctrlKey && !e.metaKey && !e.altKey){ e.preventDefault(); const n=_consumeCount(); moveAndUpdate(()=>_moveWORDB(n)); return; }
-        if (e.key==='^'){ e.preventDefault(); const _n=_consumeCount(); const line=(_splitLines()[caretRow]||''); _setCaret(caretRow, _firstNonBlankColOf(line)); _repositionCaret(); _updateVisualSelection(); return; }
-        if (e.key==='0' && _countAcc==null){ e.preventDefault(); _setCaret(caretRow, 0); _repositionCaret(); _updateVisualSelection(); return; }
-        if (e.key==='$'){ e.preventDefault(); const n=_consumeCount(); let r=caretRow; if (n>1){ _moveCaretLines(n-1); r=caretRow; } const len=_lineLen(r); _setCaret(r, len); _repositionCaret(); updateGutter(); _updateVisualSelection(); return; }
+    if (e.key==='^'){ e.preventDefault(); const _n=_consumeCount(); const line=(_splitLines()[caretRow]||''); _setCaret(caretRow, _firstNonBlankColOf(line)); try{ _flagCaretMotion(); }catch{} _repositionCaret(); _updateVisualSelection(); return; }
+    if (e.key==='0' && _countAcc==null){ e.preventDefault(); _setCaret(caretRow, 0); try{ _flagCaretMotion(); }catch{} _repositionCaret(); _updateVisualSelection(); return; }
+    if (e.key==='$'){ e.preventDefault(); const n=_consumeCount(); let r=caretRow; if (n>1){ _moveCaretLines(n-1); r=caretRow; } const len=_lineLen(r); _setCaret(r, len); try{ _flagCaretMotion(); }catch{} _repositionCaret(); updateGutter(); _updateVisualSelection(); return; }
         if (e.key==='}'){ e.preventDefault(); const n=_consumeCount(); moveAndUpdate(()=>_moveParagraphNext(n)); return; }
         if (e.key==='{'){ e.preventDefault(); const n=_consumeCount(); moveAndUpdate(()=>_moveParagraphPrev(n)); return; }
         // gg / G motions in VISUAL (extend selection)
@@ -6184,7 +6206,15 @@
       if (e.key==='0' && !e.ctrlKey && !e.metaKey && !e.altKey && _countAcc!=null){ e.preventDefault(); _countAcc = _countAcc*10; return; }
   if (e.key==='i'){ e.preventDefault(); _setMode('INSERT'); return; }
   if (e.key==='v' && !e.ctrlKey && !e.metaKey && !e.altKey){ e.preventDefault(); _enterVisual(false); return; }
-  if (e.key==='V' && !e.ctrlKey && !e.metaKey && !e.altKey){ e.preventDefault(); _enterVisual(true); return; }
+  if (e.key==='V' && !e.ctrlKey && !e.metaKey && !e.altKey){
+        e.preventDefault();
+        // Preserve caret column when entering VISUAL linewise (#447)
+        const colHold = caretCol|0;
+        _enterVisual(true);
+        try{ _setCaret(caretRow, Math.max(0, Math.min(_lineLen(caretRow), colHold))); }catch{}
+        _repositionCaret(); updateGutter();
+        return;
+      }
       if (e.key==='a' && !e.ctrlKey && !e.metaKey && !e.altKey){
         e.preventDefault();
         // move one cp right within line if possible, then enter INSERT
@@ -8884,6 +8914,14 @@
   try{ _setMode(_mode); }catch{}
         // Wire encoding button and popup interactions
         try{
+          // Global capture: consume Ctrl+U to avoid Edge side-effects (#447)
+          window.addEventListener('keydown', (e)=>{
+            try{
+              if (e && e.ctrlKey && !e.altKey && !e.metaKey && (e.key==='u' || e.key==='U')){
+                e.preventDefault(); e.stopPropagation();
+              }
+            }catch{}
+          }, true);
           if (encBtn){
             encBtn.style.whiteSpace = 'pre';
             encBtn.addEventListener('mousedown', (e)=>{ e.preventDefault(); });
