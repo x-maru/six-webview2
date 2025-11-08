@@ -228,6 +228,10 @@
   let _lastCaretCol = -1;
   // track last time caret moved (for distinguishing caret-induced scroll vs manual scroll)
   let _lastCaretMovedAt = 0;
+  // caret movement repeat state (for disabling blink while auto-repeating)
+  let _caretMoving = false;
+  let _caretMovePulseTimer = 0; // clears moving state after idle
+  const _caretMoveIdleMs = 140; // threshold after last motion to resume blink
   // global mouse cursor visibility state
   let _cursorHidden = false;
   // scrolloff pause control: temporarily suppress ensureScrolloff after search confirm
@@ -237,6 +241,20 @@
   // global mouse cursor visibility state and helpers (used across modules)
   const _hideCursor = ()=>{ try{ if (!_cursorHidden){ document.body.classList.add('hide-cursor'); _cursorHidden=true; } }catch{} };
   const _showCursor = ()=>{ try{ if (_cursorHidden){ document.body.classList.remove('hide-cursor'); _cursorHidden=false; } }catch{} };
+  function _flagCaretMotion(){
+    _lastCaretMovedAt = Date.now();
+    if (!_caretMoving){ _caretMoving = true; try{ document.body.classList.add('moving-caret'); }catch{} }
+    if (_caretMovePulseTimer){ try{ clearTimeout(_caretMovePulseTimer); }catch{} }
+    _caretMovePulseTimer = setTimeout(()=>{
+      // if no new motion in idle window, clear moving state
+      if (Date.now() - _lastCaretMovedAt >= _caretMoveIdleMs){
+        _caretMoving = false; try{ document.body.classList.remove('moving-caret'); }catch{}
+      } else {
+        // still moving; reschedule to check again
+        _caretMovePulseTimer = setTimeout(arguments.callee, _caretMoveIdleMs);
+      }
+    }, _caretMoveIdleMs);
+  }
   // editor zoom state (scale only editor/gutter, not global UI)
   let _edScale = 1;
   // short guard to ignore stray key events immediately after modal close
@@ -5344,6 +5362,7 @@
         // Allow native editing behavior, but keep overlays in sync when moving the caret
         if (e.key==='ArrowLeft' || e.key==='ArrowRight' || e.key==='ArrowUp' || e.key==='ArrowDown' ||
             e.key==='Home' || e.key==='End' || e.key==='PageUp' || e.key==='PageDown'){
+          try{ _flagCaretMotion(); }catch{}
           // Defer until after the browser updates selection/caret
           setTimeout(()=>{
             try{ const off = editor.selectionStart|0; const rc = _rcFromOffset(off); caretRow = rc.r; caretCol = rc.c; }catch{}
@@ -6121,10 +6140,10 @@
         }
         return;
       }
-      if (e.key==='j' || e.key==='ArrowDown'){ e.preventDefault(); const n=_consumeCount(); _moveCaretLines(n); _repositionCaret(); updateGutter(); return; }
-      if (e.key==='k' || e.key==='ArrowUp'){ e.preventDefault(); const n=_consumeCount(); _moveCaretLines(-n); _repositionCaret(); updateGutter(); return; }
-      if (e.key==='h' || e.key==='ArrowLeft'){ e.preventDefault(); const n=_consumeCount(); _moveCaretCols(-n); _repositionCaret(); return; }
-      if (e.key==='l' || e.key==='ArrowRight'){ e.preventDefault(); const n=_consumeCount(); _moveCaretCols(n); _repositionCaret(); return; }
+  if (e.key==='j' || e.key==='ArrowDown'){ e.preventDefault(); const n=_consumeCount(); _moveCaretLines(n); try{ _flagCaretMotion(); }catch{} _repositionCaret(); updateGutter(); return; }
+  if (e.key==='k' || e.key==='ArrowUp'){ e.preventDefault(); const n=_consumeCount(); _moveCaretLines(-n); try{ _flagCaretMotion(); }catch{} _repositionCaret(); updateGutter(); return; }
+  if (e.key==='h' || e.key==='ArrowLeft'){ e.preventDefault(); const n=_consumeCount(); _moveCaretCols(-n); try{ _flagCaretMotion(); }catch{} _repositionCaret(); return; }
+  if (e.key==='l' || e.key==='ArrowRight'){ e.preventDefault(); const n=_consumeCount(); _moveCaretCols(n); try{ _flagCaretMotion(); }catch{} _repositionCaret(); return; }
   // delete: x (delete char(s) under cursor / join newline)
   if (e.key==='x' && !e.ctrlKey && !e.metaKey && !e.altKey){ e.preventDefault(); const n=_consumeCount(); _doDeleteX(n); ensureScrolloff(); _repositionCaret(); updateGutter(); return; }
   // delete operator: d + motion
@@ -6136,18 +6155,18 @@
   // change operator: c + motion
   if (e.key==='c' && !e.ctrlKey && !e.metaKey && !e.altKey){ e.preventDefault(); _pendingOp='c'; _pendingOpCount=_consumeCount(); if (!_pendingOpCount || _pendingOpCount<1) _pendingOpCount=1; _pendingOpSeq=null; _armPendingOpTimeout(); return; }
       // word motions (w: next word start, b: prev word start)
-    if (e.key==='w' && !e.ctrlKey && !e.metaKey && !e.altKey){ e.preventDefault(); const n=_consumeCount(); _moveWordW(n); _ensureAfterMotion(); _repositionCaret(); updateGutter(); return; }
-    if (e.key==='b' && !e.ctrlKey && !e.metaKey && !e.altKey){ e.preventDefault(); const n=_consumeCount(); _moveWordB(n); _ensureAfterMotion(); _repositionCaret(); updateGutter(); return; }
-  if (e.key==='W' && !e.ctrlKey && !e.metaKey && !e.altKey){ e.preventDefault(); const n=_consumeCount(); _moveWORDW(n); _ensureAfterMotion(); _repositionCaret(); updateGutter(); return; }
-  if (e.key==='B' && !e.ctrlKey && !e.metaKey && !e.altKey){ e.preventDefault(); const n=_consumeCount(); _moveWORDB(n); _ensureAfterMotion(); _repositionCaret(); updateGutter(); return; }
+    if (e.key==='w' && !e.ctrlKey && !e.metaKey && !e.altKey){ e.preventDefault(); const n=_consumeCount(); _moveWordW(n); try{ _flagCaretMotion(); }catch{} _ensureAfterMotion(); _repositionCaret(); updateGutter(); return; }
+    if (e.key==='b' && !e.ctrlKey && !e.metaKey && !e.altKey){ e.preventDefault(); const n=_consumeCount(); _moveWordB(n); try{ _flagCaretMotion(); }catch{} _ensureAfterMotion(); _repositionCaret(); updateGutter(); return; }
+  if (e.key==='W' && !e.ctrlKey && !e.metaKey && !e.altKey){ e.preventDefault(); const n=_consumeCount(); _moveWORDW(n); try{ _flagCaretMotion(); }catch{} _ensureAfterMotion(); _repositionCaret(); updateGutter(); return; }
+  if (e.key==='B' && !e.ctrlKey && !e.metaKey && !e.altKey){ e.preventDefault(); const n=_consumeCount(); _moveWORDB(n); try{ _flagCaretMotion(); }catch{} _ensureAfterMotion(); _repositionCaret(); updateGutter(); return; }
       // line anchors ^, 0, $
-      if (e.key==='^'){ e.preventDefault(); const _n=_consumeCount(); const line=(_splitLines()[caretRow]||''); _setCaret(caretRow, _firstNonBlankColOf(line)); _repositionCaret(); return; }
+  if (e.key==='^'){ e.preventDefault(); const _n=_consumeCount(); const line=(_splitLines()[caretRow]||''); _setCaret(caretRow, _firstNonBlankColOf(line)); try{ _flagCaretMotion(); }catch{} _repositionCaret(); return; }
       // '0' as a command only when no count prefix in progress
-      if (e.key==='0' && _countAcc==null){ e.preventDefault(); _setCaret(caretRow, 0); _repositionCaret(); return; }
-      if (e.key==='$'){ e.preventDefault(); const n=_consumeCount(); let r=caretRow; if (n>1){ _moveCaretLines(n-1); r=caretRow; } const len=_lineLen(r); _setCaret(r, len); _repositionCaret(); updateGutter(); return; }
+  if (e.key==='0' && _countAcc==null){ e.preventDefault(); _setCaret(caretRow, 0); try{ _flagCaretMotion(); }catch{} _repositionCaret(); return; }
+  if (e.key==='$'){ e.preventDefault(); const n=_consumeCount(); let r=caretRow; if (n>1){ _moveCaretLines(n-1); r=caretRow; } const len=_lineLen(r); _setCaret(r, len); try{ _flagCaretMotion(); }catch{} _repositionCaret(); updateGutter(); return; }
       // paragraphs { }
-  if (e.key==='}'){ e.preventDefault(); const n=_consumeCount(); _moveParagraphNext(n); _ensureAfterMotion(); _repositionCaret(); updateGutter(); return; }
-  if (e.key==='{'){ e.preventDefault(); const n=_consumeCount(); _moveParagraphPrev(n); _ensureAfterMotion(); _repositionCaret(); updateGutter(); return; }
+  if (e.key==='}'){ e.preventDefault(); const n=_consumeCount(); _moveParagraphNext(n); try{ _flagCaretMotion(); }catch{} _ensureAfterMotion(); _repositionCaret(); updateGutter(); return; }
+  if (e.key==='{'){ e.preventDefault(); const n=_consumeCount(); _moveParagraphPrev(n); try{ _flagCaretMotion(); }catch{} _ensureAfterMotion(); _repositionCaret(); updateGutter(); return; }
       // numeric prefix (1-9 start/extend; 0 extends if already started)
       if (e.key>='1' && e.key<='9' && !e.ctrlKey && !e.metaKey && !e.altKey){ e.preventDefault(); _countAcc = (_countAcc==null?0:_countAcc)*10 + parseInt(e.key,10); return; }
       if (e.key==='0' && !e.ctrlKey && !e.metaKey && !e.altKey && _countAcc!=null){ e.preventDefault(); _countAcc = _countAcc*10; return; }

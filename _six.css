@@ -121,6 +121,11 @@ body { font: var(--fontBase, 18px)/20px Consolas, 'Courier New', monospace; over
 	background: linear-gradient(to right, var(--caretGradStart, #ff5b5b), var(--caretGradMid, rgba(255,0,0,0.2)), rgba(255,0,0,0.0));
 	animation: caret-blink 1s steps(1, end) infinite;
 }
+/* While caret is moving due to key repeat, keep it lit (no blink) */
+.hide-cursor.moving-caret .caret {
+	animation: none !important;
+	opacity: 1 !important;
+}
 @keyframes caret-blink { 0%{opacity:1} 50%{opacity:0} 100%{opacity:1} }
 
 /* active line band (editor areaのみに限定: ガターへ侵食しない) */
