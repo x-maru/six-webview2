@@ -123,8 +123,8 @@ body { font: var(--fontBase, 18px)/20px Consolas, 'Courier New', monospace; over
 }
 @keyframes caret-blink { 0%{opacity:1} 50%{opacity:0} 100%{opacity:1} }
 
-/* active line band */
-#edstripe { position:absolute; left:0; right:0; height: var(--lhEff, var(--lh)); background: linear-gradient(to bottom, var(--activeLineGradStart, rgb(231,255,231)), var(--activeLineGradEnd, rgb(219,243,219))); opacity:0.7; pointer-events:none; z-index:0; }
+/* active line band (editor areaのみに限定: ガターへ侵食しない) */
+#edstripe { position:absolute; left: var(--gw); right:0; height: var(--lhEff, var(--lh)); background: linear-gradient(to bottom, var(--activeLineGradStart, rgb(231,255,231)), var(--activeLineGradEnd, rgb(219,243,219))); opacity:0.7; pointer-events:none; z-index:0; }
 
 /* Keep mouse cursor stable (avoid flicker by explicitly setting) */
 #editorViewport, #editor, #gutter { cursor: text; }

@@ -280,5 +280,63 @@ _six.js:5876  Uncaught ReferenceError: _lastSearch is not defined
 - 余白10行 →OK
 - 即時終了でのセッション保存、ヘルプ文言 →OK
 - `G`直後にEOF行を削除すると「先頭余白＋行背景ズレ」が発生する
-  - NORMALモードで`dd`でも発生するしINSERTモードで`Backspace`等でEOF行を全部削除した瞬間にも発生する
+  - NORMALモードで`dd`でも発生するしINSERTモードで`Backspace`等でEOF行を全文字削除した瞬間にも発生する
   - 「先頭余白」は余白ではないかも。単に直上の行が中途半端に見えているだけかもしれない。
+
+#437
+OK。次はUIの仕様変更。
+- INSERTモード時だけアクティブ行グラデーションとcaretグラデーションの色を変更したい
+  - window.THEMEに下記で定義
+```
+  activeEditLineGradStart: "white",
+  activeEditLineGradEnd: "#f4f4f4",
+  editCaretGradStart: "#ffe000",
+  editCaretGradMid: "rgba(255,239,0,0.5)",
+```
+- 今回の追加分に限らず、window.THEME対応しているのにwindow.THEMEに記述がないものは一律"yellow"で描画するようにしたい。
+
+#438
+- さっきの値を_six.customizeのwindow.THEMEに追加して。
+- 「未定義なら通常設定」「未定義ならベース値」→代替は一切せず、未定義なら即"yellow"で。
+  - window.THEME対応しているものはすべて漏れなくwindow.THEMEに記述する想定で運用したい。なので「記述がない＝事故」扱いなので、記述漏れをいち早く見つける意味でyellowとしている。
+
+#439
+- activeEditLineGradStartは反映されているが、activeEditLineGradEndが反映されていない。→NG
+- editCaretGradStart/Midがyellowで表示されている →NG
+
+#440
+- THEMEが適用されたが、_six.customizeの値を変更して保存し`F10`→起動としても変更が反映されない。
+  - 適用するタイミングの変更で起動時に反映できるならしてほしい。
+  - 難しいなら`Ctrl+F5`を消費せず素通しするようにしたい。(`F5`は消費)
+
+#441
+- セッション再現時も`Ctrl+F5`でも即刻THEMEが反映された →OK
+- `F5`が無視されてタブ5に移れない。
+- INSERTモードでのactiveガターの背景色にwindow.THEME.activeEditGutterGradStart/Endを使って。
+
+#442
+- `F5` →OK
+- INSERTモードでのactiveガターの背景色にwindow.THEME.activeEditGutterGradStart/Endが使われていない。NG
+  - "#f4f4f4"なんて_six.customize内に見当たらないけど、どこから来た値？
+- INSERTモード時のactive行背景のグラデーションがガター部分まで侵食している。NG
+- prompt.mdを保存したつもりが失敗していた。下記のエラーがコンソールに出るが、予防的対処は可能？
+```
+_six.js:7554   POST http://127.0.0.1:59891/write?fs=%5C%5Cwsl.localhost%5CUbuntu%5Chome%5Cymaru%5Cwork%5CWebView2%5Csix%5Cprompt.md net::ERR_CONNECTION_REFUSED
+_saveToURL @ _six.js:7554
+(匿名) @ _six.js:4026
+runCommand @ _six.js:4036
+(匿名) @ _six.js:6548
+```
+  - 即時終了して起動し直したら`:w`で保存できた。
+
+#443
+OK。次はWindowsクリップボードに対応する機能を追加したい。
+- NORMALモードの`Y`：
+  - `y`と同じバリエーションに対応し、yankバッファではなくWindowsクリップボードに格納する
+    - `YY`と`Yy`はどちらも`yy`のクリップボード版とする。`yY`はない。
+    - 数字前置詞も対応する。`3Yw`など。
+    - 格納直後にトーストを出す。"Copied to Windows clipboard."
+- VISUALモードの`Y`：
+  - 選択中に`Y`でyankバッファではなくWindowsクリップボードに格納する
+    - 格納直後にトーストを出す。"Copied to Windows clipboard."
+- 仕様として足りない点や不整合があれば指摘して。

@@ -19,31 +19,46 @@ window.SIX_OPTIONS = {
 window.THEME = {
   bodyBGColor: "#0b0d12",
   lineBaseFill: "#0f1117",
-  // Per-line vertical gradient (top -> bottom)
-  lineGradientStart: "rgb(243,251,243)",
-  lineGradientEnd: "rgb(237,243,237)",
+
   // Editor text color and sizes
   editorTextColor: "rgb(0,95,31)",
-  // Active line gradients (editor and gutter)
-  activeLineGradientStart: "rgb(231,255,231)",
-  activeLineGradientEnd: "rgb(203,243,203)",
-  activeGutterGradientStart: "rgb(231,255,231)",
-  activeGutterGradientEnd: "rgb(219,243,219)",
-  // Inactive gutter gradient (top -> bottom)
+
+  // Inactive line/gutter gradient (top -> bottom)
+  lineGradientStart: "rgb(243,251,243)",
+  lineGradientEnd: "rgb(237,243,237)",
   inactiveGutterGradientStart: "rgb(235,239,235)",
   inactiveGutterGradientEnd: "rgb(219,227,219)",
+  gutterNumberColor: "#b0b0b0",
+
+  // Active line/gutter gradient (editor and gutter)
+  activeLineGradientStart: "rgb(231,255,231)",
+  activeLineGradientEnd: "rgb(203,243,203)",
+  activeGutterGradientStart: "#d0ead0",
+  activeGutterGradientEnd: "#c0dac0",
+  activeLineNumberColor: "#100000",
+
   eofFillColor: "#0f1117",
   eofGutterFillColor: "rgb(235,239,235)",
   gutterGradientStart: "rgb(235,239,235)",
   gutterGradientEnd: "rgb(219,227,219)",
+
   activeLineBg: "#1b2231",
-  activeLineNumberColor: "rgb(191,31,79)",
-  gutterNumberColor: "rgb(143,179,143)",
+
   caretGradientStart: "#ff0000",
   caretGradientMid: "rgba(255,0,0,0.5)",
   caretWidthPx: 2,
+
+  // INSERT mode specific gradients (#437/#438)
+  activeEditLineGradStart: "#fff0f0",
+  activeEditLineGradEnd: "#ffe0e0",
+  activeEditGutterGradStart: "#efe0e0",
+  activeEditGutterGradEnd: "#efd0c0",
+  editCaretGradStart: "rgba(255,79,0,0.95)",
+  editCaretGradMid: "rgba(255,79,0,0.01)",
+
   tabBarBg: "rgb(27,47,15)",
   tabBarFg: "rgb(0,95,31)",
+
   // Visual selection default colors
   selectionBg: "#607080",
   selectionFg: "white",
@@ -59,6 +74,11 @@ window.THEME = {
   // VISUAL after ':' selection overlay
   visCmdSelBg: "rgba(20, 192, 192, 0.2)",
   visCmdSelOutline: "rgba(0, 80, 120, 0.55)",
+
+  // Global <kbd> colors used in tabbar and :b popup (fallbacks to helpKbd*)
+  KbdBgColor: "#1c282a",
+  KbdFgColor: "#90aada",
+
   // Help modal theming
   helpTabActiveBg: "#2b7050",
   helpTabActiveFg: "#e0efe6",
@@ -67,9 +87,6 @@ window.THEME = {
   helpModalBg: "#041a10",
   helpKbdBg: "#1c282a",
   helpKbdFg: "#90aada",
-  // Global <kbd> colors used in tabbar and :b popup (fallbacks to helpKbd*)
-  KbdBgColor: "#1c282a",
-  KbdFgColor: "#90aada",
   // Help close button (themeable)
   helpCloseBg: "#3a3a56",
   helpCloseFg: "#e6e6e6",

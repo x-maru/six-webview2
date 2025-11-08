@@ -34,6 +34,8 @@
   // session/quit control flags
   let _skipPersistOnUnloadOnce = false; // suppress one-time session persist at unload
   let _suppressPersistOnQuit = false;   // do not rewrite session on this quit path
+  // Track last known total lines to detect shrink/expand for post-edit scroll snapping (#436)
+  let _lastLinesForSnap = 0;
   // session persistence
   const _SESSION_KEY = 'six.session.v1';
   let _persistTimer = null;
@@ -1106,59 +1108,80 @@
       const t = (window && window.THEME) ? window.THEME : {};
       const root = document.documentElement;
       const setVar = (k, v)=>{ try{ if (v!=null) root.style.setProperty('--'+k, String(v)); }catch{} };
+      // Theme getter with uniform fallback 'yellow' when key missing (#437)
+      const themeGet = (key, fallback)=>{
+        try{
+          if (t && Object.prototype.hasOwnProperty.call(t, key)){
+            const v = t[key];
+            if (v != null && v !== '') return v;
+          }
+        }catch{}
+        return (fallback!=null ? fallback : 'yellow');
+      };
       // Core colors
-      setVar('bodyBGColor', t.bodyBGColor);
-      setVar('lineBaseFill', t.lineBaseFill);
+      setVar('bodyBGColor', themeGet('bodyBGColor', t.bodyBGColor));
+      setVar('lineBaseFill', themeGet('lineBaseFill', t.lineBaseFill));
       // Per-line gradient colors (top -> bottom)
-      setVar('lineGradStart', t.lineGradientStart);
-      setVar('lineGradEnd', t.lineGradientEnd);
+      setVar('lineGradStart', themeGet('lineGradientStart', t.lineGradientStart));
+      setVar('lineGradEnd', themeGet('lineGradientEnd', t.lineGradientEnd));
   // Editor text color
-  setVar('editorTextColor', t.editorTextColor);
+  setVar('editorTextColor', themeGet('editorTextColor', t.editorTextColor));
   // Active line stripe gradient (top -> bottom)
-  setVar('activeLineGradStart', t.activeLineGradientStart);
-  setVar('activeLineGradEnd', t.activeLineGradientEnd);
-      setVar('activeLineBg', t.activeLineBg);
+  setVar('activeLineGradStart', themeGet('activeLineGradientStart', t.activeLineGradientStart));
+  setVar('activeLineGradEnd', themeGet('activeLineGradientEnd', t.activeLineGradientEnd));
+  // Gutter gradients (active row default) and INSERT用ガター
+  setVar('activeGutterGradStart', themeGet('activeGutterGradientStart', t.activeGutterGradientStart));
+  setVar('activeGutterGradEnd', themeGet('activeGutterGradientEnd', t.activeGutterGradientEnd));
+  setVar('activeEditGutterGradStart', themeGet('activeEditGutterGradStart', t.activeEditGutterGradStart));
+  setVar('activeEditGutterGradEnd', themeGet('activeEditGutterGradEnd', t.activeEditGutterGradEnd));
+  // INSERT mode specific stripe/caret gradients (exposed as CSS vars too)
+  setVar('activeEditLineGradStart', themeGet('activeEditLineGradStart', t.activeEditLineGradStart));
+  setVar('activeEditLineGradEnd', themeGet('activeEditLineGradEnd', t.activeEditLineGradEnd));
+  setVar('editCaretGradStart', themeGet('editCaretGradStart', t.editCaretGradStart));
+  setVar('editCaretGradMid', themeGet('editCaretGradMid', t.editCaretGradMid));
+      setVar('activeLineBg', themeGet('activeLineBg', t.activeLineBg));
       setVar('tabBarBg', t.tabBarBg);
       setVar('tabBarFg', t.tabBarFg);
   // Command input colors
-  setVar('cmdInputFg', t.cmdInputFg);
-  setVar('cmdInputBg', t.cmdInputBg);
-      setVar('gutterGradientStart', t.gutterGradientStart);
-      setVar('gutterGradientEnd', t.gutterGradientEnd);
-      setVar('gutterNumberColor', t.gutterNumberColor);
-      setVar('activeLineNumberColor', t.activeLineNumberColor);
+  setVar('cmdInputFg', themeGet('cmdInputFg', t.cmdInputFg));
+  setVar('cmdInputBg', themeGet('cmdInputBg', t.cmdInputBg));
+      setVar('gutterGradientStart', themeGet('gutterGradientStart', t.gutterGradientStart));
+      setVar('gutterGradientEnd', themeGet('gutterGradientEnd', t.gutterGradientEnd));
+      setVar('gutterNumberColor', themeGet('gutterNumberColor', t.gutterNumberColor));
+      setVar('activeLineNumberColor', themeGet('activeLineNumberColor', t.activeLineNumberColor));
   // Caret gradient colors (start/mid). End is fixed to rgba(255,0,0,0.0) in CSS
-      setVar('caretGradStart', t.caretGradientStart);
-      setVar('caretGradMid', t.caretGradientMid);
+      setVar('caretGradStart', themeGet('caretGradientStart', t.caretGradientStart));
+      setVar('caretGradMid', themeGet('caretGradientMid', t.caretGradientMid));
   // Visual selection colors
-  setVar('selBg', t.selectionBg);
-  setVar('selFg', t.selectionFg);
+  setVar('selBg', themeGet('selectionBg', t.selectionBg));
+  setVar('selFg', themeGet('selectionFg', t.selectionFg));
   // Incremental search preview highlight
-  setVar('incPreviewBg', t.incPreviewBg);
-  setVar('incPreviewOutline', t.incPreviewOutline);
+  setVar('incPreviewBg', themeGet('incPreviewBg', t.incPreviewBg));
+  setVar('incPreviewOutline', themeGet('incPreviewOutline', t.incPreviewOutline));
   // hlsearch (all matches) highlight
-  setVar('hlsearchBg', t.hlsearchBg);
-  setVar('hlsearchOutline', t.hlsearchOutline);
+  setVar('hlsearchBg', themeGet('hlsearchBg', t.hlsearchBg));
+  setVar('hlsearchOutline', themeGet('hlsearchOutline', t.hlsearchOutline));
   // VISUAL after ':' selection overlay
-  setVar('visCmdSelBg', t.visCmdSelBg);
-  setVar('visCmdSelOutline', t.visCmdSelOutline);
+  setVar('visCmdSelBg', themeGet('visCmdSelBg', t.visCmdSelBg));
+  setVar('visCmdSelOutline', themeGet('visCmdSelOutline', t.visCmdSelOutline));
   // Help modal (tabs/colors)
-  setVar('six-help-tab-active-bg', t.helpTabActiveBg);
-  setVar('six-help-tab-active-fg', t.helpTabActiveFg);
-  setVar('six-help-tab-bg', t.helpTabBg);
-  setVar('six-help-tab-fg', t.helpTabFg);
-  setVar('six-modal-bg', t.helpModalBg);
-  setVar('six-help-kbd-bg', t.helpKbdBg);
-  setVar('six-help-kbd-fg', t.helpKbdFg);
+  setVar('six-help-tab-active-bg', themeGet('helpTabActiveBg', t.helpTabActiveBg));
+  setVar('six-help-tab-active-fg', themeGet('helpTabActiveFg', t.helpTabActiveFg));
+  setVar('six-help-tab-bg', themeGet('helpTabBg', t.helpTabBg));
+  setVar('six-help-tab-fg', themeGet('helpTabFg', t.helpTabFg));
+  setVar('six-modal-bg', themeGet('helpModalBg', t.helpModalBg));
+  setVar('six-help-kbd-bg', themeGet('helpKbdBg', t.helpKbdBg));
+  setVar('six-help-kbd-fg', themeGet('helpKbdFg', t.helpKbdFg));
   // Global kbd colors for tabs and popups
-  setVar('six-kbd-bg', t.KbdBgColor || t.helpKbdBg);
-  setVar('six-kbd-fg', t.KbdFgColor || t.helpKbdFg);
+  // No cross-key fallback: if missing, turn yellow to reveal omission (#438)
+  setVar('six-kbd-bg', themeGet('KbdBgColor', t.KbdBgColor));
+  setVar('six-kbd-fg', themeGet('KbdFgColor', t.KbdFgColor));
   // Help close button colors
-  setVar('six-help-close-bg', t.helpCloseBg);
-  setVar('six-help-close-fg', t.helpCloseFg);
-  setVar('six-help-close-border', t.helpCloseBorder);
+  setVar('six-help-close-bg', themeGet('helpCloseBg', t.helpCloseBg));
+  setVar('six-help-close-fg', themeGet('helpCloseFg', t.helpCloseFg));
+  setVar('six-help-close-border', themeGet('helpCloseBorder', t.helpCloseBorder));
   // Popup active line color (encodeSet popup etc.)
-  setVar('popupActiveLine', t.popupActiveLine);
+  setVar('popupActiveLine', themeGet('popupActiveLine', t.popupActiveLine));
       // apply persisted scale if any
       try{
         const s = localStorage.getItem('six.edScale');
@@ -1175,6 +1198,17 @@
         _caretGradMidBase   = (cg1 && cg1.trim()) || 'rgba(255,0,0,0.2)';
       }catch{}
     }catch{}
+  }
+
+  // Reload _six.customize with a cache-busting query and evaluate it to refresh window.THEME/SIX_OPTIONS.
+  // This allows theme edits to take effect on next startup without requiring Ctrl+F5 (#440).
+  function _reloadCustomizeFresh(){
+    try{
+      const url = '_six.customize?cb=' + Date.now();
+      return fetch(url, { cache: 'no-store' })
+        .then(res=>{ if (!res.ok) throw new Error('http ' + res.status); return res.text(); })
+        .then(src=>{ try{ (new Function(src))(); }catch(e){ /* swallow */ } });
+    }catch(e){ return Promise.reject(e); }
   }
 
   function _setEditorScale(next){
@@ -2025,6 +2059,15 @@
       edstripe.style.display='';
       edstripe.style.top = topPx + 'px';
       edstripe.style.height = LINE_HEIGHT + 'px';
+      // INSERT時はアクティブ行のグラデ色を切り替える (#437)
+      try{
+        if (_mode === 'INSERT'){
+          // Use CSS vars so values are centralized and fallback is consistently yellow
+          edstripe.style.background = 'linear-gradient(to bottom, var(--activeEditLineGradStart, yellow), var(--activeEditLineGradEnd, yellow))';
+        } else {
+          edstripe.style.background = '';
+        }
+      }catch{}
       // apply remainder compensation to stripe
       try{ edstripe.style.transform = (Math.abs(rem) > 0.01) ? `translateY(${-rem}px)` : ''; }catch{}
     } else {
@@ -2039,6 +2082,18 @@
       caret.className = 'caret';
       caretLayer.appendChild(caret);
     }
+    // INSERT時はcaretグラデ色を置き換え（なければ黄色） (#437)
+    try{
+      if (_mode === 'INSERT'){
+        // Use CSS vars so theme changes reflect immediately and fallback stays yellow
+        caret.style.setProperty('--caretGradStart', 'var(--editCaretGradStart, yellow)');
+        caret.style.setProperty('--caretGradMid',   'var(--editCaretGradMid, yellow)');
+      } else {
+        // non-INSERT: restore baseline (no yellow fallback here; baseline must exist)
+        if (_caretGradStartBase) caret.style.setProperty('--caretGradStart', _caretGradStartBase);
+        if (_caretGradMidBase)   caret.style.setProperty('--caretGradMid', _caretGradMidBase);
+      }
+    }catch{}
     const lines = _splitLines();
     const line = lines[caretRow] || '';
     // Helper: read half/full-width reference widths
@@ -2185,6 +2240,36 @@
       _setTitle(); _renderTabbar();
       // Persist session after modifications (debounced)
       _schedulePersist('modify');
+
+      // After line deletions near EOF, browser layout timing can leave scrollTop at a half-line
+      // value momentarily, showing a "leading half-row" at the top (#436). Detect line count
+      // reductions and, when near EOF, floor-snap scrollTop now and on next frame.
+      try{
+        const prevLines = (_lastLinesForSnap|0);
+        const curLines = Math.max(1, _totalLines()|0);
+        _lastLinesForSnap = curLines;
+        if (curLines < prevLines){
+          // Only act when viewport is at/near the tail page or caret is at EOF
+          const vis = Math.max(1, _visibleLinesExact()|0);
+          const topLine1 = Math.max(1, _topLine()|0);
+          const baseMaxTop = Math.max(1, curLines - vis + 1);
+          const nearBottom = (topLine1 >= (baseMaxTop - 1));
+          const atEOF = ((caretRow+1) >= curLines);
+          if (nearBottom || atEOF){
+            const floorSnap = ()=>{
+              try{
+                const st = (editor && typeof editor.scrollTop==='number') ? (editor.scrollTop|0) : 0;
+                const lh = (typeof LINE_HEIGHT==='number' && LINE_HEIGHT>0) ? LINE_HEIGHT : 20;
+                const flo = Math.floor(st / lh) * lh;
+                if (Math.abs(flo - st) > 0.1){ editor.scrollTop = flo; }
+                _repositionCaret(); updateGutter();
+              }catch{}
+            };
+            floorSnap();
+            if (window.requestAnimationFrame){ requestAnimationFrame(()=>{ floorSnap(); }); }
+          }
+        }
+      }catch{}
     }catch{}
   }
   function _syncModifiedFromTick(){
@@ -2833,9 +2918,13 @@
       } else {
         el.textContent = r.ln;
         if (r.active){
-          const g1 = (T.activeGutterGradientStart||'rgb(231,255,231)');
-          const g2 = (T.activeGutterGradientEnd||'rgb(219,243,219)');
-          el.style.background = `linear-gradient(to bottom, ${g1}, ${g2})`;
+          // INSERTモード用のガターグラデ (未定義キーは yellow sentinel) (#441/#442)
+          // CSS変数に委譲し、JS は単一の linear-gradient 定義のみ。テーマキーは _applyTheme() で --activeEditGutterGrad* としてセット済み。
+          if (_mode === 'INSERT'){
+            el.style.background = 'linear-gradient(to bottom, var(--activeEditGutterGradStart, yellow), var(--activeEditGutterGradEnd, yellow))';
+          } else {
+            el.style.background = 'linear-gradient(to bottom, var(--activeGutterGradStart, yellow), var(--activeGutterGradEnd, yellow))';
+          }
         } else {
           // Inactive rows: transparent to let container's tiled background show (prevents flicker)
           el.style.background = '';
@@ -7446,36 +7535,55 @@
       let fsPath = _fsPathFromFileURL(u);
       if (!fsPath){ toast('invalid target path'); return false; }
       const apiUrl = _apiBase + 'write?fs=' + encodeURIComponent(fsPath);
-      const ac = (window.AbortController ? new AbortController() : null);
-      const to = setTimeout(()=>{ try{ ac && ac.abort(); }catch{} }, 8000);
-      // Send raw bytes without setting Content-Type to avoid CORS preflight (#380)
-      // Use the exact Uint8Array view to prevent implicit Blob type headers.
-      let body;
-      try{
-        // If TextEncoder produced a view with non-zero byteOffset, create a tight copy
-        if (payloadBytes && (payloadBytes.byteOffset!==0 || payloadBytes.byteLength !== payloadBytes.buffer.byteLength)){
-          body = new Uint8Array(payloadBytes); // copies the slice
-        } else {
-          body = payloadBytes; // direct
-        }
-      }catch{ body = payloadBytes; }
-  const resp = await fetch(apiUrl, { method:'POST', body, signal: (ac?ac.signal:undefined) });
-      try{ clearTimeout(to); }catch{}
-      if (!resp.ok) {
-        let msg = 'write failed';
+      const makeBody = ()=>{
+        // Send raw bytes without setting Content-Type to avoid CORS preflight (#380)
+        // Use the exact Uint8Array view to prevent implicit Blob type headers.
         try{
-          const rt = await resp.text();
-          try{ const j = JSON.parse(rt); if (j && j.error) msg = 'write failed: ' + j.error; else if (rt) msg = 'write failed: ' + rt; }
-          catch{ if (rt) msg = 'write failed: ' + rt; }
-        }catch{}
-        // Fallback: include HTTP status if no body message
-        try{ if ((!msg || msg==='write failed') && resp){ msg = 'write failed: ' + resp.status + ' ' + (resp.statusText||''); } }catch{}
-        try{ _apiNoteFailure(); }catch{}
-        toast(msg);
-        return false;
+          if (payloadBytes && (payloadBytes.byteOffset!==0 || payloadBytes.byteLength !== payloadBytes.buffer.byteLength)){
+            return new Uint8Array(payloadBytes); // copies the slice
+          } else {
+            return payloadBytes; // direct
+          }
+        }catch{ return payloadBytes; }
+      };
+      let lastErr = null;
+      for (let attempt=0; attempt<2; attempt++){
+        const ac = (window.AbortController ? new AbortController() : null);
+        const to = setTimeout(()=>{ try{ ac && ac.abort(); }catch{} }, 8000);
+        try{
+          const resp = await fetch(apiUrl, { method:'POST', body: makeBody(), signal: (ac?ac.signal:undefined) });
+          try{ clearTimeout(to); }catch{}
+          if (resp.ok){ try{ _apiNoteSuccess(); }catch{} return true; }
+          // HTTP error: report and stop (再試行はネットワークエラー時のみ)
+          let msg = 'write failed';
+          try{
+            const rt = await resp.text();
+            try{ const j = JSON.parse(rt); if (j && j.error) msg = 'write failed: ' + j.error; else if (rt) msg = 'write failed: ' + rt; }
+            catch{ if (rt) msg = 'write failed: ' + rt; }
+          }catch{}
+          try{ if ((!msg || msg==='write failed') && resp){ msg = 'write failed: ' + resp.status + ' ' + (resp.statusText||''); } }catch{}
+          try{ _apiNoteFailure(); }catch{}
+          toast(msg);
+          return false;
+        }catch(e){
+          lastErr = e;
+          // ネットワーク層の失敗（例: 接続拒否/一時停止）: 一度だけ短い遅延で再試行
+          const emsg = (e && (e.message||'')) + '';
+          const isAbort = (e && (e.name==='AbortError'));
+          const isNet = /Failed to fetch|NetworkError|ERR_CONNECTION|ECONNREFUSED|ENETUNREACH|EHOSTUNREACH/i.test(emsg);
+          if (attempt===0 && !isAbort){
+            const hint = isNet ? ' (connection unavailable; retrying...)' : '';
+            toast('write: network error' + hint, 1200);
+            await new Promise(r=>setTimeout(r, 1200));
+            continue;
+          }
+          break;
+        }
       }
-      try{ _apiNoteSuccess(); }catch{}
-      return true;
+      // 最終失敗
+      toast('write failed: connection');
+      try{ _apiNoteFailure(); }catch{}
+      return false;
     }catch(e){ toast('write failed'); return false; }
   }
 
@@ -8450,6 +8558,10 @@
       const handler = (e)=>{
         try{
           const key = e.key;
+          // Allow hard reload (Ctrl+F5) to bypass interception so browser can fetch fresh resources (#440)
+          if (key === 'F5' && e.ctrlKey && !e.altKey && !e.metaKey){
+            return; // don't preventDefault
+          }
           // Compute UI states up-front
           const isModalOpen = !!(_modalOverlay && _modalOverlay.style && _modalOverlay.style.display !== 'none');
           const inCmd = (_mode === 'CMD');
@@ -8482,6 +8594,7 @@
             }
             return;
           }
+          // (Plain F5 is handled by the generic F1–F8 tab switching below; do not swallow here)
 
           // :b popup visible → F1–F8 or digits 1–8 = direct selection (absolute index)
           if (bufOpen && (/^F[1-8]$/.test(key) || /^[1-8]$/.test(key))){
@@ -8526,6 +8639,12 @@
     try{
       _readApiFromHash();
       _applyTheme();
+      // Try to refresh customize file with cache-buster, then re-apply theme once more
+      try{
+        _reloadCustomizeFresh()
+          .then(()=>{ try{ _applyTheme(); _repositionCaret(); updateGutter(); }catch{} })
+          .catch(()=>{});
+      }catch{}
       // Sync metrics (line-height, font-size, measurement span)
       _syncEditorMetrics();
       _wireZoomHUD();
