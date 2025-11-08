@@ -61,7 +61,7 @@ window.THEME = {
   tabBg: "#2a4020",
   tabText: "#e0ffe0",
   activeTabBg: "#50aaa0",
-  activeTagText: "#d0eaff",
+  activeTabText: "#d0eaff",
   tabScrollBtnEnableBG: "white", // タブスクロールボタン(活性)
   tabScrollBtnEnableText: "orange", // タブスクロールボタン(活性)
   tabScrollBtnDisableBG: "black", // タブスクロールボタン(非活性)
@@ -86,6 +86,11 @@ window.THEME = {
   // Global <kbd> colors used in tabbar and :b popup (fallbacks to helpKbd*)
   KbdBgColor: "#1c282a",
   KbdFgColor: "#90aada",
+
+  // 制御文字
+  controlCharColor: "#80d0d0",
+  controlCharColorLF: "#a0eada",
+  controlCharColorCRLF: "#2050c0",
 
   // Help modal theming
   helpTabActiveBg: "#2b7050",

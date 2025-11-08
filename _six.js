@@ -657,6 +657,7 @@
 
   // --- hlsearch (highlight all matches) ---
   let _optHlsearch = (function(){ try{ const o=(window&&window.SIX_OPTIONS)||{}; return !!o.hlsearch; }catch{} return false; })();          // :set hlsearch / :set nohlsearch
+  let _optList = (function(){ try{ const o=(window&&window.SIX_OPTIONS)||{}; return (o.list!==false); }catch{} return true; })(); // :set list (default ON)
   let _hlLayer = null;               // container for match rectangles
   let _hlMatches = null;             // cached [{start,len}] for _lastSearch over current text
   let _lastSearch = null;            // { src, flags, dir, origDir } last confirmed search; dir may record last movement, origDir is immutable base
@@ -820,6 +821,70 @@
     }
     _recomputeHlMatches();
     _renderHlMatchesVisible();
+    _renderListChars();
+  }
+
+  // ---- listchars rendering (minimal overlay layer) ----
+  let _listLayer = null;
+  function _listEnsureLayer(){
+    try{
+      if (!_listLayer){ _listLayer = document.createElement('div'); _listLayer.className='listchars-layer'; _listLayer.style.position='absolute'; _listLayer.style.left='0'; _listLayer.style.top='0'; _listLayer.style.right='0'; _listLayer.style.bottom='0'; _listLayer.style.pointerEvents='none'; _listLayer.style.zIndex='1'; }
+      if (_listLayer.parentNode !== caretLayer){ caretLayer.appendChild(_listLayer); }
+    }catch{}
+  }
+  function _listClear(){ try{ if(_listLayer){ while(_listLayer.firstChild){ _listLayer.removeChild(_listLayer.firstChild); } } }catch{} }
+  function _renderListChars(){
+    try{
+      if (!_optList){ _listClear(); return; }
+      _listEnsureLayer(); _listClear();
+      const lines = _splitLines();
+      const realTotal = lines.length; // real EOF (exclude virtual pad lines)
+      const topLine = _topLine();
+      const vis = _visibleLinesExact();
+      const endLine = topLine + vis - 1;
+      // For performance do one measurement span reuse
+      for (let row = topLine; row <= endLine; row++){
+        const idx = row - 1;
+        const isReal = idx >= 0 && idx < realTotal;
+        const line = isReal ? String(lines[idx]||'') : '';
+        const yTop = (row - topLine) * LINE_HEIGHT;
+        // Render trailing spaces, tabs, eol marker. We overlay individual inline boxes.
+        // Trailing spaces
+        let trailStart = line.length; while(trailStart>0 && line.charAt(trailStart-1)===' ') trailStart--;
+        // Iterate characters for tabs and trail markers
+        for (let c=0;c<line.length;c++){
+          const ch = line.charAt(c);
+          if (ch==='\t' || (c>=trailStart && ch===' ')){
+            _measureSpan.textContent = line.slice(0,c);
+            const x1 = _measureSpan.getBoundingClientRect().width;
+            _measureSpan.textContent = line.slice(0,c+1);
+            const x2 = _measureSpan.getBoundingClientRect().width;
+            const el = document.createElement('div');
+            el.className='listchar';
+            let sym = '';
+            if (ch==='\t') sym='▸'; else sym='·';
+            el.textContent = sym;
+            let _hs=0; try{ _hs=(editor.scrollLeft||0); }catch{}
+            el.style.position='absolute'; el.style.left=(x1-_hs)+'px'; el.style.top=yTop+'px'; el.style.height=LINE_HEIGHT+'px'; el.style.lineHeight=LINE_HEIGHT+'px'; el.style.fontSize='inherit'; el.style.padding='0'; el.style.margin='0'; el.style.color='var(--controlCharColor, yellow)';
+            _listLayer.appendChild(el);
+          }
+        }
+        // EOL marker (after line width) only for real lines (exclude virtual padding beyond EOF)
+        if (isReal){
+          _measureSpan.textContent = line;
+          const xEnd = _measureSpan.getBoundingClientRect().width;
+          let _hs=0; try{ _hs=(editor.scrollLeft||0); }catch{}
+          const elE = document.createElement('div');
+          elE.className='listchar-eol';
+          // ff-based coloring: THEME via CSS vars for LF/CRLF; legacy CR (mac) stays red-ish as hidden feature
+          let ffColor = 'var(--controlCharColorLF, yellow)';
+          try{ const b=currentBuffer(); const ff=(b&&b.ff)||'unix'; if(ff==='dos') ffColor='var(--controlCharColorCRLF, yellow)'; else if(ff==='mac') ffColor='rgba(200,80,80,0.65)'; }catch{}
+          elE.textContent='↲';
+          elE.style.position='absolute'; elE.style.left=(xEnd-_hs)+'px'; elE.style.top=yTop+'px'; elE.style.height=LINE_HEIGHT+'px'; elE.style.lineHeight=LINE_HEIGHT+'px'; elE.style.fontSize='inherit'; elE.style.color=ffColor; elE.style.margin='0'; elE.style.padding='0';
+          _listLayer.appendChild(elE);
+        }
+      }
+    }catch{}
   }
 
   // When true, ensureScrolloff will skip making automatic adjustments.
@@ -1215,13 +1280,17 @@
   setVar('tabBg', themeGet('tabBg', t.tabBg));
   setVar('tabText', themeGet('tabText', t.tabText));
   setVar('activeTabBg', themeGet('activeTabBg', t.activeTabBg));
-  // activeTagText in theme maps to activeTabText variable name (typo in spec key) (#455)
-  setVar('activeTabText', themeGet('activeTagText', t.activeTagText));
+  // Active tab text color (no legacy fallback; missing key => yellow to surface omission) (#457)
+  setVar('activeTabText', themeGet('activeTabText', t.activeTabText));
   // Tab scroll button colors (always present; disabled/enabled styled via CSS vars)
   setVar('tabScrollBtnEnableBG', themeGet('tabScrollBtnEnableBG', t.tabScrollBtnEnableBG));
   setVar('tabScrollBtnEnableText', themeGet('tabScrollBtnEnableText', t.tabScrollBtnEnableText));
   setVar('tabScrollBtnDisableBG', themeGet('tabScrollBtnDisableBG', t.tabScrollBtnDisableBG));
   setVar('tabScrollBtnDisableText', themeGet('tabScrollBtnDisableText', t.tabScrollBtnDisableText));
+  // Control chars colors for listchars (#458)
+  setVar('controlCharColor', themeGet('controlCharColor', t.controlCharColor));
+  setVar('controlCharColorLF', themeGet('controlCharColorLF', t.controlCharColorLF));
+  setVar('controlCharColorCRLF', themeGet('controlCharColorCRLF', t.controlCharColorCRLF));
   // Command input colors
   setVar('cmdInputFg', themeGet('cmdInputFg', t.cmdInputFg));
   setVar('cmdInputBg', themeGet('cmdInputBg', t.cmdInputBg));
@@ -3092,6 +3161,8 @@
       const first = gutter.firstElementChild;
       if (first){ first.style.marginTop = Math.abs(rem) > 0.01 ? (-rem)+'px' : '0px'; }
     }catch{}
+    // Keep listchars overlay refreshed with any gutter/text update
+    try{ _renderListChars(); }catch{}
   }
 
   /*********************************************************
@@ -3973,6 +4044,19 @@
     if (/^:set\s+hlsearch!\s*$/i.test(cmd)){
       _optHlsearch = !_optHlsearch; _updateHlsearchFull(); try{ _updateOverlayHlsearchVisual(); }catch{} toast('hlsearch: ' + (_optHlsearch?'on':'off'), 900); return;
     }
+    // :set list / :set nolist / :set list! / :set list?
+    if (/^:set\s+list\s*$/i.test(cmd)){
+      _optList = true; toast('list: on', 900); try{ _renderListChars(); }catch{} updateGutter(); try{ _updateOverlayListVisual(); }catch{} return;
+    }
+    if (/^:set\s+nolist\s*$/i.test(cmd)){
+      _optList = false; toast('list: off', 900); try{ _renderListChars(); }catch{} updateGutter(); try{ _updateOverlayListVisual(); }catch{} return;
+    }
+    if (/^:set\s+list!\s*$/i.test(cmd)){
+      _optList = !_optList; toast('list: ' + (_optList?'on':'off'), 900); try{ _renderListChars(); }catch{} updateGutter(); try{ _updateOverlayListVisual(); }catch{} return;
+    }
+    if (/^:set\s+list\?\s*$/i.test(cmd)){
+      toast('list: ' + (_optList?'on':'off'), 1200); return;
+    }
     // :wqa[!] [path?] — write all & quit (use previous :wq behavior)
     const wqam = cmd.match(/^:(wqa!?)(?:\s*(.*))?$/i);
     if (wqam){
@@ -4766,7 +4850,8 @@
             wrap.appendChild(mkH('起動後に変更可能なパラメータの初期値'));
             const initList = [
               'scrolloff = 3',
-              '検索ハイライト hlsearch = off'
+              '検索ハイライト hlsearch = off',
+              '制御文字表示 list = on'
             ];
             initList.forEach(s=>{ const d=document.createElement('div'); d.textContent=s; wrap.appendChild(d); });
             // ウインドウ
@@ -4875,6 +4960,13 @@
             // 検索ハイライト
             section('検索ハイライト', [
               [K(':set hlsearch'), sep(' 有効 / '), K(':set nohlsearch'), sep(' 無効 / '), K(':set hlsearch!'), sep(' トグル')]
+            ]);
+            // 制御文字表示 (:set list)
+            section('制御文字表示', [
+              [K(':set list'), sep(' 有効 / '), K(':set nolist'), sep(' 無効 / '), K(':set list!'), sep(' トグル / '), K(':set list?'), sep(' 状態表示')],
+              [sep('表示内容: タブ → '), K('▸'), sep(' / 行末 → '), K('↲'), sep(' / 末尾の空白 → '), K('·')],
+              [sep('行末記号色: '), K('LF(unix)'), sep(' 緑 / '), K('CRLF(dos)'), sep(' 青 / '), K('CR(mac)'), sep(' 赤')],
+              [sep('既定値: 起動時 list=on (SIX_OPTIONS.list===false なら off)')]
             ]);
             // 表示
             section('表示', [
@@ -8687,7 +8779,7 @@
         el.addEventListener('mouseleave', ()=>{ try{ el.style.background = baseBg; }catch{} });
       };
 
-      // Create buttons first (but append to a 2x2 grid later)
+  // Create buttons first (will append to a grid later)
       // 検索ハイライトトグルボタン（左下配置）
       const hlBtn = document.createElement('button');
       hlBtn.type = 'button';
@@ -8779,7 +8871,50 @@
         }catch{}
       });
 
-      // 即時終了ボタン（左上は空欄、右上に配置。ラベル後半は 'F10'）
+      // 制御文字表示（list オプション）ボタン（即時終了ボタンの左側 = グリッド上段左）
+      const listBtn = document.createElement('button');
+      listBtn.type = 'button';
+      listBtn.id = 'overlayBtnList';
+      listBtn.style.minWidth = '120px';
+      listBtn.style.border = '1px solid #2a3244';
+      listBtn.style.background = '#1a2030';
+      listBtn.style.color = '#e6e6e6';
+      listBtn.style.borderRadius = '6px';
+      listBtn.style.padding = '6px 8px';
+      listBtn.style.cursor = 'pointer';
+      listBtn.style.font = "12px/1.25 system-ui, -apple-system, 'Segoe UI', sans-serif";
+      listBtn.style.opacity = '0.92';
+      listBtn.style.userSelect = 'none';
+      listBtn.style.outline = 'none';
+      attachHover(listBtn);
+      listBtn.addEventListener('mousedown', (e)=>{ try{ lastFocusedEl = document.activeElement; e.preventDefault(); }catch{} });
+      const listWrap = document.createElement('div');
+      listWrap.style.display = 'flex';
+      listWrap.style.flexDirection = 'column';
+      listWrap.style.gap = '2px';
+      const listTitle = document.createElement('div');
+      listTitle.textContent = '制御文字表示';
+      listTitle.style.textAlign = 'center';
+      listTitle.style.fontWeight = '500';
+      const listLine = document.createElement('div');
+      listLine.style.display = 'flex';
+      listLine.style.justifyContent = 'center';
+      listLine.style.gap = '6px';
+      const listPillOff = pillBase('OFF', 'overlayBtnList_off');
+      const listPillOn  = pillBase('ON',  'overlayBtnList_on');
+      listLine.appendChild(listPillOff); listLine.appendChild(listPillOn);
+      listWrap.appendChild(listTitle); listWrap.appendChild(listLine); listBtn.appendChild(listWrap);
+      listBtn.addEventListener('click', (e)=>{
+        try{ e.preventDefault(); e.stopPropagation(); }catch{}
+        try{ _optList = !_optList; }catch{}
+        try{ _renderListChars(); }catch{}
+        try{ updateGutter(); }catch{}
+        try{ _updateOverlayListVisual(); }catch{}
+        try{ toast('list: ' + (_optList?'on':'off'), 900); }catch{}
+        try{ if (lastFocusedEl && typeof lastFocusedEl.focus === 'function'){ lastFocusedEl.focus(); } }catch{}
+      });
+
+      // 即時終了ボタン（右上配置。ラベル後半は 'F10'）
       const quitBtn = document.createElement('button');
       quitBtn.type = 'button';
       quitBtn.textContent = '即時終了\nF10';
@@ -8809,24 +8944,22 @@
         try{ if (lastFocusedEl2 && typeof lastFocusedEl2.focus==='function') lastFocusedEl2.focus(); }catch{}
       });
 
-      // Build 2x2 grid (top-left empty)
+  // Build grid (top-left: list / top-right: quit / bottom-left: hlsearch / bottom-right: help)
       const grid = document.createElement('div');
       grid.style.display = 'grid';
-      grid.style.gridTemplateColumns = 'auto auto';
+  grid.style.gridTemplateColumns = 'auto auto';
       grid.style.columnGap = '4px';
       grid.style.rowGap = '4px';
-      const empty = document.createElement('div');
-      empty.style.minWidth = '80px';
-      empty.style.minHeight = '42px';
-      grid.appendChild(empty);      // top-left (empty)
-      grid.appendChild(quitBtn);    // top-right
-      grid.appendChild(hlBtn);      // bottom-left
-      grid.appendChild(helpBtn);    // bottom-right
+  grid.appendChild(listBtn);    // top-left
+  grid.appendChild(quitBtn);    // top-right
+  grid.appendChild(hlBtn);      // bottom-left
+  grid.appendChild(helpBtn);    // bottom-right
 
       pal.appendChild(grid);
 
-      // initialize visual state for hlsearch pills
-      try{ _updateOverlayHlsearchVisual(); }catch{}
+  // initialize visual state for hlsearch & list pills
+  try{ _updateOverlayHlsearchVisual(); }catch{}
+  try{ _updateOverlayListVisual(); }catch{}
 
       
     }catch{}
@@ -8848,6 +8981,26 @@
       on .style.color = '#e6e6e6';
       // active
       if (_optHlsearch){
+        on.style.background = green; on.style.color = '#000';
+      }else{
+        off.style.background = gray; off.style.color = '#000';
+      }
+    }catch{}
+  }
+
+  // Reflect current list option state to overlay button
+  function _updateOverlayListVisual(){
+    try{
+      const off = document.getElementById('overlayBtnList_off');
+      const on  = document.getElementById('overlayBtnList_on');
+      if (!off || !on) return;
+      const gray = '#9aa0aa';
+      const green = '#49e26f';
+      off.style.background = 'transparent';
+      on.style.background  = 'transparent';
+      off.style.color = '#e6e6e6';
+      on .style.color = '#e6e6e6';
+      if (_optList){
         on.style.background = green; on.style.color = '#000';
       }else{
         off.style.background = gray; off.style.color = '#000';
