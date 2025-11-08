@@ -255,6 +255,18 @@
       }
     }, _caretMoveIdleMs);
   }
+  // Unified Escape detection (#446): treat Ctrl+[ as Esc everywhere
+  function _isEsc(e){
+    try{
+      if (!e) return false;
+      if (e.key === 'Escape') return true;
+      // Ctrl+[ (Vim style) maps to ESC semantics; ignore Meta/Alt to avoid false positives
+      if (e.ctrlKey && !e.altKey && !e.metaKey && e.key === '[') return true;
+      // keyCode (legacy) fallback
+      if (e.keyCode === 27) return true;
+      return false;
+    }catch{ return false; }
+  }
   // editor zoom state (scale only editor/gutter, not global UI)
   let _edScale = 1;
   // short guard to ignore stray key events immediately after modal close
@@ -4408,7 +4420,7 @@
         btnCancel.addEventListener('click', onCancel, { once:true });
         btnOk.addEventListener('click', onOk, { once:true });
         const onKey = (e)=>{
-          if (e.key==='Escape'){ e.preventDefault(); onCancel(); }
+          if (_isEsc(e)){ e.preventDefault(); onCancel(); }
           else if (e.key==='Enter'){ e.preventDefault(); onOk(); }
           else if (e.key==='Tab'){
             e.preventDefault();
@@ -4460,7 +4472,7 @@
         btnOk.addEventListener('click', finishOk, { once:true });
         btnCancel.addEventListener('click', finishCancel, { once:true });
         const onKey = (e)=>{
-          if (e.key==='Escape'){ e.preventDefault(); finishCancel(); }
+          if (_isEsc(e)){ e.preventDefault(); finishCancel(); }
           else if (e.key==='Enter'){ e.preventDefault(); finishOk(); }
           else if (e.key==='Tab'){
             e.preventDefault(); // trap focus between input and two buttons
@@ -4502,7 +4514,7 @@
           btnEls.push(el);
         }
         const onKey = (e)=>{
-          if (e.key==='Escape'){ e.preventDefault(); cleanup(); resolve(null); }
+          if (_isEsc(e)){ e.preventDefault(); cleanup(); resolve(null); }
           else if (e.key==='Enter'){ e.preventDefault(); cleanup(); resolve((buttons.find(x=>x.primary)||buttons[0]).id); }
           else if (e.key>='1' && e.key<='9'){
             const idx = parseInt(e.key,10) - 1;
@@ -4986,7 +4998,7 @@
         const onKey = (e)=>{
           // Prevent leaking to editor
           try{ e.stopPropagation(); }catch{}
-          if (e.key==='Escape'){ e.preventDefault(); cleanup(); return; }
+          if (_isEsc(e)){ e.preventDefault(); cleanup(); return; }
           // hidden shortcuts: q/Q/F9 to close
           if (e.key==='q' || e.key==='Q' || e.key==='F9'){ e.preventDefault(); cleanup(); return; }
           // Tab / Shift+Tab
@@ -5070,7 +5082,7 @@
         btnQ.addEventListener('click', ()=>finish('q'), { once:true });
         const onKey = (e)=>{
           try{ _renderVisSelOverlay(); }catch{}
-          if (e.key==='Escape'){ e.preventDefault(); e.stopPropagation(); finish('q'); }
+          if (_isEsc(e)){ e.preventDefault(); e.stopPropagation(); finish('q'); }
           else if (e.key==='Enter'){ e.preventDefault(); e.stopPropagation(); finish('y'); }
           else if (e.key==='y' || e.key==='Y'){ e.preventDefault(); e.stopPropagation(); finish('y'); }
           else if (e.key==='n' || e.key==='N'){ e.preventDefault(); e.stopPropagation(); finish('n'); }
@@ -5182,7 +5194,7 @@
         btnDiscardAll.addEventListener('click', ()=>{ doDiscardAll(); });
         btnCancel.addEventListener('click', ()=>{ finish(false); });
         const onKey = (e)=>{
-          if (e.key==='Escape'){ e.preventDefault(); finish(false); }
+          if (_isEsc(e)){ e.preventDefault(); finish(false); }
           else if (e.key==='Tab'){
             // trap among top buttons only
             e.preventDefault();
@@ -5352,7 +5364,7 @@
       if (Date.now() < _kbdGuardUntil){ try{ e.preventDefault(); e.stopPropagation(); }catch{} return; }
       if (_mode === 'CMD') return;
       if (_mode === 'INSERT'){
-        if (e.key==='Escape'){
+        if (_isEsc(e)){
           e.preventDefault();
           // on leaving INSERT, capture native caret back to overlay state
           try{ const off = editor.selectionStart|0; const rc = _rcFromOffset(off); caretRow = rc.r; caretCol = rc.c; }catch{}
@@ -5424,7 +5436,7 @@
           }
           return;
         }
-        if (e.key==='Escape'){ e.preventDefault(); _exitVisual(); _repositionCaret(); updateGutter(); return; }
+  if (_isEsc(e)){ e.preventDefault(); _exitVisual(); _repositionCaret(); updateGutter(); return; }
         // toggle char/line visual
         if (e.key==='v' && !e.ctrlKey && !e.metaKey && !e.altKey){ e.preventDefault(); _exitVisual(); _repositionCaret(); updateGutter(); return; }
         if (e.key==='V' && !e.ctrlKey && !e.metaKey && !e.altKey){ e.preventDefault(); _visualLinewise = true; _updateVisualSelection(); return; }
@@ -5533,7 +5545,7 @@
   // allow composing count for motion (digits only when Shift is NOT held)
   if (e.key>='1' && e.key<='9' && !e.shiftKey && !e.ctrlKey && !e.metaKey && !e.altKey){ e.preventDefault(); _countAcc = (_countAcc==null?0:_countAcc)*10 + parseInt(e.key,10); _armPendingOpTimeout(); return; }
   if (e.key==='0' && !e.shiftKey && !e.ctrlKey && !e.metaKey && !e.altKey && _countAcc!=null){ e.preventDefault(); _countAcc = _countAcc*10; _armPendingOpTimeout(); return; }
-        if (e.key==='Escape'){ e.preventDefault(); _clearPendingOp(); _countAcc=null; return; }
+  if (_isEsc(e)){ e.preventDefault(); _clearPendingOp(); _countAcc=null; return; }
         // Ignore standalone modifier keys while waiting for the motion key
         if (e.key==='Shift' || e.key==='Control' || e.key==='Alt' || e.key==='Meta'){
           // Do not clear or consume the operator; wait for the actual motion key
@@ -5634,7 +5646,7 @@
   // allow composing count for motion (digits only when Shift is NOT held)
   if (e.key>='1' && e.key<='9' && !e.shiftKey && !e.ctrlKey && !e.metaKey && !e.altKey){ e.preventDefault(); _countAcc = (_countAcc==null?0:_countAcc)*10 + parseInt(e.key,10); _armPendingOpTimeout(); return; }
   if (e.key==='0' && !e.shiftKey && !e.ctrlKey && !e.metaKey && !e.altKey && _countAcc!=null){ e.preventDefault(); _countAcc = _countAcc*10; _armPendingOpTimeout(); return; }
-        if (e.key==='Escape'){ e.preventDefault(); _clearPendingOp(); _countAcc=null; return; }
+  if (_isEsc(e)){ e.preventDefault(); _clearPendingOp(); _countAcc=null; return; }
         if (e.key==='Shift' || e.key==='Control' || e.key==='Alt' || e.key==='Meta'){
           return;
         }
@@ -5741,7 +5753,7 @@
   // allow composing count for motion (digits only when Shift is NOT held)
   if (e.key>='1' && e.key<='9' && !e.shiftKey && !e.ctrlKey && !e.metaKey && !e.altKey){ e.preventDefault(); _countAcc = (_countAcc==null?0:_countAcc)*10 + parseInt(e.key,10); _armPendingOpTimeout(); return; }
   if (e.key==='0' && !e.shiftKey && !e.ctrlKey && !e.metaKey && !e.altKey && _countAcc!=null){ e.preventDefault(); _countAcc = _countAcc*10; _armPendingOpTimeout(); return; }
-        if (e.key==='Escape'){ e.preventDefault(); _clearPendingOp(); _countAcc=null; return; }
+  if (_isEsc(e)){ e.preventDefault(); _clearPendingOp(); _countAcc=null; return; }
         // Ignore standalone modifier keys while waiting for the motion key
         // This prevents cancelling the pending 'd' when user presses Shift for $, G, {, }
         if (e.key==='Shift' || e.key==='Control' || e.key==='Alt' || e.key==='Meta'){
@@ -5846,7 +5858,7 @@
   // allow composing count for motion (digits only when Shift is NOT held)
   if (e.key>='1' && e.key<='9' && !e.shiftKey && !e.ctrlKey && !e.metaKey && !e.altKey){ e.preventDefault(); _countAcc = (_countAcc==null?0:_countAcc)*10 + parseInt(e.key,10); _armPendingOpTimeout(); return; }
   if (e.key==='0' && !e.shiftKey && !e.ctrlKey && !e.metaKey && !e.altKey && _countAcc!=null){ e.preventDefault(); _countAcc = _countAcc*10; _armPendingOpTimeout(); return; }
-        if (e.key==='Escape'){ e.preventDefault(); _clearPendingOp(); _countAcc=null; return; }
+  if (_isEsc(e)){ e.preventDefault(); _clearPendingOp(); _countAcc=null; return; }
         // Ignore standalone modifier keys while waiting for the motion key
         if (e.key==='Shift' || e.key==='Control' || e.key==='Alt' || e.key==='Meta'){
           return;
@@ -6749,7 +6761,7 @@
           _bufPopupHide();
           // Enter の keyup が editor に落ちないよう、フォーカス復帰を遅延
           setTimeout(()=>editor.focus(), 0);
-        } else if (e.key==='Escape'){
+        } else if (_isEsc(e)){
           e.preventDefault(); e.stopPropagation();
           _incPrevHide();
           // reset history browsing state on cancel
@@ -8914,7 +8926,7 @@
           window.addEventListener('keydown', (e)=>{
             try{
               if (!_filePopupVisible || !_filePopupVisible()) return;
-              if (e.key==='Escape'){
+              if (_isEsc(e)){
                 e.preventDefault(); e.stopPropagation();
                 try{ _filePopupHide(); }catch{}
                 // keep CMD input as-is; focus back to cmdinput if present
