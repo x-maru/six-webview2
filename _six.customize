@@ -1,4 +1,4 @@
-﻿// six-webview2 customization entry
+﻿// six customization entry
 // - Theme colors: window.THEME
 // - Runtime options controllable via :set: window.SIX_OPTIONS
 //   Supported keys (initial defaults):

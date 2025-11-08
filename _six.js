@@ -4553,11 +4553,11 @@
             };
             wrap.appendChild(mkSub('ウインドウのクローズボタン', [
               '即時終了と同等。変更の有無にかかわらず確認ダイアログ無しで終了',
-              'セッションはこの終了操作で書き換えない（直前に保存されていたセッションを次回起動時に復元）'
+              '現在のセッション状態を保存してから終了（未保存の編集・モード・ビュー・Undo一部を次回復元）'
             ]));
             wrap.appendChild(mkSub('F10', [
               '即時終了のショートカット。NORMAL/INSERT/VISUALの各モードで受け付け',
-              'セッションはこの終了操作で書き換えない（直前に保存されていたセッションを次回起動時に復元）'
+              '現在のセッション状態を保存してから終了（未保存の編集・モード・ビュー・Undo一部を次回復元）'
             ]));
             wrap.appendChild(mkSub('ボタンクリック', [
               '右下オーバーレイの「即時終了/F10」ボタンで同等動作',
@@ -5224,13 +5224,32 @@
           _incPrevHide();
           _incSearchAnchorOff = null; _incSearchDir = 'fwd';
           try{ _cmdHistBrowsing=false; _cmdHistIndex=_cmdHistory.length; _cmdHistTemp=''; }catch{}
+          // 残存センタリング抑止 + 水平成分保持（VISUALからの : でも初回横戻り/縦ズレを防止）
+          try{ _centerScrolloffOnce = false; }catch{}
+          try{ _scrollGuardUntil = Date.now() + 120; }catch{}
+          const _holdLeftVis = (function(){ try{ return editor.scrollLeft|0; }catch{ return 0; } })();
+          try{
+            const st0 = (editor.scrollTop||0);
+            const flo = Math.floor(st0/LINE_HEIGHT)*LINE_HEIGHT;
+            if (Math.abs(st0 - flo) > 0.1){ editor.scrollTop = flo; }
+            _repositionCaret(); updateGutter();
+            try{ if (editor && (editor.scrollLeft|0) !== _holdLeftVis){ editor.scrollLeft = _holdLeftVis; } }catch{}
+          }catch{}
           if (cmdinput){
             // Prefill with visual range
             cmdinput.value = ":'<,'>";
             // フォーカスを cmdinput に移した後でも、ネイティブ選択を再適用して
             // 選択ハイライトが残るようにする（環境によっては blur で消える対策）
+            const stHold = (function(){ try{ return editor.scrollTop|0; }catch{ return 0; } })();
             Promise.resolve().then(()=>{
               try{ cmdinput.focus(); const pos=(cmdinput.value||'').length; cmdinput.setSelectionRange(pos,pos); }catch{}
+              // フォーカス後に縦横位置を復元しつつ、選択オーバーレイを維持
+              try{
+                const flo=Math.floor(stHold/LINE_HEIGHT)*LINE_HEIGHT;
+                if (Math.abs((editor.scrollTop||0) - flo) > 0.1){ editor.scrollTop = flo; }
+                _repositionCaret(); updateGutter();
+                if (editor && (editor.scrollLeft|0) !== _holdLeftVis){ editor.scrollLeft = _holdLeftVis; }
+              }catch{}
               try{ _updateVisualSelection(); }catch{}
               try{ _renderVisSelOverlay(); }catch{}
             });
@@ -5687,18 +5706,52 @@
         _incSearchAnchorOff = null; _incSearchDir = 'fwd';
         // reset command history browsing state when entering CMD
         try{ _cmdHistBrowsing=false; _cmdHistIndex=_cmdHistory.length; _cmdHistTemp=''; }catch{}
+        // G/gg 直後の残存センタリングによるスクロールを抑止し、縦位置の半端ズレを排除
+        try{ _centerScrolloffOnce = false; }catch{}
+        try{ _scrollGuardUntil = Date.now() + 120; }catch{}
+        // 水平成分の保持（初回だけ行頭へ戻される現象を防止）
+        const _holdLeftColon = (function(){ try{ return editor.scrollLeft|0; }catch{ return 0; } })();
+        // 縦スクロールは行境界にスナップし、直後にオーバーレイを再配置
+        try{
+          const st0 = (editor.scrollTop||0);
+          const flo = Math.floor(st0/LINE_HEIGHT)*LINE_HEIGHT;
+          if (Math.abs(st0 - flo) > 0.1){ editor.scrollTop = flo; }
+          _repositionCaret(); updateGutter();
+          // 水平位置を復元
+          try{ if (editor && (editor.scrollLeft|0) !== _holdLeftColon){ editor.scrollLeft = _holdLeftColon; } }catch{}
+        }catch{}
         if (cmdinput){
           // コロンは入力欄にそのまま見えるようにする
           cmdinput.value = ':';
             // 直後に他のフォーカス復元ロジックが割り込んでしまう競合を避けるため、rAF+setTimeout の二段階でフォーカス確定
+            const stHold = (function(){ try{ return editor.scrollTop|0; }catch{ return 0; } })();
             Promise.resolve().then(()=>{
               try{ if (_mode==='CMD'){ cmdinput.focus(); const pos=(cmdinput.value||'').length; cmdinput.setSelectionRange(pos,pos); } }catch{}
               if (window.requestAnimationFrame){
                 requestAnimationFrame(()=>{
-                  try{ if (_mode==='CMD' && document.activeElement !== cmdinput){ cmdinput.focus(); const p=(cmdinput.value||'').length; cmdinput.setSelectionRange(p,p); } }catch{}
+                  try{
+                    if (_mode==='CMD' && document.activeElement !== cmdinput){ cmdinput.focus(); const p=(cmdinput.value||'').length; cmdinput.setSelectionRange(p,p); }
+                    // フォーカスでブラウザが動かしたスクロールを縦横ともに復元
+                    if (_mode==='CMD' && editor){
+                      const flo=Math.floor(stHold/LINE_HEIGHT)*LINE_HEIGHT;
+                      if (Math.abs((editor.scrollTop||0) - flo) > 0.1){ editor.scrollTop = flo; }
+                      _repositionCaret(); updateGutter();
+                      if ((editor.scrollLeft|0) !== _holdLeftColon){ editor.scrollLeft = _holdLeftColon; }
+                    }
+                  }catch{}
                 });
               }
-              setTimeout(()=>{ try{ if (_mode==='CMD' && document.activeElement !== cmdinput){ cmdinput.focus(); const p=(cmdinput.value||'').length; cmdinput.setSelectionRange(p,p); } }catch{} }, 60);
+              setTimeout(()=>{
+                try{
+                  if (_mode==='CMD' && document.activeElement !== cmdinput){ cmdinput.focus(); const p=(cmdinput.value||'').length; cmdinput.setSelectionRange(p,p); }
+                  if (_mode==='CMD' && editor){
+                    const flo=Math.floor(stHold/LINE_HEIGHT)*LINE_HEIGHT;
+                    if (Math.abs((editor.scrollTop||0) - flo) > 0.1){ editor.scrollTop = flo; }
+                    _repositionCaret(); updateGutter();
+                    if ((editor.scrollLeft|0) !== _holdLeftColon){ editor.scrollLeft = _holdLeftColon; }
+                  }
+                }catch{}
+              }, 60);
             });
           // close interception is now bound at startup; nothing to do here
         }
@@ -7150,8 +7203,8 @@
                 if (!msg || msg.type !== 'close-request') return;
                 if (_quitInProgress) return;
                 _quitInProgress = true;
-                // Treat window close as immediate quit (F10 semantics): do not prompt; do not rewrite session
-                try{ _suppressPersistOnQuit = true; _skipPersistOnUnloadOnce = true; _quittingAll = true; _allowUnloadOnce = true; }catch{}
+                // Treat window close as immediate quit (F10 semantics): persist session, no prompt (#435)
+                try{ _persistSessionNow(); _suppressPersistOnQuit = false; _skipPersistOnUnloadOnce = true; _quittingAll = true; _allowUnloadOnce = true; }catch{}
                 try{ window.chrome.webview.postMessage({ type:'close-result', ok: true }); }catch{}
                 try{ window.close(); }catch{}
                 _quitInProgress = false;
@@ -7168,8 +7221,8 @@
               try{
                 if (_allowUnloadOnce){ _allowUnloadOnce = false; return; }
                 if (_quittingAll) return;
-                // Treat native window close like F10 immediate quit: don't persist, don't prompt
-                try{ _suppressPersistOnQuit = true; _skipPersistOnUnloadOnce = true; }catch{}
+                // Treat native window close like F10 immediate quit: persist via capture listener, don't prompt
+                try{ _suppressPersistOnQuit = false; _skipPersistOnUnloadOnce = false; }catch{}
                 // Allow the unload to proceed without intervention
                 return;
               }catch{}
@@ -8335,7 +8388,11 @@
       quitBtn.addEventListener('mousedown', (e)=>{ try{ lastFocusedEl2 = document.activeElement; e.preventDefault(); }catch{} });
       quitBtn.addEventListener('click', (e)=>{
         try{ e.preventDefault(); e.stopPropagation(); }catch{}
-        try{ _suppressPersistOnQuit = true; _skipPersistOnUnloadOnce = true; _quittingAll = true; _allowUnloadOnce = true; }catch{}
+        try{
+          _persistSessionNow();
+          _suppressPersistOnQuit = false;
+          _skipPersistOnUnloadOnce = true; _quittingAll = true; _allowUnloadOnce = true;
+        }catch{}
         try{ window.close(); }catch{}
         try{ if (lastFocusedEl2 && typeof lastFocusedEl2.focus==='function') lastFocusedEl2.focus(); }catch{}
       });
@@ -8400,10 +8457,15 @@
           const fileOpen = (typeof _filePopupVisible==='function' && _filePopupVisible());
           const bufOpen  = (typeof _bufPopupVisible==='function' && _bufPopupVisible());
 
-          // F10: immediate quit (no prompt, do not persist new session state)
+          // F10: 即時終了（#435: 終了直前にセッションを保存してから閉じる）
           if (key === 'F10'){
             try{ e.preventDefault(); e.stopPropagation(); }catch{}
-            try{ _suppressPersistOnQuit = true; _skipPersistOnUnloadOnce = true; _quittingAll = true; _allowUnloadOnce = true; }catch{}
+            try{
+              _persistSessionNow();
+              _suppressPersistOnQuit = false;
+              _skipPersistOnUnloadOnce = true; // onbeforeunload での二重書き込みを避ける
+              _quittingAll = true; _allowUnloadOnce = true;
+            }catch{}
             try{ window.close(); }catch{}
             return;
           }

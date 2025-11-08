@@ -8,7 +8,7 @@
 	--fontBase: 18px;        /* base font-size for UI (tabbar/cmdbar) */
 	--editorFontBase: 20px;  /* base font-size for editor/gutter at 100% */
 	/* EOF padding (in lines) */
-	--eofPadLines: 5;
+	--eofPadLines: 10;
 	/* Derived (used by editor only) */
 	--lh: calc(var(--lhBase) * var(--edScale) + var(--lhExtraBase) * var(--edScale));
 	/* Effective line-height after JS rounding; falls back to --lh */
@@ -69,7 +69,7 @@ body { font: var(--fontBase, 18px)/20px Consolas, 'Courier New', monospace; over
 	font-weight: 200 !important;
 }
 #gutter div { line-height: var(--lhEff, var(--lh)); padding-right: calc(6px * var(--edScale)); box-sizing: border-box; width: 100%; /* use line-height centering; avoid flex rounding drift; make row background span full gutter incl. padding */ }
-#editor { flex: 1; background: transparent; color: var(--editorTextColor, #e6e6e6); border:0; outline:0; resize:none; line-height: var(--lhEff, var(--lh)); tab-size: 4; white-space: pre; padding: 0 0 calc(var(--eofPadLines, 5) * var(--lhEff, var(--lh))) 0; margin: 0; box-sizing: content-box; position: relative; z-index: 1; font-size: calc(var(--editorFontBase, 20px) * var(--edScale));
+#editor { flex: 1; background: transparent; color: var(--editorTextColor, #e6e6e6); border:0; outline:0; resize:none; line-height: var(--lhEff, var(--lh)); tab-size: 4; white-space: pre; padding: 0 0 calc(var(--eofPadLines, 10) * var(--lhEff, var(--lh))) 0; margin: 0; box-sizing: content-box; position: relative; z-index: 1; font-size: calc(var(--editorFontBase, 20px) * var(--edScale));
 	/* Prefer monospaced CJK fonts earlier to stabilize East Asian punctuation widths */
 	font-family: "Cascadia Code", "Cascadia Mono", "JetBrains Mono", "Fira Code", "Consolas", "MS Gothic", "Meiryo", "Yu Gothic", "游ゴシック Light", monospace !important;
 	font-weight: 200 !important;
