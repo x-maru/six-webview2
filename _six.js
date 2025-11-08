@@ -10,6 +10,33 @@
   const tabbarEl   = document.getElementById('tabbar');
   const tabbarTabs = tabbarEl ? tabbarEl.querySelector('.tabs') : null;
   const tabbarTools = tabbarEl ? tabbarEl.querySelector('#tabtools') : null;
+  const tabScrollLeftBtn = tabbarEl ? document.getElementById('tabScrollLeft') : null;
+  const tabScrollRightBtn = tabbarEl ? document.getElementById('tabScrollRight') : null;
+  function _updateTabScrollButtons(){
+    try{
+      if (!tabbarTabs || !tabScrollLeftBtn || !tabScrollRightBtn) return;
+      const max = Math.max(0, (tabbarTabs.scrollWidth|0) - (tabbarTabs.clientWidth|0));
+      const x = (tabbarTabs.scrollLeft|0);
+      const canL = x > 0;
+      const canR = x < max - 1;
+      tabScrollLeftBtn.classList.toggle('disabled', !canL);
+      tabScrollRightBtn.classList.toggle('disabled', !canR);
+    }catch{}
+  }
+  function _scrollTabsBy(delta){
+    try{
+      if (!tabbarTabs) return;
+      const step = Math.max(24, Math.floor(tabbarTabs.clientWidth * 0.7));
+      const next = (tabbarTabs.scrollLeft|0) + (delta<0 ? -step : step);
+      tabbarTabs.scrollTo({ left: Math.max(0, next), behavior: 'smooth' });
+      // update soon after; also rely on 'scroll' event
+      setTimeout(_updateTabScrollButtons, 120);
+    }catch{}
+  }
+  try{ tabScrollLeftBtn && tabScrollLeftBtn.addEventListener('click', ()=>{ if (!tabScrollLeftBtn.classList.contains('disabled')) _scrollTabsBy(-1); }); }catch{}
+  try{ tabScrollRightBtn && tabScrollRightBtn.addEventListener('click', ()=>{ if (!tabScrollRightBtn.classList.contains('disabled')) _scrollTabsBy(+1); }); }catch{}
+  try{ tabbarTabs && tabbarTabs.addEventListener('scroll', _updateTabScrollButtons); }catch{}
+  try{ window.addEventListener('resize', ()=>{ _updateTabScrollButtons(); }); }catch{}
   const encBtn    = document.getElementById('encBtn');
   const cmdinput   = document.getElementById('cmdinput');
   const modestatus = document.getElementById('modestatus');
@@ -1182,8 +1209,19 @@
   setVar('editCaretGradStart', themeGet('editCaretGradStart', t.editCaretGradStart));
   setVar('editCaretGradMid', themeGet('editCaretGradMid', t.editCaretGradMid));
       setVar('activeLineBg', themeGet('activeLineBg', t.activeLineBg));
-      setVar('tabBarBg', t.tabBarBg);
-      setVar('tabBarFg', t.tabBarFg);
+  setVar('tabBarBg', t.tabBarBg);
+  setVar('tabBarFg', t.tabBarFg);
+  // Tab colors (#455) with yellow fallback if missing
+  setVar('tabBg', themeGet('tabBg', t.tabBg));
+  setVar('tabText', themeGet('tabText', t.tabText));
+  setVar('activeTabBg', themeGet('activeTabBg', t.activeTabBg));
+  // activeTagText in theme maps to activeTabText variable name (typo in spec key) (#455)
+  setVar('activeTabText', themeGet('activeTagText', t.activeTagText));
+  // Tab scroll button colors (always present; disabled/enabled styled via CSS vars)
+  setVar('tabScrollBtnEnableBG', themeGet('tabScrollBtnEnableBG', t.tabScrollBtnEnableBG));
+  setVar('tabScrollBtnEnableText', themeGet('tabScrollBtnEnableText', t.tabScrollBtnEnableText));
+  setVar('tabScrollBtnDisableBG', themeGet('tabScrollBtnDisableBG', t.tabScrollBtnDisableBG));
+  setVar('tabScrollBtnDisableText', themeGet('tabScrollBtnDisableText', t.tabScrollBtnDisableText));
   // Command input colors
   setVar('cmdInputFg', themeGet('cmdInputFg', t.cmdInputFg));
   setVar('cmdInputBg', themeGet('cmdInputBg', t.cmdInputBg));
@@ -1740,10 +1778,30 @@
       tabbarTabs.appendChild(div);
       if (i===currentIdx) activeEl = div;
     });
-    // アクティブタブがスクロール領域に見えるように調整
-    if (activeEl && typeof activeEl.scrollIntoView === 'function'){
-      activeEl.scrollIntoView({block:'nearest', inline:'nearest'});
-    }
+    // アクティブタブが隠れていたら手動で可視領域に入るようスクロール
+    try{
+      if (activeEl){
+        const tabsRect = tabbarTabs.getBoundingClientRect();
+        const elRect = activeEl.getBoundingClientRect();
+        // 可視領域はスクロールボタンを除外した内側領域として計算
+        let leftGuard = tabsRect.left;
+        let rightGuard = tabsRect.right;
+        try{
+          if (tabScrollLeftBtn){ const r = tabScrollLeftBtn.getBoundingClientRect(); leftGuard = Math.max(leftGuard, r.right + 2); }
+          if (tabScrollRightBtn){ const r = tabScrollRightBtn.getBoundingClientRect(); rightGuard = Math.min(rightGuard, r.left - 2); }
+        }catch{}
+        const hiddenLeft = elRect.left < leftGuard;
+        const hiddenRight = elRect.right > rightGuard;
+        if (hiddenLeft){
+          const delta = elRect.left - leftGuard - 8;
+          tabbarTabs.scrollLeft = Math.max(0, (tabbarTabs.scrollLeft|0) + delta);
+        } else if (hiddenRight){
+          const delta = elRect.right - rightGuard + 8;
+          tabbarTabs.scrollLeft = Math.max(0, (tabbarTabs.scrollLeft|0) + delta);
+        }
+      }
+    }catch{}
+    try{ _updateTabScrollButtons(); }catch{}
     try{ _updateEncBtnLabel(); }catch{}
   }
 

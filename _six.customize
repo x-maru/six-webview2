@@ -57,8 +57,11 @@ window.THEME = {
   editCaretGradMid: "rgba(255,79,0,0.01)",
 
   // タブバー
-  tabBarBg: "rgb(27,47,15)",
-  tabBarFg: "rgb(0,95,31)",
+  tabBarBg: "#002a0a",
+  tabBg: "#2a4020",
+  tabText: "#e0ffe0",
+  activeTabBg: "#50aaa0",
+  activeTagText: "#d0eaff",
   tabScrollBtnEnableBG: "white", // タブスクロールボタン(活性)
   tabScrollBtnEnableText: "orange", // タブスクロールボタン(活性)
   tabScrollBtnDisableBG: "black", // タブスクロールボタン(非活性)

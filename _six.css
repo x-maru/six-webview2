@@ -28,12 +28,16 @@ html, body { height: 100%; margin: 0; background: var(--bodyBGColor, #0b0d12); c
 /* Keep global UI (tabbar/cmdbar) unaffected by editor zoom */
 body { font: var(--fontBase, 18px)/20px Consolas, 'Courier New', monospace; overflow: hidden; }
 
-#tabbar { height: 36px; background: var(--tabBarBg, #0f1117); color: var(--tabBarFg, #a6accd); display:flex; align-items:stretch; padding:0 4px; border-bottom:1px solid #1c2230; overflow:hidden; }
-#tabbar .tabs { display:flex; gap:4px; align-items:flex-end; flex:1 1 auto; overflow-x:auto; overflow-y:hidden; scrollbar-width: thin; }
+#tabbar { height: 36px; background: var(--tabBarBg, #0f1117); color: var(--tabBarFg, #a6accd); display:flex; align-items:flex-end; padding:0 4px; border-bottom:1px solid #1c2230; overflow:hidden; }
+#tabbar .tabs { height:100%; display:flex; gap:4px; align-items:flex-end; flex:1 1 auto; overflow-x:auto; overflow-y:hidden; scrollbar-width: none; position:relative; }
+#tabbar .tabs::-webkit-scrollbar { display: none; }
 #tabbar #tabtools { flex: 0 0 auto; display:flex; align-items:center; gap:6px; padding-left:6px; }
-#tabbar .tab { flex: 0 0 auto; min-width: 80px; padding:0 10px; height: 18px; line-height: 18px; margin: 0 0 2px 0; border-radius:4px 4px 0 0; background:#131722; color:#a6accd; display:flex; align-items:center; border:1px solid #1c2230; border-bottom-color:#0f1117; box-sizing:border-box; cursor:pointer; }
+#tabbar .tab { flex: 0 0 auto; min-width: 80px; padding:0 10px; height: 90%; line-height: 1; margin: 0; border-radius:4px 4px 0 0; background: var(--tabBg, yellow); color: var(--tabText, yellow); display:flex; align-items:center; border:1px solid #1c2230; border-bottom-color:#0f1117; box-sizing:border-box; cursor:pointer; }
+#tabbar .tabscroll { flex:0 0 1.4rem; display:flex; align-items:center; justify-content:center; width:1.4rem; height:90%; margin:0 4px 0 0; border-radius:4px 4px 0 0; font-weight:600; user-select:none; cursor:pointer; box-sizing:border-box; padding:0; background: var(--tabScrollBtnEnableBG, yellow); color: var(--tabScrollBtnEnableText, yellow); /* align bottom edge & visual with tabs */ border:1px solid #1c2230; border-bottom-color:#0f1117; }
+#tabbar .tabscroll.disabled { cursor:default; opacity:0.9; background: var(--tabScrollBtnDisableBG, yellow); color: var(--tabScrollBtnDisableText, yellow); }
+#tabbar .tabscroll span { pointer-events:none; }
 #tabbar .tab:hover { filter: brightness(1.05); }
-#tabbar .tab.active { background:#1a2030; color:#e6e6e6; border-bottom-color:#1a2030; font-weight:600; }
+#tabbar .tab.active { background: var(--activeTabBg, yellow); color: var(--activeTabText, yellow); border-bottom-color: var(--activeTabBg, yellow); font-weight:600; }
 #tabbar .tab .name { white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
 #tabbar .tab .name::first-letter { font-size: 1.1em; vertical-align: -1px; }
 #tabbar .tab .mod { color:#ff5b5b; margin-left:6px; font-weight:700; }

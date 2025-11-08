@@ -12,11 +12,6 @@
 ### 実装候補
 - scrolloffに何を設定しても3固定の動作になっている
 - modifiedのときタブの'*'に加えて、行番号ガター背景のグラデ色を変更
-- Vimの:set listを実装 (listcharsは固定) アプリで1つの設定とする。デフォルトでON
-  - 「listchars=eol:↲,tab:▸\ ,trail:·」で、eolはLF/CRLF/CRで色を変える。
-  - :set list / :set nolist / :set list! を実装する
-  - 右下のオーバーレイパレットにボタン追加「制御文字表示^OFF ON」
-  - 文字幅の計算方法などHTA版sixで十分に詰めて完成させたので、できればロジックをそのまま持ってきたい。
 - INSERTモード中のTab/Ctrl+IでTABコード挿入
 - タブバーのタブ群の右に[行 X, 列 Y/W]を表示する。Wはcaret行で$としたときの列数。
 - キーバインド追加：
