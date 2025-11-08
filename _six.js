@@ -983,9 +983,21 @@
   function _setTitle(){
     try{
       const b = currentBuffer();
-      const mod = (b && b.modified) ? '*' : '';
-      // OS ウインドウタイトルにはパスを出さない（file:/// を隠す）
-      document.title = `six-webview2${mod ? ' ' + mod : ''}`;
+      const mod = (b && b.modified) ? ' *' : '';
+      // タイトルバーにはアクティブタブのフルパスを表示（Fキー等の前置なし）
+      if (b){
+        let title = '';
+        if (b.path){
+          try{
+            // file:// は見やすいパス表記へ（UNC/WSL/Windows ドライブ対応）
+            title = _prettyFileUrlLabel(b.path);
+          }catch{ title = String(b.path||''); }
+        }
+        if (!title){ title = b.name || 'untitled'; }
+        document.title = title + mod;
+      } else {
+        document.title = 'six-webview2';
+      }
     }catch{}
   }
 
@@ -1694,14 +1706,8 @@
       div.className = 'tab' + (i===currentIdx ? ' active' : '');
       let label = '';
       if (b.path && /^file:\/\//i.test(b.path)){
-        if (i===currentIdx){
-          const rel = _relativeDisplayPath(b.path);
-          label = rel && rel !== b.path ? rel : _prettyFileUrlLabel(b.path);
-          if (!label) label = (b.name||'');
-        } else {
-          // 非アクティブタブは常にファイル名のみ（WSL含む）
-          try{ label = _basename(b.path); }catch{ label = (b.name||''); }
-        }
+        // すべてのタブで同一体裁（ファイル名のみ）
+        try{ label = _basename(b.path); }catch{ label = (b.name||''); }
       } else {
         label = b.name || '';
       }

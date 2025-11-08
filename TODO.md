@@ -12,7 +12,6 @@
 ### 実装候補
 - scrolloffに何を設定しても3固定の動作になっている
 - modifiedのときタブの'*'に加えて、行番号ガター背景のグラデ色を変更
-- タブバー内タブ群の横スクロール
 - Vimの:set listを実装 (listcharsは固定) アプリで1つの設定とする。デフォルトでON
   - 「listchars=eol:↲,tab:▸\ ,trail:·」で、eolはLF/CRLF/CRで色を変える。
   - :set list / :set nolist / :set list! を実装する

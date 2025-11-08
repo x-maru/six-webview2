@@ -56,8 +56,13 @@ window.THEME = {
   editCaretGradStart: "rgba(255,79,0,0.95)",
   editCaretGradMid: "rgba(255,79,0,0.01)",
 
+  // タブバー
   tabBarBg: "rgb(27,47,15)",
   tabBarFg: "rgb(0,95,31)",
+  tabScrollBtnEnableBG: "white", // タブスクロールボタン(活性)
+  tabScrollBtnEnableText: "orange", // タブスクロールボタン(活性)
+  tabScrollBtnDisableBG: "black", // タブスクロールボタン(非活性)
+  tabScrollBtnDisableText: "cyan", // タブスクロールボタン(非活性)
 
   // Visual selection default colors
   selectionBg: "#607080",
@@ -91,6 +96,7 @@ window.THEME = {
   helpCloseBg: "#3a3a56",
   helpCloseFg: "#e6e6e6",
   helpCloseBorder: "#3f5074",
+
   // Popup active line highlight (encodeSet popupなど)
   popupActiveLine: "#00a090"
 };
