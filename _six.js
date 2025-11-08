@@ -2627,6 +2627,59 @@
     try{ _regUnnamed = { text: String(yankedBlock||''), linewise: true }; }catch{}
   }
 
+  // Clipboard helpers and non-register extractors for Y (Windows clipboard copy)
+  function _extractRangeText(p1, p2){
+    const lines=_splitLines();
+    let a=_clampPos(p1), b=_clampPos(p2);
+    if (_cmpPos(a,b)>0){ const t=a; a=b; b=t; }
+    if (a.r===b.r && a.c===b.c) return '';
+    if (a.r===b.r){
+      const r=a.r; const s=lines[r]||'';
+      return s.slice(a.c, b.c);
+    } else {
+      const head=(lines[a.r]||'').slice(a.c);
+      const middle = (b.r - a.r > 1) ? (lines.slice(a.r+1, b.r).join('\n') + '\n') : '';
+      const tail=(lines[b.r]||'').slice(0,b.c);
+      return head + '\n' + middle + tail;
+    }
+  }
+  function _extractWholeLinesText(rStart, count){
+    const lines=_splitLines();
+    const total=lines.length;
+    if (total===0) return '';
+    let rs=Math.max(0, Math.min(total-1, rStart|0));
+    let n=Math.max(1, count|0);
+    const rEnd = Math.min(total-1, rs + n - 1);
+    return lines.slice(rs, rEnd+1).join('\n');
+  }
+  async function _copyToClipboard(text){
+    const s = String(text||'');
+    try{
+      if (navigator && navigator.clipboard && navigator.clipboard.writeText){
+        await navigator.clipboard.writeText(s);
+        return true;
+      }
+    }catch{}
+    // Fallback via hidden textarea + execCommand('copy')
+    try{
+      const restoreEl = document.activeElement;
+      const ta = document.createElement('textarea');
+      ta.value = s;
+      ta.setAttribute('readonly','');
+      ta.style.position='fixed';
+      ta.style.opacity='0';
+      ta.style.left='-9999px';
+      document.body.appendChild(ta);
+      ta.focus();
+      ta.select();
+      let ok=false; try{ ok = document.execCommand('copy'); }catch{}
+      try{ document.body.removeChild(ta); }catch{}
+      try{ if (restoreEl && restoreEl.focus){ restoreEl.focus(); } }catch{}
+      return !!ok;
+    }catch{}
+    return false;
+  }
+
   /*********************************************************
    * ensureScrolloff
    *********************************************************/
@@ -4772,6 +4825,7 @@
               [K('Nd モーション'), sep('  カウント付き（例: '), K('2dw'), sep('）')],
               [K('yy'), sep(' 行ヤンク(行コピー) ')],
               [K('y モーション'), sep(' ヤンク(コピー) ※範囲はモーションによる ')],
+              [K('Y'), sep(' Windowsクリップボードへコピー（y のモーション/カウントと同等、unnamed レジスタは変えない。例: '), K('YY'), sep(' / '), K('3Yw'), sep('）')],
               [K('p'), sep('  caret行の下に行ペースト')],
               [K('P'), sep('  caret行の上に行ペースト')]
             ]));
@@ -4810,6 +4864,12 @@
             p.appendChild(K(":'<,'>"));
             p.appendChild(document.createTextNode(' 自動挿入・ハイライト維持）。'));
             wrap.appendChild(p);
+            // VISUAL の追加ヘルプ: Y -> Windows クリップボードにコピー
+            const p2 = document.createElement('div');
+            p2.style.marginTop = '8px';
+            p2.appendChild(K('Y'));
+            p2.appendChild(document.createTextNode('  選択範囲をWindowsクリップボードへコピーします（行選択/文字選択とも対応）。コピー後に「Copied to Windows clipboard.」トーストを表示します。unnamed レジスタは変更しません。'));
+            wrap.appendChild(p2);
           }
 
           sc.appendChild(wrap);
@@ -5349,8 +5409,18 @@
         // toggle char/line visual
         if (e.key==='v' && !e.ctrlKey && !e.metaKey && !e.altKey){ e.preventDefault(); _exitVisual(); _repositionCaret(); updateGutter(); return; }
         if (e.key==='V' && !e.ctrlKey && !e.metaKey && !e.altKey){ e.preventDefault(); _visualLinewise = true; _updateVisualSelection(); return; }
-        // yank/delete selection in VISUAL
+        // yank selection in VISUAL to unnamed register
         if (e.key==='y' && !e.ctrlKey && !e.metaKey && !e.altKey){ e.preventDefault(); if (_visualLinewise){ const rs=Math.min(_visualAnchorR, caretRow); const re=Math.max(_visualAnchorR, caretRow); _yankWholeLines(rs, re-rs+1); } else { const a={r:_visualAnchorR,c:_visualAnchorC}; const b={r:caretRow,c:caretCol}; _yankRangePos(a,b); } _exitVisual(); _repositionCaret(); updateGutter(); return; }
+        // Y in VISUAL — copy selection to Windows clipboard (no register mutation)
+        if (e.key==='Y' && !e.ctrlKey && !e.metaKey && !e.altKey){
+          e.preventDefault();
+          let text='';
+          if (_visualLinewise){ const rs=Math.min(_visualAnchorR, caretRow); const re=Math.max(_visualAnchorR, caretRow); text = _extractWholeLinesText(rs, re-rs+1); }
+          else { const a={r:_visualAnchorR,c:_visualAnchorC}; const b={r:caretRow,c:caretCol}; text = _extractRangeText(a,b); }
+          (async ()=>{ const ok = await _copyToClipboard(text); toast(ok? 'Copied to Windows clipboard.':'Clipboard write failed.', ok? 1000:1500); })();
+          _exitVisual(); _repositionCaret(); updateGutter();
+          return;
+        }
         if (e.key==='d' && !e.ctrlKey && !e.metaKey && !e.altKey){ e.preventDefault(); if (_visualLinewise){ const rs=Math.min(_visualAnchorR, caretRow); const re=Math.max(_visualAnchorR, caretRow); _deleteWholeLines(rs, re-rs+1); } else { const a={r:_visualAnchorR,c:_visualAnchorC}; const b={r:caretRow,c:caretCol}; _deleteRangePos(a,b); } _exitVisual(); ensureScrolloff(); _repositionCaret(); updateGutter(); return; }
         // VISUAL change: delete selection immediately and enter INSERT
         if (e.key==='c' && !e.ctrlKey && !e.metaKey && !e.altKey){
@@ -5537,6 +5607,113 @@
           }
           _clearPendingOp(); _repositionCaret(); updateGutter();
           return;
+        }
+        _clearPendingOp(); return;
+      }
+  // Pending Windows-clipboard copy operator: interpret next key as motion or line-wise command
+  if (_pendingOp === 'Y'){
+  // allow composing count for motion (digits only when Shift is NOT held)
+  if (e.key>='1' && e.key<='9' && !e.shiftKey && !e.ctrlKey && !e.metaKey && !e.altKey){ e.preventDefault(); _countAcc = (_countAcc==null?0:_countAcc)*10 + parseInt(e.key,10); _armPendingOpTimeout(); return; }
+  if (e.key==='0' && !e.shiftKey && !e.ctrlKey && !e.metaKey && !e.altKey && _countAcc!=null){ e.preventDefault(); _countAcc = _countAcc*10; _armPendingOpTimeout(); return; }
+        if (e.key==='Escape'){ e.preventDefault(); _clearPendingOp(); _countAcc=null; return; }
+        if (e.key==='Shift' || e.key==='Control' || e.key==='Alt' || e.key==='Meta'){
+          return;
+        }
+        e.preventDefault();
+        // YY (copy N lines)
+        if (e.key==='Y'){
+          const mcount = (_countAcc==null?1:_countAcc); _countAcc=null;
+          const total = Math.max(1, (_pendingOpCount||1) * mcount);
+          const text = _extractWholeLinesText(caretRow, total);
+          (async ()=>{ const ok = await _copyToClipboard(text); toast(ok? 'Copied to Windows clipboard.':'Clipboard write failed.', ok? 1000:1500); })();
+          _clearPendingOp(); _repositionCaret(); updateGutter();
+          return;
+        }
+        // Ygg / YNgg
+        if (e.key==='g'){
+          if (_pendingOpSeq === 'g'){
+            const mcount = (_countAcc==null?1:_countAcc); _countAcc=null;
+            const targetLine = Math.max(1, mcount) - 1;
+            const r0 = caretRow;
+            const r1 = Math.max(0, Math.min(_totalLines()-1, targetLine));
+            const rs = Math.min(r0, r1);
+            const re = Math.max(r0, r1);
+            const text = _extractWholeLinesText(rs, re-rs+1);
+            (async ()=>{ const ok = await _copyToClipboard(text); toast(ok? 'Copied to Windows clipboard.':'Clipboard write failed.', ok? 1000:1500); })();
+            _clearPendingOp(); _repositionCaret(); updateGutter();
+            return;
+          } else {
+            _pendingOpSeq = 'g'; _armPendingOpTimeout(); return;
+          }
+        }
+        // Y$ — charwise to end-of-line (or across lines if count>1)
+        if (e.key==='$'){
+          const mcount = (_countAcc==null?1:_countAcc); _countAcc=null;
+          let rS = caretRow, cS = caretCol;
+          let rE = rS, cE = (_splitLines()[rS]||'').length;
+          if (mcount > 1){
+            const last = _totalLines()-1;
+            rE = Math.min(last, rS + (mcount-1));
+            cE = (_splitLines()[rE]||'').length;
+          }
+          const start={r:rS, c:cS}, end={r:rE, c:cE};
+          const text = _extractRangeText(start, end);
+          (async ()=>{ const ok = await _copyToClipboard(text); toast(ok? 'Copied to Windows clipboard.':'Clipboard write failed.', ok? 1000:1500); })();
+          _clearPendingOp(); _repositionCaret(); updateGutter();
+          return;
+        }
+        // YG / YNG (N as target line) — linewise copy (use literal 'G')
+        if (e.key==='G'){
+          const mcount = (_countAcc==null?0:_countAcc); _countAcc=null;
+          const r0 = caretRow; const total=_totalLines();
+          let r1;
+          if (mcount && mcount>0){ r1 = Math.max(0, Math.min(total-1, mcount-1)); }
+          else { r1 = total-1; }
+          const rs = Math.min(r0, r1);
+          const re = Math.max(r0, r1);
+          const text = _extractWholeLinesText(rs, re-rs+1);
+          (async ()=>{ const ok = await _copyToClipboard(text); toast(ok? 'Copied to Windows clipboard.':'Clipboard write failed.', ok? 1000:1500); })();
+          _clearPendingOp(); _repositionCaret(); updateGutter();
+          return;
+        }
+        // Y} / Y{ — linewise copy by paragraph
+        if (e.key==='}'){
+          const mcount = (_countAcc==null?1:_countAcc); _countAcc=null;
+          const next = _paragraphNextPos(caretRow, mcount);
+          const rs = caretRow;
+          const re = Math.max(rs, Math.max(0, Math.min(_totalLines()-1, next.r-1)));
+          if (re >= rs){
+            const text = _extractWholeLinesText(rs, re-rs+1);
+            (async ()=>{ const ok = await _copyToClipboard(text); toast(ok? 'Copied to Windows clipboard.':'Clipboard write failed.', ok? 1000:1500); })();
+          }
+          _clearPendingOp(); _repositionCaret(); updateGutter();
+          return;
+        }
+        if (e.key==='{'){
+          const mcount = (_countAcc==null?1:_countAcc); _countAcc=null;
+          const prev = _paragraphPrevPos(caretRow, mcount);
+          const rs = Math.min(prev.r, caretRow);
+          const re = caretRow;
+          if (re >= rs){
+            const text = _extractWholeLinesText(rs, re-rs+1);
+            (async ()=>{ const ok = await _copyToClipboard(text); toast(ok? 'Copied to Windows clipboard.':'Clipboard write failed.', ok? 1000:1500); })();
+          }
+          _clearPendingOp(); _repositionCaret(); updateGutter();
+          return;
+        }
+        // generic Y + motion (charwise)
+        {
+          const mcount = (_countAcc==null?1:_countAcc); _countAcc=null;
+          const totalCount = Math.max(1, (_pendingOpCount||1) * mcount);
+          const target = _computeMotionTarget(caretRow, caretCol, e.key, totalCount);
+          if (target){
+            const start = { r: caretRow, c: caretCol };
+            const end   = target;
+            const text  = _extractRangeText(start, end);
+            (async ()=>{ const ok = await _copyToClipboard(text); toast(ok? 'Copied to Windows clipboard.':'Clipboard write failed.', ok? 1000:1500); })();
+            _clearPendingOp(); _repositionCaret(); updateGutter();
+            return;
+          }
         }
         _clearPendingOp(); return;
       }
@@ -5954,6 +6131,8 @@
   if (e.key==='d' && !e.ctrlKey && !e.metaKey && !e.altKey){ e.preventDefault(); _pendingOp='d'; _pendingOpCount=_consumeCount(); if (!_pendingOpCount || _pendingOpCount<1) _pendingOpCount=1; _pendingOpSeq=null; _armPendingOpTimeout(); return; }
   // yank operator: y + motion
   if (e.key==='y' && !e.ctrlKey && !e.metaKey && !e.altKey){ e.preventDefault(); _pendingOp='y'; _pendingOpCount=_consumeCount(); if (!_pendingOpCount || _pendingOpCount<1) _pendingOpCount=1; _pendingOpSeq=null; _armPendingOpTimeout(); return; }
+  // Windows clipboard copy operator: Y + motion (does not touch unnamed register)
+  if (e.key==='Y' && !e.ctrlKey && !e.metaKey && !e.altKey){ e.preventDefault(); _pendingOp='Y'; _pendingOpCount=_consumeCount(); if (!_pendingOpCount || _pendingOpCount<1) _pendingOpCount=1; _pendingOpSeq=null; _armPendingOpTimeout(); return; }
   // change operator: c + motion
   if (e.key==='c' && !e.ctrlKey && !e.metaKey && !e.altKey){ e.preventDefault(); _pendingOp='c'; _pendingOpCount=_consumeCount(); if (!_pendingOpCount || _pendingOpCount<1) _pendingOpCount=1; _pendingOpSeq=null; _armPendingOpTimeout(); return; }
       // word motions (w: next word start, b: prev word start)
