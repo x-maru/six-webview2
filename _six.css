@@ -186,6 +186,9 @@ body { font: var(--fontBase, 18px)/20px Consolas, 'Courier New', monospace; over
 #zoomhud button { border: 1px solid #2a3244; background: #1a2030; color:#e6e6e6; border-radius: 4px; padding:2px 6px; cursor:pointer; font: 11px/1.2 system-ui, -apple-system, 'Segoe UI', sans-serif; }
 #zoomhud button:hover { filter: brightness(1.06); }
 
+/* Palette toggle button hover (#473): external button below overlay palette */
+#paletteToggleBtn:hover { background: #5a1a1a !important; color: #ffffff !important; border-color: #7a2a3a !important; }
+
 /* modal (custom confirm) */
 #modalOverlay { position: fixed; inset: 0; background: rgba(0,0,0,0.45); display: none; align-items: center; justify-content: center; z-index: 10002; }
 #modalBox { min-width: 360px; max-width: 80vw; background: #0f1117; color: #e6e6e6; border: 1px solid #2a3244; border-radius: 8px; box-shadow: 0 12px 28px rgba(0,0,0,0.5); overflow: hidden; }

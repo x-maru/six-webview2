@@ -73,14 +73,14 @@
       b.viewRow = caretRow|0; b.viewCol = caretCol|0;
       // snap to line grid for stability
       const st = (editor && typeof editor.scrollTop==='number') ? (editor.scrollTop|0) : 0;
-      try{ b.viewScrollTop = Math.round(Math.max(0, st)/LINE_HEIGHT)*LINE_HEIGHT; }catch{ b.viewScrollTop = Math.max(0, st); }
+    try{ b.viewScrollTop = Math.round(Math.max(0, st)/LINE_HEIGHT)*LINE_HEIGHT; }catch{ b.viewScrollTop = Math.max(0, st); }
     }catch{}
   }
   function _collectSessionPayload(opts={}){
     // opts.lite: if true, omit text for unmodified file-backed buffers to reduce footprint
   const lite = !!opts.lite;
-    try{
-      _syncActiveViewStateIntoBuffer();
+      try{
+        _syncActiveViewStateIntoBuffer();
       const bufs = buffers.map((b)=>{
         const isFileBacked = !!(b && b.path && /^file:\/\//i.test(b.path));
         const omitText = !!(lite && isFileBacked && !b.modified);
@@ -118,34 +118,44 @@
           viewScrollTop: Number.isFinite(b.viewScrollTop)?(b.viewScrollTop|0):0,
           savedMode: b.savedMode||'NORMAL',
           savedVisual: (b.savedVisual ? { linewise: !!b.savedVisual.linewise, anchorR: b.savedVisual.anchorR|0, anchorC: b.savedVisual.anchorC|0, caretR: b.savedVisual.caretR|0, caretC: b.savedVisual.caretC|0 } : null),
-          undo: undoArr
+    undo: undoArr,
+    extMtime: (typeof b._extMtime === 'number') ? b._extMtime : null,
+    extSize: (typeof b._extSize === 'number') ? b._extSize : null,
+    externalIgnored: !!b._externalChangeIgnored
         };
       });
       const payload = {
         version: 1,
         when: Date.now(),
         active: Math.max(0, Math.min((buffers.length?buffers.length-1:0), currentIdx|0)),
-        buffers: bufs
+        buffers: bufs,
+        scrolloff: Number.isFinite(scrolloff) ? (scrolloff|0) : 3
       };
       return payload;
     }catch{ return { version:1, when:Date.now(), active:0, buffers:[] }; }
   }
   function _persistClearedSession(){
     try{
-      const payload = { version:1, when:Date.now(), active:0, buffers:[] };
+      const payload = { version:1, when:Date.now(), active:0, buffers:[], scrolloff:3 };
       try{ localStorage.setItem(_SESSION_KEY, JSON.stringify(payload)); }catch{}
     }catch{}
   }
   function _persistSessionNow(){
     try{
       const p = _collectSessionPayload({ lite:false });
-      try{
-        localStorage.setItem(_SESSION_KEY, JSON.stringify(p));
-        return true;
-      }catch(e){
-        // quota fallback: retry with lite payload
-        try{ const p2 = _collectSessionPayload({ lite:true }); localStorage.setItem(_SESSION_KEY, JSON.stringify(p2)); return true; }catch{ return false; }
-      }
+          try {
+              localStorage.setItem(_SESSION_KEY, JSON.stringify(p));
+            return true;
+        } catch (e) {
+            // quota fallback: retry with lite payload
+            try {
+                const p2 = _collectSessionPayload({ lite: true });
+                localStorage.setItem(_SESSION_KEY, JSON.stringify(p2));
+                return true;
+            } catch {
+                return false;
+            }
+        }
     }catch{ return false; }
   }
   function _schedulePersist(reason){
@@ -158,8 +168,16 @@
     try{
       const s = localStorage.getItem(_SESSION_KEY);
       if (!s) return false;
-      const j = JSON.parse(s);
-      if (!j || !Array.isArray(j.buffers)) return false;
+        const j = JSON.parse(s); 
+        if (!j || !Array.isArray(j.buffers)) return false; 
+      // Restore scrolloff if present; otherwise fall back to default 3 (#473)
+      try{
+        if (Number.isFinite(j.scrolloff)){
+          scrolloff = (j.scrolloff|0);
+        } else {
+          scrolloff = 3;
+        }
+      }catch{ scrolloff = 3; }
       // Clear current
       buffers.length = 0; currentIdx = -1;
       // Rehydrate buffers
@@ -205,6 +223,10 @@
             }));
             b._redo = [];
           }catch{ b._undo = b._undo||[]; b._redo = []; }
+          // External modification tracking restoration
+          try{ if (it && typeof it.extMtime === 'number') b._extMtime = it.extMtime; }catch{}
+          try{ if (it && typeof it.extSize === 'number') b._extSize = it.extSize; }catch{}
+          try{ b._externalChangeIgnored = !!(it && it.externalIgnored); }catch{}
           // Seed baseline undo only if none persisted and buffer is modified with savedText available
           try{
             if ((!(Array.isArray(b._undo) && b._undo.length)) && modified && typeof b.savedText === 'string' && b.savedText !== b.text){
@@ -355,8 +377,9 @@
   // --- Incremental search anchor (used by '/', '?', and :s preview) ---
   let _incSearchAnchorOff = null; // absolute offset anchor for incremental search
   let _incSearchDir = 'fwd';      // last incremental search direction
-  // Initial options may be provided via window.SIX_OPTIONS (from _six.customize)
-  let scrolloff = (function(){ try{ const o=(window&&window.SIX_OPTIONS)||{}; const n=parseInt(o.scrolloff,10); if (Number.isFinite(n)) return n|0; }catch{} return 3; })();
+  // scrolloff (上下の余白行数): セッション復元があればそれを使い、無ければ既定値 3 にする。
+  // SIX_OPTIONS.scrolloff は廃止（#473）。
+  let scrolloff = 3;
   // How many undo steps to persist into session storage (payload size vs utility)
   const UNDO_STEPS_IN_SESSION = (function(){
     try{
@@ -765,6 +788,7 @@
       const out = [];
       let m; re.lastIndex = 0;
       while ((m = re.exec(text))){
+        _extLastCheckAt: 0
         const s = (m.index|0);
         const l = ((m[0]||'').length|0);
         if (l > 0) out.push({ start:s, len:l });
@@ -1163,6 +1187,35 @@
     }catch{ return full; }
   }
 
+  // --- file stat helpers for external modification detection (mtime/size) ---
+  async function _statFileMeta(urlStr){
+    try{
+      const u = new URL(urlStr);
+      if (u.protocol !== 'file:') return null;
+      const parent = _dirnameURL(u.toString());
+      const baseName = _basename(u.toString());
+      if (!baseName) return null;
+      const list = await _listDirEntriesWithQuickRetry(parent);
+      if (!Array.isArray(list)) return null;
+      let caseSensitive = false; try{ if (u.host && u.host.toLowerCase()==='wsl.localhost') caseSensitive = true; }catch{}
+      const match = list.find(e=> e && !e.isDir && (
+        caseSensitive ? (e.name===baseName) : (String(e.name||'').toLowerCase()===String(baseName||'').toLowerCase())
+      ));
+      if (match){
+        const hasM = (typeof match.mtime === 'number');
+        const hasS = (typeof match.size  === 'number');
+        // 両方とも欠落している場合はメタ無しとして扱い、nullを返す（baselineをnullで汚さない）
+        if (!hasM && !hasS) return null;
+        const mtime = hasM ? match.mtime : null;
+        const size  = hasS ? match.size  : null;
+        try{ console.log('[stat] meta', baseName, 'mtime=', mtime, 'size=', size, 'parent=', parent); }catch{}
+        return { mtime, size };
+      }
+      try{ console.log('[stat] no entry for', baseName, 'in parent', parent); }catch{}
+      return null;
+    }catch{ return null; }
+  }
+
   // URL を :e の入力欄にそのまま貼れるディレクトリ表記へ（//host/... または C:/... など）
   function _inputDirRawFromURL(urlObj){
     try{
@@ -1514,7 +1567,13 @@
         viewCol: 0,
         viewScrollTop: 0,
         // persist VISUAL selection across tabs
-        savedVisual: null
+        savedVisual: null,
+        // external modification tracking (mtime/size established when buffer becomes unmodified after save/load)
+        _extMtime: null,
+        _extSize: null,
+        _externalChangeIgnored: false,
+        _checkingExternal: false,
+        _extLastCheckAt: 0
       });
       if (currentIdx<0) currentIdx=0;
     }catch{}
@@ -1527,6 +1586,7 @@
         try{ editor && editor.focus && editor.focus(); }catch{}
         return;
       }
+      try{ const b0 = buffers[i]; console.log('[switch] begin', i, b0 && b0.name, b0 && b0.path); }catch{}
       _lastBufferSwitchAt = Date.now();
       // Temporarily hide editor viewport to avoid a brief flicker to EOF when
       // the new buffer has fewer lines and the previous scrollTop is clamped.
@@ -1675,6 +1735,86 @@
           _setMode('NORMAL');
         }
       }catch{}
+      // On activation, detect external modification for file-backed buffers
+      try{
+        if (b && b.path && /^file:\/\//i.test(b.path)){
+          try{ console.log('[switch] external-check trigger', b.name); }catch{}
+          _maybeCheckExternalChangeOnActivate(i);
+        } else {
+          try{ b._externalChangeIgnored = false; }catch{}
+        }
+      }catch{}
+    }catch{}
+  }
+
+  // External change detection (activation)
+  async function _maybeCheckExternalChangeOnActivate(idx){
+    try{
+      const b = buffers[idx]; if (!b) return;
+      if (!b.path || !/^file:\/\//i.test(b.path)){ try{ console.log('[ext-check] skip (no file path)', b && b.name); }catch{} return; }
+      const now = Date.now();
+      if (b._extLastCheckAt && (now - b._extLastCheckAt < 1500)) { try{ console.log('[ext-check] throttle-skip', b.name); }catch{} return; }
+      b._extLastCheckAt = now;
+      if (b._checkingExternal){ try{ console.log('[ext-check] already-checking', b.name); }catch{} return; }
+      try{ console.log('[ext-check] invoke', b.name); }catch{}
+      b._checkingExternal = true;
+      (async()=>{
+  let meta = await _statFileMeta(b.path);
+  try{ console.log('[ext-check] start', b.name); }catch{}
+        try{ b._checkingExternal=false; }catch{}
+        // メタが取れない場合でも、キャッシュを捨てて1回だけ即再試行（短期エラーの吸収）
+        if (!meta){
+          try{ console.log('[ext-check] miss meta; cache-bust and retry', b.name); }catch{}
+          try{
+            const parent = _dirnameURL(b.path);
+            const key = (function(){ try{ return _ensureSlash(parent)?.toString()||null; }catch{ return null; } })();
+            if (key && _dirCache && _dirCache.delete){ _dirCache.delete(key); }
+          }catch{}
+          try{ meta = await _statFileMeta(b.path); }catch{}
+          if (!meta) return;
+        }
+        const { mtime, size } = meta;
+        if (!(typeof b._extMtime === 'number') || !(typeof b._extSize === 'number')){
+          // baseline 未設定時: modified=falseなら取得できた数値のみ反映
+          if (!b.modified){
+            if (typeof mtime === 'number') b._extMtime = mtime;
+            if (typeof size  === 'number') b._extSize  = size;
+            try{ console.log('[ext-check] baseline init', b.name, 'mtime=', b._extMtime, 'size=', b._extSize); }catch{}
+          }
+          return;
+        }
+        // いずれかの差分で変更と判断（どちらか一方のみ取得できるFSも想定）
+        const changed = (typeof mtime==='number' && mtime !== b._extMtime) || (typeof size==='number' && size !== b._extSize);
+  try{ console.log('[ext-check] compare', b.name, 'old mtime=', b._extMtime, 'old size=', b._extSize, 'new mtime=', mtime, 'new size=', size, 'changed=', changed); }catch{}
+        if (!changed) return;
+        const label = b.path ? _prettyFileUrlLabel(b.path) : (b.name||'(untitled)');
+        const detail = b.modified
+          ? `このファイルは外部で編集されたようです。未保存の編集を破棄して読み込みますか？\n${label}`
+          : `このファイルは外部で編集されたようです。読み込みますか？\n${label}`;
+        const id = await choiceModal({ title:'外部変更検出', detail, buttons:[{id:'reload',label:'読み込み直す',primary:true},{id:'ignore',label:'無視'}] });
+        if (id==='reload'){
+          await _loadFromPath(b.path, null, { mode:'replace' });
+          try{
+            const after = currentBuffer();
+            if (after===b && !after.modified){
+              // リロード直後はキャッシュを捨ててメタを再取得
+              try{ const parent = _dirnameURL(b.path); const k = (function(){ try{ return _ensureSlash(parent)?.toString()||null; }catch{ return null; } })(); if (k && _dirCache && _dirCache.delete){ _dirCache.delete(k); } }catch{}
+              const meta2 = await _statFileMeta(b.path);
+              if (meta2){
+                if (typeof meta2.mtime === 'number') b._extMtime = meta2.mtime;
+                if (typeof meta2.size  === 'number') b._extSize  = meta2.size;
+              }
+              b._externalChangeIgnored=false;
+              try{ console.log('[ext-check] baseline after reload', b.name, 'mtime=', b._extMtime, 'size=', b._extSize); }catch{}
+            }
+          }catch{}
+          toast('reloaded');
+        } else if (id==='ignore') {
+          b._externalChangeIgnored = true;
+          try{ console.log('[ext-check] ignored', b.name); }catch{}
+          toast('外部変更を検出: 保存時に警告します', 2000);
+        }
+      })();
     }catch{}
   }
 
@@ -1930,7 +2070,7 @@
         try {
           const xhr = new XMLHttpRequest();
           xhr.open('GET', urlStr, true);
-          xhr.responseType = 'text';
+            b.viewRow = caretRow | 0; b.viewCol = caretCol | 0;
           xhr.onload = ()=>{
             // file:// では status 0 が正常扱いの場合がある
             if (xhr.status === 0 || (xhr.status >= 200 && xhr.status < 300)){
@@ -2041,6 +2181,16 @@
         if (b){
           b.path = urlStr; b.name = _basename(path); b.text = t; b.savedText = t; b._changeTick=0; b._savedTick=0; b.modified=false; try{ b._undo=[]; b._redo=[]; }catch{}
           try{ b.enc='utf-8'; b.ff=ff; b.bom=hasBomChar; }catch{}
+          try{
+            b._externalChangeIgnored=false;
+            const meta = await _statFileMeta(b.path);
+              if (meta){
+              // 数値が得られた項目のみ更新（nullは書かない）
+              if (typeof meta.mtime === 'number') b._extMtime = meta.mtime;
+              if (typeof meta.size  === 'number') b._extSize  = meta.size;
+              try{ console.log('[baseline] after replace-load', b.name, 'mtime=', b._extMtime, 'size=', b._extSize); }catch{}
+            }
+          }catch{}
         }
         // Reflect into editor now since we stay on the same buffer
         editor.value = t; loadedIntoEditor = true;
@@ -4043,7 +4193,7 @@
             if (id === 'save'){
               if (b.path){
                 const textData = editor.value||'';
-                const ok = await _saveToURL(b.path, textData);
+                const ok = await _saveToURLWithExternalCheck(b, b.path, textData);
                 if (!ok){ toast('write failed: ' + (b.name||'')); return; }
                 try{ b.text = textData; b.savedText = textData; b._savedTick = (b._changeTick|0); b.modified = false; }catch{}
               } else {
@@ -4055,7 +4205,7 @@
                 let targetUrl = null;
                 try{ targetUrl = _normalizeToURLString(input, base); }catch{}
                 if (!targetUrl){ toast('invalid path', 1500); return; }
-                const ok = await _saveToURL(targetUrl, editor.value||'');
+                const ok = await _saveToURLWithExternalCheck(b, targetUrl, editor.value||'');
                 if (!ok){ toast('write failed', 1500); return; }
                 try{ b.path = targetUrl; b.name = _basename(targetUrl); const textData = editor.value||''; b.text = textData; b.savedText = textData; b._savedTick = (b._changeTick|0); b.modified=false; }catch{}
                 _setTitle(); _renderTabbar();
@@ -4099,7 +4249,19 @@
     const m = cmd.match(/^:set\s+so\s*=\s*(\d+)$/i);
     if (m){
       const n = parseInt(m[1],10);
-      if (!Number.isNaN(n)) window.six.setScrolloff(n);
+      if (!Number.isNaN(n)) { window.six.setScrolloff(n); try{ toast('scrolloff = ' + (n|0), 900); }catch{} }
+      return;
+    }
+    // :set scrolloff=N
+    const mSo = cmd.match(/^:set\s+scrolloff\s*=\s*(\d+)$/i);
+    if (mSo){
+      const n = parseInt(mSo[1],10);
+      if (!Number.isNaN(n)) { window.six.setScrolloff(n); try{ toast('scrolloff = ' + (n|0), 900); }catch{} }
+      return;
+    }
+    // :set scrolloff?
+    if (/^:set\s+scrolloff\?\s*$/i.test(cmd)){
+      try{ toast('scrolloff = ' + (Number.isFinite(scrolloff)?(scrolloff|0):3), 1200); }catch{}
       return;
     }
     // :set hlsearch / :set nohlsearch / :set hlsearch!
@@ -4164,7 +4326,7 @@
             }
           }catch{}
         }
-        const ok = await _saveToURL(targetUrl, editor.value||'');
+  const ok = await _saveToURLWithExternalCheck(b, targetUrl, editor.value||'');
         if (ok){
           try{
             const was = b.path||null;
@@ -4216,7 +4378,7 @@
             }
           }catch{}
         }
-        const ok = await _saveToURL(targetUrl, editor.value||'');
+  const ok = await _saveToURLWithExternalCheck(b, targetUrl, editor.value||'');
         if (ok){
           try{
             const was = b.path||null;
@@ -4239,7 +4401,7 @@
           const b = buffers[i];
           if (!b || !b.modified || !b.path) continue;
           const textData = (i===currentIdx)?(editor.value||''):(b.text||'');
-          const ok = await _saveToURL(b.path, textData);
+          const ok = await _saveToURLWithExternalCheck(b, b.path, textData);
           if (ok){ try{ b.text=textData; b.modified=false; }catch{} toast('written: ' + _prettyFileUrlLabel(b.path)); } else { toast('write failed: ' + (b.name||'')); }
         }
         _setTitle(); _renderTabbar();
@@ -4319,7 +4481,7 @@
             }
           }catch{}
         }
-        const ok = await _saveToURL(targetUrl, editor.value||'');
+  const ok = await _saveToURLWithExternalCheck(b, targetUrl, editor.value||'');
         if (ok){
           try{
             const was = b.path||null;
@@ -5038,7 +5200,8 @@
             ]);
             // 表示
             section('表示', [
-              [K(':set scrolloff=N'), sep(' スクロールオフ（上下の余白行数）'), K('set so=N'), sep('でも同じ')]
+              [K(':set scrolloff=N'), sep(' スクロールオフ（上下余白行数） / '), K(':set scrolloff?'), sep(' 現在値表示 / '), K(':set so=N'), sep(' 省略形')],
+              [sep('既定値: セッション未保存時 scrolloff=3 （変更はセッションへ保存し次回復元）')]
             ]);
             // その他
             section('その他', [
@@ -5353,7 +5516,7 @@
             for (const {b,i} of modifiedItems){
               const id = await choiceModal({ title:'Unsaved changes', detail:`Save changes to: ${b.path? _prettyFileUrlLabel(b.path):(b.name||'(untitled)')}`, buttons:[{id:'save',label:'Save',primary:true},{id:'dont',label:"Don't Save"},{id:'cancel',label:'Cancel',danger:true}] });
               if (id===null || id==='cancel'){ resolve(false); return; }
-              if (id==='save' && b.path){ const textData = (i===currentIdx)?(editor.value||''):(b.text||''); const ok = await _saveToURL(b.path, textData); if (!ok){ toast('write failed: ' + (b.name||'')); resolve(false); return; } try{ b.text=textData; b.modified=false; }catch{} }
+              if (id==='save' && b.path){ const textData = (i===currentIdx)?(editor.value||''):(b.text||''); const ok = await _saveToURLWithExternalCheck(b, b.path, textData); if (!ok){ toast('write failed: ' + (b.name||'')); resolve(false); return; } try{ b.text=textData; b.modified=false; }catch{} }
             }
             resolve(true);
           })();
@@ -5375,7 +5538,7 @@
           const removeRow = ()=>{ try{ listWrap.removeChild(row); rows.delete(i); }catch{} };
           btnSave.addEventListener('click', async()=>{
             btnSave.disabled = true; btnSkip.disabled=true;
-            if (b.path){ const textData = (i===currentIdx)?(editor.value||''):(b.text||''); const ok = await _saveToURL(b.path, textData); if (!ok){ toast('write failed: ' + (b.name||'')); btnSave.disabled=false; btnSkip.disabled=false; return; } try{ b.text=textData; b.savedText=textData; b._savedTick = (b._changeTick|0); b.modified=false; }catch{} }
+            if (b.path){ const textData = (i===currentIdx)?(editor.value||''):(b.text||''); const ok = await _saveToURLWithExternalCheck(b, b.path, textData); if (!ok){ toast('write failed: ' + (b.name||'')); btnSave.disabled=false; btnSkip.disabled=false; return; } try{ b.text=textData; b.savedText=textData; b._savedTick = (b._changeTick|0); b.modified=false; }catch{} }
             removeRow(); maybeFinish();
           });
           btnSkip.addEventListener('click', ()=>{ removeRow(); maybeFinish(); });
@@ -5398,7 +5561,7 @@
             const b = obj.b;
             if (b && b.modified && b.path){
               const textData = (i===currentIdx)?(editor.value||''):(b.text||'');
-              const ok = await _saveToURL(b.path, textData);
+              const ok = await _saveToURLWithExternalCheck(b, b.path, textData);
               if (!ok){ toast('write failed: ' + (b.name||'')); btnAll.disabled=false; btnCancel.disabled=false; return; }
               try{ b.text=textData; b.savedText=textData; b._savedTick = (b._changeTick|0); b.modified=false; }catch{}
             }
@@ -5448,7 +5611,29 @@
   window.addEventListener('mousemove', _showCursor, { passive:true });
   window.addEventListener('blur', _showCursor);
   // When window becomes active, make caret active (hide mouse cursor briefly)
-  window.addEventListener('focus', ()=>{ try{ _hideCursor(); _repositionCaret(); updateGutter(); }catch{} });
+  window.addEventListener('focus', ()=>{
+    try{ _hideCursor(); _repositionCaret(); updateGutter(); }catch{}
+    // 前面復帰時にアクティブバッファの外部変更も確認（スロットル内蔵） (#476)
+    try{
+      const idx = (typeof currentIdx==='number') ? currentIdx : -1;
+      const b = (idx>=0 && idx<buffers.length) ? buffers[idx] : null;
+      if (b && b.path && /^file:\/\//i.test(b.path)){
+        _maybeCheckExternalChangeOnActivate(idx);
+      }
+    }catch{}
+  });
+  // タブ切替なしでアプリが不可視→可視になった場合も同様に確認
+  document.addEventListener('visibilitychange', ()=>{
+    try{
+      if (document.visibilityState === 'visible'){
+        const idx = (typeof currentIdx==='number') ? currentIdx : -1;
+        const b = (idx>=0 && idx<buffers.length) ? buffers[idx] : null;
+        if (b && b.path && /^file:\/\//i.test(b.path)){
+          _maybeCheckExternalChangeOnActivate(idx);
+        }
+      }
+    }catch{}
+  });
   // Unified scroll handler: snap to line grid and render once per frame
   let _scrollRAF = 0;
   const scheduleScrollRender = ()=>{
@@ -8111,6 +8296,63 @@
     }catch(e){ toast('write failed'); return false; }
   }
 
+  // Wrapper: warn when previously ignored external change; offer 3 choices
+  // Returns {status:'saved'|'discarded'|'cancel'}
+  async function _saveToURLWithExternalCheck(b, urlStr, textUtf8){
+    try{
+      if (b && b._externalChangeIgnored){
+        const label = b.path ? _prettyFileUrlLabel(b.path) : (b.name||'(untitled)');
+        const id = await choiceModal({ title:'外部変更の可能性', detail:`このファイルは外部で編集されました。どうしますか？\n${label}`, buttons:[{id:'force',label:'強制保存',primary:true},{id:'discard',label:'編集内容を破棄'},{id:'cancel',label:'キャンセル',danger:true}] });
+        if (id==='force'){
+          const ok = await _saveToURL(urlStr, textUtf8);
+          if (ok){
+            try{
+              const meta = await _statFileMeta(b.path||urlStr);
+              if (meta){
+                if (typeof meta.mtime === 'number') b._extMtime = meta.mtime;
+                if (typeof meta.size  === 'number') b._extSize  = meta.size;
+              }
+              b._externalChangeIgnored=false;
+              try{ console.log('[baseline] after force-save', b.name, 'mtime=', b._extMtime, 'size=', b._extSize); }catch{}
+            }catch{}
+            return { status:'saved' };
+          }
+          return { status:'cancel' };
+        } else if (id==='discard'){
+          if (b && b.path){
+            await _loadFromPath(b.path, null, { mode:'replace' });
+            try{
+              const meta = await _statFileMeta(b.path);
+              if (meta){
+                if (typeof meta.mtime === 'number') b._extMtime = meta.mtime;
+                if (typeof meta.size  === 'number') b._extSize  = meta.size;
+              }
+              b._externalChangeIgnored=false;
+              try{ console.log('[baseline] after discard-reload', b.name, 'mtime=', b._extMtime, 'size=', b._extSize); }catch{}
+            }catch{}
+          }
+          return { status:'discarded' };
+        } else {
+          return { status:'cancel' };
+        }
+      } else {
+        const ok = await _saveToURL(urlStr, textUtf8);
+        if (ok){
+          try{
+            const meta = await _statFileMeta(b && (b.path||urlStr));
+            if (b && meta){
+              if (typeof meta.mtime === 'number') b._extMtime = meta.mtime;
+              if (typeof meta.size  === 'number') b._extSize  = meta.size;
+              b._externalChangeIgnored=false;
+              try{ console.log('[baseline] after normal-save', b.name, 'mtime=', b._extMtime, 'size=', b._extSize); }catch{}
+            }
+          }catch{}
+        }
+        return { status: ok ? 'saved' : 'cancel' };
+      }
+    }catch{ return { status:'cancel' }; }
+  }
+
   // Minimal Shift_JIS encoder (ASCII + halfwidth-kana + common mappings). Returns Uint8Array.
   function _encodeShiftJIS(str){
     const bytes = [];
@@ -8186,7 +8428,7 @@
         const apiUrl2 = _apiBase + 'dir?cwd=' + encodeURIComponent(key);
         const jx = await _fetchJSONWithTimeout(apiUrl2, 7000);
         if (jx && Array.isArray(jx.entries) && jx.entries.length){
-          const arrx = jx.entries.map(e=>({ name: e.name, isDir: !!e.isDir, url: String(e.url||'') }));
+          const arrx = jx.entries.map(e=>({ name: e.name, isDir: !!e.isDir, url: String(e.url||''), size: (typeof e.size==='number'?e.size:null), mtime: (typeof e.mtime==='number'?e.mtime:null) }));
           _dirCache.set(key, arrx);
           // まだ同じディレクトリを見ているなら即時反映
           try{
@@ -8274,7 +8516,7 @@
                 if (jf && Array.isArray(jf.entries)){
                   const arrFs = jf.entries.map(e=>{
                     const n = e.name; const d = !!e.isDir; const url = makeEntryUrl(u, n, d, e.url);
-                    return { name: n, isDir: d, url };
+                    return { name: n, isDir: d, url, size: (typeof e.size==='number'?e.size:null), mtime: (typeof e.mtime==='number'?e.mtime:null) };
                   });
                   if (arrFs.length > 0){ _dirCache.set(key, arrFs); return arrFs; }
                 }
@@ -8296,9 +8538,12 @@
           const timeout1 = isUnc ? 6000 : 2000;
           try{ j = await _fetchJSONWithTimeout(apiUrl, timeout1); try{ _apiNoteSuccess(); }catch{} }catch(e){ if (_apiIsEnabled()){ try{ _apiNoteFailure(); }catch{} } throw e; }
           if (j && Array.isArray(j.entries)){
+            // API 正常応答: size / mtime も保持して外部変更検出の基礎情報に使う (#477)
             const arr = j.entries.map(e=>{
               const n = e.name; const d = !!e.isDir; const url = makeEntryUrl(u, n, d, e.url);
-              return { name: n, isDir: d, url };
+              const sz = (typeof e.size === 'number') ? e.size : null;
+              const mt = (typeof e.mtime === 'number') ? e.mtime : null;
+              return { name: n, isDir: d, url, size: sz, mtime: mt };
             });
             if (arr.length > 0){ _dirCache.set(key, arr); return arr; }
             // 空なら fs= でも試す（Uri.LocalPath 解決の失敗対策）
@@ -8312,7 +8557,9 @@
                 if (j2 && Array.isArray(j2.entries)){
                   const arr2 = j2.entries.map(e=>{
                     const n = e.name; const d = !!e.isDir; const url = makeEntryUrl(u, n, d, e.url);
-                    return { name: n, isDir: d, url };
+                    const sz = (typeof e.size === 'number') ? e.size : null;
+                    const mt = (typeof e.mtime === 'number') ? e.mtime : null;
+                    return { name: n, isDir: d, url, size: sz, mtime: mt };
                   });
                   if (arr2.length > 0){ _dirCache.set(key, arr2); return arr2; }
                 }
@@ -8332,7 +8579,9 @@
               if (j2 && Array.isArray(j2.entries)){
                 const arr2 = j2.entries.map(e=>{
                   const n = e.name; const d = !!e.isDir; const url = makeEntryUrl(u, n, d, e.url);
-                  return { name: n, isDir: d, url };
+                  const sz = (typeof e.size === 'number') ? e.size : null;
+                  const mt = (typeof e.mtime === 'number') ? e.mtime : null;
+                  return { name: n, isDir: d, url, size: sz, mtime: mt };
                 });
                 if (arr2.length > 0){ _dirCache.set(key, arr2); return arr2; }
               }
@@ -9371,6 +9620,6 @@
 
   window.six = {
     runCommand,
-    setScrolloff:(n)=>{ scrolloff = n; ensureScrolloff(); _repositionCaret(); updateGutter(); }
+    setScrolloff:(n)=>{ try{ const v = parseInt(n,10); if (Number.isNaN(v)) return; scrolloff = v|0; _schedulePersist('scrolloff'); ensureScrolloff({force:true}); _repositionCaret(); updateGutter(); }catch{} }
   };
 })();
