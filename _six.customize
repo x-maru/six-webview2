@@ -7,7 +7,7 @@
 
 // Initial :set options
 window.SIX_OPTIONS = {
-  scrolloff: 99999, // 初期スクロールオフ
+  // scrolloff: 99999, // :set scrolloff=Nで設定した値をセッション情報に含めるのでオプションからは外した。初期値は3
   tabstop: 8, // TABコードを何桁の空白として表示するか
   // 即時終了から復帰した後まで引き継ぐアンドゥバッファの深さ(各バッファ毎に持つバッファに対する共通の深さ)
   UNDO_STEPS_IN_SESSION: 5,

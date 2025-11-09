@@ -46,6 +46,12 @@
 
   <div id="toast" style="display:none"><span class="msg"></span></div>
 
+  <!-- palette toggle button (always visible; outside overlayPalette) -->
+  <button id="paletteToggleBtn" type="button" title="オーバーレイパレット表示/非表示 (Ctrl+F9)" style="position:fixed; right:12px; bottom:6px; z-index:10001; display:block; font:11px/1.25 system-ui,-apple-system,'Segoe UI',sans-serif; padding:4px 8px; border:1px solid #2a3244; background:#1a2030; color:#e6e6e6; border-radius:6px; cursor:pointer; user-select:none; line-height:1.2;">
+    <span style="display:block; filter: grayscale(100%);">🎨</span>
+    <span style="display:block;">^F9</span>
+  </button>
+
   <!-- zoom HUD (over tabbar) -->
   <div id="zoomhud" aria-hidden="true" style="display:none">
     <div class="box">

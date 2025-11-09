@@ -2248,11 +2248,16 @@
     if (offsetLines < 0) { edstripe.style.display='none'; return; }
     const topPx = offsetLines * LINE_HEIGHT;
     // Subpixel remainder between scrollTop and line-height (e.g., due to DPI/zoom)
-    // Align overlays (stripe/caret) with the text by canceling the remainder via translateY
+    // Align overlays (stripe/caret) with the text by canceling the remainder via translateY.
+    // IMPORTANT: Use floor, not round. We define the logical top line with Math.floor(scrollTop/LINE_HEIGHT)+1
+    // so using round here could introduce a negative half-line remainder after gg/G/k causing a visual gap (#470).
+    // By flooring consistently we always translate relative to the same grid origin used by _topLine()/ensureScrolloff.
     let rem = 0;
     try{
       const st = (editor.scrollTop||0);
-      rem = st - Math.round(st/LINE_HEIGHT)*LINE_HEIGHT;
+      rem = st - Math.floor(st/LINE_HEIGHT)*LINE_HEIGHT;
+      // Guard against tiny negative floating residues (e.g., -0.5px at certain zoom ratios)
+      if (Math.abs(rem) < 0.01) rem = 0;
     }catch{}
     if (topPx >= 0 && topPx < viewport.clientHeight) {
       edstripe.style.display='';
@@ -2411,7 +2416,8 @@
     // Position caret X adjusted by current horizontal scroll
     try{ let _hs = 0; try{ _hs = (editor.scrollLeft||0); }catch{} caret.style.left = (x - _hs) + 'px'; }catch{}
     // Apply the same remainder compensation to caret overlay container
-    try{ caretLayer.style.transform = (Math.abs(rem) > 0.01) ? `translateY(${-rem}px)` : ''; }catch{}
+  // NOTE: caretLayer transform remainder must use the same floor-based remainder as edstripe (rem computed above)
+  try{ caretLayer.style.transform = (Math.abs(rem) > 0.01) ? `translateY(${-rem}px)` : ''; }catch{}
     // Detect caret movement (row/col change) and hide mouse cursor accordingly
     try{
       const moved = (caretRow !== _lastCaretRow) || (caretCol !== _lastCaretCol);
@@ -3009,16 +3015,18 @@
     try{
       const stCur = (editor.scrollTop||0);
       const atEOFJump = !!(opts && opts.preferEOFPad && caretLine1 === linesTotal);
-      const snapped = atEOFJump ? (Math.floor(stCur/LINE_HEIGHT)*LINE_HEIGHT)
-                                : (Math.round(stCur/LINE_HEIGHT)*LINE_HEIGHT);
-      if (Math.abs(snapped - stCur) > 0.1){ editor.scrollTop = snapped; }
-      // EOFジャンプ強化: rAF で再度 floor スナップを試行し、微小ズレを完全排除
-      if (atEOFJump && window.requestAnimationFrame){
+      // #472 scrolloff=99999（常時センタリング）環境で Math.round により 0.5 行上方へズレ、背景グラデとの不一致が発生。
+      // text/gutter/caret は floor ベース remainder へ統一済みなので、ここでも常に floor へ統一して余剰を排除。
+      // （EOF ジャンプ特別扱いは不要になったが、将来の拡張のためフラグは保持）
+      const snapped = Math.floor(stCur/LINE_HEIGHT)*LINE_HEIGHT;
+      if (Math.abs(snapped - stCur) > 0.01){ editor.scrollTop = snapped; }
+      // 念のため rAF で再度 floor スナップ（レイアウト遅延対策）。EOF だけでなく常時行うが、差分が出なければ軽微。
+      if (window.requestAnimationFrame){
         requestAnimationFrame(()=>{
           try{
             const st1 = (editor.scrollTop||0);
-            const floor1 = Math.floor(st1/LINE_HEIGHT)*LINE_HEIGHT;
-            if (Math.abs(floor1 - st1) > 0.1){ editor.scrollTop = floor1; }
+            const flo1 = Math.floor(st1/LINE_HEIGHT)*LINE_HEIGHT;
+            if (Math.abs(flo1 - st1) > 0.01){ editor.scrollTop = flo1; }
             _repositionCaret(); updateGutter();
           }catch{}
         });
@@ -3216,7 +3224,8 @@
     try{
       gutter.style.transform = '';
       const st = (editor.scrollTop||0);
-      const rem = st - Math.round(st/LINE_HEIGHT)*LINE_HEIGHT;
+      // Use floor-based remainder consistent with _topLine()/caret stripe to prevent half-line leading gap (#470)
+      const rem = st - Math.floor(st/LINE_HEIGHT)*LINE_HEIGHT;
       const first = gutter.firstElementChild;
       if (first){ first.style.marginTop = Math.abs(rem) > 0.01 ? (-rem)+'px' : '0px'; }
     }catch{}
@@ -8863,6 +8872,14 @@
     try{
       const viewport = document.getElementById('editorViewport');
       if (!viewport) return;
+      // Ensure palette toggle button wiring (button lives outside overlayPalette) (#469)
+      try{
+        const toggleBtn = document.getElementById('paletteToggleBtn');
+        if (toggleBtn && !toggleBtn.__wired){
+          toggleBtn.__wired = true;
+          toggleBtn.addEventListener('click', (e)=>{ try{ e.preventDefault(); }catch{} _toggleOverlayPaletteVisibility(); });
+        }
+      }catch{}
       // Create root once
       let pal = document.getElementById('overlayPalette');
       if (!pal){
@@ -9084,6 +9101,17 @@
     }catch{}
   }
 
+  // Internal flag (not persisted) for palette visibility (#469)
+  let _overlayPaletteVisible = true; // start visible every session
+  function _toggleOverlayPaletteVisibility(){
+    try{
+      const pal = document.getElementById('overlayPalette');
+      if (!pal) return;
+      _overlayPaletteVisible = !_overlayPaletteVisible;
+      pal.style.display = _overlayPaletteVisible ? 'flex' : 'none';
+    }catch{}
+  }
+
   // Reflect current hlsearch state to overlay button
   function _updateOverlayHlsearchVisual(){
     try{
@@ -9145,6 +9173,12 @@
           const fileOpen = (typeof _filePopupVisible==='function' && _filePopupVisible());
           const bufOpen  = (typeof _bufPopupVisible==='function' && _bufPopupVisible());
 
+          // Ctrl+F9: toggle overlay palette visibility (#469) — handle before plain F9
+          if (key==='F9' && e.ctrlKey){
+            try{ e.preventDefault(); e.stopPropagation(); }catch{}
+            _toggleOverlayPaletteVisibility();
+            return;
+          }
           // F10: 即時終了（#435: 終了直前にセッションを保存してから閉じる）
           if (key === 'F10'){
             try{ e.preventDefault(); e.stopPropagation(); }catch{}
