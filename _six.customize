@@ -7,12 +7,11 @@
 
 // Initial :set options
 window.SIX_OPTIONS = {
-  // 初期スクロールオフ
-  scrolloff: 3,
+  scrolloff: 99999, // 初期スクロールオフ
+  tabstop: 8, // TABコードを何桁の空白として表示するか
   // 即時終了から復帰した後まで引き継ぐアンドゥバッファの深さ(各バッファ毎に持つバッファに対する共通の深さ)
   UNDO_STEPS_IN_SESSION: 5,
-  // 検索ハイライト（:set hlsearch / :set nohlsearch / :set hlsearch!）
-  hlsearch: false
+  hlsearch: false // 検索ハイライト（:set hlsearch / :set nohlsearch / :set hlsearch!）
 };
 
 // Theme definition (moved from _six-theme.js)

@@ -837,6 +837,14 @@
     try{
       if (!_optList){ _listClear(); return; }
       _listEnsureLayer(); _listClear();
+      // Keep native textarea tab-size in sync with SIX_OPTIONS.tabstop
+      try{
+        const root = document.documentElement;
+        let ts = 8; if (window && window.SIX_OPTIONS && window.SIX_OPTIONS.tabstop){
+          const raw = parseInt(window.SIX_OPTIONS.tabstop,10); if (raw && raw>0) ts = raw;
+        }
+        root.style.setProperty('--tabstop', String(ts));
+      }catch{}
       const lines = _splitLines();
       const realTotal = lines.length; // real EOF (exclude virtual pad lines)
       const topLine = _topLine();
@@ -849,29 +857,48 @@
         const line = isReal ? String(lines[idx]||'') : '';
         const yTop = (row - topLine) * LINE_HEIGHT;
         // Render trailing spaces, tabs, eol marker. We overlay individual inline boxes.
-        // Trailing spaces
-        let trailStart = line.length; while(trailStart>0 && line.charAt(trailStart-1)===' ') trailStart--;
+        // Trailing run: treat ASCII space, TAB, and IDEOGRAPHIC SPACE as trailing (#461)
+        let trailStart = line.length;
+        while (trailStart>0){
+          const cht = line.charAt(trailStart-1);
+          if (cht===' ' || cht==='\t' || cht==='\u3000') trailStart--; else break;
+        }
         // Iterate characters for tabs and trail markers
+        // local tab expander for measurement parity with textarea rendering
+        const _exp = (s)=>{
+          if (!s || s.indexOf('\t')===-1) return s;
+          // tabstop from SIX_OPTIONS (default 4, min 1)
+          let _ts = 8; try{ const tsRaw = (window && window.SIX_OPTIONS && window.SIX_OPTIONS.tabstop); const ts = parseInt(tsRaw,10); if (ts && ts>0) _ts = ts; }catch{}
+          let out='', col=0;
+          for (let i=0;i<s.length;i++){
+            const ch=s[i];
+            if (ch==='\t'){ const spaces = _ts - (col%_ts); out += ' '.repeat(spaces); col += spaces; }
+            else { out += ch; col += 1; }
+          }
+          return out;
+        };
         for (let c=0;c<line.length;c++){
           const ch = line.charAt(c);
-          if (ch==='\t' || (c>=trailStart && ch===' ')){
-            _measureSpan.textContent = line.slice(0,c);
+          if (ch==='\t' || ch==='\u3000' || (c>=trailStart && ch===' ')){
+            _measureSpan.textContent = _exp(line.slice(0,c));
             const x1 = _measureSpan.getBoundingClientRect().width;
-            _measureSpan.textContent = line.slice(0,c+1);
+            _measureSpan.textContent = _exp(line.slice(0,c+1));
             const x2 = _measureSpan.getBoundingClientRect().width;
             const el = document.createElement('div');
             el.className='listchar';
             let sym = '';
-            if (ch==='\t') sym='▸'; else sym='·';
+            if (ch==='\t') sym='▸';
+            else if (ch==='\u3000'){ sym='□'; el.className+=' listchar-ideospc'; } // render ideographic space visibly (#462)
+            else sym='·';
             el.textContent = sym;
             let _hs=0; try{ _hs=(editor.scrollLeft||0); }catch{}
-            el.style.position='absolute'; el.style.left=(x1-_hs)+'px'; el.style.top=yTop+'px'; el.style.height=LINE_HEIGHT+'px'; el.style.lineHeight=LINE_HEIGHT+'px'; el.style.fontSize='inherit'; el.style.padding='0'; el.style.margin='0'; el.style.color='var(--controlCharColor, yellow)';
+            el.style.position='absolute'; el.style.left=(x1-_hs)+'px'; el.style.top=yTop+'px'; el.style.height=LINE_HEIGHT+'px'; el.style.lineHeight=LINE_HEIGHT+'px'; el.style.fontSize='inherit'; el.style.fontFamily='var(--controlCharFont, "Segoe UI Symbol","Noto Sans Symbols 2","Cascadia Mono","Consolas",monospace)'; /* weight via CSS var on class */ el.style.padding='0'; el.style.margin='0'; el.style.color='var(--controlCharColor, yellow)';
             _listLayer.appendChild(el);
           }
         }
         // EOL marker (after line width) only for real lines (exclude virtual padding beyond EOF)
         if (isReal){
-          _measureSpan.textContent = line;
+          _measureSpan.textContent = _exp(line);
           const xEnd = _measureSpan.getBoundingClientRect().width;
           let _hs=0; try{ _hs=(editor.scrollLeft||0); }catch{}
           const elE = document.createElement('div');
@@ -880,7 +907,7 @@
           let ffColor = 'var(--controlCharColorLF, yellow)';
           try{ const b=currentBuffer(); const ff=(b&&b.ff)||'unix'; if(ff==='dos') ffColor='var(--controlCharColorCRLF, yellow)'; else if(ff==='mac') ffColor='rgba(200,80,80,0.65)'; }catch{}
           elE.textContent='↲';
-          elE.style.position='absolute'; elE.style.left=(xEnd-_hs)+'px'; elE.style.top=yTop+'px'; elE.style.height=LINE_HEIGHT+'px'; elE.style.lineHeight=LINE_HEIGHT+'px'; elE.style.fontSize='inherit'; elE.style.color=ffColor; elE.style.margin='0'; elE.style.padding='0';
+          elE.style.position='absolute'; elE.style.left=(xEnd-_hs)+'px'; elE.style.top=yTop+'px'; elE.style.height=LINE_HEIGHT+'px'; elE.style.lineHeight=LINE_HEIGHT+'px'; elE.style.fontSize='inherit'; elE.style.fontFamily='var(--controlCharFont, "Segoe UI Symbol","Noto Sans Symbols 2","Cascadia Mono","Consolas",monospace)'; /* weight via CSS var on class */ elE.style.color=ffColor; elE.style.margin='0'; elE.style.padding='0';
           _listLayer.appendChild(elE);
         }
       }
@@ -1291,6 +1318,15 @@
   setVar('controlCharColor', themeGet('controlCharColor', t.controlCharColor));
   setVar('controlCharColorLF', themeGet('controlCharColorLF', t.controlCharColorLF));
   setVar('controlCharColorCRLF', themeGet('controlCharColorCRLF', t.controlCharColorCRLF));
+  // Tabstop CSS var (used by textarea native tab-size). Fallback to 8 when SIX_OPTIONS.tabstop is missing. (#465)
+  try{
+    let ts = 8;
+    if (window && window.SIX_OPTIONS && window.SIX_OPTIONS.tabstop){
+      const raw = parseInt(window.SIX_OPTIONS.tabstop, 10);
+      if (raw && raw > 0) ts = raw;
+    }
+    setVar('tabstop', ts);
+  }catch{ setVar('tabstop', 8); }
   // Command input colors
   setVar('cmdInputFg', themeGet('cmdInputFg', t.cmdInputFg));
   setVar('cmdInputBg', themeGet('cmdInputBg', t.cmdInputBg));
@@ -2259,6 +2295,28 @@
     }catch{}
     const lines = _splitLines();
     const line = lines[caretRow] || '';
+    // Treat literal tab characters as advancing to the next 4-column tab stop for caret x calc (#460)
+    // Measurement span with actual '\t' in a textarea may collapse width; expand logically.
+    const _expandTabs = (s)=>{
+      if (!s || s.indexOf('\t')===-1) return s;
+      // tabstop from SIX_OPTIONS (default 4, min 1) (#462)
+  let _ts = 8; try{ const tsRaw = (window && window.SIX_OPTIONS && window.SIX_OPTIONS.tabstop); const ts = parseInt(tsRaw,10); if (ts && ts>0) _ts = ts; }catch{}
+      let out = '';
+      let col = 0;
+      for (let i=0;i<s.length;i++){
+        const ch = s[i];
+        if (ch==='\t'){
+          const spaces = _ts - (col % _ts);
+          out += ' '.repeat(spaces);
+          col += spaces;
+        } else {
+          out += ch;
+          // Count width as 1 column for measurement baseline; full-width adjustment handled later per char.
+          col += 1;
+        }
+      }
+      return out;
+    };
     // Helper: read half/full-width reference widths
     const _measureRefWidths = ()=>{
       _measureSpan.textContent = 'W';
@@ -2279,7 +2337,8 @@
     const _isHangablePunct = (ch)=> /[\u3001\u3002\uFF0C\uFF0E]/.test(ch||'');
     const _isFullwidth = (ch)=> /[\u1100-\u115F\u2E80-\uA4CF\uAC00-\uD7A3\uF900-\uFAFF\uFE10-\uFE19\uFE30-\uFE6F\u3000-\u303F\uFF01-\uFF60\uFFE0-\uFFE6]/.test(ch||'');
     // Primary width measurement up to caretCol
-    _measureSpan.textContent = line.slice(0, Math.max(0, caretCol));
+  // Expand tabs before measurement to avoid mid-tab caret mis-centering
+  _measureSpan.textContent = _expandTabs(line.slice(0, Math.max(0, caretCol)));
     let x = _measureSpan.getBoundingClientRect().width; // px
     // If the tail just before caret consists of hangable CJK punctuation (e.g., '、、' '。'),
     // some fonts may apply hanging/kerning so substr width does not grow. Recompute locally.
@@ -2305,7 +2364,7 @@
     let chW = 0;
     if (caretCol < line.length){
       // width of the next character box
-      _measureSpan.textContent = line.slice(0, caretCol+1);
+  _measureSpan.textContent = _expandTabs(line.slice(0, caretCol+1));
       const x2 = _measureSpan.getBoundingClientRect().width;
       chW = Math.max(0, x2 - x);
       if (!(chW>0)){
@@ -2314,7 +2373,7 @@
       }
     } else {
       // at EOL: use half-width box width (measure with 'W')
-      _measureSpan.textContent = 'W';
+  _measureSpan.textContent = 'W';
       chW = _measureSpan.getBoundingClientRect().width;
     }
     // Guard: if measurement collapsed (e.g., hanging punctuation), fallback by character class
@@ -5579,6 +5638,34 @@
           // on leaving INSERT, capture native caret back to overlay state
           try{ const off = editor.selectionStart|0; const rc = _rcFromOffset(off); caretRow = rc.r; caretCol = rc.c; }catch{}
           _setMode('NORMAL');
+          return;
+        }
+        // Ctrl+H を Backspace と同等に扱う (#460)
+        if (e.ctrlKey && !e.altKey && !e.metaKey && (e.key==='h' || e.key==='H')){
+          e.preventDefault(); e.stopPropagation();
+          // ネイティブ Backspace 相当: 1 文字削除（選択範囲があれば範囲削除）
+          try{
+            const start = editor.selectionStart|0;
+            const end   = editor.selectionEnd|0;
+            let s = String(editor.value||'');
+            if (start !== end){
+              editor.value = s.slice(0,start) + s.slice(end);
+              const rc = _rcFromOffset(start); caretRow = rc.r; caretCol = rc.c;
+            } else if (start>0){
+              // 直前コードポイント単位で削除（サロゲート対応）
+              let delStart = start-1;
+              const prev = s[delStart];
+              // surrogate pair check
+              if (prev && /[\uDC00-\uDFFF]/.test(prev) && delStart-1>=0){
+                const lead = s[delStart-1];
+                if (lead && /[\uD800-\uDBFF]/.test(lead)){ delStart = delStart-1; }
+              }
+              editor.value = s.slice(0,delStart) + s.slice(start);
+              const rc = _rcFromOffset(delStart); caretRow = rc.r; caretCol = rc.c;
+            }
+            _setCaret(caretRow, caretCol);
+            _touchBufferModified(); ensureScrolloff(); _repositionCaret(); updateGutter();
+          }catch{}
           return;
         }
         // Allow native editing behavior, but keep overlays in sync when moving the caret
