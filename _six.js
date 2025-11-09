@@ -5542,6 +5542,38 @@
     if (e && e.ctrlKey && !e.altKey && !e.metaKey && (e.key==='u' || e.key==='U')){ try{ e.preventDefault(); e.stopPropagation(); }catch{} return; }
       if (_mode === 'CMD') return;
       if (_mode === 'INSERT'){
+        // INSERTモードで Tab または Ctrl+I でタブ文字を挿入 (#459)
+        // ブラウザのデフォルト Tab 挙動(フォーカス移動)を抑止し、明示的に '\t' を挿入する。
+        try{
+          const isCtrlI = (e.ctrlKey && !e.altKey && !e.metaKey && (e.key==='i' || e.key==='I'));
+          if (e.key==='Tab' || isCtrlI){
+            e.preventDefault(); e.stopPropagation();
+            // 事前にネイティブ selectionStart を caretRow/Col に反映（途中で別操作でズレている可能性に備える）
+            try{ const off0 = editor.selectionStart|0; const rc0 = _rcFromOffset(off0); caretRow = rc0.r; caretCol = rc0.c; }catch{}
+            const selStart = editor.selectionStart|0;
+            const selEnd   = editor.selectionEnd|0;
+            if (selStart !== selEnd){
+              // 選択範囲がある場合は置換（通常の文字入力と同様の挙動）
+              const v = String(editor.value||'');
+              const before = v.slice(0, selStart);
+              const after  = v.slice(selEnd);
+              editor.value = before + '\t' + after;
+              const newOff = before.length + 1;
+              try{ const rc = _rcFromOffset(newOff); caretRow = rc.r; caretCol = rc.c; }catch{}
+              _setCaret(caretRow, caretCol);
+              _touchBufferModified(); ensureScrolloff(); _repositionCaret(); updateGutter();
+            } else {
+              // 通常ケース（選択なし）: caret位置へ挿入
+              try{
+                const pos = _insertTextAt(caretRow, caretCol, '\t');
+                caretRow = pos.r; caretCol = pos.c;
+                _setCaret(caretRow, caretCol);
+                _touchBufferModified(); ensureScrolloff(); _repositionCaret(); updateGutter();
+              }catch{}
+            }
+            return; // 既に処理したので抜ける
+          }
+        }catch{}
         if (_isEsc(e)){
           e.preventDefault();
           // on leaving INSERT, capture native caret back to overlay state
