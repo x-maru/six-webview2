@@ -43,6 +43,10 @@ body { font: var(--fontBase, 18px)/20px Consolas, 'Courier New', monospace; over
 #tabbar .tab .mod { color:#ff5b5b; margin-left:6px; font-weight:700; }
 #encBtn { white-space: pre; min-width: 84px; border:1px solid #2a3244; background:#1a2030; color:#e6e6e6; border-radius:6px; padding:4px 8px; cursor:pointer; font: 12px/1.25 system-ui, -apple-system, 'Segoe UI', sans-serif; opacity:0.92; user-select:none; outline:none; height: 28px; display:flex; align-items:center; }
 #encBtn:hover{ filter: brightness(1.06); }
+#posinfo { white-space: pre; min-width: 16ch; /* enough for 行99999, 列999/998 */
+	background: transparent; border:0; padding:0 4px; height:28px; display:flex; align-items:center;
+	font: var(--fontBase, 18px)/1 Consolas, 'Courier New', monospace; /* match tab label size */
+	color: var(--tabText, yellow); opacity:0.95; user-select:none; cursor: default; }
 #cmdbar { position:fixed; left:0; right:0; bottom:0; height: 24px; background: var(--tabBarBg); color: var(--tabBarFg); display:flex; align-items:center; padding:0 8px; border-top:1px solid #1c2230; gap:8px; z-index: 9999; }
 #modestatus { font-weight:600; opacity:0.9; }
 #cmdprefix { opacity: 0.85; }

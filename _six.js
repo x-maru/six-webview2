@@ -12,6 +12,7 @@
   const tabbarTools = tabbarEl ? tabbarEl.querySelector('#tabtools') : null;
   const tabScrollLeftBtn = tabbarEl ? document.getElementById('tabScrollLeft') : null;
   const tabScrollRightBtn = tabbarEl ? document.getElementById('tabScrollRight') : null;
+  const posinfoEl = document.getElementById('posinfo');
   function _updateTabScrollButtons(){
     try{
       if (!tabbarTabs || !tabScrollLeftBtn || !tabScrollRightBtn) return;
@@ -21,6 +22,41 @@
       const canR = x < max - 1;
       tabScrollLeftBtn.classList.toggle('disabled', !canL);
       tabScrollRightBtn.classList.toggle('disabled', !canR);
+    }catch{}
+  }
+  // legacy: _displayLineVisualWidth no longer used (replaced by half-width metric in _updatePosInfo)
+  function _updatePosInfo(){
+    try{
+      if (!posinfoEl) return;
+      const lines = _splitLines();
+      const r = Math.max(0, Math.min(lines.length-1, caretRow|0));
+      const line = lines[r]||'';
+      // 半角換算列幅: TAB=1, 半角=1, 全角=2 (#505)
+      const _isFull = (ch)=>/[\u1100-\u115F\u2E80-\uA4CF\uAC00-\uD7A3\uF900-\uFAFF\uFE10-\uFE19\uFE30-\uFE6F\u3000-\u303F\uFF01-\uFF60\uFFE0-\uFFE6]/.test(ch||'');
+      const logicalWidthUpTo = (s, endCol)=>{
+        try{
+          let w=0; const n=Math.max(0, Math.min(s.length, endCol|0));
+          for (let i=0;i<n;i++){
+            const ch=s[i];
+            if (ch==='\t') w+=1; // TAB は常に 1
+            else if (_isFull(ch)) w+=2; else w+=1;
+          }
+          return w;
+        }catch{ return 0; }
+      };
+      const lineWidth = logicalWidthUpTo(line, line.length); // 0-based幅（空行で0）
+      const caretLogical = logicalWidthUpTo(line, caretCol|0); // caret 直前までの幅
+      const rowDisp = r + 1;
+      const colDisp = caretLogical + 1; // 1-based caret 列（行頭=1、全角通過後は+2）
+      const widthDisp = lineWidth;      // 1文字も無ければ0, 全角含め半角換算合計
+      posinfoEl.textContent = `行 ${rowDisp}, 列 ${colDisp}/${widthDisp}`;
+      // THEME: posInfoText > tabText > yellow
+      try{
+        let col = 'yellow';
+        if (window && window.THEME){
+          if (window.THEME.posInfoText) col = window.THEME.posInfoText; else if (window.THEME.tabText) col = window.THEME.tabText; }
+        posinfoEl.style.color = col;
+      }catch{ posinfoEl.style.color = 'yellow'; }
     }catch{}
   }
   function _scrollTabsBy(delta){
@@ -888,16 +924,26 @@
           if (cht===' ' || cht==='\t' || cht==='\u3000') trailStart--; else break;
         }
         // Iterate characters for tabs and trail markers
-        // local tab expander for measurement parity with textarea rendering
+        // local tab expander using pixel-based columns (space width) for correct alignment after full-width chars (#507)
         const _exp = (s)=>{
           if (!s || s.indexOf('\t')===-1) return s;
-          // tabstop from SIX_OPTIONS (default 4, min 1)
           let _ts = 8; try{ const tsRaw = (window && window.SIX_OPTIONS && window.SIX_OPTIONS.tabstop); const ts = parseInt(tsRaw,10); if (ts && ts>0) _ts = ts; }catch{}
-          let out='', col=0;
+          // baseline space advance
+          _measureSpan.textContent = ' ';
+          const spaceW = _measureSpan.getBoundingClientRect().width || 1;
+          const _charW = (ch)=>{ _measureSpan.textContent = ch; const w=_measureSpan.getBoundingClientRect().width; return (w && w>0)?w:spaceW; };
+          let out=''; let x=0;
           for (let i=0;i<s.length;i++){
             const ch=s[i];
-            if (ch==='\t'){ const spaces = _ts - (col%_ts); out += ' '.repeat(spaces); col += spaces; }
-            else { out += ch; col += 1; }
+            if (ch==='\t'){
+              const col = Math.floor((x/spaceW)+1e-6);
+              const spaces = _ts - (col % _ts);
+              out += ' '.repeat(spaces);
+              x += spaces * spaceW;
+            } else {
+              out += ch;
+              x += _charW(ch);
+            }
           }
           return out;
         };
@@ -2474,24 +2520,28 @@
     }catch{}
     const lines = _splitLines();
     const line = lines[caretRow] || '';
-    // Treat literal tab characters as advancing to the next 4-column tab stop for caret x calc (#460)
-    // Measurement span with actual '\t' in a textarea may collapse width; expand logically.
+    // Expand tabs using pixel-based tab stops (columns measured in space-width units) (#507)
+    // This keeps overlay caret aligned with the textarea's native rendering even after full-width chars.
     const _expandTabs = (s)=>{
       if (!s || s.indexOf('\t')===-1) return s;
-      // tabstop from SIX_OPTIONS (default 4, min 1) (#462)
-  let _ts = 8; try{ const tsRaw = (window && window.SIX_OPTIONS && window.SIX_OPTIONS.tabstop); const ts = parseInt(tsRaw,10); if (ts && ts>0) _ts = ts; }catch{}
+      // tabstop from SIX_OPTIONS (default 8, min 1)
+      let _ts = 8; try{ const tsRaw = (window && window.SIX_OPTIONS && window.SIX_OPTIONS.tabstop); const ts = parseInt(tsRaw,10); if (ts && ts>0) _ts = ts; }catch{}
+      // measure a single space advance (column width baseline)
+      _measureSpan.textContent = ' ';
+      const spaceW = _measureSpan.getBoundingClientRect().width || 1;
       let out = '';
-      let col = 0;
+      let x = 0; // accumulated pixel width so far
       for (let i=0;i<s.length;i++){
         const ch = s[i];
         if (ch==='\t'){
+          // current column in space widths
+          const col = Math.floor((x / spaceW) + 1e-6);
           const spaces = _ts - (col % _ts);
           out += ' '.repeat(spaces);
-          col += spaces;
+          x += spaces * spaceW;
         } else {
           out += ch;
-          // Count width as 1 column for measurement baseline; full-width adjustment handled later per char.
-          col += 1;
+          x += _charWidth(ch);
         }
       }
       return out;
@@ -2624,6 +2674,8 @@
         b.viewScrollTop = (editor.scrollTop||0)|0;
       }
     }catch{}
+    // Keep position indicator up-to-date for all caret moves
+    try{ _updatePosInfo(); }catch{}
   }
 
   // ---- Buffer/text helpers for editing ----
@@ -5687,6 +5739,7 @@
       // Hide mouse cursor when visible range changes shortly after caret moved
       if ((Date.now() - _lastCaretMovedAt) < 120){ _hideCursor(); }
       _repositionCaret(); updateGutter(); _renderHlMatchesVisible(); _incPrevRefresh(); _renderVisSelOverlay();
+  _updatePosInfo();
       // Persist current buffer's view state (scroll and caret) on every scroll frame
       try{
         const b = currentBuffer();
@@ -5755,7 +5808,7 @@
         try{ const off = editor.selectionStart|0; const rc = _rcFromOffset(off); caretRow = rc.r; caretCol = rc.c; }catch{}
         // _touchBufferModified already hides cursor; redundant call removed
       }
-      _exactLineLockAdjust(); _repositionCaret(); updateGutter(); _updateHlsearchFull();
+      _exactLineLockAdjust(); _repositionCaret(); updateGutter(); _updateHlsearchFull(); _updatePosInfo();
     });
     // Mouse selection/click: sync overlay caret with native selection
     const syncCaretFromSelection = ()=>{
@@ -5803,10 +5856,10 @@
           caretRow = rc.r; caretCol = rc.c;
         }
       }catch{}
-      _repositionCaret(); updateGutter();
+      _repositionCaret(); updateGutter(); _updatePosInfo();
     });
-    editor.addEventListener('keyup', (e)=>{ if(e.key==='Enter') ensureScrolloff(); _repositionCaret(); updateGutter(); });
-    editor.addEventListener('click', ()=>{ _repositionCaret(); updateGutter(); });
+  editor.addEventListener('keyup', (e)=>{ if(e.key==='Enter') ensureScrolloff(); _repositionCaret(); updateGutter(); _updatePosInfo(); });
+  editor.addEventListener('click', ()=>{ _repositionCaret(); updateGutter(); _updatePosInfo(); });
     // IME composition events — 非 INSERT では確定も含め一切反映しない (#492)
     // 仕様: NORMAL/VISUAL/CMD 中の IME 入力（未確定/確定）は無視。選択状態も維持。
     let _imeComposing = false;
@@ -5901,6 +5954,8 @@
               const newOff = before.length + 1;
               try{ const rc = _rcFromOffset(newOff); caretRow = rc.r; caretCol = rc.c; }catch{}
               _setCaret(caretRow, caretCol);
+              // ネイティブ選択も同期しないと次入力が末尾に挿入されうる (#506)
+              try{ _syncNativeSelectionToCaret(); }catch{}
               _touchBufferModified(); ensureScrolloff(); _repositionCaret(); updateGutter();
             } else {
               // 通常ケース（選択なし）: caret位置へ挿入
@@ -5908,6 +5963,8 @@
                 const pos = _insertTextAt(caretRow, caretCol, '\t');
                 caretRow = pos.r; caretCol = pos.c;
                 _setCaret(caretRow, caretCol);
+                // ネイティブ選択も同期 (#506)
+                try{ _syncNativeSelectionToCaret(); }catch{}
                 _touchBufferModified(); ensureScrolloff(); _repositionCaret(); updateGutter();
               }catch{}
             }

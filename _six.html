@@ -18,11 +18,14 @@
   </style>
 </head>
 <body>
-  <div id="tabbar">
+    <div id="tabbar">
     <div class="tabscroll" id="tabScrollLeft" title="Scroll tabs left"><span>◀</span></div>
     <div class="tabs"></div>
     <div class="tabscroll" id="tabScrollRight" title="Scroll tabs right"><span>▶</span></div>
-    <div id="tabtools"><button id="encBtn" type="button" title="文字コード/改行の変更"></button></div>
+    <div id="tabtools">
+      <span id="posinfo" title="カーソル位置"></span>
+      <button id="encBtn" type="button" title="文字コード/改行の変更"></button>
+    </div>
   </div>
   <div id="pane">
     <div id="editorViewport">
