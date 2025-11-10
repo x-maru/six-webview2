@@ -1264,7 +1264,28 @@
     }catch{ try{ return new URL(String(path||''), base||_htmlBaseURL()).toString(); }catch{ return String(path||''); } }
   }
 
-  function _splitLines(){ return String(editor.value||'').split(/\n/); }
+  function _splitLines(){
+    try{
+      const t = String(editor.value||'');
+      // 基本は \n で分割。ただし「存在しない便宜上の最終空行」は描画・行数に含めない (#495)
+      // 具体的には末尾が\nで終わっている場合でも、分割結果の末尾の空要素は1つだけ捨てる。
+      // これにより「末尾に改行あり（1つ）」のときに余分な空行を表示しない。
+      const parts = t.split(/\n/);
+      if (t.endsWith('\n') && parts.length>0){
+        // ただし caret が末尾空行（改行直後＝テキスト末尾位置）にいるときはその空行は編集対象の「実在する」行なので残す (#498)
+        // editor.selectionStart は beforeinput/keydown 経路でも常に最新位置が得られる前提。
+        try{
+          const caretOff = editor.selectionStart|0;
+          const atBlankLineStart = (caretOff === t.length); // 改行直後 = 空行先頭 = 末尾オフセット
+          if (!atBlankLineStart){ parts.pop(); }
+          else {
+            // 残す: Enter 直後の空行に文字を入力しても余計な改行が先行しないようにする
+          }
+        }catch{ parts.pop(); }
+      }
+      return parts;
+    }catch{ return String(editor.value||'').split(/\n/); }
+  }
   function _totalLines(){ return _splitLines().length; }
   function _topLine(){
     const st = (editor.scrollTop||0);
@@ -4195,10 +4216,10 @@
             }
             if (id === 'save'){
               if (b.path){
-                const textData = editor.value||'';
+                const textData = _normalizeTextForSaveInternal(editor.value||'');
                 const ok = await _saveToURLWithExternalCheck(b, b.path, textData);
                 if (!ok){ toast('write failed: ' + (b.name||'')); return; }
-                try{ b.text = textData; b.savedText = textData; b._savedTick = (b._changeTick|0); b.modified = false; }catch{}
+                try{ editor.value = textData; b.text = textData; b.savedText = textData; b._savedTick = (b._changeTick|0); b.modified = false; }catch{}
               } else {
                 // No path -> prompt for a save path (Save As)
                 const base = _currentDirBase();
@@ -4208,9 +4229,10 @@
                 let targetUrl = null;
                 try{ targetUrl = _normalizeToURLString(input, base); }catch{}
                 if (!targetUrl){ toast('invalid path', 1500); return; }
-                const ok = await _saveToURLWithExternalCheck(b, targetUrl, editor.value||'');
+                const _t = _normalizeTextForSaveInternal(editor.value||'');
+                const ok = await _saveToURLWithExternalCheck(b, targetUrl, _t);
                 if (!ok){ toast('write failed', 1500); return; }
-                try{ b.path = targetUrl; b.name = _basename(targetUrl); const textData = editor.value||''; b.text = textData; b.savedText = textData; b._savedTick = (b._changeTick|0); b.modified=false; }catch{}
+                try{ b.path = targetUrl; b.name = _basename(targetUrl); editor.value = _t; b.text = _t; b.savedText = _t; b._savedTick = (b._changeTick|0); b.modified=false; }catch{}
                 _setTitle(); _renderTabbar();
               }
             }
@@ -4328,13 +4350,17 @@
               }
             }
           }catch{}
-        }
-  const ok = await _saveToURLWithExternalCheck(b, targetUrl, editor.value||'');
+    }
+  // Ensure internal text reflects standardized single trailing newline (size/mtime align)
+  let _txtForSave = _normalizeTextForSaveInternal(editor.value||'');
+  const ok = await _saveToURLWithExternalCheck(b, targetUrl, _txtForSave);
         if (ok){
           try{
             const was = b.path||null;
             if (was !== targetUrl){ b.path = targetUrl; b.name = _basename(targetUrl); }
-            b.text = editor.value||''; b.savedText = editor.value||''; b._savedTick = (b._changeTick|0); b.modified = false;
+            // Update buffer with normalized text (may include newly added final newline)
+            editor.value = _txtForSave;
+            b.text = _txtForSave; b.savedText = _txtForSave; b._savedTick = (b._changeTick|0); b.modified = false;
           }catch{}
           _setTitle(); _renderTabbar();
           toast('written: ' + _prettyFileUrlLabel(targetUrl));
@@ -4381,12 +4407,14 @@
             }
           }catch{}
         }
-  const ok = await _saveToURLWithExternalCheck(b, targetUrl, editor.value||'');
+  let _txtForSave2 = _normalizeTextForSaveInternal(editor.value||'');
+  const ok = await _saveToURLWithExternalCheck(b, targetUrl, _txtForSave2);
         if (ok){
           try{
             const was = b.path||null;
             if (was !== targetUrl){ b.path = targetUrl; b.name = _basename(targetUrl); }
-            b.text = editor.value||''; b.savedText = editor.value||''; b._savedTick = (b._changeTick|0); b.modified = false;
+            editor.value = _txtForSave2;
+            b.text = _txtForSave2; b.savedText = _txtForSave2; b._savedTick = (b._changeTick|0); b.modified = false;
           }catch{}
           _setTitle(); _renderTabbar();
           toast('written: ' + _prettyFileUrlLabel(targetUrl));
@@ -4404,8 +4432,9 @@
           const b = buffers[i];
           if (!b || !b.modified || !b.path) continue;
           const textData = (i===currentIdx)?(editor.value||''):(b.text||'');
-          const ok = await _saveToURLWithExternalCheck(b, b.path, textData);
-          if (ok){ try{ b.text=textData; b.modified=false; }catch{} toast('written: ' + _prettyFileUrlLabel(b.path)); } else { toast('write failed: ' + (b.name||'')); }
+            const textDataN = (i===currentIdx)? _normalizeTextForSaveInternal(editor.value||'') : _normalizeTextForSaveInternal(textData||'');
+            const ok = await _saveToURLWithExternalCheck(b, b.path, textDataN);
+          if (ok){ try{ if (i===currentIdx){ editor.value = textDataN; } b.text=textDataN; b.savedText=textDataN; b._savedTick=(b._changeTick|0); b.modified=false; }catch{} toast('written: ' + _prettyFileUrlLabel(b.path)); } else { toast('write failed: ' + (b.name||'')); }
         }
         _setTitle(); _renderTabbar();
       })();
@@ -4484,12 +4513,14 @@
             }
           }catch{}
         }
-  const ok = await _saveToURLWithExternalCheck(b, targetUrl, editor.value||'');
+  let _txtForSave3 = _normalizeTextForSaveInternal(editor.value||'');
+  const ok = await _saveToURLWithExternalCheck(b, targetUrl, _txtForSave3);
         if (ok){
           try{
             const was = b.path||null;
             if (was !== targetUrl){ b.path = targetUrl; b.name = _basename(targetUrl); }
-            b.text = editor.value||''; b.savedText = editor.value||''; b._savedTick = (b._changeTick|0); b.modified = false;
+            editor.value = _txtForSave3;
+            b.text = _txtForSave3; b.savedText = _txtForSave3; b._savedTick = (b._changeTick|0); b.modified = false;
           }catch{}
           _setTitle(); _renderTabbar();
           toast('written: ' + _prettyFileUrlLabel(targetUrl));
@@ -5523,7 +5554,7 @@
             for (const {b,i} of modifiedItems){
               const id = await choiceModal({ title:'Unsaved changes', detail:`Save changes to: ${b.path? _prettyFileUrlLabel(b.path):(b.name||'(untitled)')}`, buttons:[{id:'save',label:'Save',primary:true},{id:'dont',label:"Don't Save"},{id:'cancel',label:'Cancel',danger:true}] });
               if (id===null || id==='cancel'){ resolve(false); return; }
-              if (id==='save' && b.path){ const textData = (i===currentIdx)?(editor.value||''):(b.text||''); const ok = await _saveToURLWithExternalCheck(b, b.path, textData); if (!ok){ toast('write failed: ' + (b.name||'')); resolve(false); return; } try{ b.text=textData; b.modified=false; }catch{} }
+              if (id==='save' && b.path){ const textData = (i===currentIdx)? _normalizeTextForSaveInternal(editor.value||'') : _normalizeTextForSaveInternal(b.text||''); const ok = await _saveToURLWithExternalCheck(b, b.path, textData); if (!ok){ toast('write failed: ' + (b.name||'')); resolve(false); return; } try{ if (i===currentIdx){ editor.value=textData; } b.text=textData; b.savedText=textData; b._savedTick=(b._changeTick|0); b.modified=false; }catch{} }
             }
             resolve(true);
           })();
@@ -5545,7 +5576,7 @@
           const removeRow = ()=>{ try{ listWrap.removeChild(row); rows.delete(i); }catch{} };
           btnSave.addEventListener('click', async()=>{
             btnSave.disabled = true; btnSkip.disabled=true;
-            if (b.path){ const textData = (i===currentIdx)?(editor.value||''):(b.text||''); const ok = await _saveToURLWithExternalCheck(b, b.path, textData); if (!ok){ toast('write failed: ' + (b.name||'')); btnSave.disabled=false; btnSkip.disabled=false; return; } try{ b.text=textData; b.savedText=textData; b._savedTick = (b._changeTick|0); b.modified=false; }catch{} }
+            if (b.path){ const textData = (i===currentIdx)? _normalizeTextForSaveInternal(editor.value||'') : _normalizeTextForSaveInternal(b.text||''); const ok = await _saveToURLWithExternalCheck(b, b.path, textData); if (!ok){ toast('write failed: ' + (b.name||'')); btnSave.disabled=false; btnSkip.disabled=false; return; } try{ if (i===currentIdx){ editor.value=textData; } b.text=textData; b.savedText=textData; b._savedTick = (b._changeTick|0); b.modified=false; }catch{} }
             removeRow(); maybeFinish();
           });
           btnSkip.addEventListener('click', ()=>{ removeRow(); maybeFinish(); });
@@ -5567,10 +5598,10 @@
           for (const [i, obj] of Array.from(rows.entries())){
             const b = obj.b;
             if (b && b.modified && b.path){
-              const textData = (i===currentIdx)?(editor.value||''):(b.text||'');
+              const textData = (i===currentIdx)? _normalizeTextForSaveInternal(editor.value||'') : _normalizeTextForSaveInternal(b.text||'');
               const ok = await _saveToURLWithExternalCheck(b, b.path, textData);
               if (!ok){ toast('write failed: ' + (b.name||'')); btnAll.disabled=false; btnCancel.disabled=false; return; }
-              try{ b.text=textData; b.savedText=textData; b._savedTick = (b._changeTick|0); b.modified=false; }catch{}
+              try{ if (i===currentIdx){ editor.value=textData; } b.text=textData; b.savedText=textData; b._savedTick = (b._changeTick|0); b.modified=false; }catch{}
             }
             try{ listWrap.removeChild(obj.row); rows.delete(i); }catch{}
           }
@@ -6761,23 +6792,43 @@
       }
       if (e.key==='o' && !e.ctrlKey && !e.metaKey && !e.altKey){
         e.preventDefault();
-  _pushUndoSnapshot('open-below');
-  _suppressInsertSnapshotOnce = true;
+        _pushUndoSnapshot('open-below');
+        _suppressInsertSnapshotOnce = true;
+        const prev = String(editor.value||'');
+        const hadFinalLF = prev.endsWith('\n');
         const lines = _splitLines();
         const rr = Math.max(0, Math.min(lines.length-1, caretRow));
+        const wasLastRow = (rr === lines.length-1);
+        const hadBlankEOFLine = (lines.length>0 && lines[lines.length-1]==='');
         const newLines = lines.slice(0, rr+1).concat(['']).concat(lines.slice(rr+1));
-        editor.value = newLines.join('\n');
-        _setCaret(rr+1, 0); _touchBufferModified(); ensureScrolloff(); _repositionCaret(); updateGutter(); _setMode('INSERT'); return;
+        let out = newLines.join('\n');
+        // 末尾行での o は、元テキストに末尾LFがある場合は常にもう 1 つ LF を付与し、
+        // EOF の実在空行数を +1 できるようにする（join だけでは末尾に LF は増えないため）。
+        if (wasLastRow && hadFinalLF){ out += '\n'; }
+        // 末尾以外の挿入では、元が末尾LFありなら保持（結合結果で落ちた場合のみ復元）
+        else if (!wasLastRow && hadFinalLF && !out.endsWith('\n')){ out += '\n'; }
+        if (out !== prev){ editor.value = out; _touchBufferModified(); }
+        _setCaret(rr+1, 0); ensureScrolloff(); _repositionCaret(); updateGutter(); _setMode('INSERT'); return;
       }
       if (e.key==='O' && !e.ctrlKey && !e.metaKey && !e.altKey){
         e.preventDefault();
-  _pushUndoSnapshot('open-above');
-  _suppressInsertSnapshotOnce = true;
+        _pushUndoSnapshot('open-above');
+        _suppressInsertSnapshotOnce = true;
+        const prev = String(editor.value||'');
+        const hadFinalLF = prev.endsWith('\n');
         const lines = _splitLines();
         const rr = Math.max(0, Math.min(lines.length-1, caretRow));
+        const wasLastRow = (rr === lines.length-1);
+        const isEOFBlank = (lines.length>0 && rr===lines.length-1 && lines[rr]==='');
         const newLines = lines.slice(0, rr).concat(['']).concat(lines.slice(rr));
-        editor.value = newLines.join('\n');
-        _setCaret(rr, 0); _touchBufferModified(); ensureScrolloff(); _repositionCaret(); updateGutter(); _setMode('INSERT'); return;
+        let out = newLines.join('\n');
+        // 末尾の空行上での O は EOF の実在空行を +1 にする必要があるため、
+        // 元に末尾LFがある場合はもう 1 つ LF を付与して表現を進める。
+        if (hadFinalLF && (isEOFBlank || wasLastRow) && out.endsWith('\n')){ out += '\n'; }
+        // それ以外は、元が末尾LFありなら保持（結合結果で落ちた場合のみ復元）
+        else if (hadFinalLF && !out.endsWith('\n')){ out += '\n'; }
+        if (out !== prev){ editor.value = out; _touchBufferModified(); }
+        _setCaret(rr, 0); ensureScrolloff(); _repositionCaret(); updateGutter(); _setMode('INSERT'); return;
       }
       if (e.key==='p' && !e.ctrlKey && !e.metaKey && !e.altKey){
         e.preventDefault();
@@ -8309,7 +8360,22 @@
   const ff = (b&&b.ff)||'unix';
   const bom = !!(b&&b.bom);
   let out = String(textUtf8||'');
-  if (ff === 'dos'){ out = out.replace(/\n/g, '\r\n'); }
+  // #493: six では表示上 EOF 直後に 1 行余白を許容しているため、実際の保存内容が末尾改行なしだと
+  // 他ツールで最終行が表示上より 1 行少なく見える。内部表現は行区切りを '\n' ベースで保持しているので
+  // 保存時に（空でない && 終端に改行が無い）場合は 1 つ末尾改行を付与し、フォーマット(ff)に合わせて変換する。
+  // 空バッファ(out.length===0)はそのまま（追加すると意図しない 1 行ファイルになるため）。
+  try{
+    if (out.length > 0 && !/\n$/.test(out)){
+      out += '\n';
+    }
+    // 改行コード変換: 内部は \n 前提。dos は CRLF, mac は CR 単体。
+    if (ff === 'dos'){
+      out = out.replace(/\n/g, '\r\n');
+    } else if (ff === 'mac'){
+      // 既に追加した末尾 \n も含め全てを \r に変換
+      out = out.replace(/\n/g, '\r');
+    }
+  }catch{}
   let payloadBytes = null;
   if (enc === 'utf-8'){
     let s = out; if (bom){ s = '\uFEFF' + s; }
@@ -8381,6 +8447,18 @@
       try{ _apiNoteFailure(); }catch{}
       return false;
     }catch(e){ toast('write failed'); return false; }
+  }
+
+  // Normalize internal text right before save: ensure exactly one trailing LF when non-empty.
+  function _normalizeTextForSaveInternal(s){
+    try{
+      let t = String(s||'');
+      if (t.length===0) return t;
+      // If missing trailing LF, add one. If already ends with LF(s), leave as-is.
+      // これにより、保存時は「末尾に改行なし」を解消しつつ、不要な空行追加はしない (#495)
+      if (!t.endsWith('\n')) return t + '\n';
+      return t;
+    }catch{ return String(s||''); }
   }
 
   // Wrapper: warn when previously ignored external change; offer 3 choices
