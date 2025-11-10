@@ -4667,6 +4667,8 @@
     if (m==='INSERT'){
       // Allow IME in INSERT (best-effort; browsers may ignore)
       try{ if (editor){ editor.removeAttribute('inputmode'); editor.style.imeMode = ''; } }catch{}
+      // ユーザー編集を許可
+      try{ if (editor) editor.readOnly = false; }catch{}
       // If we previously hinted IME off by focus juggling, restore focus cleanly once here
       try{ if (editor && document.activeElement !== editor){ editor.focus(); } }catch{}
       // Snap scrollTop to exact line boundary proactively to avoid half-line misalignment before typing
@@ -4689,6 +4691,8 @@
         if (editor){
           editor.setAttribute('inputmode', 'none');
           editor.style.imeMode = 'disabled';
+          // ユーザー編集は禁止（プログラム編集は許可）
+          try{ editor.readOnly = true; }catch{}
           // Heuristic: brief blur→focus to nudge some IME implementations to exit composition when leaving INSERT
           // (Safe because we immediately resync caret; guarded to avoid infinite loops)
           const prev = document.activeElement;
@@ -5683,10 +5687,34 @@
     try{ viewport.addEventListener('wheel', wheelZoom, { passive:false }); }catch{ viewport.addEventListener('wheel', wheelZoom); }
     // Scroll snapping is handled in the unified RAF above
     editor.addEventListener('beforeinput', (e)=>{
+      // NORMAL/VISUAL/CMD ではユーザー操作による内容変更を全面禁止（IME 確定含む）
       if (_mode !== 'INSERT'){
-        // NORMAL/CMD ではテキスト変更を禁止
-        e.preventDefault();
+        try{ e.preventDefault(); }catch{}
+        return;
       }
+    });
+    // NORMAL/VISUAL/CMD 時の入力フォールバックガード (#491, #492)
+    // beforeinput で止めきれない実装差分（特に IME の insertFromComposition/insertCompositionText）に備え、
+    // INSERT 以外で発火した input のうち insert*/delete* 系は直ちに巻き戻す。
+    editor.addEventListener('input', (e)=>{
+      try{
+        if (_mode !== 'INSERT'){
+          if (!e || !e.isTrusted) return; // 非ユーザー操作は対象外
+          const it = String(e.inputType||'');
+          if (it && (it.startsWith('insert') || it.startsWith('delete'))){
+            // 現在のバッファ内容に強制巻き戻し（ユーザー操作による変更は一切反映しない）
+            const b = currentBuffer();
+            if (b){
+              const keepOff = editor.selectionStart|0;
+              editor.value = String(b.text||'');
+              const len = editor.value.length|0;
+              const off = (keepOff<=len)?keepOff:len;
+              editor.selectionStart = editor.selectionEnd = off;
+            }
+          }
+          return;
+        }
+      }catch{}
     });
     editor.addEventListener('input', ()=>{
       if (_mode === 'INSERT'){
@@ -5748,19 +5776,44 @@
     });
     editor.addEventListener('keyup', (e)=>{ if(e.key==='Enter') ensureScrolloff(); _repositionCaret(); updateGutter(); });
     editor.addEventListener('click', ()=>{ _repositionCaret(); updateGutter(); });
-    // IME composition events — detect full-width ALNUM mode and reflect on caret color
-  // IME composition listeners removed (#426)
+    // IME composition events — 非 INSERT では確定も含め一切反映しない (#492)
+    // 仕様: NORMAL/VISUAL/CMD 中の IME 入力（未確定/確定）は無視。選択状態も維持。
+    let _imeComposing = false;
+    let _blockedComposition = false;
+    let _preCompSelS = 0, _preCompSelE = 0;
+    editor.addEventListener('compositionstart', (e)=>{
+      _imeComposing = true;
+      try{
+        if (_mode !== 'INSERT'){
+          _blockedComposition = true;
+          // selection を保持して後で復元（VISUAL 選択解除対策）
+          _preCompSelS = editor.selectionStart|0; _preCompSelE = editor.selectionEnd|0;
+          // 一部実装で確定が走らないよう readOnly を一時有効化
+          try{ editor.readOnly = true; }catch{}
+          // 直後に選択が崩れる実装に対する復元
+          setTimeout(()=>{
+            try{ editor.selectionStart = _preCompSelS; editor.selectionEnd = _preCompSelE; }catch{}
+          }, 0);
+        } else {
+          _blockedComposition = false;
+        }
+      }catch{}
+    });
+    editor.addEventListener('compositionend', (e)=>{
+      try{
+        if (_blockedComposition){
+          // 反映させない（値は readOnly で変わっていない前提だが、念のため選択を復元）
+          try{ editor.selectionStart = _preCompSelS; editor.selectionEnd = _preCompSelE; }catch{}
+        }
+      }catch{}
+      _imeComposing = false; _blockedComposition = false;
+      try{ if (_mode !== 'INSERT'){ editor.readOnly = true; } }catch{}
+      _repositionCaret(); updateGutter();
+    });
     editor.addEventListener('compositionupdate', (e)=>{
       try{
+        // 非 INSERT では動作しない（無視）。INSERT では従来通り特に処理しない。
         if (_mode !== 'INSERT') return;
-        const s = String(e && e.data || '');
-        let fw = false;
-        for (let i=0; i<s.length; i++){
-          const cp = s.codePointAt(i);
-          if (cp>0xFFFF) i++; // skip surrogate pair extra unit
-          if (_isFullwidthAlnumCp(cp|0)){ fw = true; break; }
-        }
-  // IME fullwidth heuristic removed
       }catch{}
     });
   // editor.addEventListener('compositionend', ...) removed
