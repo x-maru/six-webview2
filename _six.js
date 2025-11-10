@@ -1177,9 +1177,12 @@
       p = p.replace(/^\/([A-Za-z]:\/)/, '$1');
       // UNC/WSL: host があれば //host を付ける
       try{
-        // pathname は先頭に /share の形なので二重スラッシュを調整
-        if (p.startsWith('/')) p = p.substring(1);
-        p = '//' + host + '/' + p;
+        // host が空（ローカル Windows ドライブなど）の場合は先頭 "//" を付けない（UNC誤認回避 #488）
+        // host ありの場合のみ //host/ を形成。先頭重複スラッシュは調整。
+        if (host){
+          if (p.startsWith('/')) p = p.substring(1);
+          p = '//' + host + '/' + p;
+        }
       }catch{}
       // ディレクトリ末尾のスラッシュは維持
       if ((u.pathname||'').endsWith('/') && !p.endsWith('/')) p += '/';
@@ -7408,20 +7411,40 @@
               const val = String(cmdinput.value||'');
               if (/^\s*:?(?:e\b)/i.test(val)){
                 e.preventDefault(); e.stopPropagation();
-                // 直ちに :e 空ベースのポップアップを開く
-                _fileBaseURL = _currentDirBase();
-                _fileStartBaseURL = _ensureSlash(_fileBaseURL);
-                _fileNextStartBaseURL = null;
-                try{ const b=_ensureSlash(_fileBaseURL); _filePopupNoUp = !!(b && (_isHostRoot(b) || _isUncShareRoot(b))); }catch{ _filePopupNoUp=false; }
+                // 既入力があるかを判定（":e <path>" 形式）→ 末尾 '/' 無しなら親ディレクトリ列挙＋終端セグメントを選択対象フィルタとして扱う (#489)
+                // 候補: :e C:/foo/bar   → base = C:/foo/, filter=bar, typedDirRaw="C:/foo/"
+                let parsed = null; let havePath = false;
+                try{
+                  if (/^\s*:?(?:e)\s+\S+/i.test(val)){ parsed = _eParseInput(val.replace(/^\s*:?/,'').replace(/^e\s*/i,'')); }
+                }catch{ parsed = null; }
+                if (parsed && parsed.typedDirRaw){ havePath = true; }
+                if (havePath){
+                  // 既存パス入力を尊重
+                  _fileBaseURL = parsed.baseURL || _currentDirBase();
+                  _fileStartBaseURL = _ensureSlash(_fileBaseURL);
+                  _fileNextStartBaseURL = null;
+                  _fileTypedDirRaw = parsed.typedDirRaw || '';
+                  _fileFilter = parsed.filter || '';
+                  _fileSelAuto = true; // フィルタによる自動選択有効
+                  try{ const b=_ensureSlash(_fileBaseURL); _filePopupNoUp = !!(b && (_isHostRoot(b) || _isUncShareRoot(b))); }catch{ _filePopupNoUp=false; }
+                } else {
+                  // 旧挙動（空起動）
+                  _fileBaseURL = _currentDirBase();
+                  _fileStartBaseURL = _ensureSlash(_fileBaseURL);
+                  _fileNextStartBaseURL = null;
+                  try{ const b=_ensureSlash(_fileBaseURL); _filePopupNoUp = !!(b && (_isHostRoot(b) || _isUncShareRoot(b))); }catch{ _filePopupNoUp=false; }
+                  _fileTypedDirRaw = '';
+                  _fileFilter = '';
+                  _fileSelAuto = true;
+                }
                 _fileJustNavAt = Date.now(); _fileNavRetryCount = 0;
-                // 起動直後は Enter を無効化（Tab は可）
-                _fileReflectGuardUntil = Date.now() + 700;
-                _fileTypedDirRaw = '';
-                _fileFilter = '';
+                _fileReflectGuardUntil = Date.now() + 700; // 直後 Enter 抑止
                 _fileInvalid = false;
                 _fileLoading = true;
-                _fileEntries = []; _fileSel = 0;
+                _fileEntries = []; _fileSel = 0; _fileSelMuted = false;
                 _fileReflectedOnOpen = false;
+                // 入力欄末尾へ caret を移動（既入力再利用時）
+                try{ if (cmdinput){ const pos=(cmdinput.value||'').length; cmdinput.setSelectionRange(pos,pos); } }catch{}
                 if (!_filePopupVisible()) _filePopupShow(); else _filePopupRender();
                 (function(){
                   const reqKey = (function(){ try{ return _ensureSlash(_fileBaseURL)?.toString()||null; }catch{ return null; } })();
@@ -7434,6 +7457,17 @@
                         if (!reqKey || curKey===reqKey){
                           _fileEntries = Array.isArray(list) ? list : [];
                           if (Array.isArray(list) && list.length>0){ _fileStableEntries = list.slice(); _fileStableBaseKey = curKey; }
+                          // 既入力フィルタがある場合は一致ディレクトリを選択（ファイル名でもディレクトリでも）
+                          if (_fileFilter){
+                            let caseSensitive = false; try{ const b=_ensureSlash(_fileBaseURL); if (b && b.protocol==='file:' && b.host && b.host.toLowerCase()==='wsl.localhost') caseSensitive=true; }catch{}
+                            const matchIdx = _fileEntries.findIndex(e=> e && e.name && (caseSensitive ? e.name===_fileFilter : e.name.toLowerCase()===_fileFilter.toLowerCase()));
+                            if (matchIdx>=0){
+                              try{ const baseNow=_ensureSlash(_fileBaseURL); const suppressUp=(!!_filePopupNoUp)||(baseNow&&(_isHostRoot(baseNow)||_isUncShareRoot(baseNow))); }catch{}
+                              const suppressUp = (function(){ try{ const b=_ensureSlash(_fileBaseURL); return (!!_filePopupNoUp)||(b&&(_isHostRoot(b)||_isUncShareRoot(b))); }catch{ return false; }})();
+                              _fileSel = matchIdx + (suppressUp?0:1);
+                              _fileSelMuted = false;
+                            }
+                          }
                         }
                       }catch{}
                     })
@@ -9031,9 +9065,11 @@
 
   // :e 入力文字列の解析 → {baseURL, typedDirRaw, filter}
   function _eParseInput(vRaw){
-    // 先頭のコロンは1つのみ許容（"::e" は不正とみなす）
+    // 先頭のコロンは1つのみ許容（"::e" は不正とみなす）。未マッチ時は "vRaw" 全体をパス入力として扱う (#490)
     const m = vRaw.match(/^:?\s*e\s*(.*)$/i);
-    const rest = (m? m[1] : '').trimStart();
+    // 既存実装は未マッチ時に rest="" となり Tab 再オープン時 (":e path" → Esc → Tab) にパスが消失していた。
+    // 未マッチ（:e/e が前置されていない生パス文字列）なら vRaw 全体をそのまま解析対象にする。
+    const rest = (m? m[1] : vRaw).trimStart();
     const orig = rest;
     // バックスラッシュ→スラッシュ統一（内部処理用）。raw は保持
     const norm = orig.replace(/\\/g,'/');
