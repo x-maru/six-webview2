@@ -204,3 +204,6 @@ body { font: var(--fontBase, 18px)/20px Consolas, 'Courier New', monospace; over
 #modalBox .modal-buttons button:hover { filter: brightness(1.06); }
 #modalBox .modal-buttons .primary { background:#2a3756; border-color:#2f4064; }
 #modalBox .modal-buttons .danger { background:#5b1f2a; border-color:#7a2a3a; }
+
+/* Visual Bell flash overlay */
+#vbflash { position:absolute; inset:0; background:black; opacity:0; pointer-events:none; z-index: 10; }

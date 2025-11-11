@@ -842,6 +842,32 @@
   let _optHlsearch = (function(){ try{ const o=(window&&window.SIX_OPTIONS)||{}; return !!o.hlsearch; }catch{} return false; })();          // :set hlsearch / :set nohlsearch
   let _optList = (function(){ try{ const o=(window&&window.SIX_OPTIONS)||{}; return (o.list!==false); }catch{} return true; })(); // :set list (default ON)
   let _hlLayer = null;               // container for match rectangles
+  // --- Visual Bell ---
+  let _optVisualBell = (function(){ try{ const o=(window&&window.SIX_OPTIONS)||{}; return (o.visualbell!==false); }catch{} return true; })(); // :set visualbell (default ON)
+  let _vbLayer = null;               // full-viewport black flash overlay
+  function _vbEnsureLayer(){
+    try{
+      if (!_vbLayer){
+        const d = document.createElement('div');
+        d.id = 'vbflash';
+        d.style.display = 'none';
+        _vbLayer = d;
+      }
+      if (_vbLayer.parentNode !== editorViewport){ try{ editorViewport.appendChild(_vbLayer); }catch{} }
+    }catch{}
+  }
+  function _triggerVisualBell(){
+    try{
+      if (!_optVisualBell) return;
+      _vbEnsureLayer();
+      _vbLayer.style.display = 'block';
+      _vbLayer.style.opacity = '1';
+      setTimeout(()=>{
+        try{ _vbLayer.style.opacity = '0'; }catch{}
+        setTimeout(()=>{ try{ _vbLayer.style.display = 'none'; }catch{} }, 60);
+      }, 40);
+    }catch{}
+  }
   let _hlMatches = null;             // cached [{start,len}] for _lastSearch over current text
   let _lastSearch = null;            // { src, flags, dir, origDir } last confirmed search; dir may record last movement, origDir is immutable base
 
@@ -3854,6 +3880,7 @@
             }catch{}
           } else {
             toast('no match');
+            try{ _triggerVisualBell(); }catch{}
           }
           // Clear the incremental search anchor after a confirmed search
           try{ _incSearchAnchorOff = null; }catch{}
@@ -3873,13 +3900,13 @@
   const flagsGiven = String(ms[4]||'');
   // Validate flags: allow only lowercase g, i, c, n (uppercase should be invalid)
   const invalid = flagsGiven.replace(/[gicn]/g, '');
-    if (invalid){ toast('invalid flags: ' + invalid); return; }
-        if (!pat){ toast('empty pattern'); return; }
+  if (invalid){ toast('invalid flags: ' + invalid); try{ _triggerVisualBell(); }catch{} return; }
+  if (!pat){ toast('empty pattern'); try{ _triggerVisualBell(); }catch{} return; }
         let reFlags = '';
         if (/i/.test(flagsGiven)) reFlags += 'i';
         // We'll use a global regex for scan; per-line non-g behavior is handled manually
         let reAll = null; try{ reAll = new RegExp(pat, reFlags+'g'); }catch{ reAll=null; }
-        if (!reAll){ toast('invalid pattern'); return; }
+  if (!reAll){ toast('invalid pattern'); try{ _triggerVisualBell(); }catch{} return; }
   const wantGlobalPerLine = /g/.test(flagsGiven);
     const reportOnly = /n/.test(flagsGiven);
     const needConfirm = /c/.test(flagsGiven) && !reportOnly;
@@ -4074,7 +4101,7 @@
           const post = orig.slice(selEnd);
           // For scanning within the selection, clone regex for this scope
           let reMid = null; try{ reMid = new RegExp(pat, reFlags + 'g'); }catch{ reMid=null; }
-          if (!reMid){ toast('invalid pattern'); try{ _exitVisual(); }catch{} return; }
+          if (!reMid){ toast('invalid pattern'); try{ _triggerVisualBell(); }catch{} try{ _exitVisual(); }catch{} return; }
           const seenLineFirst = new Set(); // track first match per (relative) line when !g
           // For report-only: count unique relative rows within selection
           const affectedRows = new Set();
@@ -4183,7 +4210,7 @@
           const line = String(lines[r]||'');
           // For scanning within the line, clone regex for this scope
           let reLine = null; try{ reLine = new RegExp(pat, reFlags + 'g'); }catch{ reLine=null; }
-          if (!reLine){ toast('invalid pattern'); return; }
+          if (!reLine){ toast('invalid pattern'); try{ _triggerVisualBell(); }catch{} return; }
           const affectedRows = new Set();
           let m; reLine.lastIndex = 0; let accLine = line; let acceptAll=false; let baseStartOff = (function(){ try{ return _offsetFromRC(r,0)|0; }catch{ return 0; } })();
           const _decStackLine = [];
@@ -4338,7 +4365,7 @@
         if (list.length === 0){
           // 無該当
           const q = (_bufFilter||'').trim();
-              if (q) toast('No such buffer: ' + q);
+              if (q) { toast('No such buffer: ' + q); try{ _triggerVisualBell(); }catch{} }
           try{ _bufPopupHide(); }catch{}
           try{ _setMode('NORMAL'); }catch{}
           try{ if (cmdinput){ cmdinput.value=''; try{ cmdinput.dispatchEvent(new Event('input', { bubbles:true })); }catch{} } }catch{}
@@ -4430,10 +4457,10 @@
                 if (!input){ toast('write cancelled', 1500); return; }
                 let targetUrl = null;
                 try{ targetUrl = _normalizeToURLString(input, base); }catch{}
-                if (!targetUrl){ toast('invalid path', 1500); return; }
+                if (!targetUrl){ toast('invalid path', 1500); try{ _triggerVisualBell(); }catch{} return; }
                 const _t = _normalizeTextForSaveInternal(editor.value||'');
                 const ok = await _saveToURLWithExternalCheck(b, targetUrl, _t);
-                if (!ok){ toast('write failed', 1500); return; }
+                if (!ok){ toast('write failed', 1500); try{ _triggerVisualBell(); }catch{} return; }
                 try{ b.path = targetUrl; b.name = _basename(targetUrl); editor.value = _t; b.text = _t; b.savedText = _t; b._savedTick = (b._changeTick|0); b.modified=false; }catch{}
                 _setTitle(); _renderTabbar();
               }
@@ -4491,6 +4518,19 @@
       try{ toast('scrolloff = ' + (Number.isFinite(scrolloff)?(scrolloff|0):3), 1200); }catch{}
       return;
     }
+    // :set visualbell / :set novisualbell / :set visualbell! / :set visualbell?
+    if (/^:set\s+visualbell\s*$/i.test(cmd)){
+      _optVisualBell = true; toast('visualbell: on', 900); return;
+    }
+    if (/^:set\s+novisualbell\s*$/i.test(cmd)){
+      _optVisualBell = false; toast('visualbell: off', 900); return;
+    }
+    if (/^:set\s+visualbell!\s*$/i.test(cmd)){
+      _optVisualBell = !_optVisualBell; toast('visualbell: ' + (_optVisualBell?'on':'off'), 900); return;
+    }
+    if (/^:set\s+visualbell\?\s*$/i.test(cmd)){
+      toast('visualbell: ' + (_optVisualBell?'on':'off'), 1200); return;
+    }
     // :set hlsearch / :set nohlsearch / :set hlsearch!
     if (/^:set\s+hlsearch\s*$/i.test(cmd)){
       _optHlsearch = true; _updateHlsearchFull(); try{ _updateOverlayHlsearchVisual(); }catch{} toast('hlsearch: on', 900); return;
@@ -4520,7 +4560,7 @@
       const bang = /!$/.test(wqam[1]||'');
       const arg = (wqam[2]||'').trim();
       const b = currentBuffer();
-      if (!b){ toast('no buffer'); _setMode('NORMAL'); return; }
+  if (!b){ toast('no buffer'); try{ _triggerVisualBell(); }catch{} _setMode('NORMAL'); return; }
       // unchanged and no path → close current, then aggregate others and exit
       try{ if (!arg && b && b.modified===false){
         (async()=>{
@@ -4584,7 +4624,7 @@
       const bang = /!$/.test(wqm[1]||'');
       const arg = (wqm[2]||'').trim();
       const b = currentBuffer();
-      if (!b){ toast('no buffer'); _setMode('NORMAL'); return; }
+  if (!b){ toast('no buffer'); try{ _triggerVisualBell(); }catch{} _setMode('NORMAL'); return; }
       // unchanged and no path → just close current buffer
       try{ if (!arg && b && b.modified===false){ _setMode('NORMAL'); _closeCurrentBuffer(); return; } }catch{}
       // Resolve target URL
@@ -4636,7 +4676,7 @@
           const textData = (i===currentIdx)?(editor.value||''):(b.text||'');
             const textDataN = (i===currentIdx)? _normalizeTextForSaveInternal(editor.value||'') : _normalizeTextForSaveInternal(textData||'');
             const ok = await _saveToURLWithExternalCheck(b, b.path, textDataN);
-          if (ok){ try{ if (i===currentIdx){ editor.value = textDataN; } b.text=textDataN; b.savedText=textDataN; b._savedTick=(b._changeTick|0); b.modified=false; }catch{} toast('written: ' + _prettyFileUrlLabel(b.path)); } else { toast('write failed: ' + (b.name||'')); }
+          if (ok){ try{ if (i===currentIdx){ editor.value = textDataN; } b.text=textDataN; b.savedText=textDataN; b._savedTick=(b._changeTick|0); b.modified=false; }catch{} toast('written: ' + _prettyFileUrlLabel(b.path)); } else { toast('write failed: ' + (b.name||'')); try{ _triggerVisualBell(); }catch{} }
         }
         _setTitle(); _renderTabbar();
       })();
@@ -4650,7 +4690,7 @@
       const bang = /!$/.test(wm[1]||'');
       const arg = (wm[2]||'').trim();
       const b = currentBuffer();
-      if (!b){ toast('no buffer'); _setMode('NORMAL'); return; }
+  if (!b){ toast('no buffer'); try{ _triggerVisualBell(); }catch{} _setMode('NORMAL'); return; }
       // Capture viewport and selection to stabilize after save
       let _w_st = 0, _w_sl = 0, _w_cr = caretRow|0, _w_cc = caretCol|0, _w_sS = 0, _w_sE = 0;
       try{ _w_st = editor.scrollTop|0; _w_sl = editor.scrollLeft|0; _w_sS = editor.selectionStart|0; _w_sE = editor.selectionEnd|0; }catch{}
@@ -5431,6 +5471,12 @@
             section('検索ハイライト', [
               [K(':set hlsearch'), sep(' 有効 / '), K(':set nohlsearch'), sep(' 無効 / '), K(':set hlsearch!'), sep(' トグル')]
             ]);
+            // ビジュアルベル
+            section('ビジュアルベル', [
+              [K(':set visualbell'), sep(' 有効 / '), K(':set novisualbell'), sep(' 無効 / '), K(':set visualbell!'), sep(' トグル / '), K(':set visualbell?'), sep(' 状態表示')],
+              [sep('失敗時などにエディタ全体を一瞬黒くフラッシュ表示します')],
+              [sep('既定値: 起動時 visualbell=on (SIX_OPTIONS.visualbell===false なら off)')]
+            ]);
             // 制御文字表示 (:set list)
             section('制御文字表示', [
               [K(':set list'), sep(' 有効 / '), K(':set nolist'), sep(' 無効 / '), K(':set list!'), sep(' トグル / '), K(':set list?'), sep(' 状態表示')],
@@ -5756,7 +5802,7 @@
             for (const {b,i} of modifiedItems){
               const id = await choiceModal({ title:'Unsaved changes', detail:`Save changes to: ${b.path? _prettyFileUrlLabel(b.path):(b.name||'(untitled)')}`, buttons:[{id:'save',label:'Save',primary:true},{id:'dont',label:"Don't Save"},{id:'cancel',label:'Cancel',danger:true}] });
               if (id===null || id==='cancel'){ resolve(false); return; }
-              if (id==='save' && b.path){ const textData = (i===currentIdx)? _normalizeTextForSaveInternal(editor.value||'') : _normalizeTextForSaveInternal(b.text||''); const ok = await _saveToURLWithExternalCheck(b, b.path, textData); if (!ok){ toast('write failed: ' + (b.name||'')); resolve(false); return; } try{ if (i===currentIdx){ editor.value=textData; } b.text=textData; b.savedText=textData; b._savedTick=(b._changeTick|0); b.modified=false; }catch{} }
+              if (id==='save' && b.path){ const textData = (i===currentIdx)? _normalizeTextForSaveInternal(editor.value||'') : _normalizeTextForSaveInternal(b.text||''); const ok = await _saveToURLWithExternalCheck(b, b.path, textData); if (!ok){ toast('write failed: ' + (b.name||'')); try{ _triggerVisualBell(); }catch{} resolve(false); return; } try{ if (i===currentIdx){ editor.value=textData; } b.text=textData; b.savedText=textData; b._savedTick=(b._changeTick|0); b.modified=false; }catch{} }
             }
             resolve(true);
           })();
@@ -5778,7 +5824,7 @@
           const removeRow = ()=>{ try{ listWrap.removeChild(row); rows.delete(i); }catch{} };
           btnSave.addEventListener('click', async()=>{
             btnSave.disabled = true; btnSkip.disabled=true;
-            if (b.path){ const textData = (i===currentIdx)? _normalizeTextForSaveInternal(editor.value||'') : _normalizeTextForSaveInternal(b.text||''); const ok = await _saveToURLWithExternalCheck(b, b.path, textData); if (!ok){ toast('write failed: ' + (b.name||'')); btnSave.disabled=false; btnSkip.disabled=false; return; } try{ if (i===currentIdx){ editor.value=textData; } b.text=textData; b.savedText=textData; b._savedTick = (b._changeTick|0); b.modified=false; }catch{} }
+            if (b.path){ const textData = (i===currentIdx)? _normalizeTextForSaveInternal(editor.value||'') : _normalizeTextForSaveInternal(b.text||''); const ok = await _saveToURLWithExternalCheck(b, b.path, textData); if (!ok){ toast('write failed: ' + (b.name||'')); try{ _triggerVisualBell(); }catch{} btnSave.disabled=false; btnSkip.disabled=false; return; } try{ if (i===currentIdx){ editor.value=textData; } b.text=textData; b.savedText=textData; b._savedTick = (b._changeTick|0); b.modified=false; }catch{} }
             removeRow(); maybeFinish();
           });
           btnSkip.addEventListener('click', ()=>{ removeRow(); maybeFinish(); });
@@ -5802,7 +5848,7 @@
             if (b && b.modified && b.path){
               const textData = (i===currentIdx)? _normalizeTextForSaveInternal(editor.value||'') : _normalizeTextForSaveInternal(b.text||'');
               const ok = await _saveToURLWithExternalCheck(b, b.path, textData);
-              if (!ok){ toast('write failed: ' + (b.name||'')); btnAll.disabled=false; btnCancel.disabled=false; return; }
+              if (!ok){ toast('write failed: ' + (b.name||'')); try{ _triggerVisualBell(); }catch{} btnAll.disabled=false; btnCancel.disabled=false; return; }
               try{ if (i===currentIdx){ editor.value=textData; } b.text=textData; b.savedText=textData; b._savedTick = (b._changeTick|0); b.modified=false; }catch{}
             }
             try{ listWrap.removeChild(obj.row); rows.delete(i); }catch{}
@@ -7182,7 +7228,7 @@
               _repositionCaret(); updateGutter(); _renderHlMatchesVisible();
               _lastSearch.dir = dir; // record last movement direction (origDir remains stable)
             }catch{}
-          } else { toast('no match'); }
+          } else { toast('no match'); try{ _triggerVisualBell(); }catch{} }
         } else {
           toast('no last search');
         }
@@ -7606,7 +7652,7 @@
           }
           // 明示的無効コマンド（::e）にトーストを出す（CMD 継続）
           if (/^\s*:{2,}\s*e\b/i.test(raw)){
-            toast('invalid command');
+            toast('invalid command'); try{ _triggerVisualBell(); }catch{}
             return;
           }
           if (raw){
@@ -8649,7 +8695,7 @@
   // Safety: if encoding yielded zero bytes but we have non-empty content, fall back to UTF-8
   try{ if ((payloadBytes && payloadBytes.byteLength===0) && out && out.length>0){ payloadBytes = new TextEncoder().encode(out); } }catch{}
       let fsPath = _fsPathFromFileURL(u);
-      if (!fsPath){ toast('invalid target path'); return false; }
+  if (!fsPath){ toast('invalid target path'); try{ _triggerVisualBell(); }catch{} return false; }
       const apiUrl = _apiBase + 'write?fs=' + encodeURIComponent(fsPath);
       const makeBody = ()=>{
         // Send raw bytes without setting Content-Type to avoid CORS preflight (#380)
@@ -8697,10 +8743,10 @@
         }
       }
       // 最終失敗
-      toast('write failed: connection');
+  toast('write failed: connection'); try{ _triggerVisualBell(); }catch{}
       try{ _apiNoteFailure(); }catch{}
       return false;
-    }catch(e){ toast('write failed'); return false; }
+  }catch(e){ toast('write failed'); try{ _triggerVisualBell(); }catch{} return false; }
   }
 
   // Normalize internal text right before save: ensure exactly one trailing LF when non-empty.
