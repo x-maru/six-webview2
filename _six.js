@@ -844,7 +844,98 @@
   let _hlLayer = null;               // container for match rectangles
   // --- Visual Bell ---
   let _optVisualBell = (function(){ try{ const o=(window&&window.SIX_OPTIONS)||{}; return (o.visualbell!==false); }catch{} return true; })(); // :set visualbell (default ON)
+  // --- Debug key logging (ring buffer) ---
+  // :set debugkeys / :set nodebugkeys / :set debugkeys! / :set debugkeys?
+  let _optDebugKeys = false;
+  const _debugKeyRing = [];
+  const _DEBUG_KEY_MAX = 300;
+  function _debugPush(ev){ try{ if(!_optDebugKeys) return; _debugKeyRing.push(ev); if(_debugKeyRing.length>_DEBUG_KEY_MAX){ _debugKeyRing.splice(0,_debugKeyRing.length-_DEBUG_KEY_MAX); } }catch{} }
+  function _debugDumpString(){
+    try{
+      return _debugKeyRing.map((e,i)=>{
+        return i.toString().padStart(3,'0')+' '+new Date(e.t).toISOString()+` ${e.type}`+
+          ` m=${e.mode}`+
+          (e.key!==undefined?` key=${JSON.stringify(e.key)}`:'')+
+          (e.code?` code=${e.code}`:'')+
+          (e.inputType?` inputType=${e.inputType}`:'')+
+          (e.data!==undefined?` data=${JSON.stringify(e.data)}`:'')+
+          (e.compData!==undefined?` comp=${JSON.stringify(e.compData)}`:'')+
+          ` ctrl=${e.ctrl?'1':'0'} alt=${e.alt?'1':'0'} meta=${e.meta?'1':'0'} isComp=${e.isComp?'1':'0'}`;
+      }).join('\n');
+    }catch{ return ''; }
+  }
   let _vbLayer = null;               // full-viewport black flash overlay
+  // --- Anomaly heuristics (diagnose NORMAL+IME ON acting like constant 'l') ---
+  let _anomActive = false;           // between start/end markers
+  let _anomColsMismatchRun = 0;      // consecutive times j/k led to cols motion
+  function _anomalyMaybeStart(reason){
+    try{
+      if (_anomActive) return;
+      _anomActive = true;
+      _anomColsMismatchRun = 0;
+      _debugPush({ t:Date.now(), type:'anomaly-start', mode:_mode, reason, lastKey:_lastKeydownForAnom });
+    }catch{}
+  }
+  function _anomalyMaybeEnd(reason){
+    try{
+      if (!_anomActive) return;
+      _anomActive = false;
+      _debugPush({ t:Date.now(), type:'anomaly-end', mode:_mode, reason });
+    }catch{}
+  }
+  function _anomalyMaybeCols(delta){
+    try{
+      // Heuristic: if last keydown looked like vertical (j/k/ArrowUp/Down) but we executed cols move, count it.
+      const k = (_lastKeydownForAnom||{}).key;
+      const c = (_lastKeydownForAnom||{}).code;
+      const isVertIntent = (k==='j' || k==='k' || k==='ArrowUp' || k==='ArrowDown' || (k==='Process' && (c==='KeyJ' || c==='KeyK')));
+      const isCols = (delta!==0);
+      if (isVertIntent && isCols){
+        _anomColsMismatchRun++;
+        _debugPush({ t:Date.now(), type:'anomaly-note', mode:_mode, note:'vert-intent->cols', count:_anomColsMismatchRun, lastKey:_lastKeydownForAnom });
+        if (_anomColsMismatchRun>=2){ _anomalyMaybeStart('vert->cols'); }
+        return;
+      }
+      // If we had a mismatch run but got a horizontal intent, end it when we see a legit lines move elsewhere.
+      if (_anomColsMismatchRun>0 && (k==='h' || k==='l' || k==='ArrowLeft' || k==='ArrowRight' || (k==='Process' && (c==='KeyH'||c==='KeyL')))){
+        _anomColsMismatchRun = 0;
+        _anomalyMaybeEnd('horizontal-intent');
+        return;
+      }
+      // default: no-op
+    }catch{}
+  }
+  // --- Raw key logging (capture phase, pre-routing) ---
+  // :set rawkeys / :set norawkeys / :set rawkeys! / :set rawkeys? / :dumprawkeys / :clearrawkeys
+  let _optRawKeys = false;
+  const _rawKeyRing = [];
+  const _RAW_KEY_MAX = 400;
+  function _rawPush(ev){ try{ if(!_optRawKeys) return; _rawKeyRing.push(ev); if(_rawKeyRing.length>_RAW_KEY_MAX){ _rawKeyRing.splice(0,_rawKeyRing.length-_RAW_KEY_MAX); } }catch{} }
+  function _rawDump(arr){
+    try{
+      return arr.map((e,i)=>{
+        return i.toString().padStart(3,'0')+' '+new Date(e.t).toISOString()+` ${e.type}`+
+          ` key=${JSON.stringify(e.key)}`+
+          (e.code?` code=${e.code}`:'')+
+          (e.repeat?` repeat=${e.repeat?'1':'0'}`:'')+
+          (e.trusted?` trusted=${e.trusted?'1':'0'}`:'')+
+          ` ctrl=${e.ctrl?'1':'0'} alt=${e.alt?'1':'0'} meta=${e.meta?'1':'0'}`;
+      }).join('\n');
+    }catch{ return ''; }
+  }
+  // Capture raw keydown/keyup before any other listeners (once only)
+  // Also retain last keydown for anomaly heuristics.
+  let _lastKeydownForAnom = null; // {key, code, t}
+  try{
+    window.addEventListener('keydown', (e)=>{
+      const now = Date.now();
+      _rawPush({ t:now, type:'raw-keydown', key:e.key, code:e.code, repeat:!!e.repeat, trusted:!!e.isTrusted, ctrl:e.ctrlKey, alt:e.altKey, meta:e.metaKey });
+      try{ _lastKeydownForAnom = { key:e.key, code:e.code, t:now }; }catch{}
+    }, true);
+    window.addEventListener('keyup', (e)=>{
+      _rawPush({ t:Date.now(), type:'raw-keyup', key:e.key, code:e.code, repeat:!!e.repeat, trusted:!!e.isTrusted, ctrl:e.ctrlKey, alt:e.altKey, meta:e.metaKey });
+    }, true);
+  }catch{}
   function _vbEnsureLayer(){
     try{
       if (!_vbLayer){
@@ -868,6 +959,9 @@
       }, 40);
     }catch{}
   }
+  // STRICT NORMAL IME option: when enabled, ignore letter-based motions while IME composition is active
+  // Users hit an anomaly where NORMAL+IME ON sometimes behaves like constant 'l'; this provides a safe mode.
+  let _optStrictNormalIME = false; // :set strictnormalime / :set nostrictnormalime
   let _hlMatches = null;             // cached [{start,len}] for _lastSearch over current text
   let _lastSearch = null;            // { src, flags, dir, origDir } last confirmed search; dir may record last movement, origDir is immutable base
 
@@ -3637,11 +3731,19 @@
     _setCaret(newRow, newCol, { suppressDesired: true });
     // Prefer no scroll on first motion after switch if caret is visible; otherwise force ensure
     _ensureAfterMotion();
+    // motion log
+    try{ _debugPush({ t:Date.now(), type:'motion', mode:_mode, kind:'lines', delta:delta|0, toR:caretRow|0, toC:caretCol|0 }); }catch{}
+    try{ _anomalyMaybeEnd('lines-motion'); }catch{}
   }
   function _moveCaretCols(delta){
     const line = (_splitLines()[caretRow] || '');
+    const fromR = caretRow|0, fromC = caretCol|0;
     const nc = Math.max(0, Math.min(line.length, caretCol + delta));
     _setCaret(caretRow, nc);
+    // Detect unexpected row change (should not happen here); if it does, tag anomaly
+    const wrap = (caretRow!==fromR);
+    try{ _debugPush({ t:Date.now(), type:'motion', mode:_mode, kind:'cols', delta:delta|0, fromR, fromC, toR:caretRow|0, toC:caretCol|0, wrap }); }catch{}
+    try{ _anomalyMaybeCols(delta); }catch{}
   }
   // ---- Motion helpers ----
   function _lineLen(r){ const lines=_splitLines(); return (r>=0 && r<lines.length) ? (lines[r]||'').length : 0; }
@@ -4554,6 +4656,79 @@
     if (/^:set\s+list\?\s*$/i.test(cmd)){
       toast('list: ' + (_optList?'on':'off'), 1200); return;
     }
+    // :set strictnormalime / :set nostrictnormalime / :set strictnormalime! / :set strictnormalime?
+    if (/^:set\s+strictnormalime\s*$/i.test(cmd)){ _optStrictNormalIME = true; toast('strictnormalime: on', 900); return; }
+    if (/^:set\s+nostrictnormalime\s*$/i.test(cmd)){ _optStrictNormalIME = false; toast('strictnormalime: off', 900); return; }
+    if (/^:set\s+strictnormalime!\s*$/i.test(cmd)){ _optStrictNormalIME = !_optStrictNormalIME; toast('strictnormalime: ' + (_optStrictNormalIME?'on':'off'), 900); return; }
+    if (/^:set\s+strictnormalime\?\s*$/i.test(cmd)){ toast('strictnormalime: ' + (_optStrictNormalIME?'on':'off'), 1200); return; }
+    // :set debugkeys / :set nodebugkeys / :set debugkeys! / :set debugkeys?
+    if (/^:set\s+debugkeys\s*$/i.test(cmd)){
+      _optDebugKeys = true; toast('debugkeys: on', 900); return;
+    }
+    if (/^:set\s+nodebugkeys\s*$/i.test(cmd)){
+      _optDebugKeys = false; toast('debugkeys: off', 900); return;
+    }
+    if (/^:set\s+debugkeys!\s*$/i.test(cmd)){
+      _optDebugKeys = !_optDebugKeys; toast('debugkeys: ' + (_optDebugKeys?'on':'off'), 900); return;
+    }
+    if (/^:set\s+debugkeys\?\s*$/i.test(cmd)){
+      toast('debugkeys: ' + (_optDebugKeys?'on':'off'), 1200); return;
+    }
+    // :set rawkeys / :set norawkeys / :set rawkeys! / :set rawkeys?
+    if (/^:set\s+rawkeys\s*$/i.test(cmd)){ _optRawKeys = true; toast('rawkeys: on', 900); return; }
+    if (/^:set\s+norawkeys\s*$/i.test(cmd)){ _optRawKeys = false; toast('rawkeys: off', 900); return; }
+    if (/^:set\s+rawkeys!\s*$/i.test(cmd)){ _optRawKeys = !_optRawKeys; toast('rawkeys: ' + (_optRawKeys?'on':'off'), 900); return; }
+    if (/^:set\s+rawkeys\?\s*$/i.test(cmd)){ toast('rawkeys: ' + (_optRawKeys?'on':'off'), 1200); return; }
+    // :dumpkeys [N] — copy last N (or all) debug key events to clipboard
+    {
+      const mDump = cmd.match(/^:dumpkeys(?:\s*([0-9０-９]+))?\s*$/i);
+      if (mDump){
+        let arr = _debugKeyRing.slice();
+        let numStr = (mDump[1]||'').trim();
+        // Normalize full-width digits to ASCII
+        if (numStr){ numStr = numStr.replace(/[０-９]/g, ch=> String.fromCharCode(ch.charCodeAt(0)-0xFF10+0x30)); }
+        const nArg = parseInt(numStr||'',10);
+        if (Number.isFinite(nArg) && nArg>0 && nArg < arr.length){ arr = arr.slice(arr.length - nArg); }
+        if (!arr.length){ toast('debugkeys: ring empty', 900); return; }
+        const s = arr.map((e,i)=>{
+          return i.toString().padStart(3,'0')+' '+new Date(e.t).toISOString()+` ${e.type}`+
+            ` m=${e.mode}`+
+            (e.key!==undefined?` key=${JSON.stringify(e.key)}`:'')+
+            (e.code?` code=${e.code}`:'')+
+            (e.inputType?` inputType=${e.inputType}`:'')+
+            (e.data!==undefined?` data=${JSON.stringify(e.data)}`:'')+
+            (e.compData!==undefined?` comp=${JSON.stringify(e.compData)}`:'')+
+            ` ctrl=${e.ctrl?'1':'0'} alt=${e.alt?'1':'0'} meta=${e.meta?'1':'0'} isComp=${e.isComp?'1':'0'}`;
+        }).join('\n');
+        (async()=>{ const ok = await _copyToClipboard(s); toast(ok?`dumped ${arr.length} events to clipboard.`:'Clipboard write failed.', ok?1000:1500); })();
+        return;
+      }
+    }
+    // :dumprawkeys [N] — copy last N raw key events
+    {
+      const mDumpRaw = cmd.match(/^:dumprawkeys(?:\s*([0-9０-９]+))?\s*$/i);
+      if (mDumpRaw){
+        let arr = _rawKeyRing.slice();
+        let numStr = (mDumpRaw[1]||'').trim();
+        if (numStr){ numStr = numStr.replace(/[０-９]/g, ch=> String.fromCharCode(ch.charCodeAt(0)-0xFF10+0x30)); }
+        const nArg = parseInt(numStr||'',10);
+        if (Number.isFinite(nArg) && nArg>0 && nArg < arr.length){ arr = arr.slice(arr.length - nArg); }
+        if (!arr.length){ toast('rawkeys: ring empty', 900); return; }
+        const s = _rawDump(arr);
+        (async()=>{ const ok = await _copyToClipboard(s); toast(ok?`dumped ${arr.length} raw events.`:'Clipboard write failed.', ok?1000:1500); })();
+        return;
+      }
+    }
+    // :clearkeys — clear the debug key log
+    if (/^:clearkeys\s*$/i.test(cmd)){
+      try{ _debugKeyRing.splice(0,_debugKeyRing.length); }catch{}
+      toast('debugkeys: cleared', 900); return;
+    }
+    // :clearrawkeys — clear raw key log
+    if (/^:clearrawkeys\s*$/i.test(cmd)){
+      try{ _rawKeyRing.splice(0,_rawKeyRing.length); }catch{}
+      toast('rawkeys: cleared', 900); return;
+    }
     // :wqa[!] [path?] — write all & quit (use previous :wq behavior)
     const wqam = cmd.match(/^:(wqa!?)(?:\s*(.*))?$/i);
     if (wqam){
@@ -4953,9 +5128,9 @@
     }
     // Begin an INSERT compound edit by pushing a snapshot before edits start
     if (m==='INSERT'){
-      // Allow IME in INSERT (best-effort; browsers may ignore)
+      // Allow IME in INSERT
       try{ if (editor){ editor.removeAttribute('inputmode'); editor.style.imeMode = ''; } }catch{}
-      // ユーザー編集を許可
+      // ユーザー編集を許可（INSERT のみ）
       try{ if (editor) editor.readOnly = false; }catch{}
       // If we previously hinted IME off by focus juggling, restore focus cleanly once here
       try{ if (editor && document.activeElement !== editor){ editor.focus(); } }catch{}
@@ -4974,23 +5149,10 @@
       _syncNativeSelectionToCaret();
   // Caret color remains baseline (IME visualization removed)
     } else {
-      // In NON-INSERT modes, hint IME OFF (cannot force at OS level)
-      try{
-        if (editor){
-          editor.setAttribute('inputmode', 'none');
-          editor.style.imeMode = 'disabled';
-          // ユーザー編集は禁止（プログラム編集は許可）
-          try{ editor.readOnly = true; }catch{}
-          // Heuristic: brief blur→focus to nudge some IME implementations to exit composition when leaving INSERT
-          // (Safe because we immediately resync caret; guarded to avoid infinite loops)
-          const prev = document.activeElement;
-          if (prev === editor){
-            editor.blur();
-            setTimeout(()=>{ try{ editor.focus(); _syncNativeSelectionToCaret(); }catch{} }, 0);
-          }
-        }
-      }catch{}
-  // IME visual reset removed (no longer tracking IME state)
+      // NORMAL/VISUAL/CMD: IME on/off キーや未確定表示は許容するため、inputmode/imeMode の強制変更はしない。
+      // 内容変更は beforeinput/input で阻止するため readOnly も false のままにする。
+      try{ if (editor){ editor.removeAttribute('inputmode'); editor.style.imeMode=''; editor.readOnly = false; } }catch{}
+      // 以前の blur→focus による IME 強制終了は行わない（#522）。
     }
   }
 
@@ -5983,14 +6145,27 @@
     // Use non-passive to be able to prevent default browser zoom
     try{ viewport.addEventListener('wheel', wheelZoom, { passive:false }); }catch{ viewport.addEventListener('wheel', wheelZoom); }
     // Scroll snapping is handled in the unified RAF above
+    // IME破棄時のビジュアルベル制御（スパム防止のため軽いスロットリング）
+    let _imeBellLastAt = 0;
     editor.addEventListener('beforeinput', (e)=>{
-      // NORMAL/VISUAL/CMD ではユーザー操作による内容変更を全面禁止（IME 確定含む）
+      // NORMAL/VISUAL/CMD では本文変更を全面禁止（未確定表示 insertCompositionText も含む）
       if (_mode !== 'INSERT'){
         try{ e.preventDefault(); }catch{}
+        // IME系の insert を捨てる際に visualbell を発行（#530）
+        try{
+          const it = String(e.inputType||'');
+          const isIMEInsert = (it==='insertCompositionText' || it==='insertFromComposition' || (it==='insertText' && _imeComposing===true));
+          if (isIMEInsert){
+            const now = Date.now();
+            if (now - _imeBellLastAt > 120){ _imeBellLastAt = now; try{ _triggerVisualBell && _triggerVisualBell(); }catch{} }
+          }
+        }catch{}
+        _debugPush({ t:Date.now(), type:'beforeinput-block', mode:_mode, inputType:e.inputType, data:e.data, ctrl:e.ctrlKey, alt:e.altKey, meta:e.metaKey, isComp:false });
         return;
       }
+      _debugPush({ t:Date.now(), type:'beforeinput', mode:_mode, inputType:e.inputType, data:e.data, ctrl:e.ctrlKey, alt:e.altKey, meta:e.metaKey, isComp:false });
     });
-    // NORMAL/VISUAL/CMD 時の入力フォールバックガード (#491, #492)
+    // NORMAL/VISUAL/CMD 時の入力フォールバックガード (#491, #492, #522)
     // beforeinput で止めきれない実装差分（特に IME の insertFromComposition/insertCompositionText）に備え、
     // INSERT 以外で発火した input のうち insert*/delete* 系は直ちに巻き戻す。
     editor.addEventListener('input', (e)=>{
@@ -6002,16 +6177,30 @@
             // 現在のバッファ内容に強制巻き戻し（ユーザー操作による変更は一切反映しない）
             const b = currentBuffer();
             if (b){
-              const keepOff = editor.selectionStart|0;
+              // IME の未確定/確定文字列による input で caret が右へ進む「擬似 l 移動」を防ぐ (#529)
+              // 以下のケースではロールバック後の caret を「確定前の選択終端」へ戻す:
+              // - insertFromComposition（確定）
+              // - insertCompositionText（未確定表示）
+              // - insertText だが現在 IME composing 中
+              let keepOff = (editor.selectionStart|0);
+              try{
+                if (it === 'insertFromComposition' || it === 'insertCompositionText' || (it === 'insertText' && _imeComposing)){
+                  keepOff = (_preCompSelE|0);
+                }
+              }catch{}
               editor.value = String(b.text||'');
               const len = editor.value.length|0;
               const off = (keepOff<=len)?keepOff:len;
               editor.selectionStart = editor.selectionEnd = off;
+              // オーバーレイ caret も復元オフセットへ同期して、行ジャンプ風の見え方を抑止（#530）
+              try{ const rc = _rcFromOffset(off); caretRow = rc.r; caretCol = rc.c; _repositionCaret(); updateGutter(); }catch{}
             }
+            _debugPush({ t:Date.now(), type:'input-rollback', mode:_mode, inputType:it, data:e.data, ctrl:e.ctrlKey, alt:e.altKey, meta:e.metaKey, isComp:false });
           }
           return;
         }
       }catch{}
+      _debugPush({ t:Date.now(), type:'input', mode:_mode, inputType:e.inputType, data:e.data, ctrl:e.ctrlKey, alt:e.altKey, meta:e.metaKey, isComp:false });
     });
     editor.addEventListener('input', ()=>{
       if (_mode === 'INSERT'){
@@ -6071,10 +6260,9 @@
       }catch{}
       _repositionCaret(); updateGutter(); _updatePosInfo();
     });
-  editor.addEventListener('keyup', (e)=>{ if(e.key==='Enter') ensureScrolloff(); _repositionCaret(); updateGutter(); _updatePosInfo(); });
+  editor.addEventListener('keyup', (e)=>{ _debugPush({ t:Date.now(), type:'keyup', mode:_mode, key:e.key, code:e.code, keyCode:e.keyCode, which:e.which, ctrl:e.ctrlKey, alt:e.altKey, meta:e.metaKey, isComp:_imeComposing }); if(e.key==='Enter') ensureScrolloff(); _repositionCaret(); updateGutter(); _updatePosInfo(); });
   editor.addEventListener('click', ()=>{ _repositionCaret(); updateGutter(); _updatePosInfo(); });
-    // IME composition events — 非 INSERT では確定も含め一切反映しない (#492)
-    // 仕様: NORMAL/VISUAL/CMD 中の IME 入力（未確定/確定）は無視。選択状態も維持。
+    // IME composition events — #522: NORMAL/VISUAL では未確定の表示は許可するが、確定は捨てる
     let _imeComposing = false;
     let _blockedComposition = false;
     let _preCompSelS = 0, _preCompSelE = 0;
@@ -6083,34 +6271,32 @@
       try{
         if (_mode !== 'INSERT'){
           _blockedComposition = true;
-          // selection を保持して後で復元（VISUAL 選択解除対策）
+          // 表示位置のため現在の選択を記録（確定時ロールバック用）
           _preCompSelS = editor.selectionStart|0; _preCompSelE = editor.selectionEnd|0;
-          // 一部実装で確定が走らないよう readOnly を一時有効化
-          try{ editor.readOnly = true; }catch{}
-          // 直後に選択が崩れる実装に対する復元
-          setTimeout(()=>{
-            try{ editor.selectionStart = _preCompSelS; editor.selectionEnd = _preCompSelE; }catch{}
-          }, 0);
-        } else {
-          _blockedComposition = false;
-        }
+        } else { _blockedComposition = false; }
+        _debugPush({ t:Date.now(), type:'compositionstart', mode:_mode, compData:e.data, ctrl:e.ctrlKey, alt:e.altKey, meta:e.metaKey, isComp:true });
       }catch{}
     });
     editor.addEventListener('compositionend', (e)=>{
       try{
         if (_blockedComposition){
-          // 反映させない（値は readOnly で変わっていない前提だが、念のため選択を復元）
+          // 確定は破棄：バッファ内容で強制復元し、選択も戻す
+          const b = currentBuffer();
+          if (b){
+            editor.value = String(b.text||'');
+          }
           try{ editor.selectionStart = _preCompSelS; editor.selectionEnd = _preCompSelE; }catch{}
         }
       }catch{}
       _imeComposing = false; _blockedComposition = false;
-      try{ if (_mode !== 'INSERT'){ editor.readOnly = true; } }catch{}
       _repositionCaret(); updateGutter();
+      _debugPush({ t:Date.now(), type:'compositionend', mode:_mode, compData:e.data, ctrl:e.ctrlKey, alt:e.altKey, meta:e.metaKey, isComp:false });
     });
     editor.addEventListener('compositionupdate', (e)=>{
       try{
-        // 非 INSERT では動作しない（無視）。INSERT では従来通り特に処理しない。
-        if (_mode !== 'INSERT') return;
+        // 未確定表示はブラウザに任せる。INSERT でも特別な処理なし。
+        _debugPush({ t:Date.now(), type:'compositionupdate', mode:_mode, compData:e.data, ctrl:e.ctrlKey, alt:e.altKey, meta:e.metaKey, isComp:true });
+        return;
       }catch{}
     });
   // editor.addEventListener('compositionend', ...) removed
@@ -6146,6 +6332,18 @@
       if (Date.now() < _kbdGuardUntil){ try{ e.preventDefault(); e.stopPropagation(); }catch{} return; }
     // Globally consume Ctrl+U to avoid Edge opening view-source window (#447)
     if (e && e.ctrlKey && !e.altKey && !e.metaKey && (e.key==='u' || e.key==='U')){ try{ e.preventDefault(); e.stopPropagation(); }catch{} return; }
+    _debugPush({ t:Date.now(), type:'keydown', mode:_mode, key:e.key, code:e.code, keyCode:e.keyCode, which:e.which, ctrl:e.ctrlKey, alt:e.altKey, meta:e.metaKey, isComp:_imeComposing });
+    // DEBUG GUARD (#523): investigate spurious 'l' motions in NORMAL with IME ON.
+    // If key is reported as 'l' but original event has a printable key pressed that differs and no modifiers,
+    // add lightweight console trace. (Will be removed after root cause isolated.)
+    try{
+      if (_mode==='NORMAL' && e && !e.ctrlKey && !e.metaKey && !e.altKey){
+        // Heuristic: if key=='l' and code not matching expected 'KeyL' or ArrowRight, log it.
+        if (e.key==='l' && !(e.code==='KeyL' || e.code==='ArrowRight')){
+          try{ console.warn('[debug#523] anomalous l-key event', {key:e.key, code:e.code, which:e.which, keyCode:e.keyCode, time:Date.now()}); }catch{}
+        }
+      }
+    }catch{}
       if (_mode === 'CMD') return;
       if (_mode === 'INSERT'){
         // INSERTモードで Tab または Ctrl+I でタブ文字を挿入 (#459)
@@ -6346,10 +6544,27 @@
         }
     // Motions extend selection
   const moveAndUpdate=(fn)=>{ fn(); try{ _flagCaretMotion(); }catch{} _ensureAfterMotion(); _repositionCaret(); updateGutter(); _updateVisualSelection(); };
-        if (e.key==='j' || e.key==='ArrowDown'){ e.preventDefault(); const n=_consumeCount(); moveAndUpdate(()=>_moveCaretLines(n)); return; }
-        if (e.key==='k' || e.key==='ArrowUp'){ e.preventDefault(); const n=_consumeCount(); moveAndUpdate(()=>_moveCaretLines(-n)); return; }
-        if (e.key==='h' || e.key==='ArrowLeft'){ e.preventDefault(); const n=_consumeCount(); moveAndUpdate(()=>_moveCaretCols(-n)); return; }
-        if (e.key==='l' || e.key==='ArrowRight'){ e.preventDefault(); const n=_consumeCount(); moveAndUpdate(()=>_moveCaretCols(n)); return; }
+        if (e.key==='ArrowDown'){ e.preventDefault(); const n=_consumeCount(); moveAndUpdate(()=>_moveCaretLines(n)); return; }
+        if (e.key==='ArrowUp'){ e.preventDefault(); const n=_consumeCount(); moveAndUpdate(()=>_moveCaretLines(-n)); return; }
+        // In strict-normal-ime, ignore letter motions (and their Process-coded variants) while composing; arrows still work
+        if (_optStrictNormalIME && _imeComposing){
+          const isHJKLCode = (e.code==='KeyH'||e.code==='KeyJ'||e.code==='KeyK'||e.code==='KeyL');
+          const isHJKLKey  = (e.key==='h'||e.key==='j'||e.key==='k'||e.key==='l');
+          if (isHJKLKey || (e.key==='Process' && isHJKLCode)){
+            e.preventDefault();
+            _debugPush({ t:Date.now(), type:'ignored-motion', mode:_mode, key:e.key, code:e.code, reason:'strict-ime', isComp:_imeComposing });
+            return;
+          }
+        }
+        // Accept Process-coded j/k when composing (non-strict): map by code
+        if (e.key==='j' || (e.key==='Process' && e.code==='KeyJ')){ e.preventDefault(); try{ _debugPush({ t:Date.now(), type:'motion-exec', mode:_mode, key:'j', code:e.code, via:(e.key==='Process'?'Process/KeyJ':'j') }); }catch{} const n=_consumeCount(); moveAndUpdate(()=>_moveCaretLines(n)); return; }
+        if (e.key==='k' || (e.key==='Process' && e.code==='KeyK')){ e.preventDefault(); try{ _debugPush({ t:Date.now(), type:'motion-exec', mode:_mode, key:'k', code:e.code, via:(e.key==='Process'?'Process/KeyK':'k') }); }catch{} const n=_consumeCount(); moveAndUpdate(()=>_moveCaretLines(-n)); return; }
+  // Guard against anomalous IME mapping (#523): accept 'h' when code is KeyH or Process/KeyH; always accept ArrowLeft
+  if ((e.key==='h' && e.code==='KeyH' && (!_optStrictNormalIME || !_imeComposing)) || (e.key==='Process' && e.code==='KeyH' && (!_optStrictNormalIME || !_imeComposing)) || e.key==='ArrowLeft'){
+    e.preventDefault(); try{ _debugPush({ t:Date.now(), type:'motion-exec', mode:_mode, key:e.key, code:e.code, via:(e.key==='ArrowLeft'?'ArrowLeft':(e.code==='KeyH'?(e.key==='Process'?'Process/KeyH':'KeyH'):'unknown')) }); }catch{} const n=_consumeCount(); moveAndUpdate(()=>_moveCaretCols(-n)); return; }
+  // Likewise for 'l': accept when code is KeyL or Process/KeyL; always accept ArrowRight
+  if ((e.key==='l' && e.code==='KeyL' && (!_optStrictNormalIME || !_imeComposing)) || (e.key==='Process' && e.code==='KeyL' && (!_optStrictNormalIME || !_imeComposing)) || e.key==='ArrowRight'){
+    e.preventDefault(); try{ _debugPush({ t:Date.now(), type:'motion-exec', mode:_mode, key:e.key, code:e.code, via:(e.key==='ArrowRight'?'ArrowRight':(e.code==='KeyL'?(e.key==='Process'?'Process/KeyL':'KeyL'):'unknown')) }); }catch{} const n=_consumeCount(); moveAndUpdate(()=>_moveCaretCols(n)); return; }
         if (e.key==='w' && !e.ctrlKey && !e.metaKey && !e.altKey){ e.preventDefault(); const n=_consumeCount(); moveAndUpdate(()=>_moveWordW(n)); return; }
         if (e.key==='b' && !e.ctrlKey && !e.metaKey && !e.altKey){ e.preventDefault(); const n=_consumeCount(); moveAndUpdate(()=>_moveWordB(n)); return; }
   if (e.key==='W' && !e.ctrlKey && !e.metaKey && !e.altKey){ e.preventDefault(); const n=_consumeCount(); moveAndUpdate(()=>_moveWORDW(n)); return; }
@@ -7047,10 +7262,18 @@
         }
         return;
       }
-  if (e.key==='j' || e.key==='ArrowDown'){ e.preventDefault(); const n=_consumeCount(); _moveCaretLines(n); try{ _flagCaretMotion(); }catch{} _repositionCaret(); updateGutter(); return; }
-  if (e.key==='k' || e.key==='ArrowUp'){ e.preventDefault(); const n=_consumeCount(); _moveCaretLines(-n); try{ _flagCaretMotion(); }catch{} _repositionCaret(); updateGutter(); return; }
-  if (e.key==='h' || e.key==='ArrowLeft'){ e.preventDefault(); const n=_consumeCount(); _moveCaretCols(-n); try{ _flagCaretMotion(); }catch{} _repositionCaret(); return; }
-  if (e.key==='l' || e.key==='ArrowRight'){ e.preventDefault(); const n=_consumeCount(); _moveCaretCols(n); try{ _flagCaretMotion(); }catch{} _repositionCaret(); return; }
+  if (e.key==='j' || e.key==='ArrowDown'){ e.preventDefault(); try{ _debugPush({ t:Date.now(), type:'motion-exec', mode:_mode, key:e.key, code:e.code, via:(e.key==='j'?'j':'ArrowDown') }); }catch{} const n=_consumeCount(); _moveCaretLines(n); try{ _flagCaretMotion(); }catch{} _repositionCaret(); updateGutter(); return; }
+  if (e.key==='k' || e.key==='ArrowUp'){ e.preventDefault(); try{ _debugPush({ t:Date.now(), type:'motion-exec', mode:_mode, key:e.key, code:e.code, via:(e.key==='k'?'k':'ArrowUp') }); }catch{} const n=_consumeCount(); _moveCaretLines(-n); try{ _flagCaretMotion(); }catch{} _repositionCaret(); updateGutter(); return; }
+  // Strict IME mode: while composing in NORMAL, ignore letter motions j/k/h/l (arrows still work)
+  if (_optStrictNormalIME && _imeComposing){
+    if (e.key==='j' || e.key==='k' || e.key==='h' || e.key==='l'){
+      _debugPush({ t:Date.now(), type:'ignored-motion', mode:_mode, key:e.key, code:e.code, reason:'strict-ime', isComp:_imeComposing });
+      return;
+    }
+  }
+  // Guard anomalous IME mapping (#523): require KeyH/KeyL for h/l, allow arrow keys as usual
+  if ((e.key==='h' && e.code==='KeyH' && (!_optStrictNormalIME || !_imeComposing)) || e.key==='ArrowLeft'){ e.preventDefault(); try{ _debugPush({ t:Date.now(), type:'motion-exec', mode:_mode, key:e.key, code:e.code, via:(e.code==='KeyH'?'KeyH':'ArrowLeft') }); }catch{} const n=_consumeCount(); _moveCaretCols(-n); try{ _flagCaretMotion(); }catch{} _repositionCaret(); return; }
+  if ((e.key==='l' && e.code==='KeyL' && (!_optStrictNormalIME || !_imeComposing)) || e.key==='ArrowRight'){ e.preventDefault(); try{ _debugPush({ t:Date.now(), type:'motion-exec', mode:_mode, key:e.key, code:e.code, via:(e.code==='KeyL'?'KeyL':'ArrowRight') }); }catch{} const n=_consumeCount(); _moveCaretCols(n); try{ _flagCaretMotion(); }catch{} _repositionCaret(); return; }
   // delete: x (delete char(s) under cursor / join newline)
   if (e.key==='x' && !e.ctrlKey && !e.metaKey && !e.altKey){ e.preventDefault(); const n=_consumeCount(); _doDeleteX(n); ensureScrolloff(); _repositionCaret(); updateGutter(); return; }
   // delete operator: d + motion
