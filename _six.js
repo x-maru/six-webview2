@@ -24,33 +24,37 @@
       tabScrollRightBtn.classList.toggle('disabled', !canR);
     }catch{}
   }
-  // legacy: _displayLineVisualWidth no longer used (replaced by half-width metric in _updatePosInfo)
+  // Position info: visual column using tab stops & full-width=2 (#508). TAB advances to next tab stop.
   function _updatePosInfo(){
     try{
       if (!posinfoEl) return;
       const lines = _splitLines();
       const r = Math.max(0, Math.min(lines.length-1, caretRow|0));
       const line = lines[r]||'';
-      // 半角換算列幅: TAB=1, 半角=1, 全角=2 (#505)
+      // tabstop (fallback 8 if invalid)
+      let ts = 8; try{ if (window.SIX_OPTIONS && Number(window.SIX_OPTIONS.tabstop)>=1) ts = Math.min(64, Math.max(1, Number(window.SIX_OPTIONS.tabstop)|0)); }catch{}
       const _isFull = (ch)=>/[\u1100-\u115F\u2E80-\uA4CF\uAC00-\uD7A3\uF900-\uFAFF\uFE10-\uFE19\uFE30-\uFE6F\u3000-\u303F\uFF01-\uFF60\uFFE0-\uFFE6]/.test(ch||'');
-      const logicalWidthUpTo = (s, endCol)=>{
+      // visual width up to (exclusive) index endCol; TAB -> next tab stop, full-width -> +2, half -> +1
+      const visualWidthUpTo = (s, endCol)=>{
         try{
           let w=0; const n=Math.max(0, Math.min(s.length, endCol|0));
           for (let i=0;i<n;i++){
             const ch=s[i];
-            if (ch==='\t') w+=1; // TAB は常に 1
-            else if (_isFull(ch)) w+=2; else w+=1;
+            if (ch==='\t'){
+              const next = ((Math.floor(w/ts)+1)*ts); // next multiple of ts
+              w = next;
+            } else if (_isFull(ch)) w+=2; else w+=1;
           }
           return w;
         }catch{ return 0; }
       };
-      const lineWidth = logicalWidthUpTo(line, line.length); // 0-based幅（空行で0）
-      const caretLogical = logicalWidthUpTo(line, caretCol|0); // caret 直前までの幅
+      const lineWidth = visualWidthUpTo(line, line.length); // half-width units after expansion
+      const caretVisual = visualWidthUpTo(line, caretCol|0);
       const rowDisp = r + 1;
-      const colDisp = caretLogical + 1; // 1-based caret 列（行頭=1、全角通過後は+2）
-      const widthDisp = lineWidth;      // 1文字も無ければ0, 全角含め半角換算合計
+      const colDisp = caretVisual + 1; // caret is after preceding chars; 1-based
+      const widthDisp = lineWidth;     // may be 0 for empty line
       posinfoEl.textContent = `行 ${rowDisp}, 列 ${colDisp}/${widthDisp}`;
-      // THEME: posInfoText > tabText > yellow
+      // THEME color apply (posInfoText > tabText > yellow)
       try{
         let col = 'yellow';
         if (window && window.THEME){
@@ -317,6 +321,43 @@
   let _caretMoving = false;
   let _caretMovePulseTimer = 0; // clears moving state after idle
   const _caretMoveIdleMs = 140; // threshold after last motion to resume blink
+  // Desired visual column across vertical motions (j/k). Units: half-width columns with tabstop expansion.
+  let _desiredVisualCol = null; // null until first set
+  let _suppressDesiredOnce = false; // one-shot suppression flag for _setCaret
+  function _tabstopVal(){ try{ const v = Number(window && window.SIX_OPTIONS && window.SIX_OPTIONS.tabstop); if (!Number.isFinite(v) || v<1) return 8; return Math.min(64, Math.max(1, v|0)); }catch{ return 8; } }
+  const _FULLW_RE = /[\u1100-\u115F\u2E80-\uA4CF\uAC00-\uD7A3\uF900-\uFAFF\uFE10-\uFE19\uFE30-\uFE6F\u3000-\u303F\uFF01-\uFF60\uFFE0-\uFFE6]/;
+  function _isFullW(ch){ try{ return _FULLW_RE.test(ch||''); }catch{ return false; } }
+  function _visualWidthUpToLine(line, endCol){
+    try{
+      let w=0; const ts=_tabstopVal(); const n=Math.max(0, Math.min((line||'').length, endCol|0));
+      for (let i=0;i<n;i++){
+        const ch=line[i];
+        if (ch==='\t'){
+          const next = ((Math.floor(w/ts)+1)*ts);
+          w = next;
+        } else if (_isFullW(ch)) w+=2; else w+=1;
+      }
+      return w;
+    }catch{ return 0; }
+  }
+  function _colForVisual(line, desired){
+    try{
+      const s=String(line||''); const ts=_tabstopVal(); let w=0;
+      const target = Math.max(0, desired|0);
+      const len=s.length;
+      for (let i=0;i<=len;i++){
+        if (w>=target) return i; // caret before char i
+        if (i>=len) return len;
+        const ch=s[i];
+        if (ch==='\t'){
+          const next=((Math.floor(w/ts)+1)*ts); w=next;
+        } else if (_isFullW(ch)) w+=2; else w+=1;
+      }
+      return len;
+    }catch{ return 0; }
+  }
+  function _currentVisualCol(){ try{ const line=(_splitLines()[caretRow]||''); return _visualWidthUpToLine(line, caretCol|0); }catch{ return 0; } }
+  function _ensureDesired(){ if (_desiredVisualCol==null) _desiredVisualCol = _currentVisualCol(); }
   // global mouse cursor visibility state
   let _cursorHidden = false;
   // scrolloff pause control: temporarily suppress ensureScrolloff after search confirm
@@ -3017,7 +3058,15 @@
     let rr=r, cc=c;
     const last=lines.length-1;
     const moveCols=(delta)=>{ const line=lines[rr]||''; const len=line.length; cc=Math.max(0, Math.min(len, cc+delta)); };
-    const moveLines=(delta)=>{ rr=Math.max(0, Math.min(last, rr+delta)); const len=(lines[rr]||'').length; cc=Math.max(0, Math.min(len, cc)); };
+    const moveLines=(delta)=>{
+      // Preserve desired visual column for vertical motion
+      const line0 = lines[rr]||'';
+      const curVis = _visualWidthUpToLine(line0, cc|0);
+      const desired = (_desiredVisualCol==null? curVis : _desiredVisualCol|0);
+      rr=Math.max(0, Math.min(last, rr+delta));
+      const line1 = lines[rr]||'';
+      cc = _colForVisual(line1, desired);
+    };
     switch(key){
       case 'h': moveCols(-times); break;
       case 'l': moveCols(+times); break;
@@ -3464,20 +3513,33 @@
    *********************************************************/
   function _moveCaretLines(delta){
     const lines = _splitLines();
-    caretRow = Math.max(0, Math.min(lines.length-1, caretRow + delta));
-    const line = lines[caretRow] || '';
-    caretCol = Math.max(0, Math.min(line.length, caretCol));
+    const newRow = Math.max(0, Math.min(lines.length-1, caretRow + delta));
+    _ensureDesired();
+    const line = lines[newRow] || '';
+    const newCol = _colForVisual(line, _desiredVisualCol|0);
+    // commit without updating desired (keep it across j/k)
+    caretRow = newRow;
+    _suppressDesiredOnce = true;
+    _setCaret(newRow, newCol, { suppressDesired: true });
     // Prefer no scroll on first motion after switch if caret is visible; otherwise force ensure
     _ensureAfterMotion();
   }
   function _moveCaretCols(delta){
     const line = (_splitLines()[caretRow] || '');
-    caretCol = Math.max(0, Math.min(line.length, caretCol + delta));
+    const nc = Math.max(0, Math.min(line.length, caretCol + delta));
+    _setCaret(caretRow, nc);
   }
   // ---- Motion helpers ----
   function _lineLen(r){ const lines=_splitLines(); return (r>=0 && r<lines.length) ? (lines[r]||'').length : 0; }
   function _firstNonBlankColOf(line){ const m = String(line||'').match(/^\s*/); return m ? (m[0]||'').length : 0; }
-  function _setCaret(r,c){ const lines=_splitLines(); r=Math.max(0, Math.min(lines.length-1, r|0)); const len=(lines[r]||'').length; caretRow=r; caretCol=Math.max(0, Math.min(len, c|0)); }
+  function _setCaret(r,c,opt){
+    const lines=_splitLines(); r=Math.max(0, Math.min(lines.length-1, r|0)); const len=(lines[r]||'').length; caretRow=r; caretCol=Math.max(0, Math.min(len, c|0));
+    try{
+      const suppress = !!(opt && (opt===true || opt.suppressDesired));
+      if (_suppressDesiredOnce){ _suppressDesiredOnce = false; return; }
+      if (!suppress){ _desiredVisualCol = _visualWidthUpToLine((lines[caretRow]||''), caretCol|0); }
+    }catch{}
+  }
   function _consumeCount(){ const n=(_countAcc==null?1:_countAcc); _countAcc=null; return Math.max(1,n); }
   // --- Word movement helpers (HTA parity, surrogate-aware) ---
   // code point at index (or -1 if invalid/middle of surrogate)
@@ -6114,7 +6176,7 @@
   if (e.key==='B' && !e.ctrlKey && !e.metaKey && !e.altKey){ e.preventDefault(); const n=_consumeCount(); moveAndUpdate(()=>_moveWORDB(n)); return; }
     if (e.key==='^'){ e.preventDefault(); const _n=_consumeCount(); const line=(_splitLines()[caretRow]||''); _setCaret(caretRow, _firstNonBlankColOf(line)); try{ _flagCaretMotion(); }catch{} _repositionCaret(); _updateVisualSelection(); return; }
     if (e.key==='0' && _countAcc==null){ e.preventDefault(); _setCaret(caretRow, 0); try{ _flagCaretMotion(); }catch{} _repositionCaret(); _updateVisualSelection(); return; }
-    if (e.key==='$'){ e.preventDefault(); const n=_consumeCount(); let r=caretRow; if (n>1){ _moveCaretLines(n-1); r=caretRow; } const len=_lineLen(r); _setCaret(r, len); try{ _flagCaretMotion(); }catch{} _repositionCaret(); updateGutter(); _updateVisualSelection(); return; }
+  if (e.key==='$'){ e.preventDefault(); const n=_consumeCount(); let r=caretRow; if (n>1){ _moveCaretLines(n-1); r=caretRow; } const len=_lineLen(r); const noMove=(r===caretRow && len===caretCol); _setCaret(r, len, noMove?{suppressDesired:true}:undefined); try{ _flagCaretMotion(); }catch{} _repositionCaret(); updateGutter(); _updateVisualSelection(); return; }
         if (e.key==='}'){ e.preventDefault(); const n=_consumeCount(); moveAndUpdate(()=>_moveParagraphNext(n)); return; }
         if (e.key==='{'){ e.preventDefault(); const n=_consumeCount(); moveAndUpdate(()=>_moveParagraphPrev(n)); return; }
         // gg / G motions in VISUAL (extend selection)
@@ -6810,7 +6872,7 @@
   if (e.key==='^'){ e.preventDefault(); const _n=_consumeCount(); const line=(_splitLines()[caretRow]||''); _setCaret(caretRow, _firstNonBlankColOf(line)); try{ _flagCaretMotion(); }catch{} _repositionCaret(); return; }
       // '0' as a command only when no count prefix in progress
   if (e.key==='0' && _countAcc==null){ e.preventDefault(); _setCaret(caretRow, 0); try{ _flagCaretMotion(); }catch{} _repositionCaret(); return; }
-  if (e.key==='$'){ e.preventDefault(); const n=_consumeCount(); let r=caretRow; if (n>1){ _moveCaretLines(n-1); r=caretRow; } const len=_lineLen(r); _setCaret(r, len); try{ _flagCaretMotion(); }catch{} _repositionCaret(); updateGutter(); return; }
+  if (e.key==='$'){ e.preventDefault(); const n=_consumeCount(); let r=caretRow; if (n>1){ _moveCaretLines(n-1); r=caretRow; } const len=_lineLen(r); const noMove=(r===caretRow && len===caretCol); _setCaret(r, len, noMove?{suppressDesired:true}:undefined); try{ _flagCaretMotion(); }catch{} _repositionCaret(); updateGutter(); return; }
       // paragraphs { }
   if (e.key==='}'){ e.preventDefault(); const n=_consumeCount(); _moveParagraphNext(n); try{ _flagCaretMotion(); }catch{} _ensureAfterMotion(); _repositionCaret(); updateGutter(); return; }
   if (e.key==='{'){ e.preventDefault(); const n=_consumeCount(); _moveParagraphPrev(n); try{ _flagCaretMotion(); }catch{} _ensureAfterMotion(); _repositionCaret(); updateGutter(); return; }
