@@ -211,6 +211,7 @@ using System.Threading.Tasks;
 using System.Windows.Forms;
 using System.IO;
 using System.Drawing;
+using System.Text.RegularExpressions;
 using Microsoft.Web.WebView2.Core;
 using Microsoft.Web.WebView2.WinForms;
 
@@ -221,6 +222,23 @@ public static class SixHostApp
   private static TaskCompletionSource<bool> _tcs;
   [System.Runtime.InteropServices.DllImport("user32.dll", SetLastError=true)]
   private static extern bool DestroyIcon(IntPtr hIcon);
+
+  private static bool TryGetBool(string json, string key, out bool value){
+    value = false; if (string.IsNullOrEmpty(json) || string.IsNullOrEmpty(key)) return false;
+    try{
+      var m = Regex.Match(json, "\""+Regex.Escape(key)+"\"\\s*:\\s*(true|false)", RegexOptions.IgnoreCase);
+      if (m.Success){ value = string.Equals(m.Groups[1].Value, "true", StringComparison.OrdinalIgnoreCase); return true; }
+    }catch{}
+    return false;
+  }
+  private static bool TryGetInt(string json, string key, out int value){
+    value = 0; if (string.IsNullOrEmpty(json) || string.IsNullOrEmpty(key)) return false;
+    try{
+      var m = Regex.Match(json, "\""+Regex.Escape(key)+"\"\\s*:\\s*(-?\\d+)", RegexOptions.IgnoreCase);
+      if (m.Success){ int v; if (int.TryParse(m.Groups[1].Value, out v)){ value = v; return true; } }
+    }catch{}
+    return false;
+  }
 
   public static void Run(string url)
   {
@@ -260,6 +278,32 @@ public static class SixHostApp
           if (txt.Contains("\"type\"\s*:\s*\"close-result\"")){
             bool ok = txt.Contains("\"ok\"\s*:\s*true");
             _tcs?.TrySetResult(ok);
+            return;
+          }
+          // handle {"type":"six-window-restore", ...}
+          if (txt.Contains("\"type\":\"six-window-restore\"")){
+            bool requestMax = false; TryGetBool(txt, "requestMaximize", out requestMax);
+            int nW=0,nH=0,sX=0,sY=0,nX=0,nY=0;
+            bool hasNW = TryGetInt(txt, "normalOuterW", out nW);
+            bool hasNH = TryGetInt(txt, "normalOuterH", out nH);
+            bool hasSX = TryGetInt(txt, "screenX", out sX);
+            bool hasSY = TryGetInt(txt, "screenY", out sY);
+            bool hasNX = TryGetInt(txt, "normalX", out nX);
+            bool hasNY = TryGetInt(txt, "normalY", out nY);
+            form.BeginInvoke(new Action(()=>{
+              try{
+                if (requestMax){
+                  // 任意: 最大化前に通常サイズを適用してから最大化（ちらつき低減のため近いサイズに）
+                  if (hasNW && hasNH){ try{ form.WindowState = FormWindowState.Normal; form.StartPosition = FormStartPosition.Manual; if (hasNX && hasNY) form.Location = new System.Drawing.Point(nX, nY); else if (hasSX && hasSY) form.Location = new System.Drawing.Point(sX, sY); form.Size = new System.Drawing.Size(Math.Max(200, nW), Math.Max(150, nH)); }catch{} }
+                  try{ form.WindowState = FormWindowState.Maximized; }catch{}
+                } else {
+                  if (hasNW && hasNH){
+                    try{ form.WindowState = FormWindowState.Normal; form.StartPosition = FormStartPosition.Manual; if (hasNX && hasNY) form.Location = new System.Drawing.Point(nX, nY); else if (hasSX && hasSY) form.Location = new System.Drawing.Point(sX, sY); form.Size = new System.Drawing.Size(Math.Max(200, nW), Math.Max(150, nH)); }catch{}
+                  }
+                }
+              }catch{}
+            }));
+            return;
           }
         }catch{}
       };

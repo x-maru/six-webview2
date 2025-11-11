@@ -76,7 +76,8 @@
   try{ tabScrollLeftBtn && tabScrollLeftBtn.addEventListener('click', ()=>{ if (!tabScrollLeftBtn.classList.contains('disabled')) _scrollTabsBy(-1); }); }catch{}
   try{ tabScrollRightBtn && tabScrollRightBtn.addEventListener('click', ()=>{ if (!tabScrollRightBtn.classList.contains('disabled')) _scrollTabsBy(+1); }); }catch{}
   try{ tabbarTabs && tabbarTabs.addEventListener('scroll', _updateTabScrollButtons); }catch{}
-  try{ window.addEventListener('resize', ()=>{ _updateTabScrollButtons(); }); }catch{}
+  // Update tab scroll buttons and track normal window bounds on resize
+  try{ window.addEventListener('resize', ()=>{ try{ _updateTabScrollButtons(); }catch{} try{ _updateNormalBoundsFromWindow(); }catch{} }); }catch{}
   const encBtn    = document.getElementById('encBtn');
   const cmdinput   = document.getElementById('cmdinput');
   const modestatus = document.getElementById('modestatus');
@@ -106,6 +107,83 @@
   // session persistence
   const _SESSION_KEY = 'six.session.v1';
   let _persistTimer = null;
+  // Update normal (restored) bounds cache on demand
+  function _updateNormalBoundsFromWindow(){
+    try{
+      const w = window;
+      const iw = (w.innerWidth||0)|0, ih=(w.innerHeight||0)|0;
+      const ow = (w.outerWidth||iw)|0, oh=(w.outerHeight||ih)|0;
+      const sx = (w.screenX||0)|0, sy = (w.screenY||0)|0;
+      let isMax = false; let snap = null;
+      try{
+        const availW = (screen && screen.availWidth) ? (screen.availWidth|0) : 0;
+        const availH = (screen && screen.availHeight) ? (screen.availHeight|0) : 0;
+        const tol = 6;
+        if (availW>0 && availH>0){ if (Math.abs(availW-ow)<=tol && Math.abs(availH-oh)<=tol) isMax = true; }
+        const edgeTol = 10; if (!isMax && availW>0){ if (sx<=edgeTol) snap='left'; else if (Math.abs((sx+ow)-availW)<=edgeTol) snap='right'; }
+      }catch{}
+      if (!isMax && !snap){
+        if (!window.__sixNormalBounds) window.__sixNormalBounds = { innerW: iw, innerH: ih, outerW: ow, outerH: oh, x: sx, y: sy };
+        window.__sixNormalBounds.innerW = iw; window.__sixNormalBounds.innerH = ih;
+        window.__sixNormalBounds.outerW = ow; window.__sixNormalBounds.outerH = oh;
+        window.__sixNormalBounds.x = sx; window.__sixNormalBounds.y = sy;
+      }
+    }catch{}
+  }
+  function _captureWindowStateForSession(){
+    try{
+      const w = window;
+      const iw = (w.innerWidth||0)|0, ih=(w.innerHeight||0)|0;
+      const ow = (w.outerWidth||iw)|0, oh=(w.outerHeight||ih)|0;
+      const sx = (w.screenX||0)|0, sy=(w.screenY||0)|0;
+      let isMax = false; let snap = null; let availW=0, availH=0;
+      try{
+        availW = (screen && screen.availWidth) ? (screen.availWidth|0) : 0;
+        availH = (screen && screen.availHeight) ? (screen.availHeight|0) : 0;
+        const tol = 6;
+        if (availW>0 && availH>0){ if (Math.abs(availW-ow)<=tol && Math.abs(availH-oh)<=tol) isMax = true; }
+        const edgeTol = 10; if (!isMax && availW>0){ if (sx<=edgeTol) snap='left'; else if (Math.abs((sx+ow)-availW)<=edgeTol) snap='right'; }
+      }catch{}
+      if (!window.__sixNormalBounds) window.__sixNormalBounds = { innerW: iw, innerH: ih, outerW: ow, outerH: oh };
+      try{ if (!isMax && !snap){ window.__sixNormalBounds.innerW = iw; window.__sixNormalBounds.innerH = ih; window.__sixNormalBounds.outerW = ow; window.__sixNormalBounds.outerH = oh; window.__sixNormalBounds.x = sx; window.__sixNormalBounds.y = sy; } }catch{}
+      const ws = {
+        innerW: iw, innerH: ih,
+        outerW: ow, outerH: oh,
+        screenX: sx, screenY: sy,
+        isMaximized: !!isMax,
+        snapEdge: snap,
+        normalInnerW: window.__sixNormalBounds ? window.__sixNormalBounds.innerW : null,
+        normalInnerH: window.__sixNormalBounds ? window.__sixNormalBounds.innerH : null,
+        normalOuterW: window.__sixNormalBounds ? window.__sixNormalBounds.outerW : null,
+        normalOuterH: window.__sixNormalBounds ? window.__sixNormalBounds.outerH : null,
+        normalX: window.__sixNormalBounds ? window.__sixNormalBounds.x : null,
+        normalY: window.__sixNormalBounds ? window.__sixNormalBounds.y : null,
+        emulateMaxOuterW: isMax ? (availW||null) : null,
+        emulateMaxOuterH: isMax ? (availH||null) : null
+      };
+      return ws;
+    }catch{ return null; }
+  }
+  function _restoreWindowFromSession(ws){
+    try{
+      if (!ws || typeof ws!=='object') return;
+      // WebView2 host restore via postMessage
+      try{
+        if (window && window.chrome && window.chrome.webview && typeof window.chrome.webview.postMessage==='function'){
+          window.chrome.webview.postMessage({ type:'six-window-restore', state: ws, requestMaximize: !!ws.isMaximized });
+          return;
+        }
+      }catch{}
+      // Browser fallback (best-effort): 最大化は行わず、通常サイズへ復帰（位置は normalX/Y を優先）
+      if (Number.isFinite(ws.normalOuterW) && Number.isFinite(ws.normalOuterH)){
+        try{ window.resizeTo(Math.max(200, ws.normalOuterW|0), Math.max(150, ws.normalOuterH|0)); }catch{}
+        try{
+          if (Number.isFinite(ws.normalX) && Number.isFinite(ws.normalY)) window.moveTo(ws.normalX|0, ws.normalY|0);
+          else if (Number.isFinite(ws.screenX) && Number.isFinite(ws.screenY)) window.moveTo(ws.screenX|0, ws.screenY|0);
+        }catch{}
+      }
+    }catch{}
+  }
   function _syncActiveViewStateIntoBuffer(){
     try{
       const b = currentBuffer();
@@ -121,6 +199,8 @@
   const lite = !!opts.lite;
       try{
         _syncActiveViewStateIntoBuffer();
+      // Capture window state (best-effort) for session restore (#513)
+      let winState = null; try{ winState = _captureWindowStateForSession(); }catch{}
       const bufs = buffers.map((b)=>{
         const isFileBacked = !!(b && b.path && /^file:\/\//i.test(b.path));
         const omitText = !!(lite && isFileBacked && !b.modified);
@@ -169,7 +249,8 @@
         when: Date.now(),
         active: Math.max(0, Math.min((buffers.length?buffers.length-1:0), currentIdx|0)),
         buffers: bufs,
-        scrolloff: Number.isFinite(scrolloff) ? (scrolloff|0) : 3
+        scrolloff: Number.isFinite(scrolloff) ? (scrolloff|0) : 3,
+        windowState: winState
       };
       return payload;
     }catch{ return { version:1, when:Date.now(), active:0, buffers:[] }; }
@@ -210,6 +291,8 @@
       if (!s) return false;
         const j = JSON.parse(s); 
         if (!j || !Array.isArray(j.buffers)) return false; 
+      // Attempt window restore (best-effort). Requires host support in WebView2.
+      try{ _restoreWindowFromSession(j.windowState); }catch{}
       // Restore scrolloff if present; otherwise fall back to default 3 (#473)
       try{
         if (Number.isFinite(j.scrolloff)){
@@ -1212,6 +1295,10 @@
 
   function _setTitle(){
     try{
+      // Note: The native window title bar (document.title) is rendered by the host (WebView2/OS),
+      // and its font size/margins cannot be controlled from page CSS/JS.
+      // To visually enlarge or add margins, we'd need to draw a custom in-app title area
+      // (separate from the OS title bar) or modify the host application window chrome.
       const b = currentBuffer();
       const mod = (b && b.modified) ? ' *' : '';
       // タイトルバーにはアクティブタブのフルパスを表示（Fキー等の前置なし）
@@ -1226,7 +1313,8 @@
         if (!title){ title = b.name || 'untitled'; }
         document.title = title + mod;
       } else {
-        document.title = 'six-webview2';
+        const title = 'six-webview2';
+        document.title = title;
       }
     }catch{}
   }
@@ -6115,12 +6203,12 @@
           if (cmdinput){
             // Prefill with visual range
             cmdinput.value = ":'<,'>";
-            // フォーカスを cmdinput に移した後でも、ネイティブ選択を再適用して
-            // 選択ハイライトが残るようにする（環境によっては blur で消える対策）
+            // フォーカス確定は rAF + setTimeout の二段階で強化（NORMAL の ':' と同等の堅牢性）
+            // さらに、フォーカス後に縦横スクロール・オーバーレイを復元
             const stHold = (function(){ try{ return editor.scrollTop|0; }catch{ return 0; } })();
             Promise.resolve().then(()=>{
-              try{ cmdinput.focus(); const pos=(cmdinput.value||'').length; cmdinput.setSelectionRange(pos,pos); }catch{}
-              // フォーカス後に縦横位置を復元しつつ、選択オーバーレイを維持
+              try{ if (_mode==='CMD'){ cmdinput.focus(); const pos=(cmdinput.value||'').length; cmdinput.setSelectionRange(pos,pos); } }catch{}
+              // 1st frame: フォーカス後にスクロール/オーバーレイ復元
               try{
                 const flo=Math.floor(stHold/LINE_HEIGHT)*LINE_HEIGHT;
                 if (Math.abs((editor.scrollTop||0) - flo) > 0.1){ editor.scrollTop = flo; }
@@ -6129,6 +6217,35 @@
               }catch{}
               try{ _updateVisualSelection(); }catch{}
               try{ _renderVisSelOverlay(); }catch{}
+              if (window.requestAnimationFrame){
+                requestAnimationFrame(()=>{
+                  try{
+                    if (_mode==='CMD' && document.activeElement !== cmdinput){ cmdinput.focus(); const p=(cmdinput.value||'').length; cmdinput.setSelectionRange(p,p); }
+                    // rAF フレームでもう一度スクロール/オーバーレイを補正
+                    if (_mode==='CMD' && editor){
+                      const flo=Math.floor(stHold/LINE_HEIGHT)*LINE_HEIGHT;
+                      if (Math.abs((editor.scrollTop||0) - flo) > 0.1){ editor.scrollTop = flo; }
+                      _repositionCaret(); updateGutter();
+                      if ((editor.scrollLeft|0) !== _holdLeftVis){ editor.scrollLeft = _holdLeftVis; }
+                    }
+                  }catch{}
+                  try{ _updateVisualSelection(); }catch{}
+                  try{ _renderVisSelOverlay(); }catch{}
+                });
+              }
+              setTimeout(()=>{
+                try{
+                  if (_mode==='CMD' && document.activeElement !== cmdinput){ cmdinput.focus(); const p=(cmdinput.value||'').length; cmdinput.setSelectionRange(p,p); }
+                  if (_mode==='CMD' && editor){
+                    const flo=Math.floor(stHold/LINE_HEIGHT)*LINE_HEIGHT;
+                    if (Math.abs((editor.scrollTop||0) - flo) > 0.1){ editor.scrollTop = flo; }
+                    _repositionCaret(); updateGutter();
+                    if ((editor.scrollLeft|0) !== _holdLeftVis){ editor.scrollLeft = _holdLeftVis; }
+                  }
+                }catch{}
+                try{ _updateVisualSelection(); }catch{}
+                try{ _renderVisSelOverlay(); }catch{}
+              }, 60);
             });
           }
           return;
@@ -6435,9 +6552,27 @@
           const totalCount = Math.max(1, (_pendingOpCount||1) * mcount);
           const target = _computeMotionTarget(caretRow, caretCol, e.key, totalCount);
           if (target){
+          // Restore zoom
             const start = { r: caretRow, c: caretCol };
             const end   = target;
             const text  = _extractRangeText(start, end);
+          // Attempt window restore (best-effort; requires host bridging in WebView2)
+          try{
+            if (obj.windowState && typeof obj.windowState==='object'){
+              const ws = obj.windowState;
+              // Provide data to host via postMessage if WebView2; host decides actual resize.
+              if (_isWebView2){
+                try{ window.chrome.webview.postMessage({ type:'six-window-restore', state: ws }); }catch{}
+              } else {
+                // Browser fallback: limited move/resize (may be blocked by settings)
+                if (!ws.isMaximized && ws.normalW && ws.normalH){
+                  try{ window.resizeTo(Math.max(200, ws.normalW), Math.max(150, ws.normalH)); }catch{}
+                  try{ window.moveTo(ws.screenX||0, ws.screenY||0); }catch{}
+                }
+                // Maximize cannot be programmatically forced reliably; user will need manual.
+              }
+            }
+          }catch{}
             (async ()=>{ const ok = await _copyToClipboard(text); toast(ok? 'Copied to Windows clipboard.':'Clipboard write failed.', ok? 1000:1500); })();
             _clearPendingOp(); _repositionCaret(); updateGutter();
             return;
