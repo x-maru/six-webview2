@@ -15,10 +15,15 @@ window.SIX_OPTIONS = {
   hlsearch: false // 検索ハイライト（:set hlsearch / :set nohlsearch / :set hlsearch!）
 };
 
-// Theme definition (moved from _six-theme.js)
+// Theme definition (色指定。基本的に全項目必須で、未定義時に代替は一切せず一律yellowとする)
 window.THEME = {
   bodyBGColor: "#0b0d12",
   lineBaseFill: "#0f1117",
+
+  // [NORMAL]/[INSERT]/[VISUAL] text color
+  modeNormalFGColor: "#e0e0e0",
+  modeInsertFGColor: "#ffe0e0",
+  modeVisualFGColor: "#e0e0ff",
 
   // Editor text color and sizes
   editorTextColor: "rgb(0,95,31)",
@@ -86,7 +91,7 @@ window.THEME = {
 
   // Global <kbd> colors used in tabbar and :b popup (fallbacks to helpKbd*)
   KbdBgColor: "#1c282a",
-  KbdFgColor: "#90aada",
+  KbdFgColor: "#aadada",
 
   // 制御文字
   controlCharColor: "#80d0d0",
@@ -99,8 +104,8 @@ window.THEME = {
   helpTabBg: "#1e241a",
   helpTabFg: "#a0aaa0",
   helpModalBg: "#041a10",
-  helpKbdBg: "#1c282a",
-  helpKbdFg: "#90aada",
+  helpKbdBg: "#222a2c",
+  helpKbdFg: "#aabada",
   // Help close button (themeable)
   helpCloseBg: "#3a3a56",
   helpCloseFg: "#e6e6e6",

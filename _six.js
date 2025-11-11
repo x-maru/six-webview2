@@ -4924,7 +4924,22 @@
 
   function _setMode(m){
     _mode = m;
-    if (modestatus) modestatus.textContent = '['+_mode+']';
+    if (modestatus){
+      // CMDモードでは表示を変更しない（[CMD]を出さない）
+      if (m === 'NORMAL' || m === 'INSERT' || m === 'VISUAL'){
+        modestatus.textContent = '['+_mode+']';
+        // モード色: 未設定なら即 yellow 固定フォールバック (#521 指示)
+        try{
+          const T = (window && window.THEME) ? window.THEME : {};
+          let col = null;
+          if (m === 'INSERT') col = T.modeInsertFGColor;
+          else if (m === 'VISUAL') col = T.modeVisualFGColor;
+          else col = T.modeNormalFGColor; // NORMAL
+          if (!col) col = 'yellow';
+          modestatus.style.color = col;
+        }catch{ try{ modestatus.style.color = 'yellow'; }catch{} }
+      }
+    }
     // Persist mode per buffer (exclude transient CMD). VISUAL/INSERT/NORMAL only.
     try{
       if (m === 'NORMAL' || m === 'INSERT' || m === 'VISUAL'){
@@ -5669,11 +5684,13 @@
           }catch{}
         };
         const onKey = (e)=>{
-          // Prevent leaking to editor
+          // Prevent leaking to editor and block browser defaults for function keys while help is open
           try{ e.stopPropagation(); }catch{}
           if (_isEsc(e)){ e.preventDefault(); cleanup(); return; }
           // hidden shortcuts: q/Q/F9 to close
           if (e.key==='q' || e.key==='Q' || e.key==='F9'){ e.preventDefault(); cleanup(); return; }
+          // Consume remaining function keys (e.g., F1〜F8, F10〜F12) so Edge/host側に渡さない
+          if (/^F\d{1,2}$/i.test(e.key)) { e.preventDefault(); return; }
           // Tab / Shift+Tab
           if (e.key==='Tab'){ e.preventDefault(); switchTab(e.shiftKey?-1:1); return; }
           // Ctrl+I / Ctrl+Shift+I as Tab / Shift+Tab equivalents
