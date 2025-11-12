@@ -35,10 +35,12 @@
   <textarea id="editor" spellcheck="false" autofocus></textarea>
         <div id="caretLayer"></div>
         <div id="edstripe" style="display:none"></div>
+        <!-- Floating command bar (dynamic position near caret; hidden by default) -->
+        <div id="cmdfloat" style="display:none"><span id="cmdprefix"></span><input id="cmdinput" type="text" spellcheck="false" /></div>
       </div>
     </div>
   </div>
-  <div id="cmdbar"><span id="cmdprefix"></span><input id="cmdinput" type="text" spellcheck="false" placeholder="command" /></div>
+  <!-- Legacy fixed bottom command bar removed in favor of floating cmdfloat (#532) -->
 
   <div id="bufpopup" style="display:none">
     <div class="inner"></div>
@@ -52,8 +54,7 @@
 
   <!-- palette toggle button (always visible; outside overlayPalette) -->
   <button id="paletteToggleBtn" type="button" title="オーバーレイパレット表示/非表示 (Ctrl+F9)" style="position:fixed; right:12px; bottom:6px; z-index:10001; display:block; font:11px/1.25 system-ui,-apple-system,'Segoe UI',sans-serif; padding:4px 8px; border:1px solid #2a3244; background:#1a2030; color:#e6e6e6; border-radius:6px; cursor:pointer; user-select:none; line-height:1.2;">
-    <span style="display:block; filter: grayscale(100%);">🎨</span>
-    <span style="display:block;">^F9</span>
+    <span style="display:inline-block; filter: grayscale(100%);">🎨</span><span style="display:inline-block; margin-left:6px;">^F9</span>
   </button>
 
   <!-- zoom HUD (over tabbar) -->

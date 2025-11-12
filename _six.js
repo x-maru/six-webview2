@@ -80,6 +80,7 @@
   try{ window.addEventListener('resize', ()=>{ try{ _updateTabScrollButtons(); }catch{} try{ _updateNormalBoundsFromWindow(); }catch{} }); }catch{}
   const encBtn    = document.getElementById('encBtn');
   const cmdinput   = document.getElementById('cmdinput');
+  const cmdfloat   = document.getElementById('cmdfloat');
   const modestatus = document.getElementById('modestatus');
 
 
@@ -2911,7 +2912,7 @@
         }
       }
     }catch{}
-    // keep hlsearch overlay in sync with caret/scroll
+  // keep hlsearch overlay in sync with caret/scroll
     _renderHlMatchesVisible();
     // Persist caret (and current viewport) to the active buffer so its view state
     // survives a tab switch even if no scroll event occurs yet (#358)
@@ -2925,6 +2926,8 @@
     }catch{}
     // Keep position indicator up-to-date for all caret moves
     try{ _updatePosInfo(); }catch{}
+    // Floating command bar reposition if visible
+    try{ if (cmdfloat && _mode==='CMD' && cmdfloat.style.display!=='none'){ _positionCmdFloat(); } }catch{}
   }
 
   // ---- Buffer/text helpers for editing ----
@@ -4437,8 +4440,8 @@
     }catch{}
     // :help — ヘルプモーダルを表示（[コマンド]タブをデフォルト選択）
     if (/^:help\b/i.test(cmd||'')){
-      // CMD 経由の場合は、閉じた後に CMD 突入前のモードへ復帰させる
-      const restoreMode = (_mode === 'CMD') ? _preCmdMode : _mode;
+      // CMD 中に呼ばれた場合は、閉じた後も CMD を維持（#533/#534）
+      const restoreMode = (_mode === 'CMD') ? 'CMD' : _mode;
       try{ await helpModal({ defaultTab: 'cmd', restoreMode }); }catch{}
       // helpModal 側で事前モードへ復帰するため、ここではモード切替しない
       try{ setTimeout(()=>{ try{ editor && editor.focus && editor.focus(); }catch{} }, 0); }catch{}
@@ -5147,6 +5150,7 @@
       // ensure native textarea caret matches overlay caret position
       try{ editor && editor.focus && editor.focus(); }catch{}
       _syncNativeSelectionToCaret();
+      try{ if (cmdfloat) cmdfloat.style.display='none'; }catch{}
   // Caret color remains baseline (IME visualization removed)
     } else {
       // NORMAL/VISUAL/CMD: IME on/off キーや未確定表示は許容するため、inputmode/imeMode の強制変更はしない。
@@ -5154,7 +5158,162 @@
       try{ if (editor){ editor.removeAttribute('inputmode'); editor.style.imeMode=''; editor.readOnly = false; } }catch{}
       // 以前の blur→focus による IME 強制終了は行わない（#522）。
     }
+    // Show/hide floating command bar for CMD mode
+    try{
+      if (m==='CMD'){ if (cmdfloat){ cmdfloat.style.display='flex'; _positionCmdFloat(); } }
+      else { if (cmdfloat){ cmdfloat.style.display='none'; } }
+    }catch{}
   }
+
+  // Compute editor viewport-aligned geometry and margins
+  function _computeOverlayBand(){
+    const rect = viewport ? viewport.getBoundingClientRect() : { left:0, right: (window.innerWidth||0), top:36, height: (window.innerHeight||0) - 36 };
+    const gw = (typeof gutter!=='undefined' && gutter && gutter.offsetWidth)|0;
+    const rootFS = (function(){ try{ return parseFloat(getComputedStyle(document.documentElement).fontSize)||16; }catch{ return 16; } })();
+    const basePad = Math.round(0.8 * rootFS);
+    const sbw = (function(){ try{ if (!editor) return 0; const w = (editor.offsetWidth|0) - (editor.clientWidth|0); return w>0?w:0; }catch{ return 0; } })();
+    const left = Math.round((rect.left|0) + gw + basePad);
+    const rightLimit = Math.round((rect.right|0) - (sbw + basePad));
+    const width = Math.max(80, rightLimit - left);
+    const viewH = (viewport ? (viewport.clientHeight|0) : Math.max(0, (window.innerHeight|0) - (rect.top|0)));
+    const topMargin = Math.round(2.5 * LINE_HEIGHT);
+    const bottomMargin = Math.round(2.5 * LINE_HEIGHT);
+    return { rect, left, rightLimit, width, viewH, topMargin, bottomMargin, sbw };
+  }
+
+  // Lay out buffer/file popup near top with margins and scrollbar-aware width/height
+  function _layoutBufPopup(){
+    try{
+      if (!bufpopup || bufpopup.style.display==='none') return;
+      const band = _computeOverlayBand();
+      const isFile = (_popupKind && _popupKind()==='file');
+      const isBuf  = (_popupKind && _popupKind()==='buf');
+      const leftPx = Math.max(8, band.left);
+      const widthPx = Math.max(120, band.width);
+      bufpopup.style.left = leftPx + 'px';
+      bufpopup.style.width = widthPx + 'px';
+      bufpopup.style.right = 'auto'; // use explicit width/left
+      // Gap units
+      const rootFS = (function(){ try{ return parseFloat(getComputedStyle(document.documentElement).fontSize)||16; }catch{ return 16; } })();
+      const gapRem = Math.round(1.5 * rootFS);
+      // Default top-aligned position (2.5 lines below viewport top)
+      const defaultTopAbs = Math.max(8, (band.rect.top|0) + band.topMargin);
+      const windowH = (window.innerHeight||0)|0;
+
+      if (isFile){
+        // :e popup — fixed height (75% of visible lines) while preserving 2.5-line bottom margin
+        const topAbs = defaultTopAbs;
+        bufpopup.style.top = topAbs + 'px';
+        bufpopup.style.bottom = 'auto';
+        const maxByBottom = Math.max(0, band.viewH - (topAbs - (band.rect.top|0)) - band.bottomMargin);
+        const fixedH = Math.max(0, Math.min(maxByBottom, Math.floor((0.75 * band.viewH)/LINE_HEIGHT) * LINE_HEIGHT));
+        // Apply fixed height to keep stable across directory navigation
+        if (fixedH > 0){
+          bufpopup.style.height = fixedH + 'px';
+          bufpopup.style.maxHeight = '';
+          if (bufpopupInner){
+            // 固定高に正確に追従させるため、max-height ではなく明示的な height を指定する
+            // 枠線の厚み（上下合計約2px）を控除して、スクロール領域の実効高さを安定化
+            const innerH = Math.max(0, fixedH - 2);
+            bufpopupInner.style.height = innerH + 'px';
+            bufpopupInner.style.maxHeight = '';
+          }
+        }
+      } else if (isBuf && cmdfloat && cmdfloat.style.display !== 'none' && _mode==='CMD'){
+        // :b popup — position relative to command float with 1.5rem gap; do NOT move the command float
+        const vr = band.rect; // viewport rect
+        const cr = cmdfloat.getBoundingClientRect();
+        // Determine which half the command float occupies (relative to viewport)
+        const cmdCenterRel = ((cr.top + cr.bottom)/2) - vr.top;
+        const upperHalf = (cmdCenterRel < (band.viewH/2));
+        if (upperHalf){
+          // Place below command float
+          const topRel = (cr.bottom - vr.top) + gapRem;
+          const topAbs = (vr.top|0) + Math.max(0, topRel);
+          bufpopup.style.top = topAbs + 'px';
+          bufpopup.style.bottom = 'auto';
+          const maxH = Math.max(0, band.viewH - topRel - 8);
+          bufpopup.style.height = '';
+          bufpopup.style.maxHeight = (maxH>0 ? (maxH + 'px') : '');
+          if (bufpopupInner){ bufpopupInner.style.maxHeight = (maxH>0 ? (Math.max(0, maxH - 8) + 'px') : ''); }
+        } else {
+          // Place above command float: anchor bottom so the gap stays exactly 1.5rem
+          const bottomAbs = Math.max(8, windowH - ((cr.top - gapRem)|0));
+          bufpopup.style.top = 'auto';
+          bufpopup.style.bottom = bottomAbs + 'px';
+          const available = Math.max(0, (cr.top - gapRem) - vr.top - 8);
+          bufpopup.style.height = '';
+          bufpopup.style.maxHeight = (available>0 ? (available + 'px') : '');
+          if (bufpopupInner){ bufpopupInner.style.maxHeight = (available>0 ? (Math.max(0, available - 8) + 'px') : ''); }
+        }
+      } else {
+        // Fallback: top-aligned with 2.5 lines margin, variable height within bottom margin
+        const topAbs = defaultTopAbs;
+        bufpopup.style.top = topAbs + 'px';
+        bufpopup.style.bottom = 'auto';
+        const maxByBottom = Math.max(0, band.viewH - (topAbs - (band.rect.top|0)) - band.bottomMargin);
+        bufpopup.style.height = '';
+        bufpopup.style.maxHeight = (maxByBottom>0 ? (maxByBottom + 'px') : '');
+        if (bufpopupInner){ bufpopupInner.style.maxHeight = (maxByBottom>0 ? (Math.max(0, maxByBottom - 8) + 'px') : ''); }
+      }
+    }catch{}
+  }
+
+  // Floating command bar positioning
+  // - Places near caret by default
+  // - If VISUAL->CMD: prefer below selection with 1.5rem gap (fallback above if no room)
+  // - If popup visible: place below popup (non-overlap by Y)
+  // - Right edge accounts for editor scrollbar width
+  function _positionCmdFloat(){
+    try{
+      if (!cmdfloat || _mode!=='CMD') return;
+      const band = _computeOverlayBand();
+      // Apply width band to cmdfloat (left + right margin incl. scrollbar)
+      cmdfloat.style.left = (band.left) + 'px';
+      cmdfloat.style.right = (Math.max(0, (window.innerWidth||0) - band.rightLimit)) + 'px';
+      // Determine vertical placement
+      const st = (editor && typeof editor.scrollTop==='number') ? (editor.scrollTop|0) : 0;
+      const h = cmdfloat.offsetHeight || 26;
+      let topPx = 0;
+      const gapBelowSel = Math.round(1.5 * (function(){ try{ return parseFloat(getComputedStyle(document.documentElement).fontSize)||16; }catch{ return 16; } })());
+      // If :e popup visible: place command float below popup with 1.5rem gap (Y stacking)
+      if (typeof _filePopupVisible==='function' && _filePopupVisible() && _popupKind && _popupKind()==='file'){
+        const vr = viewport ? viewport.getBoundingClientRect() : { top:36 };
+        const pr = bufpopup.getBoundingClientRect();
+        const relBottom = Math.max(0, (pr.bottom|0) - (vr.top|0));
+        topPx = relBottom + gapBelowSel;
+      } else if (_visCmdActive){
+        // VISUAL snapshot available while in CMD
+        const aR = _visCmdAnchorR|0, aC = _visCmdAnchorC|0, cR = _visCmdCaretR|0, cC = _visCmdCaretC|0;
+        const rMin = Math.max(0, Math.min(aR, cR));
+        const rMax = Math.max(aR, cR);
+        const selTop = (rMin*LINE_HEIGHT) - st;
+        const selBottom = ((rMax+1)*LINE_HEIGHT) - st;
+        const below = selBottom + gapBelowSel;
+        const minTop = 4; const maxTop = band.viewH - h - 4;
+        // Prefer below; fallback above if not enough space
+        if (below <= maxTop){ topPx = below; }
+        else {
+          const above = selTop - gapBelowSel - h; // overlap above (preserve 1.5rem below priority)
+          topPx = Math.max(minTop, Math.min(maxTop, above));
+        }
+      } else {
+        // Caret-based default (3 lines above/below relative to viewport)
+        const caretTopPx = (caretRow|0) * LINE_HEIGHT - st;
+        const half = band.viewH/2;
+        if (caretTopPx < half){ topPx = caretTopPx + (3*LINE_HEIGHT); }
+        else { topPx = caretTopPx - (3*LINE_HEIGHT) - h; }
+      }
+      // Clamp to viewport band
+      const minTop = 4;
+      const maxTop = band.viewH - h - 4;
+      if (topPx < minTop) topPx = minTop;
+      if (topPx > maxTop) topPx = maxTop;
+      cmdfloat.style.top = topPx + 'px';
+    }catch{}
+  }
+  try{ editor.addEventListener('scroll', ()=>{ try{ if (_mode==='CMD') _positionCmdFloat(); }catch{} }); }catch{}
+  try{ window.addEventListener('resize', ()=>{ try{ if (_mode==='CMD') _positionCmdFloat(); _positionPaletteUI(); }catch{} }); }catch{}
 
   // toast
   const _toastEl = document.getElementById('toast');
@@ -5807,10 +5966,15 @@
                   _updateVisualSelection();
                   // Clear any CMD-time overlay artifacts
                   try{ _visCmdActive = false; _cmdFromVisual = false; _visSelClear && _visSelClear(); }catch{}
+                } else if (_prevHelpMode === 'CMD'){
+                  // Keep CMD mode and return focus to command input if available
+                  _setMode('CMD');
+                  try{ if (cmdinput){ cmdinput.focus(); } }catch{}
+                  try{ _positionCmdFloat(); }catch{}
                 } else {
                   _setMode('NORMAL');
+                  editor && editor.focus && editor.focus();
                 }
-                editor && editor.focus && editor.focus();
               }catch{}
             }, 0);
           }catch{}
@@ -6271,8 +6435,17 @@
       try{
         if (_mode !== 'INSERT'){
           _blockedComposition = true;
-          // 表示位置のため現在の選択を記録（確定時ロールバック用）
-          _preCompSelS = editor.selectionStart|0; _preCompSelE = editor.selectionEnd|0;
+          // ロールバック用の基点はオーバーレイ caret 位置に統一（ネイティブ選択が陳腐化している場合があるため）
+          try{
+            const off = _offsetFromRC(caretRow|0, caretCol|0)|0;
+            _preCompSelS = off; _preCompSelE = off;
+            // IME の未確定表示ポップアップ位置が古い選択に引っ張られないよう、
+            // ネイティブ選択も caret に同期（スクロールは即時復元）
+            const stHold = editor.scrollTop|0, slHold = editor.scrollLeft|0;
+            editor.selectionStart = editor.selectionEnd = off;
+            if ((editor.scrollTop|0) !== stHold) editor.scrollTop = stHold;
+            if ((editor.scrollLeft|0) !== slHold) editor.scrollLeft = slHold;
+          }catch{}
         } else { _blockedComposition = false; }
         _debugPush({ t:Date.now(), type:'compositionstart', mode:_mode, compData:e.data, ctrl:e.ctrlKey, alt:e.altKey, meta:e.metaKey, isComp:true });
       }catch{}
@@ -8808,7 +8981,7 @@
       _fileVisibleEntries = (_fileEntries && Array.isArray(_fileEntries)) ? _fileEntries.slice() : [];
     }catch{}
   }
-  function _bufPopupShow(){ if (!bufpopup) return; try{ if (typeof _encPopupHide==='function') _encPopupHide(); }catch{} bufpopup.dataset.kind='buf'; bufpopup.style.display=''; if (!(_bufSel>=0)) _bufSel=Math.max(0,Math.min(buffers.length-1,currentIdx)); _bufPopupRender(); }
+  function _bufPopupShow(){ if (!bufpopup) return; try{ if (typeof _encPopupHide==='function') _encPopupHide(); }catch{} bufpopup.dataset.kind='buf'; bufpopup.style.display=''; if (!(_bufSel>=0)) _bufSel=Math.max(0,Math.min(buffers.length-1,currentIdx)); _layoutBufPopup(); _bufPopupRender(); }
   function _bufPopupHide(){ if (!bufpopup) return; if (_bufPopupVisible()) bufpopup.style.display='none'; }
   function _bufPopupMove(d){ if (!bufpopup) return; _bufSel=_bufSel+d; if (_bufSel<0) _bufSel=0; _bufPopupRender(); }
 
@@ -9654,7 +9827,16 @@
   try{ const act = bufpopupInner.querySelector('.item.active, .item.muted'); if (act && act.scrollIntoView) act.scrollIntoView({block:'nearest', inline:'nearest'}); }catch{}
   window.__sixFileRendering = false;
   }
-  function _filePopupShow(){ if (!bufpopup) return; try{ if (typeof _encPopupHide==='function') _encPopupHide(); }catch{} bufpopup.dataset.kind='file'; bufpopup.style.display=''; _filePopupRender(); }
+  function _filePopupShow(){
+    if (!bufpopup) return;
+    try{ if (typeof _encPopupHide==='function') _encPopupHide(); }catch{}
+    bufpopup.dataset.kind='file';
+    bufpopup.style.display='';
+    _layoutBufPopup();
+    // Immediately reposition command float below the :e popup with the specified gap
+    try{ if (_mode==='CMD' && cmdfloat && cmdfloat.style.display!=='none'){ _positionCmdFloat(); } }catch{}
+    _filePopupRender();
+  }
   function _filePopupHide(){ if (!bufpopup) return; if (_filePopupVisible()){ bufpopup.style.display='none'; _fileLoading=false; try{ _fileReflectedOnOpen=false; }catch{} try{ window.__sixFileRendering=false; }catch{} } }
   // 旧: 一覧の単純移動は廃止（反映ロジック付きの新実装は下）
   // ↑↓で選択を動かしたときは、即座に入力欄へ反映（末尾 '/' なし、".." は例外で反映しない）
@@ -9679,6 +9861,9 @@
           cmdinput.value = val;
         }
         try{ const pos=(cmdinput.value||'').length; cmdinput.setSelectionRange(pos,pos); }catch{}
+        // 入力欄に選択内容を反映した場合、フィルタはクリアしてミュートを解除（再レンダで赤ハイライトへ戻らないように）
+        _fileFilter = '';
+        _fileSelMuted = false;
         }
       }
     }catch{}
@@ -9699,6 +9884,8 @@
         if (inner.scrollTop !== prev){ ev.preventDefault(); ev.stopPropagation(); }
       }catch{}
     }, { passive:false });
+    // Reposition on resize/zoom changes
+    try{ window.addEventListener('resize', ()=>{ try{ _layoutBufPopup(); if (_mode==='CMD') _positionCmdFloat(); }catch{} }); }catch{}
   }
 
   function _currentDirBase(){
@@ -9834,6 +10021,8 @@
         if (toggleBtn && !toggleBtn.__wired){
           toggleBtn.__wired = true;
           toggleBtn.addEventListener('click', (e)=>{ try{ e.preventDefault(); }catch{} _toggleOverlayPaletteVisibility(); });
+          // Enlarge the palette icon (first line) to 1.5x
+          try{ const icon = toggleBtn.querySelector('span'); if (icon){ icon.style.fontSize = '1.5em'; icon.style.lineHeight = '1'; } }catch{}
         }
       }catch{}
       // Create root once
@@ -9841,10 +10030,10 @@
       if (!pal){
         pal = document.createElement('div');
         pal.id = 'overlayPalette';
-        pal.style.position = 'absolute';
-        // Move 0.5rem further up/left from previous 8px
-        pal.style.right = '1rem';
-        pal.style.bottom = '1rem';
+  pal.style.position = 'absolute';
+  // Right/bottom will be adjusted to align with scrollbars by _positionPaletteUI()
+  pal.style.right = '0px';
+  pal.style.bottom = '1rem';
         pal.style.zIndex = '3'; // above caret layer (2)
         pal.style.pointerEvents = 'auto';
         pal.style.display = 'flex';
@@ -10052,8 +10241,37 @@
   // initialize visual state for hlsearch & list pills
   try{ _updateOverlayHlsearchVisual(); }catch{}
   try{ _updateOverlayListVisual(); }catch{}
-
+      // Initial position sync with scrollbars
+      try{ _positionPaletteUI(); }catch{}
       
+    }catch{}
+  }
+
+  // Position palette toggle button (fixed) and overlay palette (absolute) to align with scrollbars
+  function _positionPaletteUI(){
+    try{
+      const toggleBtn = document.getElementById('paletteToggleBtn');
+      const pal = document.getElementById('overlayPalette');
+      // Compute vertical scrollbar width and horizontal scrollbar height from editor
+      const sbw = (function(){ try{ if (!editor) return 0; const w=(editor.offsetWidth|0)-(editor.clientWidth|0); return w>0?w:0; }catch{ return 0; } })();
+      const sbh = (function(){ try{ if (!editor) return 0; const h=(editor.offsetHeight|0)-(editor.clientHeight|0); return h>0?h:0; }catch{ return 0; } })();
+      // Palette container padding (keep in sync with pal.style.padding above)
+      const palPad = 4;
+      // Align toggle button: right edge should align to the right edge of the palette's rightmost inner button
+      // → palette right edge aligns to scrollbar (sbw), inner button ends at (sbw + palPad) from viewport right.
+      if (toggleBtn){
+        toggleBtn.style.right = ((sbw|0) + palPad) + 'px';
+        toggleBtn.style.bottom = (sbh|0) + 'px';
+      }
+      // Align overlay palette right edge with scrollbar (sbw) and move it upward to avoid overlapping the toggle button
+      if (pal){
+        pal.style.right = (sbw|0) + 'px';
+        // Compute button height; place palette immediately above with zero gap
+        let btnH = 28;
+        try{ if (toggleBtn){ const r = toggleBtn.getBoundingClientRect(); if (r && r.height) btnH = Math.ceil(r.height); } }catch{}
+        const gap = 0; // zero gap as requested
+        pal.style.bottom = ((sbh|0) + btnH + gap) + 'px';
+      }
     }catch{}
   }
 
@@ -10065,6 +10283,7 @@
       if (!pal) return;
       _overlayPaletteVisible = !_overlayPaletteVisible;
       pal.style.display = _overlayPaletteVisible ? 'flex' : 'none';
+      try{ _positionPaletteUI(); }catch{}
     }catch{}
   }
 
@@ -10129,8 +10348,14 @@
           const fileOpen = (typeof _filePopupVisible==='function' && _filePopupVisible());
           const bufOpen  = (typeof _bufPopupVisible==='function' && _bufPopupVisible());
 
-          // Ctrl+F9: toggle overlay palette visibility (#469) — handle before plain F9
-          if (key==='F9' && e.ctrlKey){
+          // Ctrl+F9 (or Meta+F9): toggle overlay palette visibility (#469) — handle before plain F9
+          if ((key==='F9' || e.keyCode===120 || e.which===120) && (e.ctrlKey || e.metaKey)){
+            try{ e.preventDefault(); e.stopPropagation(); }catch{}
+            _toggleOverlayPaletteVisibility();
+            return;
+          }
+          // Hidden feature: Ctrl+9 toggles overlay palette as well (same as Ctrl+F9)
+          if ((key==='9' || e.keyCode===57 || e.which===57) && e.ctrlKey){
             try{ e.preventDefault(); e.stopPropagation(); }catch{}
             _toggleOverlayPaletteVisibility();
             return;
@@ -10176,8 +10401,11 @@
             return;
           }
 
-          // When any modal or non-buf popup is open, just consume (except F10 handled above)
-          if (isModalOpen || encOpen || fileOpen) return;
+          // When any modal or non-buf popup is open, consume function keys to avoid host defaults (except F10 handled above)
+          if (isModalOpen || encOpen || fileOpen){
+            if (/^F\d{1,2}$/i.test(key)){ try{ e.preventDefault(); e.stopPropagation(); }catch{} }
+            return;
+          }
 
           // F1–F8: direct tab switching (not in CMD)
           if (/^F[1-8]$/.test(key) && !inCmd){
@@ -10190,6 +10418,8 @@
             }
             return;
           }
+          // In CMD, trap F1–F8 to block browser defaults (do not switch tabs here)
+          if (/^F[1-8]$/.test(key) && inCmd){ try{ e.preventDefault(); e.stopPropagation(); }catch{} return; }
           // Other keys: ignore
           return;
           // (F9 handled earlier)
