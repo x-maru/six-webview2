@@ -4493,7 +4493,7 @@
           try{ _bufPopupHide(); }catch{}
           try{ _setMode('NORMAL'); }catch{}
           try{ if (cmdinput){ cmdinput.value=''; try{ cmdinput.dispatchEvent(new Event('input', { bubbles:true })); }catch{} } }catch{}
-          return;
+      return;
         }
         const visIdx = Math.max(0, Math.min(list.length-1, _bufSel));
         const absIdx = (list[visIdx] ? list[visIdx].i : currentIdx);
@@ -5662,7 +5662,8 @@
           { id:'cmd', label:'コマンド' },
           { id:'normal', label:'NORMAL' },
           { id:'insert', label:'INSERT' },
-          { id:'visual', label:'VISUAL' }
+          { id:'visual', label:'VISUAL' },
+          { id:'regex', label:'正規表現' }
         ];
         let curTab = (opts && opts.defaultTab) || 'cmd';
         if (!TABS.some(t=>t.id===curTab)) curTab = 'cmd';
@@ -5895,7 +5896,8 @@
               [K('?'), sep(' ファイル先頭方向にインクリメンタル検索（確定で最後の検索状態を更新）')],
               [K('n'), sep(' 最後の検索語を検索方向に沿って検索('), K('/'), sep('による検索ならEOF方向、'), K('?'), sep('による検索ならファイル先頭方向)')],
               [K('N'), sep(' 最後の検索語を検索方向の逆方向に検索('), K('/'), sep('による検索ならファイル先頭方向、'), K('?'), sep('による検索ならEOF方向)')],
-              [sep('正規表現: ^ / $ は各行の先頭/末尾にマッチ（内部的にmultiline）。/i で大文字小文字を無視')]
+              [sep('正規表現: ^ / $ は各行の先頭/末尾にマッチ（内部的にmultiline）。/i で大文字小文字を無視')],
+              [sep('例: TAB を検索するには '), K('/\u005ct'), sep('（/ でも ? でも可）。行頭の連続TABは '), K('/^\u005ct+/'), sep(' など')]
             ]));
 
             // モード切替
@@ -5929,6 +5931,69 @@
             p2.appendChild(K('Y'));
             p2.appendChild(document.createTextNode('  選択範囲をWindowsクリップボードへコピーします（行選択/文字選択とも対応）。空の場合はWindowsクリップボードを更新しません。成功時のみ「Copied to Windows clipboard.」トーストを表示します。unnamed レジスタは変更しません。'));
             wrap.appendChild(p2);
+          } else if (curTab==='regex'){
+            wrap.appendChild(mkH('正規表現（Sixで使える仕様）'));
+            wrap.appendChild(mkList([
+              [sep('Six の検索(/, ?)・置換(:s)は JavaScript の正規表現 (ECMAScript) に準拠して解釈します')],
+              [sep('検索では '), K('^'), sep(' / '), K('$'), sep(' は常に各行の先頭/末尾にマッチ（内部的に '), K('m'), sep(' フラグを付与）')],
+              [sep(' '), K('.'), sep(' は改行にマッチしません。改行を含めて任意文字にしたい場合は '), K('[\u005cs\u005cS]'), sep(' や '), K('(?:.|\n)'), sep(' を使用してください')]
+            ]));
+
+            wrap.appendChild(mkH('フラグ'));
+            wrap.appendChild(mkList([
+              [K('/pat/i'), sep(' / '), K('?pat?i'), sep(' で '), K('i'), sep('（大文字小文字無視）を指定可能。'), K('m'), sep(' は常に有効'), sep('（指定不要）')],
+              [K(':s'), sep(' のフラグは '), K('g'), sep('（行内で全置換） / '), K('i'), sep('（大小無視） / '), K('c'), sep('（要確認） / '), K('n'), sep('（件数のみ）')],
+              [sep('それ以外のフラグ（例: '), K('s'), sep(' / '), K('u'), sep('）は未対応')] 
+            ]));
+
+            wrap.appendChild(mkH('主な構文'));
+            wrap.appendChild(mkList([
+              [K('.'), sep(' 任意の1文字（改行以外） / '), K('[]'), sep(' 文字クラス / '), K('[^...]'), sep(' 否定文字クラス')],
+              [K('^'), sep(' 行頭 / '), K('$'), sep(' 行末 / '), K('\u005cb'), sep(' 単語境界 / '), K('\u005cB'), sep(' 非単語境界')],
+              [K('* + ? {m,n}'), sep(' 繰り返し（' ), K('*? +? ?? {m,n}?'), sep(' で最短一致）')],
+              [K('()'), sep(' グループ / '), K('(?:...)'), sep(' 非捕捉グループ / '), K('|'), sep(' 選択（OR）')],
+              [K('(?=...)'), sep(' 先読み / '), K('(?!...)'), sep(' 否定先読み / '), K('(?<=...)'), sep(' 先行後読み / '), K('(?<!...)'), sep(' 否定先行後読み')],
+              [sep('代表的なショートハンド: '), K('\u005cd'), sep('（数字） / '), K('\u005cw'), sep('（英数_） / '), K('\u005cs'), sep('（空白）')]
+            ]));
+
+            wrap.appendChild(mkH('置換の特殊シーケンス'));
+            wrap.appendChild(mkList([
+              [K('$&'), sep(' マッチ全体'),
+               sep(' / '), K('$1..$9'), sep(' キャプチャグループ1〜9')],
+              [sep(' '), K('$`'), sep('（マッチより前）、'), K('$\''), sep('（マッチより後）、'), K('$+'), sep('（最後のキャプチャ）は現状未対応')]
+            ]));
+
+            wrap.appendChild(mkH('文字クラス'));
+            wrap.appendChild(mkList([
+              [K('[abc]'), sep(' 文字 '), K('a/b/c'), sep(' のいずれかに一致')],
+              [K('[^abc]'), sep(' 上記以外（否定）に一致')],
+              [K('[a-z]'), sep(' 小文字英字の範囲')],
+              [K('[A-Za-z0-9_]'), sep(' 英数字とアンダースコア（'), K('\u005cw'), sep(' と同等）')],
+              [K('[ \u005ct]'), sep(' スペースまたは TAB（'), K('\u005cs'), sep(' は空白全般）')],
+              [K('[\u005cw.-]'), sep(' 英数_ に加えてピリオドとハイフン')],
+              [sep('クラス内のリテラル '), K('-'), sep(' は先頭/末尾に置くか '), K('[\u005c-]'), sep(' のようにエスケープ')],
+              [sep('クラス内の '), K(']'), sep(' は '), K('[^\u005c]]'), sep(' のように '), K('\u005c]'), sep(' でエスケープ')],
+              [sep('POSIX 文字クラス '), K('[[:digit:]]'), sep(' などは未対応（JavaScript 正規表現仕様）')]
+            ]));
+
+            wrap.appendChild(mkH('デリミタとエスケープ'));
+            wrap.appendChild(mkList([
+              [sep('検索 '), K('/pat/'), sep(' / '), K('?pat?'), sep(' の区切り文字や、置換 '), K(':s/pat/repl/'), sep(' の区切り文字 '), K('/'), sep(' をパターン内で使う場合は '), K('\u005c/'), sep(' のようにエスケープ')],
+              [sep('フラグは末尾の '), K('/i'), sep(' や '), K('?i'), sep(' のみ解釈。パターン内の '), K('?'), sep(' は通常どおり量指定子として扱われます')]
+            ]));
+
+            wrap.appendChild(mkH('例'));
+            wrap.appendChild(mkList([
+              [K('/^\u005cs+$/'), sep(' 空白のみの行')],
+              [K('/\u005cbfoo\u005cb/'), sep(' 単語 '), K('foo'), sep(' に一致')],
+              [K('/(foo|bar)/i'), sep(' 大文字小文字を無視して '), K('foo'), sep(' または '), K('bar')],
+              [K(':s/^/# /'), sep(' 行頭に '), K('# '), sep(' を付与（現在行）')],
+              [K(':%s/(^|\n)\u005cs*TODO(?!:)/$1TODO:/g'), sep(' TODO の後ろにコロンを付ける（既にある行は除外）')],
+              [K('/\u005ct/'), sep(' TAB 文字に一致')],
+              [K(':%s/\u005ct/    /g'), sep(' すべての TAB を半角スペース4つに展開')],
+              [K(':%s/^\u005ct+//g'), sep(' 行頭の TAB を削除（インデントの TAB 抜き）')],
+              [K(':%s/[ \u005ct]+/ /g'), sep(' 連続する空白（スペース/TAB）を単一スペースに圧縮')]
+            ]));
           }
 
           sc.appendChild(wrap);
