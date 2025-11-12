@@ -745,7 +745,9 @@
       const dir = mF ? 'fwd' : (mB ? 'bwd' : 'fwd');
     let pat = String((mF?mF[1]:(mB?mB[1]:(mS?mS[3]:'')))||'');
       const flagsGiven = String((mF?mF[2]:(mB?mB[2]:''))||'');
-      const flags = (/i/.test(flagsGiven)?'i':'');
+  const flags = (/i/.test(flagsGiven)?'i':'');
+  // Always enable multiline so ^/$ match per-line by default
+  const flagsRe = ('m' + (flags.includes('i')?'i':''));
       // For :s incremental preview: capture a stable anchor once at first pattern detection
       if (mS && !(_incSearchAnchorOff>=0)){
         try{ _incSearchAnchorOff = _offsetFromRC(caretRow, caretCol)|0; }catch{ _incSearchAnchorOff=null; }
@@ -753,7 +755,7 @@
       // Do nothing on empty pattern
       if (!pat){ _incPrevHide(); return true; }
       // Try compile regex quickly; invalid → hide
-      let reOk = true; try{ new RegExp(pat, flags); }catch{ reOk=false; }
+  let reOk = true; try{ new RegExp(pat, flagsRe); }catch{ reOk=false; }
       if (!reOk){ _incPrevHide(); return true; }
       // Determine search scope and anchor
       let selStart=null, selEnd=null, limitToVisual=false;
@@ -796,7 +798,7 @@
             const tail = text.slice(off);
             // Anchor the pattern at beginning of the tail to ensure we only
             // accept a match that starts at the same offset as before.
-            const reStick = new RegExp('^(?:' + pat + ')', flags);
+            const reStick = new RegExp('^(?:' + pat + ')', flagsRe);
             const mm = reStick.exec(tail);
             if (mm){
               const l = ((mm[0]||'').length|0);
@@ -818,7 +820,7 @@
           try{
             const text = String(editor.value||'');
             const sub = text.slice(selStart, selEnd);
-            const re = new RegExp(pat, flags);
+            const re = new RegExp(pat, flagsRe);
             const m = re.exec(sub);
             if (m && m[0]){ res = { start: selStart + (m.index|0), len: (m[0]||'').length|0 }; }
           }catch{}
@@ -1061,10 +1063,13 @@
       _hlMatches = null;
       if (!_optHlsearch) return;
       if (!(_lastSearch && _lastSearch.src)) return;
-      const src = String(_lastSearch.src||'');
-      const flags = String(_lastSearch.flags||'');
-      const text = String(editor.value||'');
-      let re = null; try{ re = new RegExp(src, flags.includes('g')?flags:flags+'g'); }catch{ re=null; }
+  const src = String(_lastSearch.src||'');
+  let flags = String(_lastSearch.flags||'');
+  const text = String(editor.value||'');
+  // Ensure multiline + global for hlsearch regardless of stored flags
+  if (!flags.includes('m')) flags += 'm';
+  if (!flags.includes('g')) flags += 'g';
+  let re = null; try{ re = new RegExp(src, flags); }catch{ re=null; }
       if (!re) return;
       const out = [];
       let m; re.lastIndex = 0;
@@ -1600,13 +1605,15 @@
     try{
       const text = String(editor.value||'');
       const n = text.length|0;
-      const reFlags = (flags && /i/.test(flags)) ? 'i' : '';
+  // Always include 'm' so ^/$ anchor to line start/end across the whole buffer.
+  let reFlags = 'm';
+  if (flags && /i/.test(flags)) reFlags += 'i';
       let startIdx = -1; let matchLen = 0;
       if (dir === 'fwd'){
         const off = Math.max(0, Math.min(n, (fromOff|0)));
         const start = Math.min(n, off + 1); // move past current
         let re = null;
-        try{ re = new RegExp(src, reFlags); }catch{ re=null; }
+  try{ re = new RegExp(src, reFlags); }catch{ re=null; }
         if (!re) return null;
         const slice1 = text.slice(start);
         const m1 = re.exec(slice1);
@@ -1618,7 +1625,7 @@
       } else { // 'bwd'
         const off = Math.max(0, Math.min(n, (fromOff|0)));
         const upto = Math.max(0, off - 1);
-        const reAll = (function(){ try{ return new RegExp(src, (reFlags+'g')); }catch{ return null; } })();
+  const reAll = (function(){ try{ return new RegExp(src, (reFlags+'g')); }catch{ return null; } })();
         if (!reAll) return null;
         let last = null; let m;
         reAll.lastIndex = 0;
@@ -3106,7 +3113,7 @@
     }
     return {r:rr, c:cc};
   }
-  function _deleteRangePos(p1,p2){
+  function _deleteRangePos(p1,p2, opts){
     // record undo before mutation
     _pushUndoSnapshot('delete-range');
     const lines=_splitLines();
@@ -3139,7 +3146,11 @@
     // set caret at start of deletion
     _setCaret(a.r, a.c);
     // Update unnamed register (charwise)
-    try{ _regUnnamed = { text: String(deletedText||''), linewise: false }; }catch{}
+    // #539: allow caller to suppress register update (e.g., 'x' without count)
+    const _updReg = !(opts && opts.updateRegister === false);
+    if (_updReg){
+      try{ _regUnnamed = { text: String(deletedText||''), linewise: false }; }catch{}
+    }
     _touchBufferModified();
   }
   function _deleteWholeLines(rStart, count){
@@ -3309,7 +3320,8 @@
     const start={ r: caretRow, c: caretCol };
     const end=_advancePosByCp(start.r, start.c, n);
     if (start.r===end.r && start.c===end.c){ return; }
-    _deleteRangePos(start, end);
+    // #539: 'x' should not update yank register unless count >= 2
+    _deleteRangePos(start, end, { updateRegister: (n>=2) });
   }
 
   // Yank helpers (copy to unnamed register without modifying text)
@@ -3328,7 +3340,10 @@
       const tail=(lines[b.r]||'').slice(0,b.c);
       yanked = head + '\n' + middle + tail;
     }
-    try{ _regUnnamed = { text: String(yanked||''), linewise: false }; }catch{}
+    // #539: Do not update yank register when yanked content is empty (length 0)
+    if ((String(yanked||'').length) > 0){
+      try{ _regUnnamed = { text: String(yanked||''), linewise: false }; }catch{}
+    }
   }
   function _yankWholeLines(rStart, count){
     const lines=_splitLines();
@@ -3338,7 +3353,10 @@
     let n=Math.max(1, count|0);
     const rEnd = Math.min(total-1, rs + n - 1);
     const yankedBlock = lines.slice(rs, rEnd+1).join('\n');
-    try{ _regUnnamed = { text: String(yankedBlock||''), linewise: true }; }catch{}
+    // #539: Skip updating yank register on empty block (length 0)
+    if ((String(yankedBlock||'').length) > 0){
+      try{ _regUnnamed = { text: String(yankedBlock||''), linewise: true }; }catch{}
+    }
   }
 
   // Clipboard helpers and non-register extractors for Y (Windows clipboard copy)
@@ -4007,8 +4025,9 @@
   const invalid = flagsGiven.replace(/[gicn]/g, '');
   if (invalid){ toast('invalid flags: ' + invalid); try{ _triggerVisualBell(); }catch{} return; }
   if (!pat){ toast('empty pattern'); try{ _triggerVisualBell(); }catch{} return; }
-        let reFlags = '';
-        if (/i/.test(flagsGiven)) reFlags += 'i';
+  // Always multiline so ^/$ anchor per line; add i if requested
+  let reFlags = 'm';
+  if (/i/.test(flagsGiven)) reFlags += 'i';
         // We'll use a global regex for scan; per-line non-g behavior is handled manually
         let reAll = null; try{ reAll = new RegExp(pat, reFlags+'g'); }catch{ reAll=null; }
   if (!reAll){ toast('invalid pattern'); try{ _triggerVisualBell(); }catch{} return; }
@@ -5858,13 +5877,13 @@
             // オペレータ
             wrap.appendChild(mkSec('オペレータ'));
             wrap.appendChild(mkList([
-              [K('x'), sep('  caret直下の1文字削除')],
+              [K('x'), sep('  caret直下の1文字削除（yank バッファは更新しない。2以上の前置数字時のみ更新）')],
               [K('dd'), sep(' 行削除')],
               [K('d モーション'), sep(' 削除 ※範囲はモーションによる')], 
               [K('Nd モーション'), sep('  カウント付き（例: '), K('2dw'), sep('）')],
-              [K('yy'), sep(' 行ヤンク(行コピー) ')],
+              [K('yy'), sep(' 行ヤンク(行コピー)（空ならyank バッファを更新しない）')],
               [K('y モーション'), sep(' ヤンク(コピー) ※範囲はモーションによる ')],
-              [K('Y'), sep(' Windowsクリップボードへコピー（y のモーション/カウントと同等、unnamed レジスタは変えない。例: '), K('YY'), sep(' / '), K('3Yw'), sep('）')],
+              [K('Y'), sep(' Windowsクリップボードへコピー（y のモーション/カウントと同等、unnamed レジスタは変えない。空の場合はWindowsクリップボードを更新しない。例: '), K('YY'), sep(' / '), K('3Yw'), sep('）')],
               [K('p'), sep('  caret行の下に行ペースト')],
               [K('P'), sep('  caret行の上に行ペースト')]
             ]));
@@ -5875,7 +5894,8 @@
               [K('/'), sep(' EOF方向にインクリメンタル検索（確定で最後の検索状態を更新）')],
               [K('?'), sep(' ファイル先頭方向にインクリメンタル検索（確定で最後の検索状態を更新）')],
               [K('n'), sep(' 最後の検索語を検索方向に沿って検索('), K('/'), sep('による検索ならEOF方向、'), K('?'), sep('による検索ならファイル先頭方向)')],
-              [K('N'), sep(' 最後の検索語を検索方向の逆方向に検索('), K('/'), sep('による検索ならファイル先頭方向、'), K('?'), sep('による検索ならEOF方向)')]
+              [K('N'), sep(' 最後の検索語を検索方向の逆方向に検索('), K('/'), sep('による検索ならファイル先頭方向、'), K('?'), sep('による検索ならEOF方向)')],
+              [sep('正規表現: ^ / $ は各行の先頭/末尾にマッチ（内部的にmultiline）。/i で大文字小文字を無視')]
             ]));
 
             // モード切替
@@ -5907,7 +5927,7 @@
             const p2 = document.createElement('div');
             p2.style.marginTop = '8px';
             p2.appendChild(K('Y'));
-            p2.appendChild(document.createTextNode('  選択範囲をWindowsクリップボードへコピーします（行選択/文字選択とも対応）。コピー後に「Copied to Windows clipboard.」トーストを表示します。unnamed レジスタは変更しません。'));
+            p2.appendChild(document.createTextNode('  選択範囲をWindowsクリップボードへコピーします（行選択/文字選択とも対応）。空の場合はWindowsクリップボードを更新しません。成功時のみ「Copied to Windows clipboard.」トーストを表示します。unnamed レジスタは変更しません。'));
             wrap.appendChild(p2);
           }
 
@@ -6696,7 +6716,9 @@
           let text='';
           if (_visualLinewise){ const rs=Math.min(_visualAnchorR, caretRow); const re=Math.max(_visualAnchorR, caretRow); text = _extractWholeLinesText(rs, re-rs+1); }
           else { const a={r:_visualAnchorR,c:_visualAnchorC}; const b={r:caretRow,c:caretCol}; text = _extractRangeText(a,b); }
-          (async ()=>{ const ok = await _copyToClipboard(text); toast(ok? 'Copied to Windows clipboard.':'Clipboard write failed.', ok? 1000:1500); })();
+          if ((String(text||'').length) > 0){
+            (async ()=>{ const ok = await _copyToClipboard(text); toast(ok? 'Copied to Windows clipboard.':'Clipboard write failed.', ok? 1000:1500); })();
+          }
           _exitVisual(); _repositionCaret(); updateGutter();
           return;
         }
@@ -6921,7 +6943,9 @@
           const mcount = (_countAcc==null?1:_countAcc); _countAcc=null;
           const total = Math.max(1, (_pendingOpCount||1) * mcount);
           const text = _extractWholeLinesText(caretRow, total);
-          (async ()=>{ const ok = await _copyToClipboard(text); toast(ok? 'Copied to Windows clipboard.':'Clipboard write failed.', ok? 1000:1500); })();
+          if ((String(text||'').length) > 0){
+            (async ()=>{ const ok = await _copyToClipboard(text); toast(ok? 'Copied to Windows clipboard.':'Clipboard write failed.', ok? 1000:1500); })();
+          }
           _clearPendingOp(); _repositionCaret(); updateGutter();
           return;
         }
@@ -6935,7 +6959,9 @@
             const rs = Math.min(r0, r1);
             const re = Math.max(r0, r1);
             const text = _extractWholeLinesText(rs, re-rs+1);
-            (async ()=>{ const ok = await _copyToClipboard(text); toast(ok? 'Copied to Windows clipboard.':'Clipboard write failed.', ok? 1000:1500); })();
+            if ((String(text||'').length) > 0){
+              (async ()=>{ const ok = await _copyToClipboard(text); toast(ok? 'Copied to Windows clipboard.':'Clipboard write failed.', ok? 1000:1500); })();
+            }
             _clearPendingOp(); _repositionCaret(); updateGutter();
             return;
           } else {
@@ -6954,7 +6980,9 @@
           }
           const start={r:rS, c:cS}, end={r:rE, c:cE};
           const text = _extractRangeText(start, end);
-          (async ()=>{ const ok = await _copyToClipboard(text); toast(ok? 'Copied to Windows clipboard.':'Clipboard write failed.', ok? 1000:1500); })();
+          if ((String(text||'').length) > 0){
+            (async ()=>{ const ok = await _copyToClipboard(text); toast(ok? 'Copied to Windows clipboard.':'Clipboard write failed.', ok? 1000:1500); })();
+          }
           _clearPendingOp(); _repositionCaret(); updateGutter();
           return;
         }
@@ -6968,7 +6996,9 @@
           const rs = Math.min(r0, r1);
           const re = Math.max(r0, r1);
           const text = _extractWholeLinesText(rs, re-rs+1);
-          (async ()=>{ const ok = await _copyToClipboard(text); toast(ok? 'Copied to Windows clipboard.':'Clipboard write failed.', ok? 1000:1500); })();
+          if ((String(text||'').length) > 0){
+            (async ()=>{ const ok = await _copyToClipboard(text); toast(ok? 'Copied to Windows clipboard.':'Clipboard write failed.', ok? 1000:1500); })();
+          }
           _clearPendingOp(); _repositionCaret(); updateGutter();
           return;
         }
@@ -6980,7 +7010,9 @@
           const re = Math.max(rs, Math.max(0, Math.min(_totalLines()-1, next.r-1)));
           if (re >= rs){
             const text = _extractWholeLinesText(rs, re-rs+1);
-            (async ()=>{ const ok = await _copyToClipboard(text); toast(ok? 'Copied to Windows clipboard.':'Clipboard write failed.', ok? 1000:1500); })();
+            if ((String(text||'').length) > 0){
+              (async ()=>{ const ok = await _copyToClipboard(text); toast(ok? 'Copied to Windows clipboard.':'Clipboard write failed.', ok? 1000:1500); })();
+            }
           }
           _clearPendingOp(); _repositionCaret(); updateGutter();
           return;
@@ -6992,7 +7024,9 @@
           const re = caretRow;
           if (re >= rs){
             const text = _extractWholeLinesText(rs, re-rs+1);
-            (async ()=>{ const ok = await _copyToClipboard(text); toast(ok? 'Copied to Windows clipboard.':'Clipboard write failed.', ok? 1000:1500); })();
+            if ((String(text||'').length) > 0){
+              (async ()=>{ const ok = await _copyToClipboard(text); toast(ok? 'Copied to Windows clipboard.':'Clipboard write failed.', ok? 1000:1500); })();
+            }
           }
           _clearPendingOp(); _repositionCaret(); updateGutter();
           return;
@@ -7024,7 +7058,9 @@
               }
             }
           }catch{}
-            (async ()=>{ const ok = await _copyToClipboard(text); toast(ok? 'Copied to Windows clipboard.':'Clipboard write failed.', ok? 1000:1500); })();
+            if ((String(text||'').length) > 0){
+              (async ()=>{ const ok = await _copyToClipboard(text); toast(ok? 'Copied to Windows clipboard.':'Clipboard write failed.', ok? 1000:1500); })();
+            }
             _clearPendingOp(); _repositionCaret(); updateGutter();
             return;
           }
