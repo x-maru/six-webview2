@@ -188,7 +188,7 @@
   function _syncActiveViewStateIntoBuffer(){
     try{
       const b = currentBuffer();
-      if (!b) return;
+    if (!b) return; // Ensure buffer exists
       b.viewRow = caretRow|0; b.viewCol = caretCol|0;
       // snap to line grid for stability
       const st = (editor && typeof editor.scrollTop==='number') ? (editor.scrollTop|0) : 0;
@@ -198,7 +198,7 @@
   function _collectSessionPayload(opts={}){
     // opts.lite: if true, omit text for unmodified file-backed buffers to reduce footprint
   const lite = !!opts.lite;
-      try{
+      try{ // Attempt to sync active view state
         _syncActiveViewStateIntoBuffer();
       // Capture window state (best-effort) for session restore (#513)
       let winState = null; try{ winState = _captureWindowStateForSession(); }catch{}
@@ -3145,6 +3145,8 @@
     editor.value = lines.join('\n');
     // set caret at start of deletion
     _setCaret(a.r, a.c);
+  // Keep native selection in sync to avoid later browser-driven scroll/selection surprises (e.g., on save)
+  try{ const stHold=editor.scrollTop|0, slHold=editor.scrollLeft|0; _syncNativeSelectionToCaret(); editor.scrollTop=stHold; editor.scrollLeft=slHold; }catch{}
     // Update unnamed register (charwise)
     // #539: allow caller to suppress register update (e.g., 'x' without count)
     const _updReg = !(opts && opts.updateRegister === false);
@@ -3178,6 +3180,8 @@
     const newRow = Math.max(0, Math.min(nextLines.length-1, rs));
     editor.value = nextLines.join('\n');
     _setCaret(newRow, 0);
+    // Sync native selection immediately after programmatic mutation
+    try{ const stHold=editor.scrollTop|0, slHold=editor.scrollLeft|0; _syncNativeSelectionToCaret(); editor.scrollTop=stHold; editor.scrollLeft=slHold; }catch{}
     try{ _regUnnamed = { text: String(deletedBlock||''), linewise: true }; }catch{}
     _touchBufferModified();
   }
@@ -3416,6 +3420,7 @@
    * ensureScrolloff
    *********************************************************/
   let _scrollGuardUntil = 0; // temporary guard to suppress auto scroll adjustments
+  let _selGuardUntil = 0;    // temporary guard to suppress selection-driven caret sync (e.g., right after save)
   let _skipEnsureOnceAfterSwitch = false; // skip the next ensureScrolloff once right after buffer switch
   let _lastBufferSwitchAt = 0; // timestamp of last successful buffer switch
   // Prefer not to scroll on the very first motion after a buffer switch when caret is already visible (#415 case1)
@@ -4873,7 +4878,20 @@
           const textData = (i===currentIdx)?(editor.value||''):(b.text||'');
             const textDataN = (i===currentIdx)? _normalizeTextForSaveInternal(editor.value||'') : _normalizeTextForSaveInternal(textData||'');
             const ok = await _saveToURLWithExternalCheck(b, b.path, textDataN);
-          if (ok){ try{ if (i===currentIdx){ editor.value = textDataN; } b.text=textDataN; b.savedText=textDataN; b._savedTick=(b._changeTick|0); b.modified=false; }catch{} toast('written: ' + _prettyFileUrlLabel(b.path)); } else { toast('write failed: ' + (b.name||'')); try{ _triggerVisualBell(); }catch{} }
+          if (ok){
+            try{
+              if (i===currentIdx){
+                // Guard selection sync and preserve viewport while rewriting value
+                try{ _selGuardUntil = Date.now() + 800; }catch{}
+                let stKeep=0, slKeep=0; try{ stKeep=editor.scrollTop|0; slKeep=editor.scrollLeft|0; }catch{}
+                editor.value = textDataN;
+                try{ editor.scrollTop = stKeep; editor.scrollLeft = slKeep; }catch{}
+                try{ _syncNativeSelectionToCaret(); }catch{}
+              }
+              b.text=textDataN; b.savedText=textDataN; b._savedTick=(b._changeTick|0); b.modified=false;
+            }catch{}
+            toast('written: ' + _prettyFileUrlLabel(b.path));
+          } else { toast('write failed: ' + (b.name||'')); try{ _triggerVisualBell(); }catch{} }
         }
         _setTitle(); _renderTabbar();
       })();
@@ -4894,12 +4912,21 @@
       const _w_restore = ()=>{
         try{
           _scrollGuardUntil = Date.now() + 1200;
-          // Restore selection first to avoid auto-scroll, then set scrolls
-          try{ editor.setSelectionRange(_w_sS, _w_sE); }catch{}
-          caretRow = _w_cr; caretCol = _w_cc;
+          // Suppress select-driven caret sync briefly while we restore caret/selection
+          _selGuardUntil = Date.now() + 400;
+          // Restore caret first, then sync native selection from caret to avoid EOF jumps
+          try{ caretRow = Math.max(0, Math.min(_totalLines()-1, _w_cr|0)); }catch{ caretRow = (_w_cr|0); }
+          try{ caretCol = Math.max(0, _w_cc|0); }catch{ caretCol = (_w_cc|0); }
+          try{ _syncNativeSelectionToCaret(); }catch{}
           try{ editor.scrollTop = _w_st; }catch{}
           try{ editor.scrollLeft = _w_sl; }catch{}
           _repositionCaret(); updateGutter(); _renderHlMatchesVisible();
+          // Reinforce after a frame in case a deferred select event fires post-value assignment
+          try{
+            if (window.requestAnimationFrame){
+              requestAnimationFrame(()=>{ try{ _syncNativeSelectionToCaret(); _repositionCaret(); updateGutter(); }catch{} });
+            }
+          }catch{}
         }catch{}
       };
       // 変更なし + パス引数なしのときは何もしない（エラーも出さない）
@@ -4958,7 +4985,13 @@
           try{
             const was = b.path||null;
             if (was !== targetUrl){ b.path = targetUrl; b.name = _basename(targetUrl); }
+            // Guard selection sync before rewriting value to prevent transient EOF jumps
+            try{ _selGuardUntil = Date.now() + 800; }catch{}
+            let stKeep=0, slKeep=0; try{ stKeep=editor.scrollTop|0; slKeep=editor.scrollLeft|0; }catch{}
             editor.value = _txtForSave3;
+            try{ editor.scrollTop = stKeep; editor.scrollLeft = slKeep; }catch{}
+            // keep overlay caret authoritative and resync native selection from it
+            try{ _syncNativeSelectionToCaret(); }catch{}
             b.text = _txtForSave3; b.savedText = _txtForSave3; b._savedTick = (b._changeTick|0); b.modified = false;
           }catch{}
           _setTitle(); _renderTabbar();
@@ -6230,7 +6263,7 @@
             for (const {b,i} of modifiedItems){
               const id = await choiceModal({ title:'Unsaved changes', detail:`Save changes to: ${b.path? _prettyFileUrlLabel(b.path):(b.name||'(untitled)')}`, buttons:[{id:'save',label:'Save',primary:true},{id:'dont',label:"Don't Save"},{id:'cancel',label:'Cancel',danger:true}] });
               if (id===null || id==='cancel'){ resolve(false); return; }
-              if (id==='save' && b.path){ const textData = (i===currentIdx)? _normalizeTextForSaveInternal(editor.value||'') : _normalizeTextForSaveInternal(b.text||''); const ok = await _saveToURLWithExternalCheck(b, b.path, textData); if (!ok){ toast('write failed: ' + (b.name||'')); try{ _triggerVisualBell(); }catch{} resolve(false); return; } try{ if (i===currentIdx){ editor.value=textData; } b.text=textData; b.savedText=textData; b._savedTick=(b._changeTick|0); b.modified=false; }catch{} }
+              if (id==='save' && b.path){ const textData = (i===currentIdx)? _normalizeTextForSaveInternal(editor.value||'') : _normalizeTextForSaveInternal(b.text||''); const ok = await _saveToURLWithExternalCheck(b, b.path, textData); if (!ok){ toast('write failed: ' + (b.name||'')); try{ _triggerVisualBell(); }catch{} resolve(false); return; } try{ if (i===currentIdx){ try{ _selGuardUntil = Date.now() + 800; }catch{} let st=0, sl=0; try{ st=editor.scrollTop|0; sl=editor.scrollLeft|0; }catch{} editor.value=textData; try{ editor.scrollTop=st; editor.scrollLeft=sl; }catch{} try{ _syncNativeSelectionToCaret(); }catch{} } b.text=textData; b.savedText=textData; b._savedTick=(b._changeTick|0); b.modified=false; }catch{} }
             }
             resolve(true);
           })();
@@ -6252,7 +6285,7 @@
           const removeRow = ()=>{ try{ listWrap.removeChild(row); rows.delete(i); }catch{} };
           btnSave.addEventListener('click', async()=>{
             btnSave.disabled = true; btnSkip.disabled=true;
-            if (b.path){ const textData = (i===currentIdx)? _normalizeTextForSaveInternal(editor.value||'') : _normalizeTextForSaveInternal(b.text||''); const ok = await _saveToURLWithExternalCheck(b, b.path, textData); if (!ok){ toast('write failed: ' + (b.name||'')); try{ _triggerVisualBell(); }catch{} btnSave.disabled=false; btnSkip.disabled=false; return; } try{ if (i===currentIdx){ editor.value=textData; } b.text=textData; b.savedText=textData; b._savedTick = (b._changeTick|0); b.modified=false; }catch{} }
+            if (b.path){ const textData = (i===currentIdx)? _normalizeTextForSaveInternal(editor.value||'') : _normalizeTextForSaveInternal(b.text||''); const ok = await _saveToURLWithExternalCheck(b, b.path, textData); if (!ok){ toast('write failed: ' + (b.name||'')); try{ _triggerVisualBell(); }catch{} btnSave.disabled=false; btnSkip.disabled=false; return; } try{ if (i===currentIdx){ try{ _selGuardUntil = Date.now() + 800; }catch{} let st=0, sl=0; try{ st=editor.scrollTop|0; sl=editor.scrollLeft|0; }catch{} editor.value=textData; try{ editor.scrollTop=st; editor.scrollLeft=sl; }catch{} try{ _syncNativeSelectionToCaret(); }catch{} } b.text=textData; b.savedText=textData; b._savedTick = (b._changeTick|0); b.modified=false; }catch{} }
             removeRow(); maybeFinish();
           });
           btnSkip.addEventListener('click', ()=>{ removeRow(); maybeFinish(); });
@@ -6474,6 +6507,8 @@
     // In VISUAL mode, prefer tracking the moving edge of the selection (the end farther from the anchor)
     editor.addEventListener('select', ()=>{
       try{
+        // Guard: ignore transient selection changes during protected windows (e.g., right after save)
+        try{ if (Date.now() < _selGuardUntil) return; }catch{}
         if (_visualActive){
           // In VISUAL mode, keep overlay caret behavior consistent with our model.
           // For linewise VISUAL, preserve the caret column and only track the moving edge's ROW.
