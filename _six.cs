@@ -9,6 +9,19 @@ using System.Linq;
 
 // NOTE: six.ps1 replaces __CLASSNAME__ to a unique class per run to avoid type collisions.
 public class __CLASSNAME__ {
+  static __CLASSNAME__(){
+    try{
+      var providerType = Type.GetType("System.Text.CodePagesEncodingProvider, System.Text.Encoding.CodePages", throwOnError:false);
+      if (providerType != null){
+        var instProp = providerType.GetProperty("Instance");
+        var inst = (instProp!=null? instProp.GetValue(null) : null);
+        if (inst != null){
+          var regs = typeof(Encoding).GetMethods();
+          foreach(var m in regs){ if (m!=null && string.Equals(m.Name, "RegisterProvider", StringComparison.Ordinal)) { try{ m.Invoke(null, new object[]{ inst }); }catch{} break; } }
+        }
+      }
+    }catch{}
+  }
   private int port;
   private Thread thread;
   private TcpListener listener;
@@ -18,6 +31,31 @@ public class __CLASSNAME__ {
   private static void Write(Socket s, string txt){ var b=Encoding.ASCII.GetBytes(txt); s.Send(b); }
   private static string UrlDecode(string s){ try{ return Uri.UnescapeDataString(s); } catch{ return s; } }
   private static string FileUriFromPath(string path){ try{ return new Uri(path).AbsoluteUri; } catch { return path; } }
+  private static Encoding GetEncodingFromQuery(string enc){
+    if (string.IsNullOrEmpty(enc)) return Encoding.UTF8;
+    enc = enc.Trim().ToLowerInvariant();
+    if (enc=="utf8"||enc=="utf-8") return Encoding.UTF8;
+    if (enc=="sjis"||enc=="shift_jis"||enc=="shift-jis"||enc=="cp932"||enc=="ms932"){
+      try{ return Encoding.GetEncoding(932); }catch{ return Encoding.UTF8; }
+    }
+    try{ return Encoding.GetEncoding(enc); }catch{ return Encoding.UTF8; }
+  }
+  private static bool TryReadAllTextAuto(string path, string encName, out string text){
+    text = "";
+    try{
+      if (!string.IsNullOrEmpty(encName)){
+        var enc = GetEncodingFromQuery(encName);
+        text = File.ReadAllText(path, enc); return true;
+      }
+      // BOM 判定 → それ以外は UTF-8 優先、失敗時 SJIS
+      var data = File.ReadAllBytes(path);
+      if (data.Length>=3 && data[0]==0xEF && data[1]==0xBB && data[2]==0xBF){ text = Encoding.UTF8.GetString(data,3,data.Length-3); return true; }
+      if (data.Length>=2 && ((data[0]==0xFF && data[1]==0xFE) || (data[0]==0xFE && data[1]==0xFF))){ text = Encoding.Unicode.GetString(data); return true; }
+      try{ text = Encoding.UTF8.GetString(data); return true; }catch{}
+      try{ text = Encoding.GetEncoding(932).GetString(data); return true; }catch{}
+    }catch{}
+    return false;
+  }
   private void Run(){
     try{
       listener = new TcpListener(IPAddress.Loopback, port);
@@ -71,13 +109,14 @@ public class __CLASSNAME__ {
               entries.Append("]}"); body = entries.ToString();
             } catch { status = "400 Bad Request"; body = "{\"entries\":[]}"; }
           } else if (path.StartsWith("/read")){
-            // /read?fs=\\\\host\\path  (UTF-8 テキストとして返す)
+            // /read?fs=\\\\host\\path[&enc=utf8|sjis|cp932|auto]
             string query=null; int qm = path.IndexOf('?'); if (qm>=0) query = path.Substring(qm+1);
-            string fsPath=null; if (query!=null){ foreach(var pair in query.Split('&')){ if (pair.Length==0) continue; var kv=pair.Split('='); var k=UrlDecode(kv[0]); var v=(kv.Length>1? UrlDecode(kv[1]) : ""); if (k=="fs") fsPath=v; } }
+            string fsPath=null, encName=null; if (query!=null){ foreach(var pair in query.Split('&')){ if (pair.Length==0) continue; var kv=pair.Split('='); var k=UrlDecode(kv[0]); var v=(kv.Length>1? UrlDecode(kv[1]) : ""); if (k=="fs") fsPath=v; if (k=="enc"||k=="charset") encName=v; } }
+            if (!string.IsNullOrEmpty(encName) && encName.Trim().Equals("auto", StringComparison.OrdinalIgnoreCase)) encName = null;
             contentType = "text/plain; charset=utf-8"; string text="";
             try{
               if (string.IsNullOrEmpty(fsPath) || !File.Exists(fsPath)) throw new Exception("not found");
-              text = File.ReadAllText(fsPath, Encoding.UTF8);
+              if (!TryReadAllTextAuto(fsPath, encName, out text)) { text = ""; status = "500 Internal Server Error"; }
             } catch { status = "404 Not Found"; text = ""; }
             var bytesTxt = Encoding.UTF8.GetBytes(text);
             var headerRead = "HTTP/1.1 "+status
@@ -91,6 +130,40 @@ public class __CLASSNAME__ {
             Write(sock, headerRead); sock.Send(bytesTxt);
             try{ client.Close(); } catch{}
             continue;
+          } else if (path.StartsWith("/readbytes")){
+            // /readbytes?fs=\\\\host\\path  (raw bytes)
+            string query=null; int qm = path.IndexOf('?'); if (qm>=0) query = path.Substring(qm+1);
+            string fsPath=null; if (query!=null){ foreach(var pair in query.Split('&')){ if (pair.Length==0) continue; var kv=pair.Split('='); var k=UrlDecode(kv[0]); var v=(kv.Length>1? UrlDecode(kv[1]) : ""); if (k=="fs") fsPath=v; } }
+            byte[] data = new byte[0]; bool ok=true;
+            try{ if (string.IsNullOrEmpty(fsPath) || !File.Exists(fsPath)) throw new Exception("not found"); data = File.ReadAllBytes(fsPath); }
+            catch { ok=false; data = new byte[0]; }
+            string st = ok? "200 OK" : "404 Not Found";
+            var header = "HTTP/1.1 "+st
+              +"\r\nContent-Type: application/octet-stream"
+              +"\r\nAccess-Control-Allow-Origin: *"
+              +"\r\nCache-Control: no-store, no-cache, must-revalidate"
+              +"\r\nPragma: no-cache"
+              +"\r\nExpires: 0"
+              +"\r\nContent-Length: "+data.Length
+              +"\r\nConnection: close\r\n\r\n";
+            Write(sock, header); if (data.Length>0) sock.Send(data);
+            try{ client.Close(); } catch{}
+            continue;
+          } else if (path.StartsWith("/stat")){
+            // /stat?fs=\\\\host\\path → JSON { name,isDir,url,size,mtime }
+            string query=null; int qm = path.IndexOf('?'); if (qm>=0) query = path.Substring(qm+1);
+            string fsPath=null; if (query!=null){ foreach(var pair in query.Split('&')){ if (pair.Length==0) continue; var kv=pair.Split('='); var k=UrlDecode(kv[0]); var v=(kv.Length>1? UrlDecode(kv[1]) : ""); if (k=="fs") fsPath=v; } }
+            try{
+              if (string.IsNullOrEmpty(fsPath)) throw new Exception("fs required");
+              bool isDir = Directory.Exists(fsPath);
+              string name = isDir? new DirectoryInfo(fsPath).Name : Path.GetFileName(fsPath);
+              string url = FileUriFromPath(fsPath) + (isDir? "/" : "");
+              long? size = null; long? mtime = null;
+              if (isDir){ try{ var di=new DirectoryInfo(fsPath); var dt=di.LastWriteTimeUtc; mtime=(long)(dt - new DateTime(1970,1,1,0,0,0,DateTimeKind.Utc)).TotalMilliseconds; }catch{} }
+              else { try{ var fi=new FileInfo(fsPath); size=fi.Length; var dt=fi.LastWriteTimeUtc; mtime=(long)(dt - new DateTime(1970,1,1,0,0,0,DateTimeKind.Utc)).TotalMilliseconds; }catch{} }
+              body = "{\"name\":\""+JsonEscape(name)+"\",\"isDir\":"+(isDir?"true":"false")+",\"url\":\""+JsonEscape(url)+"\",\"size\":"+(size.HasValue? size.Value.ToString():"null")+",\"mtime\":"+(mtime.HasValue? mtime.Value.ToString():"null")+"}";
+              contentType = "application/json; charset=utf-8"; status = "200 OK";
+            } catch { status = "400 Bad Request"; contentType = "application/json; charset=utf-8"; body = "{}"; }
           } else if (path.StartsWith("/write")){
             // POST /write?fs=\\\\host\\path  body=utf-8 text
             string query=null; int qm = path.IndexOf('?'); if (qm>=0) query = path.Substring(qm+1);

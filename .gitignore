@@ -1,7 +1,8 @@
-﻿*.swp
+*.swp
 prompt.md
 TODO.md
 *.tar
+diag.ps1
 # Windows Mark-of-the-Web alternate stream files expanded as real files on non-NTFS
 *:\Zone.Identifier
 *:Zone.Identifier
