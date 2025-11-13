@@ -1499,6 +1499,11 @@
       const parent = _dirnameURL(u.toString());
       const baseName = _basename(u.toString());
       if (!baseName) return null;
+      // Bust directory cache once to avoid stale size/mtime right after save/load
+      try{
+        const key = (function(){ try{ return _ensureSlash(parent)?.toString()||null; }catch{ return null; } })();
+        if (key && _dirCache && _dirCache.delete){ _dirCache.delete(key); }
+      }catch{}
       const list = await _listDirEntriesWithQuickRetry(parent);
       if (!Array.isArray(list)) return null;
       let caseSensitive = false; try{ if (u.host && u.host.toLowerCase()==='wsl.localhost') caseSensitive = true; }catch{}
@@ -2397,7 +2402,6 @@
         try {
           const xhr = new XMLHttpRequest();
           xhr.open('GET', urlStr, true);
-            b.viewRow = caretRow | 0; b.viewCol = caretCol | 0;
           xhr.onload = ()=>{
             // file:// では status 0 が正常扱いの場合がある
             if (xhr.status === 0 || (xhr.status >= 200 && xhr.status < 300)){
@@ -2494,14 +2498,34 @@
       const mode = opts.mode || (buffers.length===0 ? 'new' : 'replace');
       if (mode === 'new'){
         const exist = _findBufferByURL(urlStr);
+        let targetIdx = -1;
         if (exist >= 0){
           // Switch to existing buffer without disturbing current editor state before switch
           _switchToBuffer(exist);
+          targetIdx = exist|0;
         } else {
           // Create buffer first; _switchToBuffer will load its text and keep previous buffer's view saved correctly
           _addBuffer({ name: _basename(path), path: urlStr, text: t, modified:false, enc:'utf-8', ff, bom: hasBomChar });
           _switchToBuffer(buffers.length-1);
+          targetIdx = (buffers.length-1)|0;
         }
+        // Establish external meta baseline on load (new buffer)
+        try{
+          const bb = buffers[targetIdx];
+          if (bb && bb.path && /^file:\/\//i.test(bb.path)){
+            bb._externalChangeIgnored = false;
+            const meta = await _statFileMeta(bb.path);
+            if (meta){
+              if (typeof meta.mtime === 'number') bb._extMtime = meta.mtime;
+              if (typeof meta.size  === 'number') bb._extSize  = meta.size;
+              try{ console.log('[baseline] after new-load', bb.name, 'mtime=', bb._extMtime, 'size=', bb._extSize); }catch{}
+            } else {
+              // Retry once after a short delay; some sources update metadata after read
+              try{ setTimeout(async()=>{ try{ const m2=await _statFileMeta(bb.path); if(m2){ if(typeof m2.mtime==='number') bb._extMtime=m2.mtime; if(typeof m2.size==='number') bb._extSize=m2.size; try{ console.log('[baseline] after new-load (delayed)', bb.name, 'mtime=', bb._extMtime, 'size=', bb._extSize); }catch{} try{ _schedulePersist('load-retry'); }catch{} } }catch{} }, 600); }catch{}
+            }
+            try{ _schedulePersist('load'); }catch{}
+          }
+        }catch{}
       } else {
         // Replace current buffer content in-place
         const b=currentBuffer();
@@ -2516,7 +2540,10 @@
               if (typeof meta.mtime === 'number') b._extMtime = meta.mtime;
               if (typeof meta.size  === 'number') b._extSize  = meta.size;
               try{ console.log('[baseline] after replace-load', b.name, 'mtime=', b._extMtime, 'size=', b._extSize); }catch{}
+            } else {
+              try{ setTimeout(async()=>{ try{ const m2=await _statFileMeta(b.path); if(m2){ if(typeof m2.mtime==='number') b._extMtime=m2.mtime; if(typeof m2.size==='number') b._extSize=b._extSize||m2.size; try{ console.log('[baseline] after replace-load (delayed)', b.name, 'mtime=', b._extMtime, 'size=', b._extSize); }catch{} try{ _schedulePersist('load-retry'); }catch{} } }catch{} }, 600); }catch{}
             }
+            try{ _schedulePersist('load'); }catch{}
           }catch{}
         }
         // Reflect into editor now since we stay on the same buffer
@@ -4706,6 +4733,45 @@
     if (/^:set\s+norawkeys\s*$/i.test(cmd)){ _optRawKeys = false; toast('rawkeys: off', 900); return; }
     if (/^:set\s+rawkeys!\s*$/i.test(cmd)){ _optRawKeys = !_optRawKeys; toast('rawkeys: ' + (_optRawKeys?'on':'off'), 900); return; }
     if (/^:set\s+rawkeys\?\s*$/i.test(cmd)){ toast('rawkeys: ' + (_optRawKeys?'on':'off'), 1200); return; }
+    // :lastsynctime — print last synchronized filesystem mtime/size of current buffer (debug; no I/O)
+    if (/^:lastsynctime\s*$/i.test(cmd)){
+      const b = currentBuffer();
+      if (!b){ toast('no buffer'); try{ _triggerVisualBell(); }catch{} _setMode('NORMAL'); return; }
+      const mt = (typeof b._extMtime === 'number') ? b._extMtime : null;
+      const sz = (typeof b._extSize  === 'number') ? b._extSize  : null;
+      try{ console.log('[debug] last-sync', { name:(b&&b.name)||null, path:(b&&b.path)||null, mtime:mt, size:sz, ignored:!!b._externalChangeIgnored }); }catch{}
+      // Keep silent by design; only console output
+      _setMode('NORMAL');
+      return;
+    }
+    // :statmeta — I/O: fetch current file's metadata now (mtime/size) and print
+    if (/^:statmeta\s*$/i.test(cmd)){
+      (async()=>{
+        const b = currentBuffer();
+        if (!b || !b.path || !/^file:\/\//i.test(b.path)){ toast('no file-backed buffer'); try{ _triggerVisualBell(); }catch{} _setMode('NORMAL'); return; }
+        const meta = await _statFileMeta(b.path);
+        try{ console.log('[debug] statmeta', { name:(b&&b.name)||null, path:b.path, meta }); }catch{}
+      })();
+      _setMode('NORMAL');
+      return;
+    }
+    // :statmeta! — I/O: dump raw directory entry for the current file (to confirm provider fields)
+    if (/^:statmeta!\s*$/i.test(cmd)){
+      (async()=>{
+        const b = currentBuffer();
+        if (!b || !b.path || !/^file:\/\//i.test(b.path)){ toast('no file-backed buffer'); try{ _triggerVisualBell(); }catch{} _setMode('NORMAL'); return; }
+        try{
+          const parent = _dirnameURL(b.path);
+          const baseName = _basename(b.path);
+          const list = await _listDirEntriesWithQuickRetry(parent);
+          let caseSensitive = false; try{ const u = new URL(b.path); if (u.host && u.host.toLowerCase()==='wsl.localhost') caseSensitive = true; }catch{}
+          const ent = Array.isArray(list) ? list.find(e=> e && !e.isDir && (caseSensitive ? (e.name===baseName) : (String(e.name||'').toLowerCase()===String(baseName||'').toLowerCase()))) : null;
+          try{ console.log('[debug] statmeta! raw-entry', { parent, baseName, entry: ent||null }); }catch{}
+        }catch(e){ try{ console.warn('statmeta! failed', e); }catch{} }
+      })();
+      _setMode('NORMAL');
+      return;
+    }
     // :dumpkeys [N] — copy last N (or all) debug key events to clipboard
     {
       const mDump = cmd.match(/^:dumpkeys(?:\s*([0-9０-９]+))?\s*$/i);
@@ -4808,6 +4874,7 @@
           }catch{}
           _setTitle(); _renderTabbar();
           toast('written: ' + _prettyFileUrlLabel(targetUrl));
+          try{ _schedulePersist('save'); }catch{}
           // Close current before dialog (spec in #192)
           _closeCurrentBuffer();
           if (bang){ window.close(); return; }
@@ -4862,6 +4929,7 @@
           }catch{}
           _setTitle(); _renderTabbar();
           toast('written: ' + _prettyFileUrlLabel(targetUrl));
+          try{ _schedulePersist('save'); }catch{}
           _closeCurrentBuffer();
         }
       })();
@@ -4894,6 +4962,7 @@
           } else { toast('write failed: ' + (b.name||'')); try{ _triggerVisualBell(); }catch{} }
         }
         _setTitle(); _renderTabbar();
+        try{ _schedulePersist('save-all'); }catch{}
       })();
       _setMode('NORMAL');
       return;
@@ -4996,6 +5065,7 @@
           }catch{}
           _setTitle(); _renderTabbar();
           toast('written: ' + _prettyFileUrlLabel(targetUrl));
+          try{ _schedulePersist('save'); }catch{}
         }
       })().finally(()=>{ try{ _w_restore(); }catch{} });
       _setMode('NORMAL');
@@ -7809,8 +7879,8 @@
             // INSERT では「印字系/編集系キー」はデフォルト処理に任せるため、フォーカスだけ移してイベントは抑止しない。
             // これにより、最初のキーが消費されて無視される問題を回避。
             if (!isCmd && !isEditor && !isFormEl){
-            // Let function keys fall through so tab/help shortcuts work (F1–F9)
-            if (['F1','F2','F3','F4','F5','F6','F7','F8','F9'].includes(e.key)) return;
+            // Let function keys fall through so tab/help shortcuts work (F1–F9) and allow DevTools (F12)
+            if (['F1','F2','F3','F4','F5','F6','F7','F8','F9','F12'].includes(e.key)) return;
             // Avoid hijacking OS/meta shortcuts
             if (e.metaKey) return;
             _globalKeyRouting = true;
@@ -9209,19 +9279,11 @@
   const ff = (b&&b.ff)||'unix';
   const bom = !!(b&&b.bom);
   let out = String(textUtf8||'');
-  // #493: six では表示上 EOF 直後に 1 行余白を許容しているため、実際の保存内容が末尾改行なしだと
-  // 他ツールで最終行が表示上より 1 行少なく見える。内部表現は行区切りを '\n' ベースで保持しているので
-  // 保存時に（空でない && 終端に改行が無い）場合は 1 つ末尾改行を付与し、フォーマット(ff)に合わせて変換する。
-  // 空バッファ(out.length===0)はそのまま（追加すると意図しない 1 行ファイルになるため）。
+  // 改行コード変換のみ: 内部は \n 前提。dos は CRLF, mac は CR 単体。末尾改行の強制追加は行わない。
   try{
-    if (out.length > 0 && !/\n$/.test(out)){
-      out += '\n';
-    }
-    // 改行コード変換: 内部は \n 前提。dos は CRLF, mac は CR 単体。
     if (ff === 'dos'){
       out = out.replace(/\n/g, '\r\n');
     } else if (ff === 'mac'){
-      // 既に追加した末尾 \n も含め全てを \r に変換
       out = out.replace(/\n/g, '\r');
     }
   }catch{}
@@ -9298,15 +9360,10 @@
   }catch(e){ toast('write failed'); try{ _triggerVisualBell(); }catch{} return false; }
   }
 
-  // Normalize internal text right before save: ensure exactly one trailing LF when non-empty.
+  // Normalize internal text right before save: preserve as-is (no forced trailing newline).
   function _normalizeTextForSaveInternal(s){
     try{
-      let t = String(s||'');
-      if (t.length===0) return t;
-      // If missing trailing LF, add one. If already ends with LF(s), leave as-is.
-      // これにより、保存時は「末尾に改行なし」を解消しつつ、不要な空行追加はしない (#495)
-      if (!t.endsWith('\n')) return t + '\n';
-      return t;
+      return String(s||'');
     }catch{ return String(s||''); }
   }
 
@@ -9359,6 +9416,22 @@
               if (typeof meta.size  === 'number') b._extSize  = meta.size;
               b._externalChangeIgnored=false;
               try{ console.log('[baseline] after normal-save', b.name, 'mtime=', b._extMtime, 'size=', b._extSize); }catch{}
+            } else if (b){
+              // Retry once later (some hosts may populate mtime/size slightly after save completes)
+              try{
+                setTimeout(async()=>{
+                  try{
+                    const meta2 = await _statFileMeta(b && (b.path||urlStr));
+                    if (meta2){
+                      if (typeof meta2.mtime === 'number') b._extMtime = meta2.mtime;
+                      if (typeof meta2.size  === 'number') b._extSize  = meta2.size;
+                      b._externalChangeIgnored=false;
+                      try{ console.log('[baseline] after save (delayed)', b.name, 'mtime=', b._extMtime, 'size=', b._extSize); }catch{}
+                      try{ _schedulePersist('meta-retry'); }catch{}
+                    }
+                  }catch{}
+                }, 800);
+              }catch{}
             }
           }catch{}
         }
@@ -10602,6 +10675,29 @@
         _renderTabbar();
         _initOverlayPalette();
         _wireHelpOpenShortcut();
+        // Background: on startup session restore, refresh ext mtime/size for all file-backed buffers
+        // Skip ones marked as external-change-ignored. Persist once after refresh.
+        try{
+          setTimeout(()=>{
+            (async()=>{
+              let touched = false;
+              for (const b of buffers){
+                try{
+                  if (!b || !b.path || !/^file:\/\//i.test(b.path)) continue;
+                  if (b._externalChangeIgnored) continue; // do not override when user chose to ignore
+                  const meta = await _statFileMeta(b.path);
+                  if (meta){
+                    let any = false;
+                    if (typeof meta.mtime === 'number' && meta.mtime !== b._extMtime){ b._extMtime = meta.mtime; any = true; }
+                    if (typeof meta.size  === 'number' && meta.size  !== b._extSize ){ b._extSize  = meta.size;  any = true; }
+                    if (any) touched = true;
+                  }
+                }catch{}
+              }
+              if (touched){ try{ _schedulePersist('startup-mtime'); }catch{} }
+            })();
+          }, 0);
+        }catch{}
   // Ensure initial IME hint/visuals match current mode (typically NORMAL)
   try{ _setMode(_mode); }catch{}
         // Wire encoding button and popup interactions

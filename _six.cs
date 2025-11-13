@@ -5,6 +5,7 @@ using System.Text;
 using System.IO;
 using System.Threading;
 using System.Diagnostics;
+using System.Linq;
 
 // NOTE: six.ps1 replaces __CLASSNAME__ to a unique class per run to avoid type collisions.
 public class __CLASSNAME__ {
@@ -47,8 +48,26 @@ public class __CLASSNAME__ {
               if (!string.IsNullOrEmpty(fsPath)) basePath = fsPath; else if (!string.IsNullOrEmpty(cwdUrl)) { var uri=new Uri(cwdUrl); if (uri.Scheme!="file") throw new Exception("bad scheme"); basePath = uri.LocalPath; }
               if (string.IsNullOrEmpty(basePath) || !Directory.Exists(basePath)) throw new Exception("not found");
               var entries=new StringBuilder(); entries.Append("{\"entries\":["); bool firstE=true;
-              try{ foreach(var d in Directory.EnumerateDirectories(basePath)){ var name=Path.GetFileName(d); var url=FileUriFromPath(d).TrimEnd('/')+"/"; if(!firstE) entries.Append(','); firstE=false; entries.Append("{\"name\":\""+JsonEscape(name)+"\",\"isDir\":true,\"url\":\""+JsonEscape(url)+"\"}"); } } catch{}
-              try{ foreach(var f in Directory.EnumerateFiles(basePath)){ var name=Path.GetFileName(f); var url=FileUriFromPath(f); if(!firstE) entries.Append(','); firstE=false; entries.Append("{\"name\":\""+JsonEscape(name)+"\",\"isDir\":false,\"url\":\""+JsonEscape(url)+"\"}"); } } catch{}
+              try{
+                foreach(var d in Directory.EnumerateDirectories(basePath)){
+                  var name=Path.GetFileName(d);
+                  var url=FileUriFromPath(d).TrimEnd('/')+"/";
+                  long? mtime = null;
+                  try{ var di = new DirectoryInfo(d); var dt = di.LastWriteTimeUtc; mtime = (long)(dt - new DateTime(1970,1,1,0,0,0,DateTimeKind.Utc)).TotalMilliseconds; } catch {}
+                  if(!firstE) entries.Append(','); firstE=false;
+                  entries.Append("{\"name\":\""+JsonEscape(name)+"\",\"isDir\":true,\"url\":\""+JsonEscape(url)+"\",\"size\":null,\"mtime\":"+(mtime.HasValue? mtime.Value.ToString():"null")+"}");
+                }
+              } catch{}
+              try{
+                foreach(var f in Directory.EnumerateFiles(basePath)){
+                  var name=Path.GetFileName(f);
+                  var url=FileUriFromPath(f);
+                  long? size = null; long? mtime = null;
+                  try{ var fi = new FileInfo(f); size = fi.Length; var dt = fi.LastWriteTimeUtc; mtime = (long)(dt - new DateTime(1970,1,1,0,0,0,DateTimeKind.Utc)).TotalMilliseconds; } catch {}
+                  if(!firstE) entries.Append(','); firstE=false;
+                  entries.Append("{\"name\":\""+JsonEscape(name)+"\",\"isDir\":false,\"url\":\""+JsonEscape(url)+"\",\"size\":"+(size.HasValue? size.Value.ToString():"null")+",\"mtime\":"+(mtime.HasValue? mtime.Value.ToString():"null")+"}");
+                }
+              } catch{}
               entries.Append("]}"); body = entries.ToString();
             } catch { status = "400 Bad Request"; body = "{\"entries\":[]}"; }
           } else if (path.StartsWith("/read")){
@@ -61,7 +80,14 @@ public class __CLASSNAME__ {
               text = File.ReadAllText(fsPath, Encoding.UTF8);
             } catch { status = "404 Not Found"; text = ""; }
             var bytesTxt = Encoding.UTF8.GetBytes(text);
-            var headerRead = "HTTP/1.1 "+status+"\r\nContent-Type: "+contentType+"\r\nAccess-Control-Allow-Origin: *\r\nContent-Length: "+bytesTxt.Length+"\r\nConnection: close\r\n\r\n";
+            var headerRead = "HTTP/1.1 "+status
+              +"\r\nContent-Type: "+contentType
+              +"\r\nAccess-Control-Allow-Origin: *"
+              +"\r\nCache-Control: no-store, no-cache, must-revalidate"
+              +"\r\nPragma: no-cache"
+              +"\r\nExpires: 0"
+              +"\r\nContent-Length: "+bytesTxt.Length
+              +"\r\nConnection: close\r\n\r\n";
             Write(sock, headerRead); sock.Send(bytesTxt);
             try{ client.Close(); } catch{}
             continue;
@@ -86,14 +112,14 @@ public class __CLASSNAME__ {
             int remaining = Math.Max(0, contentLength - (int)receivedBody.Length);
             var bufBody = new byte[8192];
             while(remaining > 0){ int n; try{ n = sock.Receive(bufBody); } catch { break; } if (n<=0) break; receivedBody.Write(bufBody,0,n); remaining -= n; if (receivedBody.Length > 50000000) break; }
-            string textToWrite = "";
-            try{ textToWrite = Encoding.UTF8.GetString(receivedBody.ToArray()); }catch{ textToWrite = ""; }
-            // Write file
+            // Write file (write raw bytes as-is to preserve encoding/BOM/newlines exactly)
             try{
               if (string.IsNullOrEmpty(fsPath)) throw new Exception("fs required");
               var dir = Path.GetDirectoryName(fsPath);
               if (!string.IsNullOrEmpty(dir) && !Directory.Exists(dir)) Directory.CreateDirectory(dir);
-              File.WriteAllText(fsPath, textToWrite, Encoding.UTF8);
+              var data = receivedBody.ToArray();
+              File.WriteAllBytes(fsPath, data);
+              try { File.SetLastWriteTimeUtc(fsPath, DateTime.UtcNow); } catch {}
               body = "{\"ok\":true}"; contentType = "application/json; charset=utf-8"; status = "200 OK";
             } catch (Exception ex) {
               status = "400 Bad Request"; contentType = "application/json; charset=utf-8"; body = "{\"ok\":false,\"error\":\""+JsonEscape(ex.Message)+"\"}";
@@ -129,7 +155,14 @@ public class __CLASSNAME__ {
             } catch { status = "400 Bad Request"; body = "{\"shares\":[]}"; }
           } else { status = "404 Not Found"; body = "{\"entries\":[]}"; }
           var bytes = Encoding.UTF8.GetBytes(body);
-          var headerJson = "HTTP/1.1 "+status+"\r\nContent-Type: "+contentType+"\r\nAccess-Control-Allow-Origin: *\r\nContent-Length: "+bytes.Length+"\r\nConnection: close\r\n\r\n";
+          var headerJson = "HTTP/1.1 "+status
+            +"\r\nContent-Type: "+contentType
+            +"\r\nAccess-Control-Allow-Origin: *"
+            +"\r\nCache-Control: no-store, no-cache, must-revalidate"
+            +"\r\nPragma: no-cache"
+            +"\r\nExpires: 0"
+            +"\r\nContent-Length: "+bytes.Length
+            +"\r\nConnection: close\r\n\r\n";
           Write(sock, headerJson); sock.Send(bytes);
         } catch { }
         try{ client.Close(); } catch{}
@@ -137,3 +170,4 @@ public class __CLASSNAME__ {
     } catch { }
   }
 }
+
