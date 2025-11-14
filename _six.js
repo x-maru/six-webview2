@@ -2165,6 +2165,9 @@
         return;
       }
       const nextIndex = Math.min(removedIndex, buffers.length - 1);
+      // Force switch even when nextIndex equals previous currentIdx (tab array shifted by splice)
+      // Avoid early-return path in _switchToBuffer that skips when i===currentIdx.
+      currentIdx = -1;
       _switchToBuffer(nextIndex);
     }catch{}
   }
