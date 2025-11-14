@@ -111,6 +111,7 @@ window.THEME = {
   helpCloseFg: "#e6e6e6",
   helpCloseBorder: "#3f5074",
 
-  // Popup active line highlight (encodeSet popupなど)
-  popupActiveLine: "#00a090"
+  // Popup (:e popup, :b popup, encodeSet popupなど)
+  popupActiveLine: "#00a090", // active line highlight
+  popupHeaderBg: "#000030"
 };

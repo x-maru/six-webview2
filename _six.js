@@ -2162,6 +2162,32 @@
     }catch{}
   }
 
+  // Close buffer at specific index without forcing switch unless necessary
+  function _closeBufferAt(index){
+    try{
+      if (!(index>=0 && index<buffers.length)) return;
+      const removedIndex = index;
+      const removingCurrent = (removedIndex === currentIdx);
+      buffers.splice(removedIndex, 1);
+      try{ _schedulePersist('close-buffer'); }catch{}
+      if (buffers.length === 0){
+        try{ _persistSessionNow(); }catch{}
+        _quittingAll = true; window.close();
+        return;
+      }
+      if (removingCurrent){
+        const nextIndex = Math.min(removedIndex, buffers.length - 1);
+        currentIdx = -1; // force switch
+        _switchToBuffer(nextIndex);
+      } else {
+        // If current index was after removed, shift left by one
+        if (currentIdx > removedIndex){ currentIdx = currentIdx - 1; }
+        // reflect tabbar update for non-current removal
+        try{ _renderTabbar && _renderTabbar(); }catch{}
+      }
+    }catch{}
+  }
+
   // Enter/Tab 確定統合（:e ファイルポップアップ用）
   function _confirmFilePopupSelection(){
     try{
@@ -5383,7 +5409,7 @@
           const maxH = Math.max(0, band.viewH - topRel - 8);
           bufpopup.style.height = '';
           bufpopup.style.maxHeight = (maxH>0 ? (maxH + 'px') : '');
-          if (bufpopupInner){ bufpopupInner.style.maxHeight = (maxH>0 ? (Math.max(0, maxH - 8) + 'px') : ''); }
+          if (bufpopupInner){ bufpopupInner.style.height=''; bufpopupInner.style.maxHeight = (maxH>0 ? (Math.max(0, maxH - 8) + 'px') : ''); }
         } else {
           // Place above command float: anchor bottom so the gap stays exactly 1.5rem
           const bottomAbs = Math.max(8, windowH - ((cr.top - gapRem)|0));
@@ -5392,7 +5418,7 @@
           const available = Math.max(0, (cr.top - gapRem) - vr.top - 8);
           bufpopup.style.height = '';
           bufpopup.style.maxHeight = (available>0 ? (available + 'px') : '');
-          if (bufpopupInner){ bufpopupInner.style.maxHeight = (available>0 ? (Math.max(0, available - 8) + 'px') : ''); }
+          if (bufpopupInner){ bufpopupInner.style.height=''; bufpopupInner.style.maxHeight = (available>0 ? (Math.max(0, available - 8) + 'px') : ''); }
         }
       } else {
         // Fallback: top-aligned with 2.5 lines margin, variable height within bottom margin
@@ -5402,7 +5428,7 @@
         const maxByBottom = Math.max(0, band.viewH - (topAbs - (band.rect.top|0)) - band.bottomMargin);
         bufpopup.style.height = '';
         bufpopup.style.maxHeight = (maxByBottom>0 ? (maxByBottom + 'px') : '');
-        if (bufpopupInner){ bufpopupInner.style.maxHeight = (maxByBottom>0 ? (Math.max(0, maxByBottom - 8) + 'px') : ''); }
+        if (bufpopupInner){ bufpopupInner.style.height=''; bufpopupInner.style.maxHeight = (maxByBottom>0 ? (Math.max(0, maxByBottom - 8) + 'px') : ''); }
       }
     }catch{}
   }
@@ -7968,6 +7994,52 @@
         }catch{}
       });
       cmdinput.addEventListener('keydown',(e)=>{
+        // :b popup 拡張 — 'd' で選択バッファを破棄（:b のままのときのみ有効）
+        try{
+          if (_bufPopupVisible() && !e.ctrlKey && !e.altKey && !e.metaKey && e.key==='d'){
+            const vNow = String(cmdinput.value||'');
+            const isBareB = /^\s*:?\s*b$/i.test(vNow);
+            if (isBareB){
+              e.preventDefault(); e.stopPropagation();
+              const list = _bufPopupComputeList();
+              if (list && list.length>0){
+                const visIdx = Math.max(0, Math.min(list.length-1, _bufSel|0));
+                const absIdx = list[visIdx] ? list[visIdx].i : currentIdx;
+                const target = (absIdx>=0 && absIdx<buffers.length) ? buffers[absIdx] : null;
+                if (target && target.modified){
+                  // Modified: popupを閉じ、対象へ切替して :q の確認ダイアログへ
+                  try{ _cmdExitAndRestoreView({ forImmediateSwitch:true }); }catch{}
+                  setTimeout(()=>{
+                    try{ if (absIdx !== currentIdx){ _switchToBuffer(absIdx); } }catch{}
+                    setTimeout(()=>{ try{ runCommand(':q'); }catch{} }, 0);
+                  }, 0);
+                } else if (target){
+                  // Unmodified: その場で破棄し :b popup と CMD を継続
+                  const prevVal = String(cmdinput && cmdinput.value || '');
+                  const keepCmd = (_mode === 'CMD');
+                  _closeBufferAt(absIdx);
+                  if (keepCmd){
+                    try{ _setMode('CMD'); }catch{}
+                    try{
+                      if (bufpopup){ bufpopup.dataset.kind='buf'; bufpopup.style.display=''; }
+                      _layoutBufPopup(); _bufPopupRender();
+                      if (cmdinput){
+                        cmdinput.value = prevVal;
+                        try { cmdinput.dispatchEvent(new Event('input', { bubbles:true })); } catch {}
+                        // フォーカス喪失対策: 次フレームで再度フォーカス (#587)
+                        try{ setTimeout(()=>{ try{ cmdinput.focus(); }catch{} }, 0); }catch{}
+                        try{ setTimeout(()=>{ try{ cmdinput.focus(); }catch{} }, 80); }catch{}
+                      }
+                    }catch{}
+                  } else {
+                    try{ _bufPopupRender(); }catch{}
+                  }
+                }
+              }
+              return;
+            }
+          }
+        }catch{}
         // HOME キー拡張 (#577): :e 入力中はファイル名先頭へ/':'先頭へトグル
         if (e.key==='Home' && !e.ctrlKey && !e.metaKey && !e.altKey){
           try{
@@ -9213,7 +9285,76 @@
     if (!bufpopup || !bufpopupInner) return;
     bufpopup.dataset.kind = 'buf';
     bufpopupInner.innerHTML = '';
+    // 先に候補を計算（ヘッダのグレー表示条件に使用）
     const list = _bufPopupComputeList();
+    // 操作ヘッダ: 「数字, Fキー ダイレクト選択」 + 「d バッファ破棄」
+    try{
+      const vNow = String((cmdinput && cmdinput.value) || '');
+      const isBareB = /^\s*:?\s*b$/i.test(vNow);
+      const isBWithSpaceOnly = /^\s*:?\s*b\s+$/i.test(vNow);
+      const isBWithSpaceAndMore = /^\s*:?\s*b\s+\S/.test(vNow);
+      const noItems = !(Array.isArray(list) && list.length>0);
+      const hdr = document.createElement('div');
+      hdr.className = 'hint';
+      try{
+        hdr.style.padding = '2px 0 6px 0';
+        hdr.style.userSelect='none';
+        hdr.style.display='flex';
+        hdr.style.gap='1.25rem';
+        hdr.style.alignItems='center';
+        // 追加の上下マージン (#587)
+        hdr.style.marginTop = '0.2rem';
+        hdr.style.marginBottom = '0.1rem';
+        // ヘッダ背景（テーマ）
+        const bg = (window && window.THEME && window.THEME.popupHeaderBg) ? window.THEME.popupHeaderBg : null;
+        if (bg) hdr.style.background = String(bg);
+      }catch{}
+      // 左側: 「[数字], [Fキー] ダイレクト選択」
+      const left = document.createElement('div');
+      try{ left.style.display='flex'; left.style.alignItems='center'; }catch{}
+      // 数字 (kbd) + 直後のカンマ
+      const kbdStyle = (el)=>{
+        try{
+          el.style.background = 'var(--six-kbd-bg, var(--six-help-kbd-bg, rgb(95,143,223)))';
+          el.style.color = 'var(--six-kbd-fg, var(--six-help-kbd-fg, #000))';
+          el.style.borderRadius = '0.18rem';
+          el.style.padding = '0 0.22rem';
+        }catch{}
+      };
+      const kNum = document.createElement('kbd'); kNum.textContent='数字'; kbdStyle(kNum);
+      const comma = document.createElement('span'); comma.textContent = ',';
+      try{ comma.style.marginLeft='0.25rem'; }catch{}
+      const kF = document.createElement('kbd'); kF.textContent='Fキー'; kbdStyle(kF);
+      const direct = document.createElement('span'); direct.textContent='ダイレクト選択';
+      try{ direct.style.marginLeft = '0.42rem'; }catch{}
+      // 3rem 左マージンは「数字,」ブロックに適用
+      const numWrap = document.createElement('span');
+      try{ numWrap.style.marginLeft='3rem'; }catch{}
+      numWrap.appendChild(kNum); numWrap.appendChild(comma);
+      left.appendChild(numWrap);
+      left.appendChild(document.createTextNode(' '));
+      left.appendChild(kF);
+      left.appendChild(direct);
+      // 入力状態に応じたグレー表示
+      // - 候補ゼロ: 数字部分のみグレー（Fキー ダイレクト選択は常に有効表示）
+      // - テキストフィルタ中（:b <text>）: 数字部分のみグレー
+      if (noItems){
+        try{ kNum.style.opacity='0.5'; comma.style.color='#777'; }catch{}
+      } else if (isBWithSpaceAndMore){
+        try{ kNum.style.opacity='0.5'; comma.style.color='#777'; }catch{}
+      }
+      // 右側: 「d バッファ破棄」
+      const right = document.createElement('div');
+      try{ right.style.display='flex'; right.style.alignItems='center'; right.style.marginLeft='1rem'; }catch{}
+      const k = document.createElement('kbd'); k.textContent = 'd'; kbdStyle(k);
+      try{ k.style.marginRight = '0.42rem'; }catch{}
+      const txt = document.createElement('span'); txt.textContent = 'バッファ破棄';
+      // d の利用可否: :b 以外、または候補ゼロならグレー
+      if (!isBareB || noItems){ try{ k.style.opacity='0.45'; txt.style.color='#777'; }catch{} }
+      hdr.appendChild(left); hdr.appendChild(right);
+      right.appendChild(k); right.appendChild(txt);
+      bufpopupInner.appendChild(hdr);
+    }catch{}
     // 絶対指定があれば可視インデックスへ変換
     if (_bufSelAbs != null){
       const visIdx = list.findIndex(({i})=> i === _bufSelAbs);
@@ -9227,6 +9368,11 @@
       div.className = 'item'+(visIdx===_bufSel?' active':'');
       const num = document.createElement('span'); num.className='num';
       try{
+        // 更新フラグ（*）：Fキー表示の左に固定幅で配置
+        const chg = document.createElement('span');
+        try{ chg.style.display='inline-block'; chg.style.width='1ch'; chg.style.marginRight='0.25rem'; }catch{}
+        if (b && b.modified){ chg.textContent='*'; try{ chg.style.color='#d33'; }catch{} }
+        num.appendChild(chg);
         const n = i+1;
         if (n>=1 && n<=8){
           const k = document.createElement('kbd'); k.textContent = 'F' + String(n);
@@ -10809,18 +10955,28 @@
           }
           // (Plain F5 is handled by the generic F1–F8 tab switching below; do not swallow here)
 
-          // :b popup visible → F1–F8 or digits 1–8 = direct selection (absolute index)
+          // :b popup visible → F1–F8 or digits 1–8 = direct selection（ただし、テキストフィルタ中は数字を無効化して入力として扱う）
           if (bufOpen && (/^F[1-8]$/.test(key) || /^[1-8]$/.test(key))){
-            try{ e.preventDefault(); e.stopPropagation(); }catch{}
-            const n = /^F/.test(key) ? parseInt(key.slice(1), 10) : parseInt(key, 10);
-            const targetIdx = n - 1;
-            if (targetIdx >= 0 && targetIdx < buffers.length){
-              // Fully emulate 'Esc → F{n}': exit CMD/popups with guarded viewport restore (light), then switch next tick
-              let st0 = 0; try{ st0 = (editor && typeof editor.scrollTop==='number') ? (editor.scrollTop|0) : 0; }catch{}
-              try{ _cmdExitAndRestoreView({ forImmediateSwitch:true }); }catch{}
-              setTimeout(()=>{ try{ if (targetIdx !== currentIdx){ _switchToBuffer(targetIdx); } else { _keepViewportNoop(st0); } }catch{} }, 0);
+            // In CMD with ":b <text>..." (text filter), disable digit direct selection
+            const isFKey = /^F[1-8]$/.test(key);
+            const isDigit = /^[1-8]$/.test(key);
+            const vNow = (function(){ try{ return String((cmdinput && cmdinput.value) || ''); }catch{ return ''; } })();
+            const isBWithSpaceAndMore = /^\s*:?:?\s*b\s+\S/i.test(vNow);
+            const textFilterActive = (inCmd && _bufFilterKind === 'text' && isBWithSpaceAndMore);
+            const allow = isFKey || !textFilterActive; // always allow F-keys; block digits under text filter
+            if (allow){
+              try{ e.preventDefault(); e.stopPropagation(); }catch{}
+              const n = isFKey ? parseInt(key.slice(1), 10) : parseInt(key, 10);
+              const targetIdx = n - 1;
+              if (targetIdx >= 0 && targetIdx < buffers.length){
+                // Fully emulate 'Esc → F{n}': exit CMD/popups with guarded viewport restore (light), then switch next tick
+                let st0 = 0; try{ st0 = (editor && typeof editor.scrollTop==='number') ? (editor.scrollTop|0) : 0; }catch{}
+                try{ _cmdExitAndRestoreView({ forImmediateSwitch:true }); }catch{}
+                setTimeout(()=>{ try{ if (targetIdx !== currentIdx){ _switchToBuffer(targetIdx); } else { _keepViewportNoop(st0); } }catch{} }, 0);
+              }
+              return;
             }
-            return;
+            // If not allowed (text filter + digit), fall through so the key is handled by cmdinput
           }
 
           // When any modal or non-buf popup is open, consume function keys to avoid host defaults (except F10 handled above)
