@@ -2465,15 +2465,17 @@
     try {
       const base = baseForRelative || _htmlBaseURL();
       urlStr = _normalizeToURLString(path, base); // Normalize the URL string
-      // UNC/WSL (file://host/...) は最初に API /read を優先して試す（fetch/XHR が CORS/権限で失敗しやすいため）
+      // file:// は常にローカルAPI /read を優先（文字コード自動判定のため）
       try {
         const uProbe = new URL(urlStr);
-        if (_apiIsEnabled() && uProbe.protocol==='file:' && uProbe.host){
-          const fsPath0 = ('\\\\' + uProbe.host + decodeURIComponent(uProbe.pathname).replace(/\//g,'\\'));
-          const apiRead0 = _apiBase + 'read?fs=' + encodeURIComponent(fsPath0);
-          try{ txt = await _fetchTextWithTimeout(apiRead0, 8000); _apiNoteSuccess(); } catch(e){ _apiNoteFailure(); }
+        if (_apiIsEnabled() && uProbe.protocol==='file:'){
+          const fsPath0 = _fsPathFromFileURL(uProbe);
+          if (fsPath0){
+            const apiRead0 = _apiBase + 'read?fs=' + encodeURIComponent(fsPath0);
+            try{ txt = await _fetchTextWithTimeout(apiRead0, 8000); _apiNoteSuccess(); } catch(e){ _apiNoteFailure(); }
+          }
         }
-      } catch { /* not UNC/WSL or no API */ }
+      } catch { /* no API or URL parse error */ }
       // それでも未取得なら通常経路（XHR/fetch）
       if (txt === undefined){
         try { txt = await _fetchTextSmart(urlStr); }
@@ -2491,10 +2493,31 @@
           } catch(eApi){ throw eFetch; }
         }
       }
-      // detect ff + BOM (utf-8 BOM appears as U+FEFF at string start)
+      // detect ff + BOM (utf-8 BOM appears as U+FEFF at string start) 既定
       let ff = (txt.indexOf('\r')>=0) ? 'dos' : 'unix';
-      const hasBomChar = (txt.length>0 && txt.charCodeAt(0)===0xFEFF);
+      let hasBomChar = (txt.length>0 && txt.charCodeAt(0)===0xFEFF);
       t = (hasBomChar ? txt.slice(1) : txt).replace(/\r\n?/g,'\n');
+      // 可能なら /probe で原本の enc/ff/bom を取得
+      let encDetected = 'utf-8';
+      try{
+        const u3 = new URL(urlStr);
+        if (_apiIsEnabled() && u3.protocol==='file:'){
+          const fs3 = _fsPathFromFileURL(u3);
+          if (fs3){
+            const info = await _fetchJSONWithTimeout(_apiBase + 'probe?fs=' + encodeURIComponent(fs3), 5000);
+            if (info){
+              // map encoding
+              const encStr = (info.encoding||'').toLowerCase();
+              if (encStr.includes('cp932') || encStr.includes('shift') || encStr.includes('sjis')) encDetected = 'shift_jis';
+              else encDetected = 'utf-8';
+              // eol
+              if (info.eol === 'dos' || info.eol === 'unix' || info.eol === 'mac') ff = info.eol;
+              // bom (UTF-8のみ考慮)
+              if (encDetected==='utf-8' && info.bom===true) hasBomChar = true;
+            }
+          }
+        }
+      }catch{}
       const mode = opts.mode || (buffers.length===0 ? 'new' : 'replace');
       if (mode === 'new'){
         const exist = _findBufferByURL(urlStr);
@@ -2505,7 +2528,7 @@
           targetIdx = exist|0;
         } else {
           // Create buffer first; _switchToBuffer will load its text and keep previous buffer's view saved correctly
-          _addBuffer({ name: _basename(path), path: urlStr, text: t, modified:false, enc:'utf-8', ff, bom: hasBomChar });
+          _addBuffer({ name: _basename(path), path: urlStr, text: t, modified:false, enc: encDetected, ff, bom: hasBomChar });
           _switchToBuffer(buffers.length-1);
           targetIdx = (buffers.length-1)|0;
         }
@@ -2531,7 +2554,7 @@
         const b=currentBuffer();
         if (b){
           b.path = urlStr; b.name = _basename(path); b.text = t; b.savedText = t; b._changeTick=0; b._savedTick=0; b.modified=false; try{ b._undo=[]; b._redo=[]; }catch{}
-          try{ b.enc='utf-8'; b.ff=ff; b.bom=hasBomChar; }catch{}
+          try{ b.enc=encDetected; b.ff=ff; b.bom=hasBomChar; }catch{}
           try{
             b._externalChangeIgnored=false;
             const meta = await _statFileMeta(b.path);
@@ -9273,41 +9296,23 @@
       if (!_apiBase) { toast('save unavailable (no API)'); return false; }
       const u = new URL(urlStr);
       if (u.protocol !== 'file:'){ toast('save only supports file://'); return false; }
-  // 保存時はバッファの encodeSet に従って改行/BOM/エンコーディングを適用
+  // 保存方針: 本文は常にUTF-8で送信し、サーバ側 /write の enc/eol/bom で再符号化
   const b = currentBuffer();
   const enc = (b&&b.enc)||'utf-8';
   const ff = (b&&b.ff)||'unix';
   const bom = !!(b&&b.bom);
   let out = String(textUtf8||'');
-  // 改行コード変換のみ: 内部は \n 前提。dos は CRLF, mac は CR 単体。末尾改行の強制追加は行わない。
-  try{
-    if (ff === 'dos'){
-      out = out.replace(/\n/g, '\r\n');
-    } else if (ff === 'mac'){
-      out = out.replace(/\n/g, '\r');
-    }
-  }catch{}
-  let payloadBytes = null;
-  if (enc === 'utf-8'){
-    let s = out; if (bom){ s = '\uFEFF' + s; }
-    payloadBytes = new TextEncoder().encode(s);
-  } else if (enc === 'shift_jis'){
-    try{
-      payloadBytes = _encodeShiftJIS(out);
-      if (!(payloadBytes instanceof Uint8Array)) throw new Error('sjis encode failed');
-    }catch{
-      // Fallback without BOM (avoid mislabel as UTF-8 BOM)
-      toast('Shift_JIS エンコード未対応のため UTF-8 で保存します', 1800);
-      payloadBytes = new TextEncoder().encode(out);
-    }
-  } else {
-    payloadBytes = new TextEncoder().encode(out);
-  }
-  // Safety: if encoding yielded zero bytes but we have non-empty content, fall back to UTF-8
+  // 改行コード変換はサーバ側に委譲するため、ここでは行わない（サーバがeolで実施）
+  let payloadBytes = new TextEncoder().encode(out);
+  // Safety: 空→UTF-8 リカバリ
   try{ if ((payloadBytes && payloadBytes.byteLength===0) && out && out.length>0){ payloadBytes = new TextEncoder().encode(out); } }catch{}
       let fsPath = _fsPathFromFileURL(u);
   if (!fsPath){ toast('invalid target path'); try{ _triggerVisualBell(); }catch{} return false; }
-      const apiUrl = _apiBase + 'write?fs=' + encodeURIComponent(fsPath);
+      // クエリ組立（enc/eol/bom/strict）
+      const encParam = (enc && enc.toLowerCase()==='shift_jis') ? 'sjis' : 'utf8';
+      const eolParam = (ff==='dos' ? 'dos' : (ff==='mac' ? 'mac' : 'unix'));
+      const bomParam = (bom && encParam==='utf8') ? '&bom=1' : '';
+      const apiUrl = _apiBase + 'write?fs=' + encodeURIComponent(fsPath) + '&enc=' + encParam + '&eol=' + eolParam + bomParam + '&strict=0';
       const makeBody = ()=>{
         // Send raw bytes without setting Content-Type to avoid CORS preflight (#380)
         // Use the exact Uint8Array view to prevent implicit Blob type headers.
