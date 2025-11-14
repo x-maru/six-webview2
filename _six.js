@@ -31,45 +31,9 @@
       const lines = _splitLines();
       const r = Math.max(0, Math.min(lines.length-1, caretRow|0));
       const line = lines[r]||'';
-      // tabstop (fallback 8 if invalid)
-      let ts = 8; try{ if (window.SIX_OPTIONS && Number(window.SIX_OPTIONS.tabstop)>=1) ts = Math.min(64, Math.max(1, Number(window.SIX_OPTIONS.tabstop)|0)); }catch{}
-      const _isFull = (ch)=>/[\u1100-\u115F\u2E80-\uA4CF\uAC00-\uD7A3\uF900-\uFAFF\uFE10-\uFE19\uFE30-\uFE6F\u3000-\u303F\uFF01-\uFF60\uFFE0-\uFFE6]/.test(ch||'');
-      // visual width up to (exclusive) index endCol; TAB -> next tab stop, full-width -> +2, half -> +1
-      const visualWidthUpTo = (s, endCol)=>{
-        try{
-          let w=0; const n=Math.max(0, Math.min(s.length, endCol|0));
-          for (let i=0;i<n;i++){
-            const ch=s[i];
-            if (ch==='\t'){
-              const next = ((Math.floor(w/ts)+1)*ts); // next multiple of ts
-              w = next;
-            } else if (_isFull(ch)) w+=2; else w+=1;
-          }
-          return w;
-        }catch{ return 0; }
-      };
-      const lineWidth = visualWidthUpTo(line, line.length); // half-width units after expansion
-      const caretVisual = visualWidthUpTo(line, caretCol|0);
-      const rowDisp = r + 1;
-      const colDisp = caretVisual + 1; // caret is after preceding chars; 1-based
-      const widthDisp = lineWidth;     // may be 0 for empty line
-      posinfoEl.textContent = `行 ${rowDisp}, 列 ${colDisp}/${widthDisp}`;
-      // THEME color apply (posInfoText > tabText > yellow)
-      try{
-        let col = 'yellow';
-        if (window && window.THEME){
-          if (window.THEME.posInfoText) col = window.THEME.posInfoText; else if (window.THEME.tabText) col = window.THEME.tabText; }
-        posinfoEl.style.color = col;
-      }catch{ posinfoEl.style.color = 'yellow'; }
-    }catch{}
-  }
-  function _scrollTabsBy(delta){
-    try{
-      if (!tabbarTabs) return;
-      const step = Math.max(24, Math.floor(tabbarTabs.clientWidth * 0.7));
-      const next = (tabbarTabs.scrollLeft|0) + (delta<0 ? -step : step);
-      tabbarTabs.scrollTo({ left: Math.max(0, next), behavior: 'smooth' });
-      // update soon after; also rely on 'scroll' event
+      // 可視幅計測は後段の _visualWidthUpToLine を利用
+      const visCol = _visualWidthUpToLine(line, caretCol|0);
+      posinfoEl.textContent = (r+1) + ':' + (visCol+1);
       setTimeout(_updateTabScrollButtons, 120);
     }catch{}
   }
@@ -4845,7 +4809,7 @@
         const nArg = parseInt(numStr||'',10);
         if (Number.isFinite(nArg) && nArg>0 && nArg < arr.length){ arr = arr.slice(arr.length - nArg); }
         if (!arr.length){ toast('debugkeys: ring empty', 900); return; }
-        const s = arr.map((e,i)=>{
+        const s2 = arr.map((e,i)=>{
           return i.toString().padStart(3,'0')+' '+new Date(e.t).toISOString()+` ${e.type}`+
             ` m=${e.mode}`+
             (e.key!==undefined?` key=${JSON.stringify(e.key)}`:'')+
@@ -4855,7 +4819,7 @@
             (e.compData!==undefined?` comp=${JSON.stringify(e.compData)}`:'')+
             ` ctrl=${e.ctrl?'1':'0'} alt=${e.alt?'1':'0'} meta=${e.meta?'1':'0'} isComp=${e.isComp?'1':'0'}`;
         }).join('\n');
-        (async()=>{ const ok = await _copyToClipboard(s); toast(ok?`dumped ${arr.length} events to clipboard.`:'Clipboard write failed.', ok?1000:1500); })();
+        (async()=>{ const ok = await _copyToClipboard(s2); toast(ok?`dumped ${arr.length} events to clipboard.`:'Clipboard write failed.', ok?1000:1500); })();
         return;
       }
     }
@@ -8004,6 +7968,34 @@
         }catch{}
       });
       cmdinput.addEventListener('keydown',(e)=>{
+        // HOME キー拡張 (#577): :e 入力中はファイル名先頭へ/':'先頭へトグル
+        if (e.key==='Home' && !e.ctrlKey && !e.metaKey && !e.altKey){
+          try{
+            const v = String(cmdinput.value||'');
+            // ":e " の後に1文字以上ある場合に適用
+            const m = v.match(/^(\s*:?\s*e\s+)(.+)$/i);
+            if (m){
+              const head = m[1];
+              const tail = m[2];
+              if (tail && tail.length>0){
+                const tailStart = head.length;
+                const sel = cmdinput.selectionStart|0;
+                if (sel > tailStart){
+                  e.preventDefault(); e.stopPropagation();
+                  cmdinput.setSelectionRange(tailStart, tailStart);
+                  return;
+                } else if (sel === tailStart){
+                  e.preventDefault(); e.stopPropagation();
+                  const colonPos = v.indexOf(':');
+                  const to = (colonPos>=0 ? colonPos : 0);
+                  cmdinput.setSelectionRange(to, to);
+                  return;
+                }
+              }
+            }
+          }catch{}
+          // それ以外は既定動作
+        }
         if (e.key==='Enter'){
           e.preventDefault(); e.stopPropagation();
           _incPrevHide();
@@ -8059,6 +8051,15 @@
           }catch{}
           // まず、:e のファイルポップアップが表示中なら Enter はポップアップに対する確定/ドリルダウンとして扱う
           if (_filePopupVisible()){
+            // 追加ガード (#576): 現在の入力フィルタ末尾が禁則文字を含む名前なら即ブロック（新規生成も不可）
+            try{
+              const parsedPre = _eParseInput(cmdinput.value);
+              const tailPre = String(parsedPre && parsedPre.filter || '').trim();
+              if (tailPre && _isNtfsIllegalName(tailPre)){
+                toast('Windows(NTFS)では無効な名前です', 1800); try{ _triggerVisualBell && _triggerVisualBell(); }catch{};
+                return;
+              }
+            }catch{}
             // #348: 入力欄が空白または末尾が区切り文字('/', '\\', ':')のときは Enter で何もしない
             try{
               const vNow0 = String(cmdinput.value||'');
@@ -8083,6 +8084,8 @@
               try{ if (Date.now() < (_fileReflectGuardUntil||0)) { if (endsWithSlash) return; } }catch{}
               if (!endsWithSlash){
                 const q = filt.trim();
+                // フィルタ末尾が禁則名なら一切確定しない (#576)
+                try{ if (q && _isNtfsIllegalName(q)){ toast('Windows(NTFS)では無効な名前です', 1800); _triggerVisualBell && _triggerVisualBell(); return; } }catch{}
                 if (q === '..'){
                   // 親ディレクトリへ（入力優先の Enter でも有効）
                   try{
@@ -8106,10 +8109,10 @@
                     // 親一覧で直前セグメントをハイライトするため保持
                     _filePostSelectName = prevSeg || null;
                     _fileBaseURL = parent; _fileTypedDirRaw = newTyped; _fileFilter = ''; _fileSelMuted = false;
-                    // 仕様 #349: 親へ移動した時点で入力欄を "<parent>/<prevSeg>" に正規化し、一覧完了時の反映は継続抑止
+                    // 仕様変更(#581): 親へ移動した直後はフィルタを空にする（入力欄は親ディレクトリまで）
                     try{
                       if (cmdinput){
-                        cmdinput.value = ':e ' + _collapseDotDotPath(String(_fileTypedDirRaw||'') + String(prevSeg||''));
+                        cmdinput.value = ':e ' + _collapseDotDotPath(String(_fileTypedDirRaw||''));
                         const pos=(cmdinput.value||'').length; try{ cmdinput.setSelectionRange(pos,pos); }catch{}
                         try { cmdinput.dispatchEvent(new Event('input', { bubbles:true })); } catch {}
                       }
@@ -8138,6 +8141,7 @@
                   const ent = (_fileEntries||[]).find(e=> e && eq(String(e.name||''), q));
                   if (ent && ent.isDir){
                     // ドリルダウン（補完専用）
+                    try{ if (_isNtfsIllegalName(q)){ toast('Windows(NTFS)では無効な名前です',1800); _triggerVisualBell && _triggerVisualBell(); return; } }catch{}
                     _fileJustNavAt = Date.now(); _fileReflectGuardUntil = Date.now() + 700; _fileNavRetryCount = 0; _fileFilter = ''; _fileSelMuted = false;
                     _fileTypedDirRaw = (_fileTypedDirRaw||'') + q + '/';
                     if (cmdinput){ cmdinput.value=':e ' + _collapseDotDotPath(_fileTypedDirRaw); try { cmdinput.dispatchEvent(new Event('input', { bubbles:true })); } catch {} }
@@ -8145,6 +8149,7 @@
                   }
                   if (ent && !ent.isDir){
                     // ファイルを開く（確定）
+                    try{ if (_isNtfsIllegalName(q)){ toast('Windows(NTFS)では無効な名前です',1800); _triggerVisualBell && _triggerVisualBell(); return; } }catch{}
                     _loadFromPath(ent.url, null, {mode:'new'});
                     // 履歴には補完後の最終文字列を入れる
                     try{ const hist = ':e ' + _collapseDotDotPath(String(_fileTypedDirRaw||'') + String(ent.name||'')); _cmdHistoryMaybePush(hist); }catch{}
@@ -8159,11 +8164,13 @@
                     if (!one) return false;
                     if (one.isDir){
                       // ドリルダウン（補完専用）
+                      try{ if (_isNtfsIllegalName(String(one.name||''))){ toast('Windows(NTFS)では無効な名前です',1800); _triggerVisualBell && _triggerVisualBell(); return false; } }catch{}
                       _fileJustNavAt = Date.now(); _fileReflectGuardUntil = Date.now() + 700; _fileNavRetryCount = 0; _fileFilter = ''; _fileSelMuted = false;
                       _fileTypedDirRaw = (_fileTypedDirRaw||'') + String(one.name||'') + '/';
                       if (cmdinput){ cmdinput.value=':e ' + _collapseDotDotPath(_fileTypedDirRaw); try { cmdinput.dispatchEvent(new Event('input', { bubbles:true })); } catch {} }
                       return true;
                     } else {
+                      try{ if (_isNtfsIllegalName(String(one.name||''))){ toast('Windows(NTFS)では無効な名前です',1800); _triggerVisualBell && _triggerVisualBell(); return false; } }catch{}
                       _loadFromPath(one.url, null, {mode:'new'});
                       try{ const hist=':e ' + _collapseDotDotPath(String(_fileTypedDirRaw||'') + String(one.name||'')); _cmdHistoryMaybePush(hist); }catch{}
                       _filePopupHide(); _bufPopupHide(); _setMode('NORMAL'); cmdinput.value=''; setTimeout(()=>editor.focus(), 0);
@@ -8191,6 +8198,7 @@
                   // ただし一覧ローディング中は誤確定を防ぐため保留
                   if (_fileLoading){ return; }
                   (async()=>{
+                    try{ if (_isNtfsIllegalName(q)){ toast('Windows(NTFS)では無効な名前です',1800); _triggerVisualBell && _triggerVisualBell(); return; } }catch{}
                     const ok = await _loadFromPath(q, _fileBaseURL, { silentOnFail:true, mode:'new' });
                     if (!ok){
                       let finalURL = null;
@@ -9317,6 +9325,8 @@
   function _isNtfsIllegalName(name){
     try{
       const s = String(name||'');
+      // 親ディレクトリ表現 ".." はファイル名ではない（ナビゲーション用途）ため常に許可
+      if (s === '..') return false;
       // 禁止文字: < > : " | ? *
       if (/[<>:"|?*]/.test(s)) return true;
       // よくある「代替コロン」類（全角/小さいコロン/比率記号など）も念のため捕捉
@@ -9986,31 +9996,26 @@
       const qRawOrig = String(_fileFilter||'');
       const qTrim = qRawOrig.replace(/\/+$/,'');
       if (qTrim){
-        // Special-case: when filtering with "..", treat it as the parent selector and don't mute
         if (qTrim === '..'){
+          // 親ディレクトリ指定は常にカーソル表示
+          _fileSelMuted = false;
+        } else if (qTrim === '.') {
+          // '.' は何もマッチさせずカーソルのみ表示 (#583)
           _fileSelMuted = false;
         } else {
-        let caseSensitive = false;
-        try{ const b = _ensureSlash(_fileBaseURL); if (b && b.protocol==='file:' && b.host && b.host.toLowerCase()==='wsl.localhost') caseSensitive = true; }catch{}
-        const pred = (nm)=>{
-          if (caseSensitive) return nm.startsWith(qTrim);
-          return nm.toLowerCase().startsWith(qTrim.toLowerCase());
-        };
+          let caseSensitive = false;
+          try{ const b = _ensureSlash(_fileBaseURL); if (b && b.protocol==='file:' && b.host && b.host.toLowerCase()==='wsl.localhost') caseSensitive = true; }catch{}
+          const pred = (nm)=>{
+            if (caseSensitive) return nm.startsWith(qTrim);
+            return nm.toLowerCase().startsWith(qTrim.toLowerCase());
+          };
           const idxMatch = list.findIndex(e=> e && !e._up && pred(String(e.name||'')));
           if (idxMatch>=0){
-            // 自動選択は input 直後のみ有効。矢印ナビ後は維持。
             if (_fileSelAuto){ _fileSel = idxMatch; }
             _fileSelMuted = false;
           } else {
             _fileSelMuted = true;
           }
-        }
-        // #345: '.' 入力時は '../' を優先的に選択する
-        if (qTrim === '.'){
-          try{
-            const idxUp = list.findIndex(e=> e && e._up);
-            if (idxUp >= 0){ _fileSel = idxUp; _fileSelMuted = false; }
-          }catch{}
         }
       } else {
         _fileSelMuted = false;
@@ -10020,6 +10025,7 @@
     // URLから安全に表示名を決めるヘルパ
     const _bestEntryName = (it)=>{
       try{
+        if (it && it._up) return '..';
         const u=new URL(String(it&&it.url||''));
         const parts=String(u.pathname||'').split('/').filter(Boolean);
         const nm=decodeURIComponent(parts[parts.length-1]||'');
@@ -10044,6 +10050,18 @@
         try{ name.style.color = '#d33'; }catch{}
         try{ name.title = 'Windows(NTFS)では無効な名前のため開けません'; }catch{}
       }
+      // フィルタ非一致はグレー表示 (#576)
+      try{
+        const qRaw = String(_fileFilter||'').replace(/\/+$/,'').trim();
+        if (qRaw){
+          let caseSensitive=false; try{ const b=_ensureSlash(_fileBaseURL); if (b && b.protocol==='file:' && b.host && b.host.toLowerCase()==='wsl.localhost') caseSensitive=true; }catch{}
+          const starts = (nm)=> caseSensitive ? nm.startsWith(qRaw) : nm.toLowerCase().startsWith(qRaw.toLowerCase());
+          // '.' フィルタ時は親("../")も含めて常に非一致グレー (#583)
+          if (!(it && !it._up && starts(String(it.name||''))) && !(qRaw==='..' && it && it._up)){
+            if (!it._disabled){ name.style.color='#777'; }
+          }
+        }
+      }catch{}
       div.appendChild(num); div.appendChild(name);
       // クリックでフォーカスを奪わない
       div.addEventListener('mousedown', (ev)=>{ ev.preventDefault(); });
@@ -10104,7 +10122,8 @@
               }catch{}
               _filePostSelectName = prevSeg || null;
               _fileBaseURL = nextBase;
-              if (cmdinput){ cmdinput.value=':e ' + _collapseDotDotPath(_fileTypedDirRaw + prevSeg); }
+              // 仕様変更 (#583): 親クリック後はフィルタを完全クリアし前セグメントを残さない
+              if (cmdinput){ cmdinput.value=':e ' + _collapseDotDotPath(_fileTypedDirRaw); }
               // クリック移動では明示的に列挙を開始し、(loading...) のままにならないようにする（#350）
               try{
                 const baseNow = _ensureSlash(_fileBaseURL);
@@ -10207,8 +10226,39 @@
     if (!bufpopup) return;
     const list = _filePopupComputeList();
     _fileSelAuto = false; // ユーザ操作により自動選択を停止
+    const prevSel = _fileSel|0;
     _fileSel = Math.max(0, Math.min(list.length-1, _fileSel + d));
     _fileSelMuted = false; // 矢印移動で通常のハイライトに復帰
+    // フィルタ非空なら非一致項目をスキップ (#576)
+    try{
+      const qTrim = String(_fileFilter||'').replace(/\/+$/,'').trim();
+      if (qTrim){
+        let caseSensitive=false; try{ const b=_ensureSlash(_fileBaseURL); if (b && b.protocol==='file:' && b.host && b.host.toLowerCase()==='wsl.localhost') caseSensitive=true; }catch{}
+        const starts = (nm)=> caseSensitive ? nm.startsWith(qTrim) : nm.toLowerCase().startsWith(qTrim.toLowerCase());
+        const isUpFilter = (qTrim==='..'); // #582: '.' は親候補マッチから除外
+        const anyMatch = isUpFilter ? list.some(e=> e && e._up) : list.some(e=> e && !e._up && starts(String(e.name||'')));
+        if (anyMatch){
+          const dir = d>0?1:-1;
+          let cur = _fileSel;
+          let found = false;
+          for (let i=0;i<list.length;i++){
+            // ラップして巡回
+            cur = (cur + dir + list.length) % list.length;
+            const it = list[cur];
+            if (isUpFilter){
+              if (it && it._up){ _fileSel = cur; found = true; break; }
+            } else {
+              if (it && !it._up && starts(String(it.name||''))){ _fileSel = cur; found = true; break; }
+            }
+          }
+          // 見つからなければ元に戻す（非一致へ動かさない）
+          if (!found){ _fileSel = prevSel; }
+        } else {
+          // 一致候補が無ければ元に戻す（非一致へ動かさない）
+          _fileSel = prevSel;
+        }
+      }
+    }catch{}
     try{
       const it = list[_fileSel];
       // 仕様変更(#573): 無効項目でも入力欄へ名前を反映（Enter/click時はブロック）
@@ -10234,8 +10284,7 @@
           cmdinput.value = val;
         }
         try{ const pos=(cmdinput.value||'').length; cmdinput.setSelectionRange(pos,pos); }catch{}
-        // 入力欄に選択内容を反映した場合、フィルタはクリアしてミュートを解除（再レンダで赤ハイライトへ戻らないように）
-        _fileFilter = '';
+        // 入力欄に選択内容を反映してもフィルタは保持（#576 スキップ用）。ミュートは解除。
         _fileSelMuted = false;
         }
       }
