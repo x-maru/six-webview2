@@ -953,6 +953,32 @@
   function _triggerVisualBell(){
     try{
       if (!_optVisualBell) return;
+      // popup専用ベル (#573): :e ファイルポップアップ表示中はポップアップ内だけフラッシュ
+      if (typeof _filePopupVisible==='function' && _filePopupVisible() && bufpopup){
+        try{
+          let flash = bufpopup.querySelector('.popup-flash');
+          if (!flash){
+            flash = document.createElement('div');
+            flash.className = 'popup-flash';
+            flash.style.position='absolute';
+            flash.style.inset='0 0 0 0';
+            flash.style.pointerEvents='none';
+            flash.style.background='rgba(255,80,80,0.35)';
+            flash.style.border='2px solid rgba(255,120,120,0.8)';
+            flash.style.boxSizing='border-box';
+            flash.style.transition='opacity 120ms ease';
+            flash.style.opacity='0';
+            bufpopup.appendChild(flash);
+          }
+          // restart animation
+          flash.style.opacity='1';
+          setTimeout(()=>{ try{ flash.style.opacity='0'; }catch{} }, 60);
+          // 自動消去（念のため）
+          setTimeout(()=>{ try{ if (flash && flash.style.opacity==='0'){ /* keep node for reuse */ } }catch{} }, 400);
+          return; // グローバルベルは使わない
+        }catch{}
+      }
+      // 通常の全体ベル
       _vbEnsureLayer();
       _vbLayer.style.display = 'block';
       _vbLayer.style.opacity = '1';
@@ -2248,6 +2274,8 @@
       }
       const sel = Math.max(0, Math.min(list.length-1, _fileSel));
       const it = list[sel];
+      // まず無効名は確定させずトーストを出す（ポップアップは維持）
+      if (it && it._disabled){ try{ toast('Windows(NTFS)では無効な名前のため開けません', 1800); }catch{} try{ _triggerVisualBell && _triggerVisualBell(); }catch{} return true; }
       if (it.isDir){
         // ポップアップは補完専用: 入力欄を更新し、あとは input ハンドラに任せる
         try{
@@ -2269,7 +2297,9 @@
             : (function(){
                 // ホスト直下（file:////host/）が次ベースの場合は //host/ にする
                 try{ if (nextBase && _isHostRoot(nextBase)) return '//' + nextBase.host + '/'; }catch{}
-                return (_fileTypedDirRaw||'') + it.name + '/';
+                // 表示名ベース（URL復元優先）で補完
+                try{ const u=new URL(String(it&&it.url||'')); const parts=String(u.pathname||'').split('/').filter(Boolean); const nm=decodeURIComponent(parts[parts.length-1]||''); if(nm) return (_fileTypedDirRaw||'') + nm + '/'; }catch{}
+                return (_fileTypedDirRaw||'') + (it.name||'') + '/';
               })();
           _fileFilter = '';
           if (cmdinput){
@@ -2299,10 +2329,16 @@
       } else {
         _loadFromPath(it.url, null, {mode:'new'});
       }
-      try{ const hist=':e ' + _collapseDotDotPath(String(_fileTypedDirRaw||'') + String(it.name||'')); _cmdHistoryMaybePush(hist); }catch{}
+      try{
+        // 履歴表示も URL 復元名を優先
+        let nm = String(it.name||'');
+        try{ const u=new URL(String(it&&it.url||'')); const parts=String(u.pathname||'').split('/').filter(Boolean); const dec=decodeURIComponent(parts[parts.length-1]||''); if(dec) nm=dec; }catch{}
+        const hist=':e ' + _collapseDotDotPath(String(_fileTypedDirRaw||'') + nm);
+        _cmdHistoryMaybePush(hist);
+      }catch{}
       _filePopupHide(); _bufPopupHide(); _setMode('NORMAL'); cmdinput.value=''; setTimeout(()=>editor.focus(),0);
       return true;
-    }catch{ return false; }
+      }catch{ return false; }
   }
 
   function _renderTabbar(){
@@ -8176,6 +8212,14 @@
                 // 入力が空 → なにもしない（ポップアップ維持）
                 return;
               }
+              // 無効名(禁則文字含む)は新規作成も読み込みも禁止 (#575)
+              try{
+                const rawName = q;
+                if (_isNtfsIllegalName(rawName)){
+                  toast('Windows(NTFS)では無効な名前です', 1800); try{ _triggerVisualBell && _triggerVisualBell(); }catch{}
+                  return; // ポップアップ維持・確定しない
+                }
+              }catch{}
               // 以前は UNC 配下の部分入力を Enter でブロックしていたが、
               // 「補完→入力ハンドラ→確定」に一本化するため撤去。ここで確定を試みる。
               // '..' を単独入力→ 親ディレクトリへ
@@ -8238,6 +8282,8 @@
             } else {
               const sel = Math.max(0, Math.min(list.length-1, _fileSel));
               const it = list[sel];
+              // 無効名（WSLのNTFS非許容名など）はEnterでも開かず、トースト+ベルのみでポップアップ継続
+              if (it && it._disabled){ try{ toast('Windows(NTFS)では無効な名前のため開けません', 1800); }catch{} try{ _triggerVisualBell && _triggerVisualBell(); }catch{} return; }
               if (it.isDir){
                 // ディレクトリは補完専用: 入力欄更新→input ハンドラに統一委譲
                 try{
@@ -8279,6 +8325,8 @@
                   return; // ポップアップ維持
                 }catch{}
               } else {
+                // 無効ファイル名は開かない（保険。通常 _disabled で捕捉済）
+                try{ const bn=_bestEntryName(it); if (_isNtfsIllegalName(bn)){ toast('Windows(NTFS)では無効な名前のため開けません', 1800); _triggerVisualBell && _triggerVisualBell(); return; } }catch{}
                 _loadFromPath(it.url, null, {mode:'new'});
               }
             }
@@ -9265,6 +9313,61 @@
   // Tab 補完は引き続き有効。タイムスタンプで短時間のみ適用する。
   let _fileReflectGuardUntil = 0;
 
+  // NTFS で不許可な名前かどうかを判定（WSL配下の表示で選択不可にする目的）
+  function _isNtfsIllegalName(name){
+    try{
+      const s = String(name||'');
+      // 禁止文字: < > : " | ? *
+      if (/[<>:"|?*]/.test(s)) return true;
+      // よくある「代替コロン」類（全角/小さいコロン/比率記号など）も念のため捕捉
+      if (/[\uFF1A\uFE55\u2236\u02D0\u02F8]/.test(s)) return true; // ：﹕∶ː˸
+      // モジバケ等で %3A が残っている（または二重エンコード %253A）場合も無効扱い
+      if (/%25?3a/i.test(s)) return true;
+      // 末尾のピリオド/スペースは禁止
+      if (/[\. ]$/.test(s)) return true;
+      // 予約名（拡張子の前のベース名で判定、拡張子が付いていても不可）
+      const base = s.split('.')[0].toUpperCase();
+      const reserved = new Set(['CON','PRN','AUX','NUL','COM1','COM2','COM3','COM4','COM5','COM6','COM7','COM8','COM9','LPT1','LPT2','LPT3','LPT4','LPT5','LPT6','LPT7','LPT8','LPT9']);
+      if (reserved.has(base)) return true;
+      return false;
+    }catch{ return false; }
+  }
+
+  // URL の末尾セグメントからNTFS禁則を検出（URL上の %3A 等も拾う）
+  function _urlLastSegHasNtfsBad(urlStr){
+    try{
+      const u = new URL(String(urlStr||''));
+      const parts = String(u.pathname||'').split('/').filter(Boolean);
+      const last = parts.length ? parts[parts.length-1] : '';
+      // まずデコードした実名で判定
+      try{ const decoded = decodeURIComponent(last); if (_isNtfsIllegalName(decoded)) return true; }catch{}
+      // デコード前の生文字列にも ':' が含まれていれば無効
+      if (/:/.test(last)) return true;
+      // デコード不可や保険として、エンコード表現にも含まれていれば無効扱い
+      if (/%3a/i.test(last)) return true;      // ':'
+      if (/%253a/i.test(last)) return true;    // 二重エンコードケース
+      // その他の禁則（" < > | ? * など）は encodeURIComponent 済みなら %22 等になるが、
+      // Linux 側で実際に使われ得るのは ':' が主目的のため、ここでは ':' を優先検出。
+      return false;
+    }catch{ return false; }
+  }
+
+  // 名前ヒューリスティクス（WSL環境で良く見る ADS 由来）
+  function _nameHintsNtfsIllegalLike(name){
+    try{
+      const s = String(name||'');
+      // 代表例: "xxx:Zone.Identifier" の派生（モジバケや全角コロン込みでラフに検出）
+      if (/zone\.identifier/i.test(s)){
+        if (/:/.test(s)) return true;
+        if (/[\uFF1A\uFE55\u2236\u02D0\u02F8]/.test(s)) return true; // ：﹕∶ː˸
+        if (/%25?3a/i.test(s)) return true; // %3A or %253A
+        // 区切りが非英数字・非ドットで不自然なケースも無効扱い
+        if (/[^A-Za-z0-9._-]Zone\.Identifier/i.test(s)) return true;
+      }
+      return false;
+    }catch{ return false; }
+  }
+
   function _ensureSlash(u){
     try{
       const x = new URL(u);
@@ -9720,9 +9823,10 @@
         try{
           const resolved = new URL(href, u);
           const isDir = /\/$/.test(resolved.pathname);
-          // name は a.textContent 優先、無ければURLパス末尾
-          let nm = (a.textContent||'').trim();
-          if (!nm){ const parts = resolved.pathname.split('/').filter(Boolean); nm = decodeURIComponent(parts[parts.length-1]||''); }
+          // name は URL パス末尾から復元を第一優先（文字化けを避ける）。失敗時のみ textContent を使用。
+          let nm = '';
+          try{ const parts = resolved.pathname.split('/').filter(Boolean); nm = decodeURIComponent(parts[parts.length-1]||''); }catch{}
+          if (!nm){ nm = (a.textContent||'').trim(); }
           out.push({ name: nm, isDir, url: resolved.toString() });
         }catch{}
       }
@@ -9758,7 +9862,21 @@
       }
       }
     }catch{}
-    for (const e of _fileEntries){ list.push(e); }
+    // WSL(\\wsl$ / wsl.localhost) 配下では、NTFSで無効となる名前を選択不可にマーキング
+    let underWsl = false;
+    try{
+      const b = _ensureSlash(_fileBaseURL);
+      const h = (b && b.host ? b.host.toLowerCase() : '');
+      underWsl = !!(b && b.protocol==='file:' && (h==='wsl.localhost' || h==='wsl$'));
+    }catch{}
+    for (const e of _fileEntries){
+      if (!e){ continue; }
+      if (underWsl){
+        const disabled = _isNtfsIllegalName(e.name||'') || _urlLastSegHasNtfsBad(e.url||'') || _nameHintsNtfsIllegalLike(e.name||'');
+        if (disabled){ list.push(Object.assign({}, e, { _disabled: true })); continue; }
+      }
+      list.push(e);
+    }
     return list;
   }
   function _collapseDotDotPath(s){
@@ -9801,6 +9919,15 @@
     let out = prefix + stack.join('/');
     if (hadTrail && out && !out.endsWith('/')) out += '/';
     return out;
+  }
+
+  // Normalize colon-like glyph variants to plain ASCII ':' for stable display & input reflection (#574)
+  // Includes: Private Use U+F03A, Fullwidth U+FF1A, Ratio U+2236, Modifier Letter U+02D0, Latin Small Letter : U+A789, Small Form Variants U+FE55
+  // (Some fonts substitute ':' with PUA glyphs; unify them here.)
+  function _normalizeColonVariants(s){
+    try{
+      return String(s||'').replace(/[\uF03A\uFF1A\u2236\u02D0\uA789\uFE55]/g, ':');
+    }catch{ return String(s||''); }
   }
 
   function _filePopupRender(){
@@ -9890,6 +10017,16 @@
       }
     }catch{}
   _fileSel = Math.max(0, Math.min(list.length-1, _fileSel));
+    // URLから安全に表示名を決めるヘルパ
+    const _bestEntryName = (it)=>{
+      try{
+        const u=new URL(String(it&&it.url||''));
+        const parts=String(u.pathname||'').split('/').filter(Boolean);
+        const nm=decodeURIComponent(parts[parts.length-1]||'');
+        if(nm) return _normalizeColonVariants(nm);
+      }catch{}
+      try{ return _normalizeColonVariants(String(it&&it.name||'')); }catch{ return ''; }
+    };
     for (let i=0;i<list.length;i++){
       const it = list[i];
   const div = document.createElement('div');
@@ -9899,11 +10036,19 @@
       }
       // 数字は付けない（配置合わせのため空の num を置く）
       const num = document.createElement('span'); num.className='num'; num.textContent='';
-      const name = document.createElement('span'); name.className='name'; name.textContent = it.name + (it.isDir? '/':'');
+      const name = document.createElement('span'); name.className='name';
+      const dispName = _bestEntryName(it);
+      name.textContent = dispName + (it.isDir? '/':'');
+      if (it && it._disabled){
+        try{ div.className += ' disabled'; }catch{}
+        try{ name.style.color = '#d33'; }catch{}
+        try{ name.title = 'Windows(NTFS)では無効な名前のため開けません'; }catch{}
+      }
       div.appendChild(num); div.appendChild(name);
       // クリックでフォーカスを奪わない
       div.addEventListener('mousedown', (ev)=>{ ev.preventDefault(); });
       div.addEventListener('click', ()=>{
+        if (it && it._disabled){ try{ _triggerVisualBell && _triggerVisualBell(); }catch{} try{ toast('Windows(NTFS)では無効な名前のため開けません', 1800); }catch{} return; }
         // クリック時も補完専用: 入力欄に貼り付けて input ハンドラに委譲
         if (it.isDir){
           try{
@@ -9996,9 +10141,9 @@
               // "/" はローカルルートとして通常処理（UNC化しない）。
               const isAtRootDoubleSlash = /^\s*:?\s*e\s+\/\/$/i.test((cmdinput && cmdinput.value)||'') || (_fileTypedDirRaw==='//');
               if (isAtRootDoubleSlash){
-                _fileTypedDirRaw = '//' + it.name + '/';
+                _fileTypedDirRaw = '//' + _bestEntryName(it) + '/';
               } else {
-                _fileTypedDirRaw = (_fileTypedDirRaw||'') + it.name + '/';
+                _fileTypedDirRaw = (_fileTypedDirRaw||'') + _bestEntryName(it) + '/';
               }
               if (cmdinput){ cmdinput.value=':e ' + _collapseDotDotPath(_fileTypedDirRaw); }
               // 基点も進める
@@ -10031,6 +10176,7 @@
             try{ cmdinput && cmdinput.focus(); }catch{}
           }catch{}
         } else {
+          // ファイル: 選択不可でなければ読み込み
           _loadFromPath(it.url, null, {mode:'new'});
           // Enter と同等に、入力欄をクリアし NORMAL に戻す
           try{ const hist=':e ' + _collapseDotDotPath(String(_fileTypedDirRaw||'') + String(it.name||'')); _cmdHistoryMaybePush(hist); }catch{}
@@ -10065,12 +10211,22 @@
     _fileSelMuted = false; // 矢印移動で通常のハイライトに復帰
     try{
       const it = list[_fileSel];
+      // 仕様変更(#573): 無効項目でも入力欄へ名前を反映（Enter/click時はブロック）
+      const bestName = (function(x){
+        try{
+          const u=new URL(String(x&&x.url||''));
+          const parts=String(u.pathname||'').split('/').filter(Boolean);
+          const nm=decodeURIComponent(parts[parts.length-1]||'');
+          if (nm) return _normalizeColonVariants(nm);
+        }catch{}
+        return _normalizeColonVariants(String(x&&x.name||''));
+      })(it);
       if (cmdinput && it){
         // ディレクトリ移動直後の短期は、選択反映をスキップ
         const guardActive = (Date.now() < (_fileReflectGuardUntil||0));
         if (!guardActive){
         if (!it._up){
-          const val = ':e ' + _collapseDotDotPath((_fileTypedDirRaw||'') + String(it.name||''));
+          const val = ':e ' + _collapseDotDotPath((_fileTypedDirRaw||'') + bestName);
           cmdinput.value = val;
         } else {
           // 親("..")上にカーソルがあるときは正規化せず ".." をそのまま可視化
