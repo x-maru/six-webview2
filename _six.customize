@@ -97,6 +97,8 @@ window.THEME = {
   controlCharColor: "#80d0d0",
   controlCharColorLF: "#a0eada",
   controlCharColorCRLF: "#2050c0",
+  dummyLFColor: "orange",
+  dummyCRLFColor: "#d0a0f0",
 
   // Help modal theming
   helpTabActiveBg: "#2b7050",

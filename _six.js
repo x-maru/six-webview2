@@ -1,12 +1,11 @@
 ﻿// six migration oriented bootstrap (spec-aligned skeleton with file load)
 (function(){
-
-  // DOM elements
+  const caretLayer = document.getElementById('caretLayer');
+  const edstripe   = document.getElementById('edstripe');
+  // Core editor elements
   const viewport   = document.getElementById('editorViewport');
   const editor     = document.getElementById('editor');
   const gutter     = document.getElementById('gutter');
-  const caretLayer = document.getElementById('caretLayer');
-  const edstripe   = document.getElementById('edstripe');
   const tabbarEl   = document.getElementById('tabbar');
   const tabbarTabs = tabbarEl ? tabbarEl.querySelector('.tabs') : null;
   const tabbarTools = tabbarEl ? tabbarEl.querySelector('#tabtools') : null;
@@ -809,6 +808,8 @@
   let _optHlsearch = (function(){ try{ const o=(window&&window.SIX_OPTIONS)||{}; return !!o.hlsearch; }catch{} return false; })();          // :set hlsearch / :set nohlsearch
   let _optList = (function(){ try{ const o=(window&&window.SIX_OPTIONS)||{}; return (o.list!==false); }catch{} return true; })(); // :set list (default ON)
   let _hlLayer = null;               // container for match rectangles
+  // #624 直前テキスト保持 (INSERT beforeinput/delete 用)
+  let _prevTextBeforeInput = '';
   // --- Visual Bell ---
   let _optVisualBell = (function(){ try{ const o=(window&&window.SIX_OPTIONS)||{}; return (o.visualbell!==false); }catch{} return true; })(); // :set visualbell (default ON)
   // --- Debug key logging (ring buffer) ---
@@ -1215,8 +1216,29 @@
           elE.className='listchar-eol';
           // ff-based coloring: THEME via CSS vars for LF/CRLF; legacy CR (mac) stays red-ish as hidden feature
           let ffColor = 'var(--controlCharColorLF, yellow)';
-          try{ const b=currentBuffer(); const ff=(b&&b.ff)||'unix'; if(ff==='dos') ffColor='var(--controlCharColorCRLF, yellow)'; else if(ff==='mac') ffColor='rgba(200,80,80,0.65)'; }catch{}
-          elE.textContent='↲';
+          let ffKind = 'unix';
+          try{ const b=currentBuffer(); ffKind=(b&&b.ff)||'unix'; if(ffKind==='dos') ffColor='var(--controlCharColorCRLF, yellow)'; else if(ffKind==='mac') ffColor='rgba(200,80,80,0.65)'; }catch{}
+          // Dummy final newline highlighting (#599): original file lacked final LF and current text still lacks final LF.
+          // We treat the displayed end-of-line marker for the last real line as synthetic and recolor it.
+          // UI記号は常に'↲'で統一（ダミーも同一記号で色のみ差別化）
+          let eolSym = '↲';
+          try{
+            const b = currentBuffer();
+            const isLastReal = (idx === realTotal-1);
+            const bufText = String(b && b.text || '');
+            const stillNoFinalLF = b ? !bufText.endsWith('\n') : false;
+            // シンプルルール: 「現在のテキストが末尾LFを欠く」時のみダミーを表示
+            const dummyActive = !!(b && isLastReal && stillNoFinalLF);
+            if (dummyActive){
+              // Prefer explicit theme colors if provided; fall back to a distinct orange/yellow.
+              // Fallback colors: fixed yellow (#601 request) if theme not provided
+              let dLF = 'yellow'; let dCRLF = 'yellow';
+              try{ if (window && window.THEME){ if (window.THEME.dummyLFColor) dLF = String(window.THEME.dummyLFColor); if (window.THEME.dummyCRLFColor) dCRLF = String(window.THEME.dummyCRLFColor); } }catch{}
+              ffColor = (ffKind === 'dos') ? dCRLF : dLF;
+              elE.dataset.dummyFinal = '1';
+            }
+          }catch{}
+          elE.textContent=eolSym;
           elE.style.position='absolute'; elE.style.left=(xEnd-_hs)+'px'; elE.style.top=yTop+'px'; elE.style.height=LINE_HEIGHT+'px'; elE.style.lineHeight=LINE_HEIGHT+'px'; elE.style.fontSize='inherit'; elE.style.fontFamily='var(--controlCharFont, "Segoe UI Symbol","Noto Sans Symbols 2","Cascadia Mono","Consolas",monospace)'; /* weight via CSS var on class */ elE.style.color=ffColor; elE.style.margin='0'; elE.style.padding='0';
           _listLayer.appendChild(elE);
         }
@@ -1567,22 +1589,32 @@
       // 具体的には末尾が\nで終わっている場合でも、分割結果の末尾の空要素は1つだけ捨てる。
       // これにより「末尾に改行あり（1つ）」のときに余分な空行を表示しない。
       const parts = t.split(/\n/);
-      if (t.endsWith('\n') && parts.length>0){
-        // ただし caret が末尾空行（改行直後＝テキスト末尾位置）にいるときはその空行は編集対象の「実在する」行なので残す (#498)
-        // editor.selectionStart は beforeinput/keydown 経路でも常に最新位置が得られる前提。
-        try{
-          const caretOff = editor.selectionStart|0;
-          const atBlankLineStart = (caretOff === t.length); // 改行直後 = 空行先頭 = 末尾オフセット
-          if (!atBlankLineStart){ parts.pop(); }
-          else {
-            // 残す: Enter 直後の空行に文字を入力しても余計な改行が先行しないようにする
-          }
-        }catch{ parts.pop(); }
-      }
+      if (t.endsWith('\n') && parts.length>0){ parts.pop(); }
       return parts;
     }catch{ return String(editor.value||'').split(/\n/); }
   }
+  // (#607) 編集操作向け: 末尾空要素も含めて忠実に分割した配列を返す
+  function _splitLinesRaw(){
+    try{ return String(editor.value||'').split(/\n/); }catch{ return [String(editor.value||'')]; }
+  }
   function _totalLines(){ return _splitLines().length; }
+  // (#607) 編集用に末尾の空要素も含めて分割した配列を返す
+  function _splitLinesRaw(){
+    try{ return String(editor.value||'').split(/\n/); }catch{ return [String(editor.value||'')]; }
+  }
+  // (#607) 生配列を使ったクランプ/前進（削除など編集ロジック専用）
+  function _clampPosRaw(p){ const lines=_splitLinesRaw(); let r=Math.max(0, Math.min(lines.length-1, p.r|0)); let c=Math.max(0, Math.min((lines[r]||'').length, p.c|0)); return {r,c}; }
+  function _advancePosByCpRaw(r,c,n){
+    const lines=_splitLinesRaw();
+    let rr=r|0, cc=c|0, left=n|0;
+    const last=lines.length-1;
+    while(left>0){
+      const line=lines[rr]||''; const len=line.length;
+      if (cc < len){ cc = _nextIndex(line, cc); left--; }
+      else { if (rr>=last) break; rr++; cc=0; left--; }
+    }
+    return { r: Math.max(0, Math.min(last, rr)), c: Math.max(0, Math.min((lines[Math.max(0, Math.min(last, rr))]||'').length, cc)) };
+  }
   function _topLine(){
     const st = (editor.scrollTop||0);
     // 端数によるズレを抑えるため下方向に丸め（常に現在の表示先頭行を指す）
@@ -1878,6 +1910,8 @@
         _savedTick: 0,
         _undo: [],
         _redo: [],
+        // original final newline presence (established on initial load/create) — #598
+        _origHadFinalLF: text0.endsWith('\n'),
         // encoding/newline metadata
         enc: (b.enc||'utf-8'),      // 'utf-8' | 'shift_jis'
         ff:  (b.ff||'unix'),        // 'unix' | 'dos'
@@ -2526,6 +2560,8 @@
       let ff = (txt.indexOf('\r')>=0) ? 'dos' : 'unix';
       let hasBomChar = (txt.length>0 && txt.charCodeAt(0)===0xFEFF);
       t = (hasBomChar ? txt.slice(1) : txt).replace(/\r\n?/g,'\n');
+      // Record original final LF before any edits (only on first creation) — #598
+      try{ if (opts && opts.mode==='new'){ b && (b._origHadFinalLF = /\n$/.test(String(t||''))); } }catch{}
       // 可能なら /probe で原本の enc/ff/bom を取得
       let encDetected = 'utf-8';
       try{
@@ -2584,6 +2620,7 @@
         if (b){
           b.path = urlStr; b.name = _basename(path); b.text = t; b.savedText = t; b._changeTick=0; b._savedTick=0; b.modified=false; try{ b._undo=[]; b._redo=[]; }catch{}
           try{ b.enc=encDetected; b.ff=ff; b.bom=hasBomChar; }catch{}
+          try{ b._origHadFinalLF = /\n$/.test(String(t||'')); }catch{}
           try{
             b._externalChangeIgnored=false;
             const meta = await _statFileMeta(b.path);
@@ -3077,7 +3114,7 @@
   // Convert between (row,col) and absolute offset in editor.value
   function _offsetFromRC(r,c){
     try{
-      const lines = _splitLines();
+      const lines = _splitLinesRaw(); // (#607) 改行列を忠実に扱う
       let rr = Math.max(0, Math.min(lines.length-1, r|0));
       let cc = Math.max(0, Math.min((lines[rr]||'').length, c|0));
       let off = 0;
@@ -3089,7 +3126,7 @@
   function _rcFromOffset(off){
     try{
       let o = Math.max(0, off|0);
-      const lines = _splitLines();
+      const lines = _splitLinesRaw(); // (#607)
       for (let r=0;r<lines.length;r++){
         const len = (lines[r]||'').length;
         if (o <= len){ return { r, c: o }; }
@@ -3144,9 +3181,34 @@
   // ---- Undo/Redo ----
   const UNDO_LIMIT = 200;
   function _currentStacks(){ const b=currentBuffer(); return b ? b : null; }
+  function _clampCaret(){
+    try{
+      const raw=_splitLinesRaw();
+      if (raw.length===0){ caretRow=0; caretCol=0; return; }
+      if (caretRow<0) caretRow=0; if (caretRow>raw.length-1) caretRow=raw.length-1;
+      const maxCol=(raw[caretRow]||'').length;
+      if (caretCol<0) caretCol=0; if (caretCol>maxCol) caretCol=maxCol;
+    }catch{}
+  }
+  function _afterTextMutation(){
+    // 強制同期順序: CaseA/B の EOF 削除/undo 直後に表示が旧状態で残る問題 (#614)
+    // 1) caret を raw でクランプ
+    try{ _clampCaret(); }catch{}
+    // 2) ネイティブ selection を先に caret に合わせる (末尾 phantom 空行判定に利用されるため)
+    try{ _syncNativeSelectionToCaret(); }catch{}
+    // 3) スクロール補正と caret overlay 再配置
+    try{ ensureScrolloff(); }catch{}
+    try{ _repositionCaret(); }catch{}
+    // 4) ガター更新前に listchars を一度クリアし再描画 (旧末尾行残留対策)
+    try{ _renderListChars(); }catch{}
+    // 5) ガター更新と二度目の listchars 再描画（caret オーバーレイ位置確定後の最終状態）
+    try{ updateGutter(); }catch{}
+    try{ _renderListChars(); }catch{}
+  }
   function _makeSnapshot(){
     const b=currentBuffer();
-    return { text: String(editor.value||''), caretRow, caretCol, scrollTop: (editor.scrollTop||0), changeTick: (b? (b._changeTick|0) : 0), enc: (b? b.enc : 'utf-8'), ff: (b? b.ff : 'unix'), bom: (b? !!b.bom : false) };
+    const txt = String(editor.value||'');
+    return { text: txt, caretRow, caretCol, scrollTop: (editor.scrollTop||0), changeTick: (b? (b._changeTick|0) : 0), enc: (b? b.enc : 'utf-8'), ff: (b? b.ff : 'unix'), bom: (b? !!b.bom : false) };
   }
   function _pushUndoSnapshotObj(kind, snap){
     try{
@@ -3162,11 +3224,14 @@
     editor.value = String(s.text||'');
     caretRow = Math.max(0, s.caretRow|0);
     caretCol = Math.max(0, s.caretCol|0);
+    _clampCaret();
     try{ editor.scrollTop = Math.max(0, s.scrollTop|0); }catch{}
     // restore change tick from snapshot and recompute modified
     try{ const b=currentBuffer(); if (b){ b._changeTick = (s.changeTick|0); } }catch{}
     _syncModifiedFromTick();
     ensureScrolloff(); _repositionCaret(); updateGutter();
+    // Undo/redo 後に listchars の再描画を明示的に行い、EOF付近の可視状態を即時反映 (CaseB)
+    try{ _renderListChars(); }catch{}
     // restore encoding meta if present
     try{ const b=currentBuffer(); if (b && s && typeof s.enc !== 'undefined'){ b.enc = s.enc||'utf-8'; b.ff = s.ff||'unix'; b.bom = !!s.bom; _updateEncBtnLabel(); } }catch{}
   }
@@ -3195,37 +3260,23 @@
   function _deleteRangePos(p1,p2, opts){
     // record undo before mutation
     _pushUndoSnapshot('delete-range');
-    const lines=_splitLines();
-    let a=_clampPos(p1), b=_clampPos(p2);
+    // Clamp order
+    let a=_clampPosRaw(p1), b=_clampPosRaw(p2); // (#607) raw ベースで厳密に
     if (_cmpPos(a,b)>0){ const t=a; a=b; b=t; }
     if (a.r===b.r && a.c===b.c) return; // nothing
-    // Capture deleted text for paste (charwise)
-    let deletedText = '';
-    if (a.r===b.r){
-      const r=a.r; const s=lines[r]||'';
-      deletedText = s.slice(a.c, b.c);
-    } else {
-      const head=(lines[a.r]||'').slice(a.c);
-      const middle = (b.r - a.r > 1) ? (lines.slice(a.r+1, b.r).join('\n') + '\n') : '';
-      const tail=(lines[b.r]||'').slice(0,b.c);
-      deletedText = head + '\n' + middle + tail;
-    }
-    if (a.r===b.r){
-      const r=a.r; const s=lines[r]||'';
-      const next = (s.slice(0,a.c) + s.slice(b.c));
-      lines[r]=next;
-    } else {
-      const head=(lines[a.r]||'').slice(0,a.c);
-      const tail=(lines[b.r]||'').slice(b.c);
-      // remove inner lines and join
-      const newLine = head + tail;
-      lines.splice(a.r, (b.r - a.r + 1), newLine);
-    }
-    editor.value = lines.join('\n');
-    // set caret at start of deletion
-    _setCaret(a.r, a.c);
-  // Keep native selection in sync to avoid later browser-driven scroll/selection surprises (e.g., on save)
-  try{ const stHold=editor.scrollTop|0, slHold=editor.scrollLeft|0; _syncNativeSelectionToCaret(); editor.scrollTop=stHold; editor.scrollLeft=slHold; }catch{}
+    // Absolute offsets over raw text to preserve exact newlines at EOF (#604)
+    const s = String(editor.value||'');
+    const off1 = _offsetFromRC(a.r, a.c);
+    const off2 = _offsetFromRC(b.r, b.c);
+    const startOff = Math.max(0, Math.min(s.length, off1|0));
+    const endOff   = Math.max(startOff, Math.min(s.length, off2|0));
+    const deletedText = s.slice(startOff, endOff);
+    const out = s.slice(0, startOff) + s.slice(endOff);
+    editor.value = out;
+    // set caret at start of deletion using offset
+    try{ const rc = _rcFromOffset(startOff); _setCaret(rc.r, rc.c); }catch{ _setCaret(a.r, a.c); }
+    // Keep native selection in sync to avoid later browser-driven scroll/selection surprises (e.g., on save)
+    try{ const stHold=editor.scrollTop|0, slHold=editor.scrollLeft|0; _syncNativeSelectionToCaret(); editor.scrollTop=stHold; editor.scrollLeft=slHold; }catch{}
     // Update unnamed register (charwise)
     // #539: allow caller to suppress register update (e.g., 'x' without count)
     const _updReg = !(opts && opts.updateRegister === false);
@@ -3233,10 +3284,13 @@
       try{ _regUnnamed = { text: String(deletedText||''), linewise: false }; }catch{}
     }
     _touchBufferModified();
+    _afterTextMutation();
   }
   function _deleteWholeLines(rStart, count){
+    // 変更開始前に必ず undo を積む（CaseA: 最終空行削除も履歴対象）
     _pushUndoSnapshot('delete-lines');
-    const lines=_splitLines();
+    const s = String(editor.value||'');
+    const lines=_splitLinesRaw(); // 編集用: 末尾空要素も含め正確に削除
     const total=lines.length;
     if (total===0) return;
     let rs=Math.max(0, Math.min(total-1, rStart|0));
@@ -3255,14 +3309,28 @@
     const before = lines.slice(0, rs);
     const after  = lines.slice(rEnd+1);
     const nextLines = before.concat(after);
+    // #616: 末尾行（最終要素）を削除し、元テキストが \n で終わっていない場合、
+    // 削除対象直前の改行が「ファイル末尾の改行」として残るため、
+    // 末尾に空要素を追加して join('\n') で末尾改行を保持する。
+    try{
+      const endsWithLF = s.endsWith('\n');
+      if (rEnd === total-1 && !endsWithLF){ nextLines.push(''); }
+    }catch{}
     if (nextLines.length===0) nextLines.push('');
     const newRow = Math.max(0, Math.min(nextLines.length-1, rs));
-    editor.value = nextLines.join('\n');
-    _setCaret(newRow, 0);
+    let out = nextLines.join('\n');
+    editor.value = out;
+    // CaseA: 末尾の空行を削除した場合は前行の末尾へ caret を置く
+    let newCol = 0;
+    if (rEnd === total-1 && (lines[total-1]||'') === ''){
+      newCol = (nextLines[newRow]||'').length;
+    }
+    _setCaret(newRow, newCol);
     // Sync native selection immediately after programmatic mutation
     try{ const stHold=editor.scrollTop|0, slHold=editor.scrollLeft|0; _syncNativeSelectionToCaret(); editor.scrollTop=stHold; editor.scrollLeft=slHold; }catch{}
     try{ _regUnnamed = { text: String(deletedBlock||''), linewise: true }; }catch{}
     _touchBufferModified();
+    _afterTextMutation();
   }
   function _insertTextAt(r,c,text){
     const s = String(text||'');
@@ -3400,11 +3468,88 @@
   }
   function _doDeleteX(count){
     const n=Math.max(1, count|0);
+    // #617: 末尾の空行(改行のみ行)で 'x' 実行時の caret 行頭移動を防ぎ、前行末へ移動させるため事前状態を記録
+    const preLines=_splitLinesRaw();
+    const preDisp=_splitLines();
+    const preLast = preLines.length - 1;
+    const preCaretRow = caretRow|0;
+    const preCaretCol = caretCol|0;
+    const preLineEmpty = (preCaretRow>=0 && preCaretRow<=preLast) ? (preLines[preCaretRow]==='') : false;
+    const preDispLast = preDisp.length - 1;
+    // 旧: 単一末尾空行のみを検出していた条件 (display + 1 の raw)
+    const preAtFinalVisibleBlankLegacy = (
+      preDispLast>=0 &&
+      preCaretRow === preDispLast &&
+      ((preDisp[preDispLast]||'')==='') &&
+      (preLines.length === preDisp.length + 1) &&
+      ((preLines[preLines.length-1]||'')==='')
+    );
+    // #622: "abc\n\n" など末尾に複数の空行がある場合でも、最終 raw 空行上での 'x' 後に caret を前行末へ移動させたい。
+    // trailingBlankCount: raw末尾連続空要素数 ("abc\n\n\n" -> 2空行なら 2, 行配列は ["abc", "", "", ""])
+    let trailingBlankCount=0;{
+      for(let i=preLines.length-1;i>=0;i--){ if(preLines[i]===''){ trailingBlankCount++; } else break; }
+    }
+    // caret が raw の最終空行上に居るか
+    const preAtLastRawBlank = (trailingBlankCount>0 && preCaretRow === preLines.length-1 && preLineEmpty);
+    // 既存 display 差分ロジックで検出できない (複数空行) ケースを追加吸収
+    const preAtFinalVisibleBlank = preAtFinalVisibleBlankLegacy || preAtLastRawBlank;
     const start={ r: caretRow, c: caretCol };
-    const end=_advancePosByCp(start.r, start.c, n);
+    const end=_advancePosByCpRaw(start.r, start.c, n); // (#607) raw ベースで1cp前進
     if (start.r===end.r && start.c===end.c){ return; }
     // #539: 'x' should not update yank register unless count >= 2
     _deleteRangePos(start, end, { updateRegister: (n>=2) });
+    // #603: 削除結果の末尾行状態に応じた特殊処理
+    try{
+      const v=String(editor.value||'');
+      const lines=_splitLinesRaw(); // (#607) 改行数の正確な判定
+      const last=lines.length-1;
+      if (caretRow>last){ caretRow=last; caretCol=(lines[last]||'').length; }
+      if (last>=0){
+        const line=lines[caretRow]||'';
+        const noFinalLF = !v.endsWith('\n');
+        // 「caret行が改行も含めて空」: 最終行が空文字列 かつ 末尾LF欠落
+        if (caretRow===last && line==='' && noFinalLF){
+          if (caretRow>0){
+            caretRow = caretRow - 1;
+            caretCol = (lines[caretRow]||'').length;
+            _setCaret(caretRow, caretCol);
+            try{ _syncNativeSelectionToCaret(); }catch{}
+          } else {
+            // 先頭唯一行が空で末尾LF欠落ならそのまま(行は残す)
+            caretCol=0; _setCaret(caretRow, caretCol);
+          }
+        } else if (caretRow===last && line!=='' && noFinalLF){
+          // 最終行が非空で末尾LF欠落 -> ダミー行末記号表示対象。描画更新のみ。
+          try{ _renderListChars(); }catch{}
+        }
+        // #617: 末尾空行(改行のみ)を 'x' で削除したケース
+        // 条件: 削除前 caret が最終行かつその行が空文字列, 削除後行数が1減, caret が前行の行頭(=0) に居る
+        // 対応: caret を前行末尾へ再設定
+        try{
+          if (preAtFinalVisibleBlank){
+            // 前行末へ移動: 複数末尾空行があった場合は「末尾空行群の直前行」を基準にする
+            // raw基準で trailingBlankCount 個の空行があり caret が最終空行だったケースでは
+            // 前行 = preLines.length - trailingBlankCount - 1
+            let targetRow;
+            if (preAtLastRawBlank){
+              targetRow = preLines.length - trailingBlankCount - 1;
+            } else {
+              // 従来単一空行ケース: display最終行
+              const disp=_splitLines();
+              targetRow = Math.max(0, disp.length - 1);
+            }
+            if (targetRow>=0){
+              const afterRaw=_splitLinesRaw();
+              const tCol=(afterRaw[targetRow]||'').length;
+              caretRow=targetRow; caretCol=tCol;
+              _setCaret(caretRow, caretCol);
+              _syncNativeSelectionToCaret();
+            }
+          }
+        }catch{}
+      }
+    }catch{}
+    _afterTextMutation();
   }
 
   // Yank helpers (copy to unnamed register without modifying text)
@@ -4913,7 +5058,7 @@
             }
           }catch{}
     }
-  // Ensure internal text reflects standardized single trailing newline (size/mtime align)
+  // Preserve text verbatim (do not add/remove trailing newline) — #597/#598
   let _txtForSave = _normalizeTextForSaveInternal(editor.value||'');
   const ok = await _saveToURLWithExternalCheck(b, targetUrl, _txtForSave);
         if (ok){
@@ -6567,6 +6712,37 @@
         _debugPush({ t:Date.now(), type:'beforeinput-block', mode:_mode, inputType:e.inputType, data:e.data, ctrl:e.ctrlKey, alt:e.altKey, meta:e.metaKey, isComp:false });
         return;
       }
+      // #624: INSERTモードで削除/改行操作前のテキストを保持（直後差分判定用）
+      try{
+        const itCap = String(e.inputType||'');
+        if (itCap && (itCap.startsWith('delete') || itCap==='insertLineBreak' || itCap==='insertParagraph')){
+          _prevTextBeforeInput = String(editor.value||'');
+        }
+      }catch{}
+      // #600: ダミーEOF改行位置での Enter は「ダミー→通常改行」置換にする（空行を作らない）
+      try{
+        const it = String(e.inputType||'');
+        if (it==='insertLineBreak' || it==='insertParagraph'){
+          const b = currentBuffer();
+          const v = String(editor.value||'');
+          const atEnd = (editor.selectionStart|0) === (editor.selectionEnd|0) && (editor.selectionStart|0) === v.length;
+          // (#606) ダミー判定は「現在末尾LFが欠落しているか」のみ
+          const dummyActive = !!(b && !v.endsWith('\n'));
+          if (atEnd && dummyActive){
+            // 既定の改行挿入を抑止し、末尾に'\n'だけ追加。caretは改行直前へ戻すことで末尾空行を表示しない
+            try{ e.preventDefault(); }catch{}
+            const newV = v + '\n';
+            editor.value = newV;
+            // caret を改行直前へ（末尾空行を _splitLines で捨てさせる）
+            const newOff = Math.max(0, newV.length - 1);
+            try{ editor.selectionStart = editor.selectionEnd = newOff; }catch{}
+            try{ const rc = _rcFromOffset(newOff); caretRow = rc.r; caretCol = rc.c; }catch{}
+            _touchBufferModified(); ensureScrolloff(); _repositionCaret(); updateGutter();
+            try{ _renderListChars(); }catch{}
+            return; // 処理済み
+          }
+        }
+      }catch{}
       _debugPush({ t:Date.now(), type:'beforeinput', mode:_mode, inputType:e.inputType, data:e.data, ctrl:e.ctrlKey, alt:e.altKey, meta:e.metaKey, isComp:false });
     });
     // NORMAL/VISUAL/CMD 時の入力フォールバックガード (#491, #492, #522)
@@ -6613,8 +6789,31 @@
         // sync overlay caret to native insertion point
         try{ const off = editor.selectionStart|0; const rc = _rcFromOffset(off); caretRow = rc.r; caretCol = rc.c; }catch{}
         // _touchBufferModified already hides cursor; redundant call removed
+        // #624: 差分検出用に直前テキストを参照（末尾状態の変化トレース）
+        try{
+          if (_prevTextBeforeInput){
+            const prev = String(_prevTextBeforeInput||'');
+            const cur = String(editor.value||'');
+            // 特殊フラグは使わず、静的状態による描画へ（#629）
+          }
+          _prevTextBeforeInput='';
+        }catch{}
       }
       _exactLineLockAdjust(); _repositionCaret(); updateGutter(); _updateHlsearchFull(); _updatePosInfo();
+      // #621: 最終行が改行のみ -> 改行削除で dummy へ移行した直後に色/記号が反映されないケースの強制再描画
+      try{
+        const b=currentBuffer();
+        if (b){
+          const txt=String(b.text||'');
+          const noFinalLF = !txt.endsWith('\n');
+          // 空ファイル または 末尾行が空文字列（raw分割末尾が単一要素）かつ LF 欠落時は再描画を二段階で強制
+          // #623: 末尾LF欠落の全ケースでダミー記号が即時反映されないことがあるため条件を一般化
+          if (noFinalLF){
+            _renderListChars();
+            if (window.requestAnimationFrame){ requestAnimationFrame(()=>{ try{ _renderListChars(); }catch{} }); }
+          }
+        }
+      }catch{}
     });
     // Mouse selection/click: sync overlay caret with native selection
     const syncCaretFromSelection = ()=>{
@@ -6665,6 +6864,8 @@
         }
       }catch{}
       _repositionCaret(); updateGutter(); _updatePosInfo();
+      // #626: caret移動のみでも EOFダミー表示が最新状態になるよう即時再描画
+      try{ _renderListChars(); }catch{}
     });
   editor.addEventListener('keyup', (e)=>{ _debugPush({ t:Date.now(), type:'keyup', mode:_mode, key:e.key, code:e.code, keyCode:e.keyCode, which:e.which, ctrl:e.ctrlKey, alt:e.altKey, meta:e.metaKey, isComp:_imeComposing }); if(e.key==='Enter') ensureScrolloff(); _repositionCaret(); updateGutter(); _updatePosInfo(); });
   editor.addEventListener('click', ()=>{ _repositionCaret(); updateGutter(); _updatePosInfo(); });
@@ -6804,6 +7005,7 @@
           _setMode('NORMAL');
           return;
         }
+        // #603: INSERTモードの下方向移動は最終行以降へ進めない。'j' 文字としての入力以外で改行を合成しない。
         // Ctrl+H を Backspace と同等に扱う (#460)
         if (e.ctrlKey && !e.altKey && !e.metaKey && (e.key==='h' || e.key==='H')){
           e.preventDefault(); e.stopPropagation();
@@ -6835,6 +7037,17 @@
         // Allow native editing behavior, but keep overlays in sync when moving the caret
         if (e.key==='ArrowLeft' || e.key==='ArrowRight' || e.key==='ArrowUp' || e.key==='ArrowDown' ||
             e.key==='Home' || e.key==='End' || e.key==='PageUp' || e.key==='PageDown'){
+          // #603: ArrowDown で末尾LF欠落時に仮改行を挿入する旧処理(#602)を撤廃。
+          // 最終行末尾での下方向移動は何も起こさず、そのまま位置維持。
+          try{
+            if (e.key==='ArrowDown'){
+              const lines=_splitLines(); const last=lines.length-1;
+              if (caretRow===last && caretCol===(lines[last]||'').length){
+                // 位置を維持するためにブラウザ既定動作を阻止（念のため）
+                try{ e.preventDefault(); e.stopPropagation(); }catch{}
+              }
+            }
+          }catch{}
           try{ _flagCaretMotion(); }catch{}
           // Defer until after the browser updates selection/caret
           setTimeout(()=>{
@@ -7766,38 +7979,32 @@
         _pushUndoSnapshot('open-below');
         _suppressInsertSnapshotOnce = true;
         const prev = String(editor.value||'');
-        const hadFinalLF = prev.endsWith('\n');
-        const lines = _splitLines();
+        const hadFinalLF = prev.endsWith('\n'); // no longer used for auto newline augmentation (#597)
+        const lines = _splitLinesRaw(); // (#607) 末尾空要素保持
         const rr = Math.max(0, Math.min(lines.length-1, caretRow));
         const wasLastRow = (rr === lines.length-1);
         const hadBlankEOFLine = (lines.length>0 && lines[lines.length-1]==='');
-        const newLines = lines.slice(0, rr+1).concat(['']).concat(lines.slice(rr+1));
+        let newLines = lines.slice(0, rr+1).concat(['']).concat(lines.slice(rr+1));
         let out = newLines.join('\n');
-        // 末尾行での o は、元テキストに末尾LFがある場合は常にもう 1 つ LF を付与し、
-        // EOF の実在空行数を +1 できるようにする（join だけでは末尾に LF は増えないため）。
-        if (wasLastRow && hadFinalLF){ out += '\n'; }
-        // 末尾以外の挿入では、元が末尾LFありなら保持（結合結果で落ちた場合のみ復元）
-        else if (!wasLastRow && hadFinalLF && !out.endsWith('\n')){ out += '\n'; }
+        // (#607) 既存末尾LFがあり raw 分割で末尾空行がなかった場合は本来 2 連続 LF になるべきなので補正
+        if (wasLastRow && hadFinalLF && !hadBlankEOFLine){ out = prev + '\n'; }
         if (out !== prev){ editor.value = out; _touchBufferModified(); }
-        _setCaret(rr+1, 0); ensureScrolloff(); _repositionCaret(); updateGutter(); _setMode('INSERT'); return;
+        _setCaret(rr+1, 0);
+        ensureScrolloff(); _repositionCaret(); updateGutter(); _setMode('INSERT'); return;
       }
       if (e.key==='O' && !e.ctrlKey && !e.metaKey && !e.altKey){
         e.preventDefault();
         _pushUndoSnapshot('open-above');
         _suppressInsertSnapshotOnce = true;
         const prev = String(editor.value||'');
-        const hadFinalLF = prev.endsWith('\n');
-        const lines = _splitLines();
+        const hadFinalLF = prev.endsWith('\n'); // no longer used for auto newline augmentation (#597)
+        const lines = _splitLinesRaw(); // (#607)
         const rr = Math.max(0, Math.min(lines.length-1, caretRow));
         const wasLastRow = (rr === lines.length-1);
         const isEOFBlank = (lines.length>0 && rr===lines.length-1 && lines[rr]==='');
         const newLines = lines.slice(0, rr).concat(['']).concat(lines.slice(rr));
         let out = newLines.join('\n');
-        // 末尾の空行上での O は EOF の実在空行を +1 にする必要があるため、
-        // 元に末尾LFがある場合はもう 1 つ LF を付与して表現を進める。
-        if (hadFinalLF && (isEOFBlank || wasLastRow) && out.endsWith('\n')){ out += '\n'; }
-        // それ以外は、元が末尾LFありなら保持（結合結果で落ちた場合のみ復元）
-        else if (hadFinalLF && !out.endsWith('\n')){ out += '\n'; }
+        // (#597) EOF 付近の自動改行付与を廃止: ユーザー操作による行挿入のみを反映し末尾LFを強制しない
         if (out !== prev){ editor.value = out; _touchBufferModified(); }
         _setCaret(rr, 0); ensureScrolloff(); _repositionCaret(); updateGutter(); _setMode('INSERT'); return;
       }
