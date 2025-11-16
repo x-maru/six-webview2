@@ -20,10 +20,39 @@ param(
   [int]$WaitMinutes = 720,
 
   # Debug: print Edge app URL (with #api) on launch
-  [switch]$ShowUrl = $false
+  [switch]$ShowUrl = $false,
+
+  # Allow multiple instances (bypass single-instance mutex). Default: false
+  [switch]$AllowMulti = $false
 )
 
 $here  = Split-Path -Parent $MyInvocation.MyCommand.Path
+if (-not $AllowMulti) {
+  $mutexName = 'six-webview2-singleton'
+  try {
+    $createdNew = $false
+    $global:SixMutex = [System.Threading.Mutex]::new($false, $mutexName, [ref]$createdNew)
+    if (-not $createdNew) {
+      Write-Host "six already running (mutex: $mutexName). Exiting." -ForegroundColor Yellow
+      # Release immediately to avoid holding mutex when forcing exit
+      try { if ($global:SixMutex) { $global:SixMutex.ReleaseMutex(); $global:SixMutex.Dispose(); $global:SixMutex = $null } } catch {}
+      if ($KeepOpen) {
+        Write-Host 'Press Enter to force launch anyway (multi-instance) or Ctrl-C to cancel.'
+        $inp = Read-Host
+      } else {
+        return  # return instead of exit: avoid blocking parent shell waiting for host
+      }
+    } else {
+      $releaseScript = {
+        try { if ($global:SixMutex) { $global:SixMutex.ReleaseMutex(); $global:SixMutex.Dispose(); $global:SixMutex = $null } } catch {}
+      }
+      try { Register-EngineEvent -SourceIdentifier PowerShell.Exiting -Action $releaseScript | Out-Null } catch {}
+      $global:SixReleaseAction = $releaseScript
+    }
+  } catch {
+    Write-Host "Mutex setup failed: $($_.Exception.Message)" -ForegroundColor DarkYellow
+  }
+}
 Write-Host "six.ps1 starting in: $here"
 $index = Join-Path $here $Html
 
@@ -270,3 +299,8 @@ if (-not $launched) {
 }
 
 if ($KeepOpen) { Write-Host 'Press Enter to exit...'; Read-Host | Out-Null }
+
+# Final mutex release fallback (in case events did not fire)
+if (-not $AllowMulti) {
+  try { if ($global:SixMutex) { $global:SixMutex.ReleaseMutex(); $global:SixMutex.Dispose(); $global:SixMutex = $null } } catch {}
+}
