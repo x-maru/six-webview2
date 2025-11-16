@@ -2558,19 +2558,24 @@
       } catch { /* no API or URL parse error */ }
       // それでも未取得なら通常経路（XHR/fetch）
       if (txt === undefined){
-        try { txt = await _fetchTextSmart(urlStr); }
-        catch(eFetch){
-          // 最後の手段として API /read（再試行）
-          try{
-            const u2 = new URL(urlStr);
-            if (_apiIsEnabled() && u2.protocol==='file:' && u2.host){
-              const fsPath2 = ('\\\\' + u2.host + decodeURIComponent(u2.pathname).replace(/\//g,'\\'));
-              const apiRead2 = _apiBase + 'read?fs=' + encodeURIComponent(fsPath2);
-              try{ txt = await _fetchTextWithTimeout(apiRead2, 8000); _apiNoteSuccess(); }catch(e2){ _apiNoteFailure(); throw eFetch; }
-            } else {
-              throw eFetch;
-            }
-          } catch(eApi){ throw eFetch; }
+        // silentOnFail + mode:new のとき、存在しないファイルは正常ケースとみなし空新規バッファ生成へ進む（追加ログ/フォールバック抑止）
+        if (opts && opts.silentOnFail && String(opts.mode||'new')==='new'){
+          txt = '';
+        } else {
+          try { txt = await _fetchTextSmart(urlStr); }
+          catch(eFetch){
+            // 最後の手段として API /read（再試行）
+            try{
+              const u2 = new URL(urlStr);
+              if (_apiIsEnabled() && u2.protocol==='file:' && u2.host){
+                const fsPath2 = ('\\\\' + u2.host + decodeURIComponent(u2.pathname).replace(/\//g,'\\'));
+                const apiRead2 = _apiBase + 'read?fs=' + encodeURIComponent(fsPath2);
+                try{ txt = await _fetchTextWithTimeout(apiRead2, 8000); _apiNoteSuccess(); }catch(e2){ _apiNoteFailure(); throw eFetch; }
+              } else {
+                throw eFetch;
+              }
+            } catch(eApi){ throw eFetch; }
+          }
         }
       }
       // detect ff + BOM (utf-8 BOM appears as U+FEFF at string start) 既定
@@ -2661,7 +2666,8 @@
       try{ _setTitle(); _renderTabbar(); }catch{}
       return true;
     } catch (e){
-      console.error('open failed', e);
+      // silentOnFail のときはコンソール出力を抑止（存在しないファイルの新規作成など正常ケース）
+      try{ if (!(opts && opts.silentOnFail)) console.error('open failed', e); }catch{}
       // 本文は読み込めている → バッファだけ確実に作り、致命的扱いにしない
       if (loadedIntoEditor){
         try{
@@ -5359,6 +5365,12 @@
         } else {
           base = _htmlBaseURL();
         }
+
+        // 引数ありの :e はここで履歴に残す（起動直後・新規作成ケースも含めて統一）
+        try{
+          const hist = ':e ' + _collapseDotDotPath(String(arg||'').replace(/\\/g,'/'));
+          _cmdHistoryMaybePush(hist);
+        }catch{}
 
         // ディレクトリ指定ヒントの場合は、そのディレクトリでポップアップを開く
         if (_isDirHint(arg)){
@@ -8341,6 +8353,19 @@
               _bufPopupHide();
               setTimeout(()=>editor.focus(), 0);
               return;
+            }
+          }catch{}
+          // Ensure :e <arg> always records into command history regardless of popup visibility (#641)
+          try{
+            const vNow = String(cmdinput.value||'');
+            // Ignore :e! (reload); handle only :e with non-empty argument
+            if (!/^\s*:e\s*!\s*$/i.test(vNow)){
+              const mPre = vNow.match(/^\s*:?(?:e\b)\s*(.*)$/i);
+              const afterPre = (mPre && mPre[1]) ? mPre[1].trim() : '';
+              if (afterPre){
+                const histPre = ':e ' + _collapseDotDotPath(afterPre.replace(/\\/g,'/'));
+                _cmdHistoryMaybePush(histPre);
+              }
             }
           }catch{}
           // popup 非表示かつ先頭が :e のときは、Enter で :e の動作を確定。
