@@ -6239,8 +6239,10 @@
               [K('gg'), sep('  先頭へ')],
               [K('G'), sep('  末尾へ')],
               [K('0'), sep('  行頭へ')],
+              [K('Home'), sep('  行頭へ（'), K('0'), sep(' と同等）')],
               [K('^'), sep('  空白文字に続く行頭へ')],
               [K('$'), sep('  行末へ')],
+              [K('End'), sep('  行末へ（'), K('$'), sep(' と同等）')],
               [K('w'), sep(' / '), K('b'), sep('  単語の先頭へ進む/戻る')],
               [K('W'), sep(' / '), K('B'), sep('  WORD（空白区切りの大きな語）単位で進む/戻る')],
               [K('Nw'), sep(' / '), K('Nb'), sep(' / '), K('NW'), sep(' / '), K('NB'), sep('  N回分まとめて移動（例: '), K('3w'), sep('）')],
@@ -6290,7 +6292,64 @@
             ]));
           } else if (curTab==='insert'){
             wrap.appendChild(mkH('INSERT'));
-            wrap.appendChild(mkP('文字入力とUndoスナップショットの扱い。'));
+            wrap.appendChild(mkP('文字入力とUndoスナップショットの扱い。INSERT中は textarea の標準編集機能（WebView2/Chromium 準拠）も利用できます。挙動はOS/環境に依存します。'));
+
+            // 基本編集
+            const mkSec = (title)=>{ const h=mkH(title); try{ h.style.fontSize='1.1em'; h.style.fontWeight='700'; }catch{} return h; };
+            wrap.appendChild(mkSec('基本編集'));
+            wrap.appendChild(mkList([
+              [K('Backspace'), sep('  左の1文字を削除')],
+              [K('Delete'), sep('  右の1文字を削除')],
+              [K('Enter'), sep('  改行を挿入（Sixの最終改行ポリシー: 視覚のみのダミー最終行あり、保存で自動追加/削除しない）')]
+            ]));
+
+            // カーソル移動（標準挙動）
+            wrap.appendChild(mkSec('カーソル移動（標準挙動）'));
+            wrap.appendChild(mkList([
+              [K('←/→/↑/↓'), sep('  1文字/1行 単位で移動')],
+              [K('Home'), sep('  行頭へ移動')],
+              [K('End'), sep('  行末へ移動')],
+              [K('Ctrl+←'), sep('  単語の前へ移動')],
+              [K('Ctrl+→'), sep('  単語の次へ移動')],
+              [K('PageUp/PageDown'), sep('  複数行を一気に移動（表示環境依存）')]
+            ]));
+
+            // 範囲選択（標準挙動）
+            wrap.appendChild(mkSec('範囲選択（標準挙動）'));
+            wrap.appendChild(mkList([
+              [K('Shift+矢印'), sep('  文字/行単位で選択を拡張/縮小')],
+              [K('Shift+Home/End'), sep('  行頭/行末まで選択')],
+              [K('Ctrl+Shift+←/→'), sep('  単語単位で選択')],
+              [K('Ctrl+A'), sep('  全選択')]
+            ]));
+
+            // 文字削除（標準挙動）
+            wrap.appendChild(mkSec('文字削除（標準挙動）'));
+            wrap.appendChild(mkList([
+              [K('Ctrl+Backspace'), sep('  左側の単語を削除')],
+              [K('Ctrl+Delete'), sep('  右側の単語を削除')]
+            ]));
+
+            // クリップボード（Windows/Chromium 標準）
+            wrap.appendChild(mkSec('クリップボード（Windows/Chromium 標準）'));
+            wrap.appendChild(mkList([
+              [K('Ctrl+C'), sep('  選択範囲をコピー（空選択時は行の既定動作は環境依存）')],
+              [K('Ctrl+X'), sep('  選択範囲を切り取り')],
+              [K('Ctrl+V'), sep('  貼り付け（改行やTABもそのまま挿入）')]
+            ]));
+
+            // Undo/Redo（Chromium 標準）
+            wrap.appendChild(mkSec('Undo/Redo（Chromium 標準）'));
+            wrap.appendChild(mkList([
+              [K('Ctrl+Z'), sep('  元に戻す（Undo）')],
+              [K('Ctrl+Y / Ctrl+Shift+Z'), sep('  やり直し（Redo、環境によりどちらか）')]
+            ]));
+
+            // 注意
+            wrap.appendChild(mkSec('注意'));
+            wrap.appendChild(mkList([
+              [sep('これらは Six 独自実装ではなく textarea の標準機能です。WebView2/Chromium および OS の設定、IME により挙動が変わることがあります。')]
+            ]));
           } else if (curTab==='visual'){
             const p = document.createElement('div');
             p.style.whiteSpace='pre-wrap';
@@ -6304,6 +6363,28 @@
             p2.appendChild(K('Y'));
             p2.appendChild(document.createTextNode('  選択範囲をWindowsクリップボードへコピーします（行選択/文字選択とも対応）。空の場合はWindowsクリップボードを更新しません。成功時のみ「Copied to Windows clipboard.」トーストを表示します。unnamed レジスタは変更しません。'));
             wrap.appendChild(p2);
+
+            // VISUAL の移動（選択拡張）
+            const mkSec = (title)=>{ const h=mkH(title); try{ h.style.fontSize='1.1em'; h.style.fontWeight='700'; }catch{} return h; };
+            wrap.appendChild(mkSec('移動(選択拡張)'));
+            wrap.appendChild(mkList([
+              [K('h'), sep(' / '), K('←'), sep(' 左へ1文字（選択調整）')],
+              [K('j'), sep(' / '), K('↓'), sep(' 下へ1行（選択調整）')],
+              [K('k'), sep(' / '), K('↑'), sep(' 上へ1行（選択調整）')],
+              [K('l'), sep(' / '), K('→'), sep(' 右へ1文字（選択調整）')],
+              [K('gg'), sep('  先頭へ（選択範囲更新）')],
+              [K('G'), sep('  末尾へ（選択範囲更新）')],
+              [K('0'), sep('  行頭へ（選択調整）')],
+              [K('Home'), sep('  行頭へ（'), K('0'), sep(' と同等。選択調整）')],
+              [K('^'), sep('  空白後の行頭へ（選択調整）')],
+              [K('$'), sep('  行末へ（選択調整）')],
+              [K('End'), sep('  行末へ（'), K('$'), sep(' と同等。選択調整。前置カウント対応）')],
+              [K('w'), sep(' / '), K('b'), sep('  単語単位で進む/戻る（選択調整）')],
+              [K('W'), sep(' / '), K('B'), sep('  WORD 単位で進む/戻る（選択調整）')],
+              [K('Nw'), sep(' / '), K('Nb'), sep(' / '), K('NW'), sep(' / '), K('NB'), sep('  N回分まとめて移動（例: '), K('3w'), sep('。選択調整）')],
+              [K('{'), sep('  段落/空行区切りの前へ（選択調整）')],
+              [K('}'), sep('  段落/空行区切りの次へ（選択調整）')]
+            ]));
           } else if (curTab==='regex'){
             wrap.appendChild(mkH('正規表現（Sixで使える仕様）'));
             wrap.appendChild(mkList([
@@ -7303,7 +7384,10 @@
   if (e.key==='B' && !e.ctrlKey && !e.metaKey && !e.altKey){ e.preventDefault(); const n=_consumeCount(); moveAndUpdate(()=>_moveWORDB(n)); return; }
     if (e.key==='^'){ e.preventDefault(); const _n=_consumeCount(); const line=(_splitLines()[caretRow]||''); _setCaret(caretRow, _firstNonBlankColOf(line)); try{ _flagCaretMotion(); }catch{} _repositionCaret(); _updateVisualSelection(); return; }
     if (e.key==='0' && _countAcc==null){ e.preventDefault(); _setCaret(caretRow, 0); try{ _flagCaretMotion(); }catch{} _repositionCaret(); _updateVisualSelection(); return; }
-  if (e.key==='$'){ e.preventDefault(); const n=_consumeCount(); let r=caretRow; if (n>1){ _moveCaretLines(n-1); r=caretRow; } const len=_lineLen(r); const noMove=(r===caretRow && len===caretCol); _setCaret(r, len, noMove?{suppressDesired:true}:undefined); try{ _flagCaretMotion(); }catch{} _repositionCaret(); updateGutter(); _updateVisualSelection(); return; }
+    // HOME -> 行頭（0 と同等）
+    if (e.key==='Home' && !e.ctrlKey && !e.metaKey && !e.altKey){ e.preventDefault(); _setCaret(caretRow, 0); try{ _flagCaretMotion(); }catch{} _repositionCaret(); _updateVisualSelection(); return; }
+    // END -> 行末（$ と同等、カウント対応）
+  if (e.key==='$' || (e.key==='End' && !e.ctrlKey && !e.metaKey && !e.altKey)){ e.preventDefault(); const n=_consumeCount(); let r=caretRow; if (n>1){ _moveCaretLines(n-1); r=caretRow; } const len=_lineLen(r); const noMove=(r===caretRow && len===caretCol); _setCaret(r, len, noMove?{suppressDesired:true}:undefined); try{ _flagCaretMotion(); }catch{} _repositionCaret(); updateGutter(); _updateVisualSelection(); return; }
         if (e.key==='}'){ e.preventDefault(); const n=_consumeCount(); moveAndUpdate(()=>_moveParagraphNext(n)); return; }
         if (e.key==='{'){ e.preventDefault(); const n=_consumeCount(); moveAndUpdate(()=>_moveParagraphPrev(n)); return; }
         // gg / G motions in VISUAL (extend selection)
@@ -8035,11 +8119,14 @@
     if (e.key==='b' && !e.ctrlKey && !e.metaKey && !e.altKey){ e.preventDefault(); const n=_consumeCount(); _moveWordB(n); try{ _flagCaretMotion(); }catch{} _ensureAfterMotion(); _repositionCaret(); updateGutter(); return; }
   if (e.key==='W' && !e.ctrlKey && !e.metaKey && !e.altKey){ e.preventDefault(); const n=_consumeCount(); _moveWORDW(n); try{ _flagCaretMotion(); }catch{} _ensureAfterMotion(); _repositionCaret(); updateGutter(); return; }
   if (e.key==='B' && !e.ctrlKey && !e.metaKey && !e.altKey){ e.preventDefault(); const n=_consumeCount(); _moveWORDB(n); try{ _flagCaretMotion(); }catch{} _ensureAfterMotion(); _repositionCaret(); updateGutter(); return; }
-      // line anchors ^, 0, $
-  if (e.key==='^'){ e.preventDefault(); const _n=_consumeCount(); const line=(_splitLines()[caretRow]||''); _setCaret(caretRow, _firstNonBlankColOf(line)); try{ _flagCaretMotion(); }catch{} _repositionCaret(); return; }
-      // '0' as a command only when no count prefix in progress
-  if (e.key==='0' && _countAcc==null){ e.preventDefault(); _setCaret(caretRow, 0); try{ _flagCaretMotion(); }catch{} _repositionCaret(); return; }
-  if (e.key==='$'){ e.preventDefault(); const n=_consumeCount(); let r=caretRow; if (n>1){ _moveCaretLines(n-1); r=caretRow; } const len=_lineLen(r); const noMove=(r===caretRow && len===caretCol); _setCaret(r, len, noMove?{suppressDesired:true}:undefined); try{ _flagCaretMotion(); }catch{} _repositionCaret(); updateGutter(); return; }
+        // line anchors ^, 0, $ （Home/End を 0/$ と同等に）
+      if (e.key==='^'){ e.preventDefault(); const _n=_consumeCount(); const line=(_splitLines()[caretRow]||''); _setCaret(caretRow, _firstNonBlankColOf(line)); try{ _flagCaretMotion(); }catch{} _repositionCaret(); return; }
+        // '0' as a command only when no count prefix in progress
+      if (e.key==='0' && _countAcc==null){ e.preventDefault(); _setCaret(caretRow, 0); try{ _flagCaretMotion(); }catch{} _repositionCaret(); return; }
+        // Home -> 行頭（0 と同等）
+      if (e.key==='Home' && !e.ctrlKey && !e.metaKey && !e.altKey){ e.preventDefault(); _setCaret(caretRow, 0); try{ _flagCaretMotion(); }catch{} _repositionCaret(); return; }
+        // End -> 行末（$ と同等、カウント対応）
+      if (e.key==='$' || (e.key==='End' && !e.ctrlKey && !e.metaKey && !e.altKey)){ e.preventDefault(); const n=_consumeCount(); let r=caretRow; if (n>1){ _moveCaretLines(n-1); r=caretRow; } const len=_lineLen(r); const noMove=(r===caretRow && len===caretCol); _setCaret(r, len, noMove?{suppressDesired:true}:undefined); try{ _flagCaretMotion(); }catch{} _repositionCaret(); updateGutter(); return; }
       // paragraphs { }
   if (e.key==='}'){ e.preventDefault(); const n=_consumeCount(); _moveParagraphNext(n); try{ _flagCaretMotion(); }catch{} _ensureAfterMotion(); _repositionCaret(); updateGutter(); return; }
   if (e.key==='{'){ e.preventDefault(); const n=_consumeCount(); _moveParagraphPrev(n); try{ _flagCaretMotion(); }catch{} _ensureAfterMotion(); _repositionCaret(); updateGutter(); return; }
