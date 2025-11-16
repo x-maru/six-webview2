@@ -32,7 +32,11 @@
       const line = lines[r]||'';
       // 可視幅計測は後段の _visualWidthUpToLine を利用
       const visCol = _visualWidthUpToLine(line, caretCol|0);
-      posinfoEl.textContent = (r+1) + ':' + (visCol+1);
+      const visTotal = _visualWidthUpToLine(line, (line||'').length);
+      // 表示形式: 「行Y, 列X/W」 (#633)
+      posinfoEl.textContent = '行' + (r+1) + ', ' + '列' + (visCol+1) + '/' + (visTotal+1);
+      // THEME反映 (#634): window.THEME.posInfoText or fallback 'yellow'
+      try{ let col='yellow'; if (window && window.THEME && window.THEME.posInfoText){ col=String(window.THEME.posInfoText); } posinfoEl.style.color=col; }catch{}
       setTimeout(_updateTabScrollButtons, 120);
     }catch{}
   }
