@@ -1,5 +1,33 @@
 ﻿// six migration oriented bootstrap (spec-aligned skeleton with file load)
 (function(){
+  // Multi-instance lock (#643): prevent opening a second active instance.
+  // Best-effort: use localStorage key with timestamp + heartbeat; if active lock recent, abort early.
+  try{
+    const LOCK_KEY = 'six.instance.lock.v1';
+    const now = Date.now();
+    const raw = localStorage.getItem(LOCK_KEY);
+    let prev = null; try{ prev = raw?JSON.parse(raw):null; }catch{ prev=null; }
+    const STALE_MS = 5*60*1000; // consider stale after 5 minutes (session likely dead)
+    const isRecent = !!(prev && typeof prev.t==='number' && (now - prev.t) < STALE_MS);
+    if (isRecent){
+      // Already running: show minimal banner then close.
+      try{
+        const msg = document.createElement('div');
+        msg.textContent = 'six: already running (multi-instance blocked)';
+        msg.style.position='fixed'; msg.style.top='40%'; msg.style.left='50%'; msg.style.transform='translate(-50%,-50%)';
+        msg.style.background='rgba(0,0,0,0.8)'; msg.style.color='yellow'; msg.style.padding='16px 24px'; msg.style.font='16px monospace'; msg.style.zIndex='99999'; msg.style.border='1px solid #666';
+        document.body.appendChild(msg);
+      }catch{}
+      try{ setTimeout(()=>{ try{ window.close(); }catch{} }, 900); }catch{}
+      return; // stop bootstrap; do not restore session
+    }
+    // Acquire lock
+    try{ localStorage.setItem(LOCK_KEY, JSON.stringify({ t: now })); }catch{}
+    // Heartbeat: refresh timestamp periodically to keep lock fresh
+    try{ setInterval(()=>{ try{ localStorage.setItem(LOCK_KEY, JSON.stringify({ t: Date.now() })); }catch{} }, 60*1000); }catch{}
+    // On unload: mark lock stale sooner (optional) — just clear timestamp so another instance can start immediately
+    try{ window.addEventListener('beforeunload', ()=>{ try{ localStorage.removeItem(LOCK_KEY); }catch{} }); }catch{}
+  }catch{}
   const caretLayer = document.getElementById('caretLayer');
   const edstripe   = document.getElementById('edstripe');
   // Core editor elements
@@ -2537,6 +2565,12 @@
     }catch{}
   }
 
+  // Lightweight reconnect: refresh #api and clear circuit breaker for next attempt
+  function _apiQuickReconnect(){
+    try{ _readApiFromHash(); }catch{}
+    try{ _apiDisabledUntil = 0; _apiFailCount = 0; }catch{}
+  }
+
   async function _loadFromPath(path, baseForRelative, opts={}){
     // 例外が途中で発生しても、本文が読み込めているなら確実にバッファを作成/切替するためのフェイルセーフ
     let urlStr = null;
@@ -2552,7 +2586,17 @@
           const fsPath0 = _fsPathFromFileURL(uProbe);
           if (fsPath0){
             const apiRead0 = _apiBase + 'read?fs=' + encodeURIComponent(fsPath0);
-            try{ txt = await _fetchTextWithTimeout(apiRead0, 8000); _apiNoteSuccess(); } catch(e){ _apiNoteFailure(); }
+            try{ txt = await _fetchTextWithTimeout(apiRead0, 8000); _apiNoteSuccess(); } catch(e){
+              _apiNoteFailure();
+              // ネットワーク失敗時は簡易再接続を一度だけ試す
+              try{
+                const emsg = (e && (e.message||'')) + '';
+                if (/Failed to fetch|NetworkError|ECONNREFUSED|ENETUNREACH|EHOSTUNREACH/i.test(emsg)){
+                  _apiQuickReconnect();
+                  try{ txt = await _fetchTextWithTimeout(apiRead0, 3500); _apiNoteSuccess(); }catch{ /* fall through to other paths */ }
+                }
+              }catch{}
+            }
           }
         }
       } catch { /* no API or URL parse error */ }
@@ -9890,9 +9934,10 @@
           const isAbort = (e && (e.name==='AbortError'));
           const isNet = /Failed to fetch|NetworkError|ERR_CONNECTION|ECONNREFUSED|ENETUNREACH|EHOSTUNREACH/i.test(emsg);
           if (attempt===0 && !isAbort){
-            const hint = isNet ? ' (connection unavailable; retrying...)' : '';
-            toast('write: network error' + hint, 1200);
-            await new Promise(r=>setTimeout(r, 1200));
+            if (isNet){ try{ _apiQuickReconnect(); }catch{} }
+            const hint = isNet ? ' (reconnecting...)' : '';
+            toast('write: network error' + hint, 900);
+            await new Promise(r=>setTimeout(r, 900));
             continue;
           }
           break;
