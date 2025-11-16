@@ -3399,6 +3399,93 @@
     _touchBufferModified();
     _afterTextMutation();
   }
+
+  // --- VISUAL case transform helpers (#649) ---
+  function _visualTransformCase(toUpper){
+    if (!_visualActive) return;
+    // Record undo snapshot
+    _pushUndoSnapshot(toUpper? 'visual-upper' : 'visual-lower');
+    const s = String(editor.value||'');
+    if (_visualLinewise){
+      const rs = Math.min(_visualAnchorR, caretRow);
+      const re = Math.max(_visualAnchorR, caretRow);
+      const raw = _splitLinesRaw();
+      // Transform each targeted raw line (keep EOF blank line semantics)
+      for (let r=rs; r<=re && r<raw.length; r++){
+        raw[r] = toUpper? raw[r].toUpperCase() : raw[r].toLowerCase();
+      }
+      const out = raw.join('\n');
+      if (out !== s){ editor.value = out; _touchBufferModified(); }
+      // Preserve caret & anchor; keep selection
+      _afterTextMutation();
+      _updateVisualSelection();
+      _repositionCaret(); updateGutter();
+    } else {
+      // Charwise: derive raw offsets and replace substring
+      let a = _clampPosRaw({r:_visualAnchorR, c:_visualAnchorC});
+      let b = _clampPosRaw({r:caretRow, c:caretCol});
+      if (_cmpPos(a,b)>0){ const t=a; a=b; b=t; }
+      if (a.r===b.r && a.c===b.c) return; // empty
+      const off1 = _offsetFromRC(a.r, a.c);
+      const off2 = _offsetFromRC(b.r, b.c);
+      const startOff = Math.max(0, Math.min(s.length, off1|0));
+      const endOff   = Math.max(startOff, Math.min(s.length, off2|0));
+      const mid = s.slice(startOff, endOff);
+      const transformed = toUpper? mid.toUpperCase() : mid.toLowerCase();
+      const out = s.slice(0, startOff) + transformed + s.slice(endOff);
+      if (out !== s){ editor.value = out; _touchBufferModified(); }
+      // Keep caret at original end (approx) by recomputing offset of prior endOff
+      try{ const rc = _rcFromOffset(endOff - (mid.length - transformed.length)); _setCaret(rc.r, rc.c); }catch{}
+      _afterTextMutation();
+      _updateVisualSelection();
+      _repositionCaret(); updateGutter();
+    }
+  }
+
+  // --- VISUAL simple brace text object (i{, a{, i}, a}) (#649) ---
+  function _visualSelectBraces(includeBraces){
+    const s = String(editor.value||'');
+    // Use caret position as reference; prefer existing selection span mid-point if active
+    let off = _offsetFromRC(caretRow, caretCol);
+    try{
+      if (_visualActive){
+        // Midpoint of selection for better locality
+        const aOff = _offsetFromRC(_visualAnchorR, _visualAnchorC);
+        const bOff = _offsetFromRC(caretRow, caretCol);
+        off = Math.floor((aOff + bOff)/2);
+      }
+    }catch{}
+    // Find nearest '{' before and matching '}' after (simple, non-nested). If nested, pick outermost covering caret.
+    let openPos = -1;
+    for (let i=off; i>=0; i--){ if (s[i]==='{'){ openPos=i; break; } }
+    // Accept also '}' search backwards if open not found and user pressed i} / a}
+    if (openPos<0){ for (let i=off; i>=0; i--){ if (s[i]==='}'){ // attempt to find matching '{' backwards before this
+          // search preceding '{'
+          for (let j=i; j>=0; j--){ if (s[j]==='{'){ openPos=j; break; } }
+          break; } }
+    }
+    if (openPos<0){ try{ toast('brace not found'); _triggerVisualBell(); }catch{} return; }
+    // Find forward '}' from openPos
+    let closePos = -1;
+    for (let i=openPos+1; i<s.length; i++){ if (s[i]==='}'){ closePos=i; break; } }
+    if (closePos<0){ try{ toast('matching } not found'); _triggerVisualBell(); }catch{} return; }
+    // Compute selection offsets
+    const selStart = includeBraces? openPos : openPos+1;
+    const selEnd   = includeBraces? (closePos+1) : closePos; // end is exclusive
+    // Map offsets to RC
+    try{
+      const rcStart = _rcFromOffset(selStart);
+      const rcEndEx = _rcFromOffset(Math.max(selStart, selEnd));
+      // Enter VISUAL charwise if not yet
+      if (!_visualActive){ _enterVisual(false); }
+      // Anchor at start, caret at end (exclusive end -> treat as preceding char if needed)
+      _visualAnchorR = rcStart.r; _visualAnchorC = rcStart.c;
+      // Adjust caret col: for exclusive end offset, ensure caret RC corresponds exactly
+      caretRow = rcEndEx.r; caretCol = rcEndEx.c;
+      _setCaret(caretRow, caretCol);
+      _updateVisualSelection(); _repositionCaret(); updateGutter();
+    }catch{}
+  }
   function _insertTextAt(r,c,text){
     const s = String(text||'');
     if (!s) return { r, c };
@@ -6261,7 +6348,9 @@
               [K('y モーション'), sep(' ヤンク(コピー) ※範囲はモーションによる ')],
               [K('Y'), sep(' Windowsクリップボードへコピー（y のモーション/カウントと同等、unnamed レジスタは変えない。空の場合はWindowsクリップボードを更新しない。例: '), K('YY'), sep(' / '), K('3Yw'), sep('）')],
               [K('p'), sep('  caret行の下に行ペースト')],
-              [K('P'), sep('  caret行の上に行ペースト')]
+              [K('P'), sep('  caret行の上に行ペースト')],
+              [K('s'), sep('  1文字変更 (cl と同等。前置カウントで複数文字)。1文字のみではunnamedレジスタを更新しない。改行も1文字として扱う')],
+              [K('cl'), sep('  1文字変更（'), K('s'), sep(' と同等。前置カウントで複数文字）。1文字のみではunnamedレジスタを更新しない。改行も1文字として扱う')]
             ]));
 
             // 検索
@@ -6384,6 +6473,32 @@
               [K('Nw'), sep(' / '), K('Nb'), sep(' / '), K('NW'), sep(' / '), K('NB'), sep('  N回分まとめて移動（例: '), K('3w'), sep('。選択調整）')],
               [K('{'), sep('  段落/空行区切りの前へ（選択調整）')],
               [K('}'), sep('  段落/空行区切りの次へ（選択調整）')]
+            ]));
+
+            // 操作
+            wrap.appendChild(mkSec('操作'));
+            wrap.appendChild(mkList([
+              [K('y'), sep('  選択範囲をヤンク（unnamed レジスタ）')],
+              [K('Y'), sep('  Windowsクリップボードへコピー（unnamedは変更しない）')],
+              [K('d'), sep('  選択削除（レジスタ更新）')],
+              [K('c'), sep('  選択削除 + INSERT へ')],
+              [K('o'), sep('  caret を選択の反対端へトグル（anchor/caret 入替）')],
+              [K('p'), sep('  選択範囲を unnamed レジスタ内容で置換（終了して NORMAL）')]
+            ]));
+
+            // 大文字/小文字変換
+            wrap.appendChild(mkSec('大文字/小文字変換'));
+            wrap.appendChild(mkList([
+              [K('gU'), sep('  選択範囲を大文字化（VISUAL継続）')],
+              [K('gu'), sep('  選択範囲を小文字化（VISUAL継続）')]
+            ]));
+
+            // テキストオブジェクト（簡易）
+            wrap.appendChild(mkSec('テキストオブジェクト（簡易）'));
+            wrap.appendChild(mkList([
+              [K('i{'), sep(' / '), K('i}'), sep('  最も近い {…} の内部を選択（ネストは最内でなく最外を簡易検出）')],
+              [K('a{'), sep(' / '), K('a}'), sep('  最も近い {…} 全体を選択（波括弧含む）')],
+              [sep('※ ネスト対応は簡易。複雑な入れ子では最初の対応する括弧を採用する。')]
             ]));
           } else if (curTab==='regex'){
             wrap.appendChild(mkH('正規表現（Sixで使える仕様）'));
@@ -7410,6 +7525,74 @@
             return;
           }
         }
+        // gU / gu case transform (remain in VISUAL)
+        if ((e.key==='U' || e.key==='u') && !e.ctrlKey && !e.metaKey && !e.altKey && _pendingNormal==='g'){
+          e.preventDefault();
+          const upper = (e.key==='U');
+          _clearPending(); _countAcc=null;
+          _visualTransformCase(upper);
+          return;
+        }
+        // o: toggle caret to opposite end (swap anchor/caret)
+        if (e.key==='o' && !e.ctrlKey && !e.metaKey && !e.altKey){
+          e.preventDefault();
+          const aR=_visualAnchorR, aC=_visualAnchorC;
+          _visualAnchorR = caretRow; _visualAnchorC = caretCol;
+          _setCaret(aR, aC);
+          _updateVisualSelection(); _repositionCaret(); updateGutter();
+          return;
+        }
+        // p: replace selection with unnamed register contents (charwise or linewise)
+        if (e.key==='p' && !e.ctrlKey && !e.metaKey && !e.altKey){
+          e.preventDefault();
+          if (_regUnnamed && _visualActive){
+            if (_visualLinewise && _regUnnamed.linewise){
+              const rs=Math.min(_visualAnchorR, caretRow); const re=Math.max(_visualAnchorR, caretRow);
+              // Delete lines then insert register lines at rs
+              const linesRaw=_splitLinesRaw();
+              const before=linesRaw.slice(0, rs);
+              const after = linesRaw.slice(re+1);
+              const clipLines=String(_regUnnamed.text||'').split('\n');
+              const out = before.concat(clipLines).concat(after).join('\n');
+              const prev=String(editor.value||''); if (out!==prev){ _pushUndoSnapshot('visual-paste-linewise'); editor.value=out; _touchBufferModified(); }
+              // caret to last inserted line head
+              const newRow = rs + clipLines.length - 1;
+              _setCaret(Math.max(0,newRow), 0);
+            } else {
+              // Charwise replace selection with register text; if register linewise still treat whole text block verbatim
+              let a={r:_visualAnchorR,c:_visualAnchorC}, b={r:caretRow,c:caretCol};
+              if (_cmpPos(a,b)>0){ const t=a; a=b; b=t; }
+              const off1=_offsetFromRC(a.r,a.c); const off2=_offsetFromRC(b.r,b.c);
+              const s=String(editor.value||''); const startOff=Math.max(0, Math.min(s.length, off1|0)); const endOff=Math.max(startOff, Math.min(s.length, off2|0));
+              const clip=String(_regUnnamed.text||'');
+              const out = s.slice(0,startOff) + clip + s.slice(endOff);
+              if (out!==s){ _pushUndoSnapshot('visual-paste-charwise'); editor.value=out; _touchBufferModified(); }
+              // Move caret to end of pasted block
+              const endPos = startOff + clip.length;
+              try{ const rc=_rcFromOffset(endPos); _setCaret(rc.r, rc.c); }catch{}
+            }
+            _afterTextMutation();
+            // Keep visual selection collapsed to end (exit VISUAL like Vim does after replace)
+            _exitVisual(); ensureScrolloff(); _repositionCaret(); updateGutter();
+          }
+          return;
+        }
+        // Text objects inside braces: i{ i} a{ a}
+        if ((e.key==='i' || e.key==='a') && !e.ctrlKey && !e.metaKey && !e.altKey){
+          // stage for next key '{' or '}'
+          _pendingNormal = e.key==='i' ? 'i-obj' : 'a-obj';
+          if (_pendingTimer) clearTimeout(_pendingTimer);
+          _pendingTimer = setTimeout(()=>{ if (_pendingNormal && (_pendingNormal==='i-obj'||_pendingNormal==='a-obj')){ _pendingNormal=null; _pendingTimer=null; } }, 800);
+          e.preventDefault();
+          return;
+        }
+        if ((e.key==='{' || e.key==='}') && (_pendingNormal==='i-obj' || _pendingNormal==='a-obj')){
+          e.preventDefault();
+          const include = (_pendingNormal==='a-obj');
+          _clearPending();
+          _visualSelectBraces(include);
+          return;
+        }
         if (e.key==='G' && !e.ctrlKey && !e.metaKey && !e.altKey){
           e.preventDefault(); _clearPending();
           const mcount = (_countAcc==null?0:_countAcc); _countAcc=null;
@@ -7881,9 +8064,22 @@
           _suppressInsertSnapshotOnce = true; _setMode('INSERT');
           return;
         }
-        // cw/cW special-case (Vim: cw behaves like ce; cW like cE for WORD)
+        // cl 特殊ケース (s と同等: 改行も1文字として扱う)
+        if (e.key==='l'){
+          const motionCount = (_countAcc==null?1:_countAcc); _countAcc=null;
+          const totalChars = Math.max(1, (_pendingOpCount||1) * motionCount);
+          const start = { r: caretRow, c: caretCol };
+          const endPos = _advancePosByCpRaw(caretRow, caretCol, totalChars);
+          const upd = (totalChars>=2); // 1文字のみならレジスタ更新しない (s と同じ仕様)
+          if (!(start.r===endPos.r && start.c===endPos.c)){
+            _deleteRangePos(start, endPos, { updateRegister: upd });
+          }
+          _clearPendingOp(); ensureScrolloff(); _repositionCaret(); updateGutter();
+          _suppressInsertSnapshotOnce = true; _setMode('INSERT');
+          return;
+        }
+        // cw/cW special-case (Vim: cw behaves like ce; cW like cE for WORD) — 改行は含めない（#654 で元に戻す）
         if (e.key==='w' || e.key==='W'){
-          // cw behaves like ce, and with count N it changes up to the end of the Nth word
           const motionCount = (_countAcc==null?1:_countAcc); _countAcc=null;
           const totalWords = Math.max(1, (_pendingOpCount||1) * motionCount);
           const line = (_splitLines()[caretRow]||'');
@@ -7892,31 +8088,25 @@
           let j = i;
           const isSpaceAt = (idx)=>{ const t=_wordTypeAtInLine(line, idx); return t===_WT_SPACE; };
           let consumed = 0;
-          // Advance j to end of the totalWords-th word run; include inter-word spaces but not trailing space after last word
           while (consumed < totalWords && j < n){
-            // Skip any leading spaces to the next word
             while (j < n && isSpaceAt(j)) j = _nextIndex(line, j);
             if (j >= n) break;
             if (e.key==='W'){
-              // WORD: consume any non-space run entirely
               while (j < n && !isSpaceAt(j)){ j = _nextIndex(line, j); }
             } else {
-              // word: consume one run of the same type (alnum/kana/han/symbol)
               const tRun = _wordTypeAtInLine(line, j);
               while (j < n && _wordTypeAtInLine(line, j) === tRun){ j = _nextIndex(line, j); }
             }
             consumed++;
           }
-          // Delete from original caret (i) to j; do NOT include trailing spaces after the last word
           const start={ r: caretRow, c: i };
-          const end  ={ r: caretRow, c: j };
+          const end={ r: caretRow, c: j };
           if (!(start.r===end.r && start.c===end.c)){
             _deleteRangePos(start, end);
-            _clearPendingOp(); ensureScrolloff(); _repositionCaret(); updateGutter();
-            _suppressInsertSnapshotOnce = true; _setMode('INSERT');
-            return;
           }
-          _clearPendingOp(); return;
+          _clearPendingOp(); ensureScrolloff(); _repositionCaret(); updateGutter();
+          _suppressInsertSnapshotOnce = true; _setMode('INSERT');
+          return;
         }
         // generic c + motion (charwise)
         const mcount = (_countAcc==null?1:_countAcc); _countAcc=null;
@@ -8207,6 +8397,20 @@
         e.preventDefault();
         const n=_consumeCount();
         if (_regUnnamed && _regUnnamed.linewise) _pasteLinewise(false, n); else _pasteCharwise(false, n);
+        return;
+      }
+      // s == cl (change one char; count N -> change N chars). EOLで文字が無ければ i と同等。
+      if (e.key==='s' && !e.ctrlKey && !e.metaKey && !e.altKey){
+        e.preventDefault();
+        const n = _consumeCount();
+        const count = Math.max(1, n|0);
+        // 改行も1文字として扱う: raw 基準でコードポイント前進（EOFの正確な取り扱い）
+        const endPos = _advancePosByCpRaw(caretRow, caretCol, count);
+        // 削除（1文字のみの変更では unnamed レジスタを更新しない仕様）
+        const upd = (count>=2);
+        _deleteRangePos({r:caretRow,c:caretCol}, endPos, { updateRegister: upd });
+        ensureScrolloff(); _repositionCaret(); updateGutter();
+        _suppressInsertSnapshotOnce = true; _setMode('INSERT');
         return;
       }
       // Undo / Redo (NORMAL)
