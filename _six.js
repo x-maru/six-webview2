@@ -1593,7 +1593,20 @@
       // 具体的には末尾が\nで終わっている場合でも、分割結果の末尾の空要素は1つだけ捨てる。
       // これにより「末尾に改行あり（1つ）」のときに余分な空行を表示しない。
       const parts = t.split(/\n/);
-      if (t.endsWith('\n') && parts.length>0){ parts.pop(); }
+      if (t.endsWith('\n') && parts.length>0){
+        // #636: 末尾 phantom 行は caret が改行直後 (offset===t.length) にある場合のみ表示。
+        // 改行文字上 (offset===t.length-1) にいるだけでは表示しない。
+        let keepFinalBlank = false;
+        try{
+          if (_mode === 'INSERT'){
+            const caretOff = editor.selectionStart|0;
+            if (caretOff === t.length){
+              keepFinalBlank = true; // caret が改行を越えて仮想行に入っている
+            }
+          }
+        }catch{}
+        if (!keepFinalBlank){ parts.pop(); }
+      }
       return parts;
     }catch{ return String(editor.value||'').split(/\n/); }
   }
@@ -6786,7 +6799,7 @@
       }catch{}
       _debugPush({ t:Date.now(), type:'input', mode:_mode, inputType:e.inputType, data:e.data, ctrl:e.ctrlKey, alt:e.altKey, meta:e.metaKey, isComp:false });
     });
-    editor.addEventListener('input', ()=>{
+    editor.addEventListener('input', (e)=>{
       if (_mode === 'INSERT'){
         // centralize modified tracking (bump change tick on each input)
         _touchBufferModified();
@@ -6796,11 +6809,26 @@
         // #624: 差分検出用に直前テキストを参照（末尾状態の変化トレース）
         try{
           if (_prevTextBeforeInput){
-            const prev = String(_prevTextBeforeInput||'');
-            const cur = String(editor.value||'');
             // 特殊フラグは使わず、静的状態による描画へ（#629）
           }
           _prevTextBeforeInput='';
+        }catch{}
+        // #637/#638: caret がダミー位置（末尾LF欠落 かつ EOF）での「文字挿入」では
+        // 直ちに通常LFへ昇格: 末尾に\nを追加し caret を改行直前へ戻す（保存時LF無しを回避）。
+        try{
+          const txt = String(editor.value||'');
+          const noFinalLF = !txt.endsWith('\n');
+          const caretAtEOF = (editor.selectionStart|0) === txt.length && (editor.selectionEnd|0) === txt.length;
+          const it = String(e && e.inputType || '');
+          const isInsertChar = it.startsWith('insert') && it!=='insertLineBreak' && it!=='insertParagraph';
+          if (noFinalLF && caretAtEOF && isInsertChar){
+            const withLF = txt + '\n';
+            editor.value = withLF;
+            const newOff = withLF.length - 1; // 改行直前
+            try{ editor.selectionStart = editor.selectionEnd = newOff; }catch{}
+            try{ const rc2 = _rcFromOffset(newOff); caretRow = rc2.r; caretCol = rc2.c; }catch{}
+            try{ const b=currentBuffer(); if (b){ b.text = String(editor.value||''); b.modified = true; } }catch{}
+          }
         }catch{}
       }
       _exactLineLockAdjust(); _repositionCaret(); updateGutter(); _updateHlsearchFull(); _updatePosInfo();
@@ -7043,15 +7071,29 @@
             e.key==='Home' || e.key==='End' || e.key==='PageUp' || e.key==='PageDown'){
           // #603: ArrowDown で末尾LF欠落時に仮改行を挿入する旧処理(#602)を撤廃。
           // 最終行末尾での下方向移動は何も起こさず、そのまま位置維持。
+          // #635/#636: 改行文字上 (offset===length-1) からの ArrowDown で仮想最終空行へ移動させる。
+          // ただし既に改行直後 (offset===length) にいる場合はネイティブ挙動に委ねて何もしない。
           try{
-            if (e.key==='ArrowDown'){
-              const lines=_splitLines(); const last=lines.length-1;
-              if (caretRow===last && caretCol===(lines[last]||'').length){
-                // 位置を維持するためにブラウザ既定動作を阻止（念のため）
-                try{ e.preventDefault(); e.stopPropagation(); }catch{}
+            if (e.key==='ArrowDown' && _mode==='INSERT'){
+              const v = String(editor.value||'');
+              if (v.endsWith('\n')){
+                const start = editor.selectionStart|0;
+                const end = editor.selectionEnd|0;
+                if (start===end && start === v.length-1){
+                  // caret は改行文字上 → 仮想行へ進める
+                  e.preventDefault(); e.stopPropagation();
+                  const newOff = v.length; // 改行直後
+                  try{ editor.setSelectionRange(newOff, newOff); }catch{}
+                  try{ const rc = _rcFromOffset(newOff); caretRow = rc.r; caretCol = rc.c; }catch{}
+                  try{ _flagCaretMotion(); }catch{}
+                  try{ ensureScrolloff(); }catch{}
+                  _repositionCaret(); updateGutter();
+                  return; // ここで処理完了
+                }
               }
             }
           }catch{}
+          // 他の移動キーは後段 setTimeout で同期
           try{ _flagCaretMotion(); }catch{}
           // Defer until after the browser updates selection/caret
           setTimeout(()=>{
