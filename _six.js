@@ -234,6 +234,7 @@
           viewScrollTop: Number.isFinite(b.viewScrollTop)?(b.viewScrollTop|0):0,
           savedMode: b.savedMode||'NORMAL',
           savedVisual: (b.savedVisual ? { linewise: !!b.savedVisual.linewise, anchorR: b.savedVisual.anchorR|0, anchorC: b.savedVisual.anchorC|0, caretR: b.savedVisual.caretR|0, caretC: b.savedVisual.caretC|0 } : null),
+              shiftwidth: Number.isFinite(b.shiftwidth)? (b.shiftwidth|0) : 4,
     undo: undoArr,
     extMtime: (typeof b._extMtime === 'number') ? b._extMtime : null,
     extSize: (typeof b._extSize === 'number') ? b._extSize : null,
@@ -308,7 +309,8 @@
         const enc = (it && it.enc) || 'utf-8';
         const ff  = (it && it.ff)  || 'unix';
         const bom = !!(it && it.bom);
-        _addBuffer({ name, path, text, modified, enc, ff, bom });
+        const shiftwidth = Number.isFinite(it && it.shiftwidth) ? Math.max(1, (it.shiftwidth|0)) : 4;
+        _addBuffer({ name, path, text, modified, enc, ff, bom, shiftwidth });
         try{
           const b = buffers[buffers.length-1];
           // If savedText is provided, trust it; otherwise, if not modified, set savedText=text
@@ -324,6 +326,8 @@
           b.savedVisual = (sv && Number.isFinite(sv.anchorR) && Number.isFinite(sv.anchorC) && Number.isFinite(sv.caretR) && Number.isFinite(sv.caretC))
             ? { linewise: !!sv.linewise, anchorR: sv.anchorR|0, anchorC: sv.anchorC|0, caretR: sv.caretR|0, caretC: sv.caretC|0 }
             : null;
+          // restore shiftwidth (default 4)
+          try{ b.shiftwidth = Number.isFinite(it && it.shiftwidth) ? Math.max(1, (it.shiftwidth|0)) : (Number.isFinite(b.shiftwidth)?b.shiftwidth:4); }catch{ b.shiftwidth = (Number.isFinite(b.shiftwidth)?b.shiftwidth:4); }
           // recompute ticks from modified flag
           b._changeTick = modified ? 1 : 0; b._savedTick = 0; b.modified = !!modified;
           // Restore undo snapshots (limited) if present
@@ -514,6 +518,8 @@
   let _pendingOpTimer = null;   // reserved for timeouts (currently unused but cleared)
   // pending normal sequence (e.g., waiting for second 'g' in 'gg') and its timer
   let _pendingNormal = null;
+  let _pendingNormalCount = null; // count captured before first '>'/'<' for >>/<<
+  let _optIndentDebug = false; // debug logs disabled (removed instrumentation)
   let _pendingTimer = null;
   // unnamed register (yank/delete/paste). Initialize to avoid ReferenceError on read.
   let _regUnnamed = null;
@@ -1561,10 +1567,10 @@
         if (!hasM && !hasS) return null;
         const mtime = hasM ? match.mtime : null;
         const size  = hasS ? match.size  : null;
-        try{ console.log('[stat] meta', baseName, 'mtime=', mtime, 'size=', size, 'parent=', parent); }catch{}
+        /* [stat] meta log removed */
         return { mtime, size };
       }
-      try{ console.log('[stat] no entry for', baseName, 'in parent', parent); }catch{}
+      /* [stat] no entry log removed */
       return null;
     }catch{ return null; }
   }
@@ -1979,6 +1985,8 @@
         _savedTick: 0,
         _undo: [],
         _redo: [],
+        // per-buffer shiftwidth (indent width in spaces)
+        shiftwidth: Number.isFinite(b.shiftwidth)? Math.max(1, (b.shiftwidth|0)) : 4,
         // original final newline presence (established on initial load/create) — #598
         _origHadFinalLF: text0.endsWith('\n'),
         // encoding/newline metadata
@@ -2011,7 +2019,7 @@
         try{ editor && editor.focus && editor.focus(); }catch{}
         return;
       }
-      try{ const b0 = buffers[i]; console.log('[switch] begin', i, b0 && b0.name, b0 && b0.path); }catch{}
+      /* [switch] begin log removed */
       _lastBufferSwitchAt = Date.now();
       // Temporarily hide editor viewport to avoid a brief flicker to EOF when
       // the new buffer has fewer lines and the previous scrollTop is clamped.
@@ -2163,7 +2171,7 @@
       // On activation, detect external modification for file-backed buffers
       try{
         if (b && b.path && /^file:\/\//i.test(b.path)){
-          try{ console.log('[switch] external-check trigger', b.name); }catch{}
+          /* [switch] external-check trigger log removed */
           _maybeCheckExternalChangeOnActivate(i);
         } else {
           try{ b._externalChangeIgnored = false; }catch{}
@@ -2176,20 +2184,20 @@
   async function _maybeCheckExternalChangeOnActivate(idx){
     try{
       const b = buffers[idx]; if (!b) return;
-      if (!b.path || !/^file:\/\//i.test(b.path)){ try{ console.log('[ext-check] skip (no file path)', b && b.name); }catch{} return; }
+      if (!b.path || !/^file:\/\//i.test(b.path)){ /* [ext-check] skip log removed */ return; }
       const now = Date.now();
-      if (b._extLastCheckAt && (now - b._extLastCheckAt < 1500)) { try{ console.log('[ext-check] throttle-skip', b.name); }catch{} return; }
+      if (b._extLastCheckAt && (now - b._extLastCheckAt < 1500)) { /* [ext-check] throttle-skip log removed */ return; }
       b._extLastCheckAt = now;
-      if (b._checkingExternal){ try{ console.log('[ext-check] already-checking', b.name); }catch{} return; }
-      try{ console.log('[ext-check] invoke', b.name); }catch{}
+      if (b._checkingExternal){ /* [ext-check] already-checking log removed */ return; }
+      /* [ext-check] invoke log removed */
       b._checkingExternal = true;
       (async()=>{
   let meta = await _statFileMeta(b.path);
-  try{ console.log('[ext-check] start', b.name); }catch{}
+  /* [ext-check] start log removed */
         try{ b._checkingExternal=false; }catch{}
         // メタが取れない場合でも、キャッシュを捨てて1回だけ即再試行（短期エラーの吸収）
         if (!meta){
-          try{ console.log('[ext-check] miss meta; cache-bust and retry', b.name); }catch{}
+          /* [ext-check] miss meta log removed */
           try{
             const parent = _dirnameURL(b.path);
             const key = (function(){ try{ return _ensureSlash(parent)?.toString()||null; }catch{ return null; } })();
@@ -2204,13 +2212,13 @@
           if (!b.modified){
             if (typeof mtime === 'number') b._extMtime = mtime;
             if (typeof size  === 'number') b._extSize  = size;
-            try{ console.log('[ext-check] baseline init', b.name, 'mtime=', b._extMtime, 'size=', b._extSize); }catch{}
+            /* [ext-check] baseline init log removed */
           }
           return;
         }
         // いずれかの差分で変更と判断（どちらか一方のみ取得できるFSも想定）
         const changed = (typeof mtime==='number' && mtime !== b._extMtime) || (typeof size==='number' && size !== b._extSize);
-  try{ console.log('[ext-check] compare', b.name, 'old mtime=', b._extMtime, 'old size=', b._extSize, 'new mtime=', mtime, 'new size=', size, 'changed=', changed); }catch{}
+  /* [ext-check] compare log removed */
         if (!changed) return;
         const label = b.path ? _prettyFileUrlLabel(b.path) : (b.name||'(untitled)');
         const detail = b.modified
@@ -2230,13 +2238,13 @@
                 if (typeof meta2.size  === 'number') b._extSize  = meta2.size;
               }
               b._externalChangeIgnored=false;
-              try{ console.log('[ext-check] baseline after reload', b.name, 'mtime=', b._extMtime, 'size=', b._extSize); }catch{}
+              /* [ext-check] baseline after reload log removed */
             }
           }catch{}
           toast('reloaded');
         } else if (id==='ignore') {
           b._externalChangeIgnored = true;
-          try{ console.log('[ext-check] ignored', b.name); }catch{}
+          /* [ext-check] ignored log removed */
           toast('外部変更を検出: 保存時に警告します', 2000);
         }
       })();
@@ -3227,6 +3235,53 @@
       const last = Math.max(0, lines.length-1);
       return { r: last, c: (lines[last]||'').length };
     }catch{ return { r:0, c:0 }; }
+  }
+  function _getShiftWidth(){
+    try{ const b=currentBuffer(); const sw = Number.isFinite(b&&b.shiftwidth)? (b.shiftwidth|0) : 4; return Math.max(1, sw); }catch{ return 4; }
+  }
+  function _applyIndentRange(rs, re, units){
+    // units>0: indent by units*shiftwidth spaces; units<0: outdent by removing up to units*shiftwidth leading spaces
+    const s = String(editor.value||'');
+    const raw = _splitLinesRaw();
+    const last = raw.length - 1;
+    const hasFinalLF = s.endsWith('\n');
+    const maxIdx = hasFinalLF && raw[last]==='' ? Math.max(0, last-1) : last;
+    if (maxIdx < 0) return;
+    let r1 = Math.max(0, Math.min(maxIdx, rs|0));
+    let r2 = Math.max(0, Math.min(maxIdx, re|0));
+    if (r2 < r1){ const t=r1; r1=r2; r2=t; }
+    const sw = _getShiftWidth();
+    const add = Math.max(0, (units>0? units:0)|0) * sw;
+    const del = Math.max(0, (units<0? -units:0)|0) * sw;
+    const buf = raw.slice();
+    let changed = false;
+    for (let r=r1; r<=r2; r++){
+      const line0 = String(buf[r]||'');
+      // 空行は対象に含むが変更は行わない
+      if (line0.length === 0) continue;
+      // 行頭の連続TABは保持し、その直後からインデント増減を適用
+      const m = line0.match(/^\t+/);
+      const tabs = m ? m[0] : '';
+      const rest0 = line0.slice(tabs.length);
+      let lineNew = line0;
+      if (add>0){
+        // TAB直後にスペースを挿入
+        lineNew = tabs + ' '.repeat(add) + rest0;
+      } else if (del>0){
+        // TAB直後のスペースを最大 del まで削除（TABは削らない）
+        let k=0; const n=Math.min(del, rest0.length);
+        while (k<n && rest0.charCodeAt(k)===0x20) k++;
+        lineNew = tabs + rest0.slice(k);
+      }
+      if (lineNew !== line0){ buf[r] = lineNew; changed = true; }
+    }
+    if (changed){
+      // 1回のインデント操作を単一のUndoに
+      _pushUndoSnapshot('indent');
+      const out = buf.join('\n');
+      if (out !== s){ editor.value = out; _touchBufferModified(); }
+    }
+    _afterTextMutation();
   }
   function _syncNativeSelectionToCaret(){
     try{
@@ -5061,6 +5116,21 @@
       try{ toast('scrolloff = ' + (Number.isFinite(scrolloff)?(scrolloff|0):3), 1200); }catch{}
       return;
     }
+    // :set shiftwidth=N  / :set sw=N
+    let mSW = cmd.match(/^:set\s+(?:shiftwidth|sw)\s*=\s*(\d+)$/i);
+    if (mSW){
+      const n = parseInt(mSW[1],10);
+      if (!Number.isNaN(n)){
+        const b=currentBuffer(); if (b){ b.shiftwidth = Math.max(1, n|0); _schedulePersist('shiftwidth'); }
+        try{ toast('shiftwidth = ' + (n|0), 900); }catch{}
+      }
+      return;
+    }
+    // :set shiftwidth?
+    if (/^:set\s+shiftwidth\?\s*$/i.test(cmd)){
+      try{ const b=currentBuffer(); const sw = b && Number.isFinite(b.shiftwidth)? (b.shiftwidth|0) : 4; toast('shiftwidth = ' + sw, 1200); }catch{}
+      return;
+    }
     // :set visualbell / :set novisualbell / :set visualbell! / :set visualbell?
     if (/^:set\s+visualbell\s*$/i.test(cmd)){
       _optVisualBell = true; toast('visualbell: on', 900); return;
@@ -6341,6 +6411,11 @@
               [K(':set scrolloff=N'), sep(' スクロールオフ（上下余白行数） / '), K(':set scrolloff?'), sep(' 現在値表示 / '), K(':set so=N'), sep(' 省略形')],
               [sep('既定値: セッション未保存時 scrolloff=3 （変更はセッションへ保存し次回復元）')]
             ]);
+            // インデント
+            section('インデント', [
+              [K(':set shiftwidth=N'), sep(' / '), K(':set sw=N'), sep(' インデント幅（半角スペース数）を設定（バッファ毎・セッション保存・既定値4）')],
+              [K(':set shiftwidth?'), sep(' 現在の '), K('shiftwidth'), sep(' を表示')]
+            ]);
             // その他
             section('その他', [
               [K(':pick'), sep(' ピッカー起動 / '), K(':pick!'), sep(' 強制起動')],
@@ -6386,7 +6461,10 @@
               [K('p'), sep('  caret行の下に行ペースト')],
               [K('P'), sep('  caret行の上に行ペースト')],
               [K('s'), sep('  1文字変更 (cl と同等。前置カウントで複数文字)。1文字のみではunnamedレジスタを更新しない。改行も1文字として扱う')],
-              [K('cl'), sep('  1文字変更（'), K('s'), sep(' と同等。前置カウントで複数文字）。1文字のみではunnamedレジスタを更新しない。改行も1文字として扱う')]
+              [K('cl'), sep('  1文字変更（'), K('s'), sep(' と同等。前置カウントで複数文字）。1文字のみではunnamedレジスタを更新しない。改行も1文字として扱う')],
+              [K('>>'), sep('  インデントを '), K('shiftwidth'), sep(' 分増やす（現在行から）。前置カウント '), K('N'), sep(' で '), K('N'), sep(' 行を対象（例: '), K('3>>'), sep('）')],
+              [K('<<'), sep('  インデントを '), K('shiftwidth'), sep(' 分減らす（現在行から）。前置カウント '), K('N'), sep(' で '), K('N'), sep(' 行を対象')],
+              [sep('※ 空行は変更しません（対象行数には含まれます）。行頭の連続 '), K('TAB'), sep(' は保持し、その直後に空白を挿入/削除します')]
             ]));
 
             // 検索
@@ -6519,7 +6597,8 @@
               [K('d'), sep('  選択削除（レジスタ更新）')],
               [K('c'), sep('  選択削除 + INSERT へ')],
               [K('o'), sep('  caret を選択の反対端へトグル（anchor/caret 入替）')],
-              [K('p'), sep('  選択範囲を unnamed レジスタ内容で置換（終了して NORMAL）')]
+              [K('p'), sep('  選択範囲を unnamed レジスタ内容で置換（終了して NORMAL）')],
+              [K('> / <'), sep('  インデントを '), K('shiftwidth'), sep(' 分 増減。前置カウント '), K('N'), sep(' で '), K('N'), sep(' 倍量。空行は変更しません。行頭の連続 '), K('TAB'), sep(' は保持し、直後に空白を挿入/削除します')]
             ]));
 
             // 大文字/小文字変換
@@ -6919,6 +6998,7 @@
 
   function _clearPending(){
     _pendingNormal = null;
+    _pendingNormalCount = null;
     if (_pendingTimer){ clearTimeout(_pendingTimer); _pendingTimer = null; }
   }
 
@@ -7504,6 +7584,18 @@
           }
           _exitVisual(); ensureScrolloff(); _repositionCaret(); updateGutter();
           _suppressInsertSnapshotOnce = true; _setMode('INSERT');
+          return;
+        }
+        // VISUAL indent/outdent by shiftwidth; count before '>' multiplies amount
+        if ((e.key==='>' || e.key=== '<') && !e.ctrlKey && !e.metaKey && !e.altKey){
+          e.preventDefault();
+          const amt = Math.max(1, _consumeCount()|0);
+          const rs = Math.min(_visualAnchorR, caretRow);
+          const re = Math.max(_visualAnchorR, caretRow);
+          const units = (e.key==='>') ? amt : -amt;
+          _applyIndentRange(rs, re, units);
+          // keep VISUAL selection active; update overlays
+          _updateVisualSelection(); _repositionCaret(); updateGutter();
           return;
         }
     // Motions extend selection
@@ -8378,6 +8470,57 @@
   if ((e.key==='l' && e.code==='KeyL' && (!_optStrictNormalIME || !_imeComposing)) || e.key==='ArrowRight'){ e.preventDefault(); try{ _debugPush({ t:Date.now(), type:'motion-exec', mode:_mode, key:e.key, code:e.code, via:(e.code==='KeyL'?'KeyL':'ArrowRight') }); }catch{} const n=_consumeCount(); _moveCaretCols(n); try{ _flagCaretMotion(); }catch{} _repositionCaret(); return; }
   // delete: x (delete char(s) under cursor / join newline)
   if (e.key==='x' && !e.ctrlKey && !e.metaKey && !e.altKey){ e.preventDefault(); const n=_consumeCount(); _doDeleteX(n); ensureScrolloff(); _repositionCaret(); updateGutter(); return; }
+  // >> / << — indent/outdent current and following N-1 lines by shiftwidth
+  // >> — allow layout-agnostic detection via e.code 'Period' + Shift, and Process-coded
+  if ((!e.ctrlKey && !e.metaKey && !e.altKey) && (e.key==='>' || (e.code==='Period' && e.shiftKey) || (e.key==='Process' && e.code==='Period' && e.shiftKey))){
+    e.preventDefault();
+    if (_pendingNormal === '>'){
+      // commit >>
+      _pendingNormal = null; if (_pendingTimer){ clearTimeout(_pendingTimer); _pendingTimer=null; }
+      let mcount = (_pendingNormalCount && _pendingNormalCount>0)? _pendingNormalCount : 0;
+      if (!(mcount>0) && _countAcc!=null && _countAcc>0){ mcount = _countAcc|0; }
+      if (!(mcount>0)) mcount = 1;
+      // debug removed: commit >> mcount
+      _pendingNormalCount = null; _countAcc = null;
+      const totalLines = _totalLines();
+      const rs = caretRow;
+      const re = Math.max(rs, Math.min(totalLines-1, rs + Math.max(1,mcount|0) - 1));
+      _applyIndentRange(rs, re, +1);
+      return;
+    } else {
+      _pendingNormal = '>';
+      if (_countAcc!=null && _countAcc>0){ _pendingNormalCount = _countAcc|0; /* keep _countAcc until commit as fallback */ } else { _pendingNormalCount = null; }
+      if (_pendingTimer) clearTimeout(_pendingTimer);
+      _pendingTimer = setTimeout(()=>{ _pendingNormal=null; _pendingTimer=null; _pendingNormalCount=null; }, 1500);
+      // debug removed: pending >
+      return;
+    }
+  }
+  // << — allow layout-agnostic detection via e.code 'Comma' + Shift, and Process-coded
+  if ((!e.ctrlKey && !e.metaKey && !e.altKey) && (e.key==='<' || (e.code==='Comma' && e.shiftKey) || (e.key==='Process' && e.code==='Comma' && e.shiftKey))){
+    e.preventDefault();
+    if (_pendingNormal === '<'){
+      // commit <<
+      _pendingNormal = null; if (_pendingTimer){ clearTimeout(_pendingTimer); _pendingTimer=null; }
+      let mcount = (_pendingNormalCount && _pendingNormalCount>0)? _pendingNormalCount : 0;
+      if (!(mcount>0) && _countAcc!=null && _countAcc>0){ mcount = _countAcc|0; }
+      if (!(mcount>0)) mcount = 1;
+      // debug removed: commit << mcount
+      _pendingNormalCount = null; _countAcc = null;
+      const totalLines = _totalLines();
+      const rs = caretRow;
+      const re = Math.max(rs, Math.min(totalLines-1, rs + Math.max(1,mcount|0) - 1));
+      _applyIndentRange(rs, re, -1);
+      return;
+    } else {
+      _pendingNormal = '<';
+      if (_countAcc!=null && _countAcc>0){ _pendingNormalCount = _countAcc|0; /* keep _countAcc until commit as fallback */ } else { _pendingNormalCount = null; }
+      if (_pendingTimer) clearTimeout(_pendingTimer);
+      _pendingTimer = setTimeout(()=>{ _pendingNormal=null; _pendingTimer=null; _pendingNormalCount=null; }, 1500);
+      // debug removed: pending <
+      return;
+    }
+  }
   // delete operator: d + motion
   if (e.key==='d' && !e.ctrlKey && !e.metaKey && !e.altKey){ e.preventDefault(); _pendingOp='d'; _pendingOpCount=_consumeCount(); if (!_pendingOpCount || _pendingOpCount<1) _pendingOpCount=1; _pendingOpSeq=null; _armPendingOpTimeout(); return; }
   // yank operator: y + motion
@@ -8403,8 +8546,34 @@
   if (e.key==='}'){ e.preventDefault(); const n=_consumeCount(); _moveParagraphNext(n); try{ _flagCaretMotion(); }catch{} _ensureAfterMotion(); _repositionCaret(); updateGutter(); return; }
   if (e.key==='{'){ e.preventDefault(); const n=_consumeCount(); _moveParagraphPrev(n); try{ _flagCaretMotion(); }catch{} _ensureAfterMotion(); _repositionCaret(); updateGutter(); return; }
       // numeric prefix (1-9 start/extend; 0 extends if already started)
-      if (e.key>='1' && e.key<='9' && !e.ctrlKey && !e.metaKey && !e.altKey){ e.preventDefault(); _countAcc = (_countAcc==null?0:_countAcc)*10 + parseInt(e.key,10); return; }
-      if (e.key==='0' && !e.ctrlKey && !e.metaKey && !e.altKey && _countAcc!=null){ e.preventDefault(); _countAcc = _countAcc*10; return; }
+      if (e.key>='1' && e.key<='9' && !e.ctrlKey && !e.metaKey && !e.altKey){
+        e.preventDefault();
+        if (_pendingNormal==='>' || _pendingNormal==='<'){
+          _pendingNormalCount = (_pendingNormalCount==null?0:_pendingNormalCount)*10 + parseInt(e.key,10);
+          if (_pendingTimer) clearTimeout(_pendingTimer);
+          _pendingTimer = setTimeout(()=>{ _pendingNormal=null; _pendingTimer=null; _pendingNormalCount=null; }, 1500);
+          // debug removed: digit during pending
+        } else {
+          _countAcc = (_countAcc==null?0:_countAcc)*10 + parseInt(e.key,10);
+          // debug removed: digit precount
+        }
+        return;
+      }
+      if (e.key==='0' && !e.ctrlKey && !e.metaKey && !e.altKey){
+        if (_countAcc!=null || _pendingNormal==='>' || _pendingNormal==='<'){
+          e.preventDefault();
+          if (_pendingNormal==='>' || _pendingNormal==='<'){
+            _pendingNormalCount = (_pendingNormalCount==null?0:_pendingNormalCount)*10; // extend pending count
+            if (_pendingTimer) clearTimeout(_pendingTimer);
+            _pendingTimer = setTimeout(()=>{ _pendingNormal=null; _pendingTimer=null; _pendingNormalCount=null; }, 1500);
+            // debug removed: zero extend pending
+          } else if (_countAcc!=null){
+            _countAcc = _countAcc*10;
+            // debug removed: zero extend precount
+          }
+          return;
+        }
+      }
   if (e.key==='i'){ e.preventDefault(); _setMode('INSERT'); return; }
   if (e.key==='v' && !e.ctrlKey && !e.metaKey && !e.altKey){ e.preventDefault(); _enterVisual(false); return; }
   if (e.key==='V' && !e.ctrlKey && !e.metaKey && !e.altKey){
@@ -8630,6 +8799,11 @@
         } else {
           toast('no last search');
         }
+        return;
+      }
+      // Ignore standalone modifier keys to preserve pending sequences and count prefix
+      if (e.key==='Shift' || e.key==='Control' || e.key==='Alt' || e.key==='Meta'){
+        // Do not clear _countAcc or pending states on pure modifiers
         return;
       }
       // other keys cancel pending sequences
