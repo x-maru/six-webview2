@@ -2210,6 +2210,7 @@
         b.viewScrollTop = stSnap; b.viewRow = caretRow|0; b.viewCol = caretCol|0;
       }catch{}
       _setTitle(); _renderTabbar();
+      try{ _updateOverlayShiftwidthVisual(); }catch{}
       _updateHlsearchFull();
       // Ensure editor regains focus after switch (covers INSERT restore as well)
       try{ setTimeout(()=>{ try{ editor && editor.focus && editor.focus(); }catch{} }, 0); }catch{}
@@ -5206,6 +5207,7 @@
       const n = parseInt(mSW[1],10);
       if (!Number.isNaN(n)){
         const b=currentBuffer(); if (b){ b.shiftwidth = Math.max(1, n|0); _schedulePersist('shiftwidth'); }
+        try{ _updateOverlayShiftwidthVisual(); }catch{}
         try{ toast('shiftwidth = ' + (n|0), 900); }catch{}
       }
       return;
@@ -11614,8 +11616,8 @@
         // Narrow down gap between buttons ~half
         pal.style.gap = '4px';
         pal.style.alignItems = 'flex-end';
-    // Fill background; adjust transparency to 0.06 per request (#431)
-  pal.style.background = 'rgba(0,15,0,0.06)';
+    // Make overlay palette background fully transparent (#682)
+  pal.style.background = 'rgba(0,0,0,0)';
         pal.style.border = 'none';
         pal.style.borderRadius = '0';
         pal.style.padding = '4px';
@@ -11673,7 +11675,7 @@
         s.style.display = 'inline-block';
         s.style.padding = '1px 8px';
         s.style.border = '1px solid #2a3244';
-        s.style.borderRadius = '999px';
+        s.style.borderRadius = '6px';
         s.style.fontSize = '11px';
         s.style.lineHeight = '1.5';
         s.style.userSelect = 'none';
@@ -11693,6 +11695,66 @@
         try{ _updateOverlayHlsearchVisual(); }catch{}
         try{ toast('hlsearch: ' + (_optHlsearch?'on':'off'), 900); }catch{}
         // Restore pre-click focus if possible
+        try{ if (lastFocusedEl && typeof lastFocusedEl.focus === 'function'){ lastFocusedEl.focus(); } }catch{}
+      });
+
+      // インデント幅ボタン（左下：検索ハイライトの左隣）
+      const swBtn = document.createElement('button');
+      swBtn.type = 'button';
+      swBtn.id = 'overlayBtnShiftwidth';
+      swBtn.style.minWidth = '100px';
+      swBtn.style.border = '1px solid #2a3244';
+      swBtn.style.background = '#1a2030';
+      swBtn.style.color = '#e6e6e6';
+      swBtn.style.borderRadius = '6px';
+      swBtn.style.padding = '6px 8px';
+      swBtn.style.cursor = 'pointer';
+      swBtn.style.font = "12px/1.25 system-ui, -apple-system, 'Segoe UI', sans-serif";
+      swBtn.style.opacity = '0.92';
+      swBtn.style.userSelect = 'none';
+      swBtn.style.outline = 'none';
+      attachHover(swBtn);
+      swBtn.addEventListener('mousedown', (e)=>{ try{ lastFocusedEl = document.activeElement; e.preventDefault(); }catch{} });
+      const swWrap = document.createElement('div');
+      swWrap.style.display = 'flex';
+      swWrap.style.flexDirection = 'column';
+      swWrap.style.gap = '2px';
+      const swTitle = document.createElement('div');
+      swTitle.textContent = 'インデント幅';
+      swTitle.style.textAlign = 'center';
+      swTitle.style.fontWeight = '500';
+      const swLine = document.createElement('div');
+      swLine.style.display = 'flex';
+      swLine.style.justifyContent = 'center';
+      swLine.style.gap = '3px';
+      const swPillBase = (label, id)=>{
+        const s = document.createElement('span');
+        s.id = id;
+        s.textContent = label;
+        s.style.display = 'inline-block';
+        s.style.padding = '1px 8px';
+        s.style.border = '1px solid #2a3244';
+        s.style.borderRadius = '6px';
+        s.style.fontSize = '11px';
+        s.style.lineHeight = '1.5';
+        s.style.userSelect = 'none';
+        return s;
+      };
+      const swP2 = swPillBase('2', 'overlayBtnSw_2');
+      const swP4 = swPillBase('4', 'overlayBtnSw_4');
+      const swP8 = swPillBase('8', 'overlayBtnSw_8');
+      swLine.appendChild(swP2); swLine.appendChild(swP4); swLine.appendChild(swP8);
+      swWrap.appendChild(swTitle); swWrap.appendChild(swLine); swBtn.appendChild(swWrap);
+      swBtn.addEventListener('click', (e)=>{
+        try{ e.preventDefault(); e.stopPropagation(); }catch{}
+        try{
+          const b = currentBuffer();
+          const cur = _getShiftWidth();
+          const next = (cur===2)?4 : (cur===4)?8 : (cur===8)?2 : 2;
+          if (b){ b.shiftwidth = Math.max(1, next|0); _schedulePersist('shiftwidth'); }
+          try{ _updateOverlayShiftwidthVisual(); }catch{}
+          try{ toast('shiftwidth = ' + next, 900); }catch{}
+        }catch{}
         try{ if (lastFocusedEl && typeof lastFocusedEl.focus === 'function'){ lastFocusedEl.focus(); } }catch{}
       });
 
@@ -11730,7 +11792,7 @@
       const listBtn = document.createElement('button');
       listBtn.type = 'button';
       listBtn.id = 'overlayBtnList';
-      listBtn.style.minWidth = '120px';
+      listBtn.style.minWidth = '112px';
       listBtn.style.border = '1px solid #2a3244';
       listBtn.style.background = '#1a2030';
       listBtn.style.color = '#e6e6e6';
@@ -11799,22 +11861,28 @@
         try{ if (lastFocusedEl2 && typeof lastFocusedEl2.focus==='function') lastFocusedEl2.focus(); }catch{}
       });
 
-  // Build grid (top-left: list / top-right: quit / bottom-left: hlsearch / bottom-right: help)
+    // Build grid 3x2
       const grid = document.createElement('div');
       grid.style.display = 'grid';
-  grid.style.gridTemplateColumns = 'auto auto';
+    grid.style.gridTemplateColumns = 'auto auto auto';
       grid.style.columnGap = '4px';
       grid.style.rowGap = '4px';
-  grid.appendChild(listBtn);    // top-left
-  grid.appendChild(quitBtn);    // top-right
-  grid.appendChild(hlBtn);      // bottom-left
-  grid.appendChild(helpBtn);    // bottom-right
+      // Row1: [empty][list][quit]
+      const emptyTL = document.createElement('div');
+      grid.appendChild(emptyTL);   // top-left empty
+      grid.appendChild(listBtn);   // top-center
+      grid.appendChild(quitBtn);   // top-right
+      // Row2: [shiftwidth][hlsearch][help]
+      grid.appendChild(swBtn);     // bottom-left
+      grid.appendChild(hlBtn);     // bottom-center
+      grid.appendChild(helpBtn);   // bottom-right
 
       pal.appendChild(grid);
 
   // initialize visual state for hlsearch & list pills
   try{ _updateOverlayHlsearchVisual(); }catch{}
   try{ _updateOverlayListVisual(); }catch{}
+  try{ _updateOverlayShiftwidthVisual(); }catch{}
       // Initial position sync with scrollbars
       try{ _positionPaletteUI(); }catch{}
       
@@ -11901,6 +11969,24 @@
       }else{
         off.style.background = gray; off.style.color = '#000';
       }
+    }catch{}
+  }
+
+  // Reflect current shiftwidth (2/4/8) state to overlay button
+  function _updateOverlayShiftwidthVisual(){
+    try{
+      const p2 = document.getElementById('overlayBtnSw_2');
+      const p4 = document.getElementById('overlayBtnSw_4');
+      const p8 = document.getElementById('overlayBtnSw_8');
+      if (!p2 || !p4 || !p8) return;
+      const green = '#49e26f';
+      // reset
+      for (const p of [p2,p4,p8]){ p.style.background = 'transparent'; p.style.color = '#e6e6e6'; }
+      const sw = _getShiftWidth();
+      if (sw === 2){ p2.style.background = green; p2.style.color = '#000'; }
+      else if (sw === 4){ p4.style.background = green; p4.style.color = '#000'; }
+      else if (sw === 8){ p8.style.background = green; p8.style.color = '#000'; }
+      // other values: none highlighted
     }catch{}
   }
 
