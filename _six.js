@@ -3521,9 +3521,13 @@
       return { r: newR, c: newC };
     }
   }
+  // Normalize any accidental visual newline symbol in register text back to real LF (#656)
+  function _normalizeRegText(s){
+    try{ return String(s||'').replace(/\u2424/g, '\n'); }catch{ return String(s||''); }
+  }
   function _pasteCharwise(after, count){
     const n = Math.max(1, count|0);
-    const clip = _regUnnamed && !_regUnnamed.linewise ? String(_regUnnamed.text||'') : '';
+    const clip = _regUnnamed && !_regUnnamed.linewise ? _normalizeRegText(_regUnnamed.text) : '';
     if (!clip) return;
     _pushUndoSnapshot('paste');
     let pos;
@@ -3545,7 +3549,7 @@
   }
   function _pasteLinewise(below, count){
     const n = Math.max(1, count|0);
-    const clip = _regUnnamed && _regUnnamed.linewise ? String(_regUnnamed.text||'') : '';
+    const clip = _regUnnamed && _regUnnamed.linewise ? _normalizeRegText(_regUnnamed.text) : '';
     if (!clip) return;
     _pushUndoSnapshot('paste');
     const lines = _splitLines();
@@ -7552,7 +7556,7 @@
               const linesRaw=_splitLinesRaw();
               const before=linesRaw.slice(0, rs);
               const after = linesRaw.slice(re+1);
-              const clipLines=String(_regUnnamed.text||'').split('\n');
+              const clipLines=_normalizeRegText(_regUnnamed.text).split('\n');
               const out = before.concat(clipLines).concat(after).join('\n');
               const prev=String(editor.value||''); if (out!==prev){ _pushUndoSnapshot('visual-paste-linewise'); editor.value=out; _touchBufferModified(); }
               // caret to last inserted line head
@@ -7564,7 +7568,7 @@
               if (_cmpPos(a,b)>0){ const t=a; a=b; b=t; }
               const off1=_offsetFromRC(a.r,a.c); const off2=_offsetFromRC(b.r,b.c);
               const s=String(editor.value||''); const startOff=Math.max(0, Math.min(s.length, off1|0)); const endOff=Math.max(startOff, Math.min(s.length, off2|0));
-              const clip=String(_regUnnamed.text||'');
+              const clip=_normalizeRegText(_regUnnamed.text);
               const out = s.slice(0,startOff) + clip + s.slice(endOff);
               if (out!==s){ _pushUndoSnapshot('visual-paste-charwise'); editor.value=out; _touchBufferModified(); }
               // Move caret to end of pasted block
