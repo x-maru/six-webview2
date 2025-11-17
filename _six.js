@@ -684,7 +684,16 @@
   let _incPrevLastLen = 0;      // last preview length
   let _incPrevStickyOff = null; // number|null
   let _incPrevStickySrc = '';
-  function _incPrevHide(){ try{ if (_incPrevEl && _incPrevEl.parentNode){ _incPrevEl.parentNode.removeChild(_incPrevEl); } _incPrevEl=null; }catch{ _incPrevEl=null; } _incPrevLastStart=null; _incPrevLastLen=0; }
+  let _incPrevExtra = [];       // additional DOM elements for multi-line preview
+  function _incPrevHide(){
+    try{
+      if (_incPrevEl && _incPrevEl.parentNode){ _incPrevEl.parentNode.removeChild(_incPrevEl); }
+    }catch{}
+    _incPrevEl=null;
+    try{ _incPrevExtra.forEach(el=>{ try{ if (el && el.parentNode){ el.parentNode.removeChild(el); } }catch{} }); }catch{}
+    _incPrevExtra=[];
+    _incPrevLastStart=null; _incPrevLastLen=0;
+  }
   function _incPrevRefresh(){
     if (_incPrevEl && _incPrevLastStart!=null){
       _incPrevShowAt(_incPrevLastStart, _incPrevLastLen);
@@ -701,6 +710,47 @@
       const r = rc.r|0, c = rc.c|0;
       const lines = _splitLines();
       const line = String(lines[r]||'');
+      const fullText = String(editor.value||'');
+      const seg = fullText.slice(startOff, startOff + nlen);
+      const hasNL = /\n/.test(seg);
+      if (hasNL){
+        // Multi-line highlight: clear existing single-line element
+        try{ if (_incPrevEl && _incPrevEl.parentNode){ _incPrevEl.parentNode.removeChild(_incPrevEl); } }catch{}
+        _incPrevEl=null;
+        // Remove extras first
+        try{ _incPrevExtra.forEach(el=>{ try{ if (el && el.parentNode){ el.parentNode.removeChild(el); } }catch{} }); }catch{}
+        _incPrevExtra=[];
+        const parts = seg.split('\n');
+        const topLine = _topLine();
+        let curRow = r;
+        // First line offset/col: c
+        for (let i=0;i<parts.length;i++){
+          const part = parts[i];
+          const row = r + i;
+          const isFirst = (i===0);
+          const startCol = isFirst ? c : 0;
+          // measure x positions within this row
+          const rowLine = String(lines[row]||'');
+          _measureSpan.textContent = rowLine.slice(0, startCol);
+          const x1 = _measureSpan.getBoundingClientRect().width;
+          _measureSpan.textContent = rowLine.slice(0, startCol + part.length);
+          const x2 = _measureSpan.getBoundingClientRect().width;
+          const row1 = row + 1;
+          const offsetLines = row1 - topLine;
+          const topPx = offsetLines * LINE_HEIGHT;
+          // create element
+          const el = document.createElement('div');
+          el.className = 'incprev';
+          let _hs = 0; try{ _hs = (editor.scrollLeft||0); }catch{}
+          el.style.left = (x1 - _hs) + 'px';
+          el.style.top = topPx + 'px';
+          el.style.width = Math.max(1, Math.round(x2 - x1)) + 'px';
+          el.style.height = Math.max(1, Math.round(LINE_HEIGHT)) + 'px';
+          try{ caretLayer.appendChild(el); }catch{}
+          _incPrevExtra.push(el);
+        }
+        return;
+      }
       // limit to single line box for preview; clamp highlight width within this line
       const endCol = Math.min(line.length, c + nlen);
       // measure x positions
@@ -744,7 +794,16 @@
   const mS = (!mF && !mB) ? s.match(/^\s*:?(?:('<,'>))?(%?)\s*s\/(.*?)(?:\/|$)/i) : null;
       if (!mF && !mB && !mS){ _incPrevHide(); return false; }
       const dir = mF ? 'fwd' : (mB ? 'bwd' : 'fwd');
-    let pat = String((mF?mF[1]:(mB?mB[1]:(mS?mS[3]:'')))||'');
+      const forward = !!mF;
+      // Determine pattern text from /, ?, or :s
+      let pat = '';
+      if (forward){ pat = String(mF[1]||''); }
+      else if (mB){ pat = String(mB[1]||''); }
+      else if (mS){ pat = String(mS[3]||''); }
+        // ユーザ入力の \n / \t を実際の改行・TABへ展開（直前がさらにバックスラッシュの場合はリテラル保持） (#692)
+        try{
+          pat = pat.replace(/(?<!\\)\\n/g,'\n').replace(/(?<!\\)\\t/g,'\t');
+        }catch{ /* lookbehind 非対応環境では単純置換（副作用で \\n が展開される場合あり） */ try{ pat = pat.replace(/\\n/g,'\n').replace(/\\t/g,'\t'); }catch{} }
       const flagsGiven = String((mF?mF[2]:(mB?mB[2]:''))||'');
   const flags = (/i/.test(flagsGiven)?'i':'');
   // Always enable multiline so ^/$ match per-line by default
@@ -815,7 +874,10 @@
       }
       if (!res){
         if (!limitToVisual){
-          res = _searchFindNext(pat, flags, dir, fromOff, true);
+          // Incremental previewは現在位置も含めて判定する（/# で行頭を即ヒットさせる）(#691)
+          // fromOff-1（fwd）/ fromOff+1（bwd）をそのまま渡し、検索側で適切に扱う
+          const incFrom = (dir==='fwd') ? (fromOff-1) : (fromOff+1);
+          res = _searchFindNext(pat, flags, dir, incFrom, true);
         } else {
           // Manual scan within [selStart, selEnd)
           try{
@@ -1780,6 +1842,25 @@
   }
   function _needsHScrollReserve(){ return false; }
 
+  // Escape regex metacharacters for VISUAL search seeds while preserving \n and \t
+  function _escapeRegexLiteralForSeed(s){
+    try{
+      if (s==null) return '';
+      // Normalize CRLF/CR to LF first
+      let src = String(s).replace(/\r\n/g,'\n').replace(/\r/g,'\n');
+      let out = '';
+      for (let i=0;i<src.length;i++){
+        const ch = src[i];
+        if (ch === '\n'){ out += '\\n'; }
+        else if (ch === '\t'){ out += '\\t'; }
+        else if (ch === '\\'){ out += '\\\\'; }
+        else if (/[\.^$|?*+(){}\[\]]/.test(ch)){ out += '\\' + ch; }
+        else { out += ch; }
+      }
+      return out;
+    }catch{ return String(s||''); }
+  }
+
   // ---- Search helpers (for '/', '?' and n/N) ----
   function _searchFindNext(src, flags, dir, fromOff, wrap){
     try{
@@ -1790,8 +1871,8 @@
   if (flags && /i/.test(flags)) reFlags += 'i';
       let startIdx = -1; let matchLen = 0;
       if (dir === 'fwd'){
-        const off = Math.max(0, Math.min(n, (fromOff|0)));
-        const start = Math.min(n, off + 1); // move past current
+        // Allow callers to pass fromOff-1 to include current. If fromOff is -1, start becomes 0.
+        const start = Math.min(n, Math.max(0, ((fromOff|0) + 1))); // caller may pass fromOff-1 to include current
         let re = null;
   try{ re = new RegExp(src, reFlags); }catch{ re=null; }
         if (!re) return null;
@@ -4529,6 +4610,10 @@
         const forward = !!mF;
         let pat = String((forward?mF[1]:mB[1])||'');
         const flagsGiven = String((forward?mF[2]:mB[2])||'');
+        // ユーザ入力の \n / \t を実際の改行・TABへ展開（直前がさらにバックスラッシュの場合はリテラル保持） (#692)
+        try{
+          pat = pat.replace(/(?<!\\)\\n/g,'\n').replace(/(?<!\\)\\t/g,'\t');
+        }catch{ try{ pat = pat.replace(/\\n/g,'\n').replace(/\\t/g,'\t'); }catch{} }
         if (!pat && _lastSearch){ pat = _lastSearch.src; }
         if (pat){
           const dir = forward? 'fwd':'bwd';
@@ -4541,7 +4626,10 @@
               return _offsetFromRC(caretRow, caretCol)|0;
             }catch{ return 0; }
           })();
-          const res = _searchFindNext(pat, flags, dir, fromOff, true);
+          // Include current position for initial forward search by subtracting 1 (search core skips current by +1) (#690)
+          // Allow -1 to include index 0 match.
+          const effectiveFrom = (dir==='fwd') ? (fromOff-1) : fromOff;
+          const res = _searchFindNext(pat, flags, dir, effectiveFrom, true);
           if (res && Number.isFinite(res.start)){
             try{
               const rc = _rcFromOffset(res.start);
@@ -6686,6 +6774,12 @@
               [K('p'), sep('  選択範囲を unnamed レジスタ内容で置換（終了して NORMAL）')],
               [K('> / <'), sep('  インデントを '), K('shiftwidth'), sep(' 分 増減。前置カウント '), K('N'), sep(' で '), K('N'), sep(' 倍量。空行は変更しません。行頭の連続 '), K('TAB'), sep(' は保持し、直後に空白を挿入/削除します')]
             ]));
+            // VISUAL 中の検索起動 (#683/#684)
+            wrap.appendChild(mkSec('検索起動'));
+            wrap.appendChild(mkList([
+              [K('/'), sep('  選択文字列を初期値として前方向インクリメンタル検索入力へ。選択中の改行は '), K('\\n'), sep(' / TAB は '), K('\\t'), sep(' にエスケープ表示。正規表現メタ文字は自動的にリテラル化（エスケープ）')],
+              [K('?'), sep('  選択文字列を初期値として後方向インクリメンタル検索入力へ。エスケープ仕様は同上')]
+            ]));
 
             // 大文字/小文字変換
             wrap.appendChild(mkSec('大文字/小文字変換'));
@@ -7560,6 +7654,81 @@
           }, 0);
         }
         return; // テキスト入力はデフォルトに委ねる
+      }
+      // VISUAL 専用: '/' と '?' を早期捕捉（通常経路で無視されるケースのフォールバック） (#685)
+      if (_mode === 'VISUAL' && !e.ctrlKey && !e.metaKey && !e.altKey && (e.key==='/' || e.key==='?')){
+        e.preventDefault();
+        let visSeed='';
+        let visStartOff = null;
+        try{
+          const v=String(editor.value||'');
+          if (_visualLinewise){
+            const rs=Math.min(_visualAnchorR, caretRow);
+            const re=Math.max(_visualAnchorR, caretRow);
+            const sOff=_offsetFromRC(rs,0)|0;
+            const eOff=_offsetFromRC(re, (_splitLines()[re]||'').length)|0;
+            visSeed=v.slice(Math.max(0,sOff), Math.max(0,eOff));
+            visStartOff = sOff|0;
+          } else {
+            const sOff=_offsetFromRC(_visualAnchorR, _visualAnchorC)|0;
+            const eOff=_offsetFromRC(caretRow, caretCol)|0;
+            const a=Math.min(sOff,eOff), b=Math.max(sOff,eOff);
+            visSeed=v.slice(Math.max(0,a), Math.max(0,b));
+            visStartOff = a|0;
+          }
+          // 選択文字列を「正規表現のリテラル一致」用にエスケープ（\n/\tは維持）
+          visSeed = _escapeRegexLiteralForSeed(visSeed); // 空白はそのまま保持 (#687)
+        }catch{ visSeed=''; }
+        try{ _exitVisual(); }catch{}
+        _preCmdMode=_mode; _setMode('CMD'); _clearPending();
+        _incPrevHide();
+        try{
+          if (visStartOff!=null && Number.isFinite(visStartOff)){
+            _incSearchAnchorOff = (visStartOff|0);
+          } else {
+            _incSearchAnchorOff = _offsetFromRC(caretRow, caretCol)|0;
+          }
+          _incSearchDir = (e.key==='?')?'bwd':'fwd';
+        }catch{ _incSearchAnchorOff=null; _incSearchDir=(e.key==='?')?'bwd':'fwd'; }
+        try{ _cmdHistBrowsing=false; _cmdHistIndex=_cmdHistory.length; _cmdHistTemp=''; }catch{}
+        try{ _centerScrolloffOnce=false; }catch{}
+        try{ _scrollGuardUntil = Date.now() + 120; }catch{}
+        const holdLeft = (function(){ try{ return editor.scrollLeft|0; }catch{ return 0; } })();
+        try{
+          const st0=(editor.scrollTop||0);
+          const flo=Math.floor(st0/LINE_HEIGHT)*LINE_HEIGHT;
+          if (Math.abs(st0-flo)>0.1){ editor.scrollTop=flo; }
+          _repositionCaret(); updateGutter();
+          try{ if (editor && (editor.scrollLeft|0)!==holdLeft){ editor.scrollLeft=holdLeft; } }catch{}
+        }catch{}
+        if (cmdinput){
+          cmdinput.value = (e.key==='?') ? ('?'+visSeed) : ('/'+visSeed);
+          const stHold=(function(){ try{ return editor.scrollTop|0; }catch{ return 0; } })();
+          Promise.resolve().then(()=>{
+            try{ if (_mode==='CMD'){ cmdinput.focus(); const pos=(cmdinput.value||'').length; cmdinput.setSelectionRange(pos,pos); } }catch{}
+            if (window.requestAnimationFrame){
+              requestAnimationFrame(()=>{ try{
+                if (_mode==='CMD' && document.activeElement!==cmdinput){ cmdinput.focus(); const p=(cmdinput.value||'').length; cmdinput.setSelectionRange(p,p); }
+                if (_mode==='CMD' && editor){
+                  const flo=Math.floor(stHold/LINE_HEIGHT)*LINE_HEIGHT;
+                  if (Math.abs((editor.scrollTop||0)-flo)>0.1){ editor.scrollTop=flo; }
+                  _repositionCaret(); updateGutter();
+                  if ((editor.scrollLeft|0)!==holdLeft){ editor.scrollLeft=holdLeft; }
+                }
+              }catch{} });
+            }
+            setTimeout(()=>{ try{
+              if (_mode==='CMD' && document.activeElement!==cmdinput){ cmdinput.focus(); const p=(cmdinput.value||'').length; cmdinput.setSelectionRange(p,p); }
+              if (_mode==='CMD' && editor){
+                const flo=Math.floor(stHold/LINE_HEIGHT)*LINE_HEIGHT;
+                if (Math.abs((editor.scrollTop||0)-flo)>0.1){ editor.scrollTop=flo; }
+                _repositionCaret(); updateGutter();
+                if ((editor.scrollLeft|0)!==holdLeft){ editor.scrollLeft=holdLeft; }
+              }
+            }catch{} }, 60);
+          });
+        }
+        return;
       }
       if (_mode === 'VISUAL'){
         // VISUAL mode key handling
@@ -8453,7 +8622,30 @@
       }
       // '/' search prompt (enter CMD with '/' prefilled) with robust multi-frame focus like ':'
       if (e.key==='/' && !e.ctrlKey && !e.metaKey && !e.altKey){
-        e.preventDefault(); _preCmdMode = _mode; _setMode('CMD'); _clearPending();
+        e.preventDefault();
+        // VISUAL 中は選択文字列を初期値にして検索へ移行 (#683)
+        let visSeed = '';
+        if (_visualActive){
+          try{
+            const v = String(editor.value||'');
+            if (_visualLinewise){
+              const rs = Math.min(_visualAnchorR, caretRow);
+              const re = Math.max(_visualAnchorR, caretRow);
+              const sOff = _offsetFromRC(rs, 0)|0;
+              const eOff = _offsetFromRC(re, (_splitLines()[re]||'').length)|0;
+              visSeed = v.slice(Math.max(0,sOff), Math.max(0,eOff));
+            } else {
+              const sOff = _offsetFromRC(_visualAnchorR, _visualAnchorC)|0;
+              const eOff = _offsetFromRC(caretRow, caretCol)|0;
+              const a = Math.min(sOff, eOff), b = Math.max(sOff, eOff);
+              visSeed = v.slice(Math.max(0,a), Math.max(0,b));
+            }
+            // リテラル一致となるよう正規表現エスケープ（\n/\tは維持）
+            visSeed = _escapeRegexLiteralForSeed(visSeed); // 空白はそのまま保持 (#687)
+          }catch{ visSeed=''; }
+          try{ _exitVisual(); }catch{}
+        }
+        _preCmdMode = _mode; _setMode('CMD'); _clearPending();
         _incPrevHide();
         try{ _incSearchAnchorOff = _offsetFromRC(caretRow, caretCol)|0; _incSearchDir = 'fwd'; }catch{ _incSearchAnchorOff = null; _incSearchDir='fwd'; }
         try{ _cmdHistBrowsing=false; _cmdHistIndex=_cmdHistory.length; _cmdHistTemp=''; }catch{}
@@ -8474,7 +8666,7 @@
           try{ if (editor && (editor.scrollLeft|0) !== _holdLeftFwd){ editor.scrollLeft = _holdLeftFwd; } }catch{}
         }catch{}
         if (cmdinput){
-          cmdinput.value = '/';
+          cmdinput.value = visSeed ? ('/' + visSeed) : '/';
           const stHold = (function(){ try{ return editor.scrollTop|0; }catch{ return 0; } })();
           Promise.resolve().then(()=>{
             try{ if (_mode==='CMD'){ cmdinput.focus(); const pos=(cmdinput.value||'').length; cmdinput.setSelectionRange(pos,pos); } }catch{}
@@ -8505,7 +8697,30 @@
       }
       // '?' backward search prompt with robust multi-frame focus like ':'
       if (e.key==='?' && !e.ctrlKey && !e.metaKey && !e.altKey){
-        e.preventDefault(); _preCmdMode = _mode; _setMode('CMD'); _clearPending();
+        e.preventDefault();
+        // VISUAL 中は選択文字列を初期値にして逆方向検索へ移行 (#683)
+        let visSeed = '';
+        if (_visualActive){
+          try{
+            const v = String(editor.value||'');
+            if (_visualLinewise){
+              const rs = Math.min(_visualAnchorR, caretRow);
+              const re = Math.max(_visualAnchorR, caretRow);
+              const sOff = _offsetFromRC(rs, 0)|0;
+              const eOff = _offsetFromRC(re, (_splitLines()[re]||'').length)|0;
+              visSeed = v.slice(Math.max(0,sOff), Math.max(0,eOff));
+            } else {
+              const sOff = _offsetFromRC(_visualAnchorR, _visualAnchorC)|0;
+              const eOff = _offsetFromRC(caretRow, caretCol)|0;
+              const a = Math.min(sOff, eOff), b = Math.max(sOff, eOff);
+              visSeed = v.slice(Math.max(0,a), Math.max(0,b));
+            }
+            // リテラル一致となるよう正規表現エスケープ（\n/\tは維持）
+            visSeed = _escapeRegexLiteralForSeed(visSeed); // 空白はそのまま保持 (#687)
+          }catch{ visSeed=''; }
+          try{ _exitVisual(); }catch{}
+        }
+        _preCmdMode = _mode; _setMode('CMD'); _clearPending();
         _incPrevHide();
         try{ _incSearchAnchorOff = _offsetFromRC(caretRow, caretCol)|0; _incSearchDir = 'bwd'; }catch{ _incSearchAnchorOff = null; _incSearchDir='bwd'; }
         try{ _cmdHistBrowsing=false; _cmdHistIndex=_cmdHistory.length; _cmdHistTemp=''; }catch{}
@@ -8521,7 +8736,7 @@
           try{ if (editor && (editor.scrollLeft|0) !== _holdLeftBwd){ editor.scrollLeft = _holdLeftBwd; } }catch{}
         }catch{}
         if (cmdinput){
-          cmdinput.value = '?';
+          cmdinput.value = visSeed ? ('?' + visSeed) : '?';
           const stHold = (function(){ try{ return editor.scrollTop|0; }catch{ return 0; } })();
           Promise.resolve().then(()=>{
             try{ if (_mode==='CMD'){ cmdinput.focus(); const pos=(cmdinput.value||'').length; cmdinput.setSelectionRange(pos,pos); } }catch{}
@@ -8878,17 +9093,30 @@
           if (!_lastSearch.origDir){ _lastSearch.origDir = origDir; }
           const dir = rev ? (origDir==='fwd'?'bwd':'fwd') : origDir;
           _scrolloffPaused = false; _scrolloffPauseAnchorR = -1; _scrolloffPauseAnchorC = -1;
-          const fromOff = (function(){ try{ return _offsetFromRC(caretRow, caretCol)|0; }catch{ return 0; } })();
-          const res = _searchFindNext(_lastSearch.src, _lastSearch.flags||'', dir, fromOff, true);
+          const caretOff = (function(){ try{ return _offsetFromRC(caretRow, caretCol)|0; }catch{ return 0; } })();
+          // Include current match by offset adjustment (forward: -1, backward: +2) then allow wrap
+          const fromAdj = (dir==='fwd') ? (caretOff-1) : (caretOff+2);
+          const res = _searchFindNext(_lastSearch.src, _lastSearch.flags||'', dir, fromAdj, true);
           if (res && Number.isFinite(res.start)){
             try{
-              const rc = _rcFromOffset(res.start);
-              caretRow = rc.r; caretCol = rc.c;
+              const sRC = _rcFromOffset(res.start);
+              caretRow = sRC.r; caretCol = sRC.c;
               ensureScrolloff();
               _repositionCaret(); updateGutter(); _renderHlMatchesVisible();
               _lastSearch.dir = dir; // record last movement direction (origDir remains stable)
+              // 検索ヒット範囲を一時フラッシュ（yank風）
+              try{
+                const mlen = Math.max(0, (res.len|0));
+                if (mlen > 0){
+                  const eRC = _rcFromOffset(res.start + mlen);
+                  _flashYanked({r:sRC.r, c:sRC.c}, {r:eRC.r, c:eRC.c});
+                }
+              }catch{}
             }catch{}
-          } else { toast('no match'); try{ _triggerVisualBell(); }catch{} }
+          } else {
+            // No matches anywhere in buffer → true no match
+            toast('no match'); try{ _triggerVisualBell(); }catch{}
+          }
         } else {
           toast('no last search');
         }
