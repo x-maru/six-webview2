@@ -1153,6 +1153,84 @@
       }
     }catch{}
   }
+  // ---- Yank flash (ephemeral highlight for yanked text) ----
+  let _yankFlashLayer = null;
+  let _yankFlashSegs = []; // {r,c1,c2,exp}
+  function _yankFlashEnsureLayer(){
+    try{
+      if (!_yankFlashLayer){
+        _yankFlashLayer = document.createElement('div');
+        _yankFlashLayer.className = 'yank-flash-layer';
+        _yankFlashLayer.style.position='absolute';
+        _yankFlashLayer.style.left='0'; _yankFlashLayer.style.top='0'; _yankFlashLayer.style.right='0'; _yankFlashLayer.style.bottom='0';
+        _yankFlashLayer.style.pointerEvents='none';
+        _yankFlashLayer.style.zIndex='1'; // below caret
+      }
+      if (_yankFlashLayer.parentNode !== caretLayer){ caretLayer.appendChild(_yankFlashLayer); }
+    }catch{}
+  }
+  function _yankFlashClear(){ try{ if(_yankFlashLayer){ while(_yankFlashLayer.firstChild){ _yankFlashLayer.removeChild(_yankFlashLayer.firstChild); } } }catch{} }
+  function _renderYankFlash(){
+    try{
+      if (!_yankFlashSegs || _yankFlashSegs.length===0){ _yankFlashClear(); return; }
+      const now = Date.now();
+      // filter expired
+      _yankFlashSegs = _yankFlashSegs.filter(s=> s && s.exp>now);
+      if (_yankFlashSegs.length===0){ _yankFlashClear(); return; }
+      _yankFlashEnsureLayer(); _yankFlashClear();
+      const topLine = _topLine();
+      const vis = _visibleLinesExact();
+      const endLine = topLine + vis - 1;
+      const lines = _splitLines();
+      let _hs = 0; try{ _hs = (editor.scrollLeft||0); }catch{}
+      let col = 'yellow'; try{ if (window && window.THEME && window.THEME.yankFlashColor){ col = String(window.THEME.yankFlashColor||'yellow'); } }catch{}
+      for (const seg of _yankFlashSegs){
+        const row1 = (seg.r|0) + 1;
+        if (row1 < topLine || row1 > endLine) continue;
+        const line = String(lines[seg.r]||'');
+        const c1 = Math.max(0, Math.min(line.length, seg.c1|0));
+        const c2 = Math.max(c1, Math.min(line.length, seg.c2|0));
+        if (c2<=c1) continue;
+        _measureSpan.textContent = line.slice(0, c1);
+        const x1 = _measureSpan.getBoundingClientRect().width;
+        _measureSpan.textContent = line.slice(0, c2);
+        const x2 = _measureSpan.getBoundingClientRect().width;
+        if (!(x2>x1)) continue;
+        const topPx = (row1 - topLine) * LINE_HEIGHT;
+        const el = document.createElement('div');
+        el.className='yank-flash';
+        el.style.left=(x1 - _hs) + 'px';
+        el.style.top= topPx + 'px';
+        el.style.width= Math.max(1, Math.round(x2 - x1)) + 'px';
+        el.style.height= Math.max(1, Math.round(LINE_HEIGHT)) + 'px';
+        try{ el.style.background = col; el.style.opacity = '0.35'; el.style.outline = '1px solid ' + col; el.style.outlineOffset='-1px'; }catch{}
+        _yankFlashLayer.appendChild(el);
+      }
+    }catch{}
+  }
+  function _flashYanked(pStart, pEnd){
+    try{
+      if (!pStart || !pEnd) return;
+      const a=_clampPos(pStart), b=_clampPos(pEnd);
+      let s=a, e=b; if (_cmpPos(s,e)>0){ const t=s; s=e; e=t; }
+      const lines=_splitLines();
+      const exp = Date.now() + 800; // 0.8s
+      // Build segments line-wise
+      if (s.r===e.r){
+        _yankFlashSegs.push({ r:s.r, c1:s.c, c2:e.c, exp });
+      } else {
+        // first line
+        _yankFlashSegs.push({ r:s.r, c1:s.c, c2:(lines[s.r]||'').length, exp });
+        // middle lines
+        for (let r=s.r+1; r<e.r; r++){ _yankFlashSegs.push({ r, c1:0, c2:(lines[r]||'').length, exp }); }
+        // last line
+        _yankFlashSegs.push({ r:e.r, c1:0, c2:e.c, exp });
+      }
+      _renderYankFlash();
+      // schedule cleanup (lazy: render will drop expired segs)
+      setTimeout(()=>{ _renderYankFlash(); }, 850);
+    }catch{}
+  }
   function _updateHlsearchFull(){
     if (!_optHlsearch || !(_lastSearch && _lastSearch.src)){
       _hlClear();
@@ -2704,10 +2782,10 @@
             if (meta){
               if (typeof meta.mtime === 'number') bb._extMtime = meta.mtime;
               if (typeof meta.size  === 'number') bb._extSize  = meta.size;
-              try{ console.log('[baseline] after new-load', bb.name, 'mtime=', bb._extMtime, 'size=', bb._extSize); }catch{}
+              /* baseline log removed: after new-load */
             } else {
               // Retry once after a short delay; some sources update metadata after read
-              try{ setTimeout(async()=>{ try{ const m2=await _statFileMeta(bb.path); if(m2){ if(typeof m2.mtime==='number') bb._extMtime=m2.mtime; if(typeof m2.size==='number') bb._extSize=m2.size; try{ console.log('[baseline] after new-load (delayed)', bb.name, 'mtime=', bb._extMtime, 'size=', bb._extSize); }catch{} try{ _schedulePersist('load-retry'); }catch{} } }catch{} }, 600); }catch{}
+              try{ setTimeout(async()=>{ try{ const m2=await _statFileMeta(bb.path); if(m2){ if(typeof m2.mtime==='number') bb._extMtime=m2.mtime; if(typeof m2.size==='number') bb._extSize=m2.size; /* baseline log removed: after new-load (delayed) */ try{ _schedulePersist('load-retry'); }catch{} } }catch{} }, 600); }catch{}
             }
             try{ _schedulePersist('load'); }catch{}
           }
@@ -2726,9 +2804,9 @@
               // 数値が得られた項目のみ更新（nullは書かない）
               if (typeof meta.mtime === 'number') b._extMtime = meta.mtime;
               if (typeof meta.size  === 'number') b._extSize  = meta.size;
-              try{ console.log('[baseline] after replace-load', b.name, 'mtime=', b._extMtime, 'size=', b._extSize); }catch{}
+              /* baseline log removed: after replace-load */
             } else {
-              try{ setTimeout(async()=>{ try{ const m2=await _statFileMeta(b.path); if(m2){ if(typeof m2.mtime==='number') b._extMtime=m2.mtime; if(typeof m2.size==='number') b._extSize=b._extSize||m2.size; try{ console.log('[baseline] after replace-load (delayed)', b.name, 'mtime=', b._extMtime, 'size=', b._extSize); }catch{} try{ _schedulePersist('load-retry'); }catch{} } }catch{} }, 600); }catch{}
+              try{ setTimeout(async()=>{ try{ const m2=await _statFileMeta(b.path); if(m2){ if(typeof m2.mtime==='number') b._extMtime=m2.mtime; if(typeof m2.size==='number') b._extSize=b._extSize||m2.size; /* baseline log removed: after replace-load (delayed) */ try{ _schedulePersist('load-retry'); }catch{} } }catch{} }, 600); }catch{}
             }
             try{ _schedulePersist('load'); }catch{}
           }catch{}
@@ -3816,6 +3894,7 @@
     // #539: Do not update yank register when yanked content is empty (length 0)
     if ((String(yanked||'').length) > 0){
       try{ _regUnnamed = { text: String(yanked||''), linewise: false }; }catch{}
+      _flashYanked(a,b);
     }
   }
   function _yankWholeLines(rStart, count){
@@ -3829,6 +3908,11 @@
     // #539: Skip updating yank register on empty block (length 0)
     if ((String(yankedBlock||'').length) > 0){
       try{ _regUnnamed = { text: String(yankedBlock||''), linewise: true }; }catch{}
+      const rs=Math.max(0, Math.min(total-1, rStart|0));
+      const n=Math.max(1, count|0);
+      const rEnd = Math.min(total-1, rs + n - 1);
+      const lastLen = (lines[rEnd]||'').length;
+      _flashYanked({r:rs,c:0},{r:rEnd,c:lastLen});
     }
   }
 
@@ -7880,6 +7964,7 @@
           const text = _extractWholeLinesText(caretRow, total);
           if ((String(text||'').length) > 0){
             (async ()=>{ const ok = await _copyToClipboard(text); toast(ok? 'Copied to Windows clipboard.':'Clipboard write failed.', ok? 1000:1500); })();
+            try{ const lines=_splitLines(); const rs=caretRow|0; const re=Math.min(_totalLines()-1, rs + total - 1); const lastLen=(lines[re]||'').length; _flashYanked({r:rs,c:0},{r:re,c:lastLen}); }catch{}
           }
           _clearPendingOp(); _repositionCaret(); updateGutter();
           return;
@@ -7896,6 +7981,7 @@
             const text = _extractWholeLinesText(rs, re-rs+1);
             if ((String(text||'').length) > 0){
               (async ()=>{ const ok = await _copyToClipboard(text); toast(ok? 'Copied to Windows clipboard.':'Clipboard write failed.', ok? 1000:1500); })();
+              try{ const lines=_splitLines(); const lastLen=(lines[re]||'').length; _flashYanked({r:rs,c:0},{r:re,c:lastLen}); }catch{}
             }
             _clearPendingOp(); _repositionCaret(); updateGutter();
             return;
@@ -7917,6 +8003,7 @@
           const text = _extractRangeText(start, end);
           if ((String(text||'').length) > 0){
             (async ()=>{ const ok = await _copyToClipboard(text); toast(ok? 'Copied to Windows clipboard.':'Clipboard write failed.', ok? 1000:1500); })();
+            _flashYanked(start, end);
           }
           _clearPendingOp(); _repositionCaret(); updateGutter();
           return;
@@ -7933,6 +8020,7 @@
           const text = _extractWholeLinesText(rs, re-rs+1);
           if ((String(text||'').length) > 0){
             (async ()=>{ const ok = await _copyToClipboard(text); toast(ok? 'Copied to Windows clipboard.':'Clipboard write failed.', ok? 1000:1500); })();
+            try{ const lines=_splitLines(); const lastLen=(lines[re]||'').length; _flashYanked({r:rs,c:0},{r:re,c:lastLen}); }catch{}
           }
           _clearPendingOp(); _repositionCaret(); updateGutter();
           return;
@@ -7947,6 +8035,7 @@
             const text = _extractWholeLinesText(rs, re-rs+1);
             if ((String(text||'').length) > 0){
               (async ()=>{ const ok = await _copyToClipboard(text); toast(ok? 'Copied to Windows clipboard.':'Clipboard write failed.', ok? 1000:1500); })();
+              try{ const lines=_splitLines(); const lastLen=(lines[re]||'').length; _flashYanked({r:rs,c:0},{r:re,c:lastLen}); }catch{}
             }
           }
           _clearPendingOp(); _repositionCaret(); updateGutter();
@@ -7961,6 +8050,7 @@
             const text = _extractWholeLinesText(rs, re-rs+1);
             if ((String(text||'').length) > 0){
               (async ()=>{ const ok = await _copyToClipboard(text); toast(ok? 'Copied to Windows clipboard.':'Clipboard write failed.', ok? 1000:1500); })();
+              try{ const lines=_splitLines(); const lastLen=(lines[re]||'').length; _flashYanked({r:rs,c:0},{r:re,c:lastLen}); }catch{}
             }
           }
           _clearPendingOp(); _repositionCaret(); updateGutter();
@@ -7995,6 +8085,7 @@
           }catch{}
             if ((String(text||'').length) > 0){
               (async ()=>{ const ok = await _copyToClipboard(text); toast(ok? 'Copied to Windows clipboard.':'Clipboard write failed.', ok? 1000:1500); })();
+              _flashYanked(start, end);
             }
             _clearPendingOp(); _repositionCaret(); updateGutter();
             return;
@@ -10566,7 +10657,7 @@
                 if (typeof meta.size  === 'number') b._extSize  = meta.size;
               }
               b._externalChangeIgnored=false;
-              try{ console.log('[baseline] after force-save', b.name, 'mtime=', b._extMtime, 'size=', b._extSize); }catch{}
+              /* baseline log removed: after force-save */
             }catch{}
             return { status:'saved' };
           }
@@ -10581,7 +10672,7 @@
                 if (typeof meta.size  === 'number') b._extSize  = meta.size;
               }
               b._externalChangeIgnored=false;
-              try{ console.log('[baseline] after discard-reload', b.name, 'mtime=', b._extMtime, 'size=', b._extSize); }catch{}
+              /* baseline log removed: after discard-reload */
             }catch{}
           }
           return { status:'discarded' };
@@ -10597,7 +10688,7 @@
               if (typeof meta.mtime === 'number') b._extMtime = meta.mtime;
               if (typeof meta.size  === 'number') b._extSize  = meta.size;
               b._externalChangeIgnored=false;
-              try{ console.log('[baseline] after normal-save', b.name, 'mtime=', b._extMtime, 'size=', b._extSize); }catch{}
+              /* baseline log removed: after normal-save */
             } else if (b){
               // Retry once later (some hosts may populate mtime/size slightly after save completes)
               try{
@@ -10608,7 +10699,7 @@
                       if (typeof meta2.mtime === 'number') b._extMtime = meta2.mtime;
                       if (typeof meta2.size  === 'number') b._extSize  = meta2.size;
                       b._externalChangeIgnored=false;
-                      try{ console.log('[baseline] after save (delayed)', b.name, 'mtime=', b._extMtime, 'size=', b._extSize); }catch{}
+                      /* baseline log removed: after save (delayed) */
                       try{ _schedulePersist('meta-retry'); }catch{}
                     }
                   }catch{}

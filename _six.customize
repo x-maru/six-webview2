@@ -88,6 +88,9 @@ window.THEME = {
   visCmdSelBg: "rgba(20, 192, 192, 0.2)",
   visCmdSelOutline: "rgba(0, 80, 120, 0.55)",
 
+  // yank/clipboardに格納した際の短時間フラッシュ
+  yankFlashColor: "#ffb020",
+
   // Global <kbd> colors used in tabbar and :b popup (fallbacks to helpKbd*)
   KbdBgColor: "#1c282a",
   KbdFgColor: "#aadada",

@@ -122,6 +122,15 @@ body { font: var(--fontBase, 18px)/20px Consolas, 'Courier New', monospace; over
 	pointer-events: none;
 	border-radius: 2px;
 }
+/* Yank flash (ephemeral highlight for yanked text) */
+.yank-flash {
+	position: absolute;
+	background: rgba(0,255,255,0.35); /* cyan with transparency */
+	outline: 1px solid rgba(0,255,255,0.55);
+	outline-offset: -1px;
+	pointer-events: none;
+	border-radius: 2px;
+}
 .viscmdsel {
 	position: absolute;
 	background: var(--visCmdSelBg);
