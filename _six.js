@@ -57,7 +57,7 @@
       if (!posinfoEl) return;
       const lines = _splitLines();
       const r = Math.max(0, Math.min(lines.length-1, caretRow|0));
-      const line = lines[r]||'';
+        const line = lines[r] || '';
       // 可視幅計測は後段の _visualWidthUpToLine を利用
       const visCol = _visualWidthUpToLine(line, caretCol|0);
       const visTotal = _visualWidthUpToLine(line, (line||'').length);
@@ -184,7 +184,7 @@
     try{
       const b = currentBuffer();
     if (!b) return; // Ensure buffer exists
-      b.viewRow = caretRow|0; b.viewCol = caretCol|0;
+        b.viewRow = caretRow | 0; b.viewCol = caretCol | 0;
       // snap to line grid for stability
       const st = (editor && typeof editor.scrollTop==='number') ? (editor.scrollTop|0) : 0;
     try{ b.viewScrollTop = Math.round(Math.max(0, st)/LINE_HEIGHT)*LINE_HEIGHT; }catch{ b.viewScrollTop = Math.max(0, st); }
@@ -1657,6 +1657,30 @@
       const line=lines[rr]||''; const len=line.length;
       if (cc < len){ cc = _nextIndex(line, cc); left--; }
       else { if (rr>=last) break; rr++; cc=0; left--; }
+    }
+    return { r: Math.max(0, Math.min(last, rr)), c: Math.max(0, Math.min((lines[Math.max(0, Math.min(last, rr))]||'').length, cc)) };
+  }
+  // Advance by code points on raw lines, but never consume the final EOF newline
+  // i.e., when text ends with '\n', do not cross from last-1 to last empty raw line (#660)
+  function _advancePosByCpRawStopBeforeFinalLF(r,c,n){
+    const s = String(editor.value||'');
+    const endsWithLF = s.endsWith('\n');
+    const endsWithSymbol = !endsWithLF && s.endsWith('\u2424'); // U+2424 SYMBOL FOR NEWLINE (paste残留) (#661)
+    const lines=_splitLinesRaw();
+    let rr=r|0, cc=c|0, left=n|0;
+    const last=lines.length-1;
+    while(left>0){
+      const line=lines[rr]||''; const len=line.length;
+      if (cc < len){
+        // 保護対象: 行末が U+2424 かつそれがファイル末尾文字
+        if (endsWithSymbol && rr===last && cc===len-1 && line.charCodeAt(len-1)===0x2424){ break; }
+        cc = _nextIndex(line, cc); left--;
+      } else {
+        if (rr>=last) break;
+        // If next step would cross the final newline (rr+1 === last) and file ends with LF, stop before consuming it
+        if (endsWithLF && (rr+1===last)) break;
+        rr++; cc=0; left--;
+      }
     }
     return { r: Math.max(0, Math.min(last, rr)), c: Math.max(0, Math.min((lines[Math.max(0, Math.min(last, rr))]||'').length, cc)) };
   }
@@ -3487,6 +3511,7 @@
     }catch{}
   }
   function _insertTextAt(r,c,text){
+    const beforeAll = String(editor.value||'');
     const s = String(text||'');
     if (!s) return { r, c };
     const lines = _splitLines();
@@ -3498,7 +3523,9 @@
       // single-line insert
       const nextLine = line.slice(0, cc) + parts[0] + line.slice(cc);
       lines[rr] = nextLine;
-      editor.value = lines.join('\n');
+      let out = lines.join('\n');
+      if (beforeAll.endsWith('\n') && !out.endsWith('\n')) out += '\n';
+      editor.value = out;
       const newC = cc + parts[0].length;
       return { r: rr, c: newC };
     } else {
@@ -3515,7 +3542,9 @@
       for (const m of mid) newLines.push(m);
       newLines.push(last);
       for (let i=rr+1;i<lines.length;i++) newLines.push(lines[i]);
-      editor.value = newLines.join('\n');
+      let out = newLines.join('\n');
+      if (beforeAll.endsWith('\n') && !out.endsWith('\n')) out += '\n';
+      editor.value = out;
       const newR = rr + parts.length - 1;
       const newC = (parts[parts.length-1]||'').length;
       return { r: newR, c: newC };
@@ -3552,13 +3581,16 @@
     const clip = _regUnnamed && _regUnnamed.linewise ? _normalizeRegText(_regUnnamed.text) : '';
     if (!clip) return;
     _pushUndoSnapshot('paste');
+    const beforeAll = String(editor.value||'');
     const lines = _splitLines();
     const insertAt = Math.max(0, Math.min(lines.length, (below ? (caretRow+1) : caretRow)));
     const block = clip.split('\n');
     const toInsert = [];
     for (let i=0;i<n;i++) toInsert.push(...block);
     const newLines = lines.slice(0, insertAt).concat(toInsert).concat(lines.slice(insertAt));
-    editor.value = newLines.join('\n');
+    let out = newLines.join('\n');
+    if (beforeAll.endsWith('\n') && !out.endsWith('\n')) out += '\n';
+    editor.value = out;
     const newR = insertAt; // first inserted line
     const col = _firstNonBlankColOf(newLines[newR]||'');
     _setCaret(newR, col);
@@ -7557,8 +7589,10 @@
               const before=linesRaw.slice(0, rs);
               const after = linesRaw.slice(re+1);
               const clipLines=_normalizeRegText(_regUnnamed.text).split('\n');
-              const out = before.concat(clipLines).concat(after).join('\n');
-              const prev=String(editor.value||''); if (out!==prev){ _pushUndoSnapshot('visual-paste-linewise'); editor.value=out; _touchBufferModified(); }
+              let out = before.concat(clipLines).concat(after).join('\n');
+              const prev=String(editor.value||'');
+              if (prev.endsWith('\n') && !out.endsWith('\n')) out += '\n';
+              if (out!==prev){ _pushUndoSnapshot('visual-paste-linewise'); editor.value=out; _touchBufferModified(); }
               // caret to last inserted line head
               const newRow = rs + clipLines.length - 1;
               _setCaret(Math.max(0,newRow), 0);
@@ -7569,7 +7603,8 @@
               const off1=_offsetFromRC(a.r,a.c); const off2=_offsetFromRC(b.r,b.c);
               const s=String(editor.value||''); const startOff=Math.max(0, Math.min(s.length, off1|0)); const endOff=Math.max(startOff, Math.min(s.length, off2|0));
               const clip=_normalizeRegText(_regUnnamed.text);
-              const out = s.slice(0,startOff) + clip + s.slice(endOff);
+              let out = s.slice(0,startOff) + clip + s.slice(endOff);
+              if (s.endsWith('\n') && !out.endsWith('\n')) out += '\n';
               if (out!==s){ _pushUndoSnapshot('visual-paste-charwise'); editor.value=out; _touchBufferModified(); }
               // Move caret to end of pasted block
               const endPos = startOff + clip.length;
@@ -8068,17 +8103,60 @@
           _suppressInsertSnapshotOnce = true; _setMode('INSERT');
           return;
         }
-        // cl 特殊ケース (s と同等: 改行も1文字として扱う)
+        // cl 特殊ケース (s と同等: 改行も1文字として扱う。ただしEOF直前の改行は含めない)
         if (e.key==='l'){
+          const beforeAll = String(editor.value||'');
+          const hadEOFSymbol = beforeAll.endsWith('\u2424');
           const motionCount = (_countAcc==null?1:_countAcc); _countAcc=null;
+          const preRawCount = (()=>{ try{ return _splitLinesRaw().length; }catch{ return null; } })();
           const totalChars = Math.max(1, (_pendingOpCount||1) * motionCount);
           const start = { r: caretRow, c: caretCol };
-          const endPos = _advancePosByCpRaw(caretRow, caretCol, totalChars);
-          const upd = (totalChars>=2); // 1文字のみならレジスタ更新しない (s と同じ仕様)
+          const endPos = _advancePosByCpRawStopBeforeFinalLF(caretRow, caretCol, totalChars);
+          // 末尾 U+2424 を削除範囲から除外 (#664)
+          try{
+            const raw=_splitLinesRaw();
+            const last=raw.length-1;
+            if (endPos.r===last){
+              const line=raw[last]||'';
+              if (endPos.c===line.length && line.endsWith('\u2424')){ endPos.c=Math.max(0, line.length-1); }
+            }
+          }catch{}
+          // 1文字のみ（前置カウント1）ではレジスタ更新しない
+          const upd = (totalChars>=2);
           if (!(start.r===endPos.r && start.c===endPos.c)){
             _deleteRangePos(start, endPos, { updateRegister: upd });
           }
+          // 念のため: EOFの␤が消えてしまった場合は復元 (#665)
+          try{
+            const after=String(editor.value||'');
+            const postRawCount = (()=>{ try{ return _splitLinesRaw().length; }catch{ return null; } })();
+            if (hadEOFSymbol){ if (!after.endsWith('\u2424')){ editor.value = after + '\u2424'; } }
+            const now=String(editor.value||'');
+            if (preRawCount!=null && postRawCount!=null && postRawCount===preRawCount-1 && !now.endsWith('\n')){
+              editor.value = now + '\u2424';
+              try{ const raw=_splitLinesRaw(); const last=raw.length-1; _setCaret(last, 0); }catch{}
+            }
+          }catch{}
+          // #662: cl でも末尾空行(最終行が空で末尾LF欠落)で前行へ吸着しない
+          try{
+            const txt=String(editor.value||'');
+            const raw=_splitLinesRaw();
+            const last=raw.length-1;
+            const lastStr=String(raw[last]||'');
+            const lastIsOnlySymbol = (lastStr.length===1 && lastStr.charCodeAt(0)===0x2424);
+            if (caretRow===last && !txt.endsWith('\n') && (lastStr==='' || lastIsOnlySymbol)){
+              _setCaret(caretRow, caretCol);
+            }
+          }catch{}
           _clearPendingOp(); ensureScrolloff(); _repositionCaret(); updateGutter();
+          // 再ピン留め (reposition後のずれ対策) (#664)
+          try{
+            const txt=String(editor.value||'');
+            if (!txt.endsWith('\n')){
+              const raw=_splitLinesRaw(); const last=raw.length-1; const lastStr=String(raw[last]||'');
+              if (caretRow===last && (lastStr==='' || (lastStr.length===1 && lastStr.charCodeAt(0)===0x2424))){ _setCaret(caretRow, 0); }
+            }
+          }catch{}
           _suppressInsertSnapshotOnce = true; _setMode('INSERT');
           return;
         }
@@ -8406,14 +8484,59 @@
       // s == cl (change one char; count N -> change N chars). EOLで文字が無ければ i と同等。
       if (e.key==='s' && !e.ctrlKey && !e.metaKey && !e.altKey){
         e.preventDefault();
+        const beforeAll = String(editor.value||'');
+        const hadEOFSymbol = beforeAll.endsWith('\u2424');
         const n = _consumeCount();
+        const preRawCount = (()=>{ try{ return _splitLinesRaw().length; }catch{ return null; } })();
         const count = Math.max(1, n|0);
         // 改行も1文字として扱う: raw 基準でコードポイント前進（EOFの正確な取り扱い）
-        const endPos = _advancePosByCpRaw(caretRow, caretCol, count);
+        const endPos = _advancePosByCpRawStopBeforeFinalLF(caretRow, caretCol, count);
+        // 末尾が U+2424 の場合は削除範囲に含めない安全弁 (#664)
+        try{
+          const raw=_splitLinesRaw();
+          const last=raw.length-1;
+          if (endPos.r===last){
+            const line=raw[last]||'';
+            if (endPos.c===line.length && line.endsWith('\u2424')){
+              endPos.c = Math.max(0, line.length-1); // exclude symbol
+            }
+          }
+        }catch{}
         // 削除（1文字のみの変更では unnamed レジスタを更新しない仕様）
         const upd = (count>=2);
         _deleteRangePos({r:caretRow,c:caretCol}, endPos, { updateRegister: upd });
+        // 念のため: EOFの␤が消えてしまった場合は復元 (#665)
+        try{
+          const after=String(editor.value||'');
+          const postRawCount = (()=>{ try{ return _splitLinesRaw().length; }catch{ return null; } })();
+          if (hadEOFSymbol){ if (!after.endsWith('\u2424')){ editor.value = after + '\u2424'; } }
+          // 行数が1減ってしまったら(末尾LF欠落のまま)␤を補い caret を末行先頭へ固定 (#666)
+          const now=String(editor.value||'');
+          if (preRawCount!=null && postRawCount!=null && postRawCount===preRawCount-1 && !now.endsWith('\n')){
+            editor.value = now + '\u2424';
+            try{ const raw=_splitLinesRaw(); const last=raw.length-1; _setCaret(last, 0); }catch{}
+          }
+        }catch{}
+        // #662: s では末尾空行(最終行が空で末尾LF欠落)でも前行へ吸着しない（位置を固定）
+        try{
+          const txt=String(editor.value||'');
+          const raw=_splitLinesRaw();
+          const last=raw.length-1;
+          const lastStr=String(raw[last]||'');
+          const lastIsOnlySymbol = (lastStr.length===1 && lastStr.charCodeAt(0)===0x2424);
+          if (caretRow===last && !txt.endsWith('\n') && (lastStr==='' || lastIsOnlySymbol)){
+            _setCaret(caretRow, caretCol);
+          }
+        }catch{}
         ensureScrolloff(); _repositionCaret(); updateGutter();
+        // 再度 EOF シンボル行での caret を明示ピン留め（reposition後にずれるケース対策） (#664)
+        try{
+          const txt=String(editor.value||'');
+          if (!txt.endsWith('\n')){
+            const raw=_splitLinesRaw(); const last=raw.length-1; const lastStr=String(raw[last]||'');
+            if (caretRow===last && (lastStr==='' || (lastStr.length===1 && lastStr.charCodeAt(0)===0x2424))){ _setCaret(caretRow, 0); }
+          }
+        }catch{}
         _suppressInsertSnapshotOnce = true; _setMode('INSERT');
         return;
       }
