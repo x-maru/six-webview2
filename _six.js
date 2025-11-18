@@ -11973,7 +11973,7 @@
   /*********************************************************
    * Bootstrap
    *********************************************************/
-  // Overlay palette (bottom-right buttons over editor)
+  // Overlay palettes (top-right: buffer-scoped, bottom-right: global)
   function _initOverlayPalette(){
     try{
       const viewport = document.getElementById('editorViewport');
@@ -11988,29 +11988,49 @@
           try{ const icon = toggleBtn.querySelector('span'); if (icon){ icon.style.fontSize = '1.5em'; icon.style.lineHeight = '1'; } }catch{}
         }
       }catch{}
-      // Create root once
-      let pal = document.getElementById('overlayPalette');
-      if (!pal){
-        pal = document.createElement('div');
-        pal.id = 'overlayPalette';
-  pal.style.position = 'absolute';
-  // Right/bottom will be adjusted to align with scrollbars by _positionPaletteUI()
-  pal.style.right = '0px';
-  pal.style.bottom = '1rem';
-        pal.style.zIndex = '3'; // above caret layer (2)
-        pal.style.pointerEvents = 'auto';
-        pal.style.display = 'flex';
+      // Create roots once
+      let palBR = document.getElementById('overlayPalette'); // keep existing id for bottom-right
+      if (!palBR){
+        palBR = document.createElement('div');
+        palBR.id = 'overlayPalette';
+        palBR.style.position = 'absolute';
+        // Right/bottom will be adjusted to align with scrollbars by _positionPaletteUI()
+        palBR.style.right = '0px';
+        palBR.style.bottom = '1rem';
+        palBR.style.zIndex = '3'; // above caret layer (2)
+        palBR.style.pointerEvents = 'auto';
+        palBR.style.display = 'flex';
         // Narrow down gap between buttons ~half
-        pal.style.gap = '4px';
-        pal.style.alignItems = 'flex-end';
-    // Make overlay palette background fully transparent (#682)
-  pal.style.background = 'rgba(0,0,0,0)';
-        pal.style.border = 'none';
-        pal.style.borderRadius = '0';
-        pal.style.padding = '4px';
-        viewport.appendChild(pal);
+        palBR.style.gap = '4px';
+        palBR.style.alignItems = 'flex-end';
+        // Make overlay palette background fully transparent (#682)
+        palBR.style.background = 'rgba(0,0,0,0)';
+        palBR.style.border = 'none';
+        palBR.style.borderRadius = '0';
+        palBR.style.padding = '4px';
+        viewport.appendChild(palBR);
       }
-      pal.innerHTML = '';
+      let palTR = document.getElementById('overlayPaletteTop');
+      if (!palTR){
+        palTR = document.createElement('div');
+        palTR.id = 'overlayPaletteTop';
+        palTR.style.position = 'absolute';
+        // Right/top will be adjusted to align with scrollbars by _positionPaletteUI()
+        palTR.style.right = '0px';
+        palTR.style.top = '0px';
+        palTR.style.zIndex = '3';
+        palTR.style.pointerEvents = 'auto';
+        palTR.style.display = 'flex';
+        palTR.style.gap = '4px';
+        palTR.style.alignItems = 'flex-start';
+        palTR.style.background = 'rgba(0,0,0,0)';
+        palTR.style.border = 'none';
+        palTR.style.borderRadius = '0';
+        palTR.style.padding = '4px';
+        viewport.appendChild(palTR);
+      }
+      palBR.innerHTML = '';
+      palTR.innerHTML = '';
       // Track and restore focus around clicks to keep pre-click focus
       let lastFocusedEl = null;
 
@@ -12023,7 +12043,7 @@
         el.addEventListener('mouseleave', ()=>{ try{ el.style.background = baseBg; }catch{} });
       };
 
-  // Create buttons first (will append to a grid later)
+  // Create buttons first (append to respective palettes later)
       // 検索ハイライトトグルボタン（左下配置）
       const hlBtn = document.createElement('button');
       hlBtn.type = 'button';
@@ -12085,7 +12105,7 @@
         try{ if (lastFocusedEl && typeof lastFocusedEl.focus === 'function'){ lastFocusedEl.focus(); } }catch{}
       });
 
-      // インデント幅ボタン（左下：検索ハイライトの左隣）
+      // インデント幅ボタン（右上パレット：バッファ毎設定）
       const swBtn = document.createElement('button');
       swBtn.type = 'button';
       swBtn.id = 'overlayBtnShiftwidth';
@@ -12248,23 +12268,26 @@
         try{ if (lastFocusedEl2 && typeof lastFocusedEl2.focus==='function') lastFocusedEl2.focus(); }catch{}
       });
 
-    // Build grid 3x2
-      const grid = document.createElement('div');
-      grid.style.display = 'grid';
-    grid.style.gridTemplateColumns = 'auto auto auto';
-      grid.style.columnGap = '4px';
-      grid.style.rowGap = '4px';
+      // Build bottom-right grid 3x2 (global options)
+      const gridBR = document.createElement('div');
+      gridBR.style.display = 'grid';
+      gridBR.style.gridTemplateColumns = 'auto auto auto';
+      gridBR.style.columnGap = '4px';
+      gridBR.style.rowGap = '4px';
       // Row1: [empty][list][quit]
       const emptyTL = document.createElement('div');
-      grid.appendChild(emptyTL);   // top-left empty
-      grid.appendChild(listBtn);   // top-center
-      grid.appendChild(quitBtn);   // top-right
-      // Row2: [shiftwidth][hlsearch][help]
-      grid.appendChild(swBtn);     // bottom-left
-      grid.appendChild(hlBtn);     // bottom-center
-      grid.appendChild(helpBtn);   // bottom-right
+      gridBR.appendChild(emptyTL);   // top-left empty
+      gridBR.appendChild(listBtn);   // top-center
+      gridBR.appendChild(quitBtn);   // top-right
+      // Row2: [empty][hlsearch][help] （shiftwidth は右上へ移動）
+      const emptyBL = document.createElement('div');
+      gridBR.appendChild(emptyBL);   // bottom-left empty
+      gridBR.appendChild(hlBtn);     // bottom-center
+      gridBR.appendChild(helpBtn);   // bottom-right
+      palBR.appendChild(gridBR);
 
-      pal.appendChild(grid);
+      // Build top-right palette content (buffer-scoped): shiftwidth only for now
+      palTR.appendChild(swBtn);
 
   // initialize visual state for hlsearch & list pills
   try{ _updateOverlayHlsearchVisual(); }catch{}
@@ -12280,7 +12303,8 @@
   function _positionPaletteUI(){
     try{
       const toggleBtn = document.getElementById('paletteToggleBtn');
-      const pal = document.getElementById('overlayPalette');
+      const palBR = document.getElementById('overlayPalette');
+      const palTR = document.getElementById('overlayPaletteTop');
       // Compute vertical scrollbar width and horizontal scrollbar height from editor
       const sbw = (function(){ try{ if (!editor) return 0; const w=(editor.offsetWidth|0)-(editor.clientWidth|0); return w>0?w:0; }catch{ return 0; } })();
       const sbh = (function(){ try{ if (!editor) return 0; const h=(editor.offsetHeight|0)-(editor.clientHeight|0); return h>0?h:0; }catch{ return 0; } })();
@@ -12292,14 +12316,18 @@
         toggleBtn.style.right = ((sbw|0) + palPad) + 'px';
         toggleBtn.style.bottom = (sbh|0) + 'px';
       }
-      // Align overlay palette right edge with scrollbar (sbw) and move it upward to avoid overlapping the toggle button
-      if (pal){
-        pal.style.right = (sbw|0) + 'px';
-        // Compute button height; place palette immediately above with zero gap
+      // Align bottom-right overlay with scrollbar (sbw) and above the toggle button
+      if (palBR){
+        palBR.style.right = (sbw|0) + 'px';
         let btnH = 28;
         try{ if (toggleBtn){ const r = toggleBtn.getBoundingClientRect(); if (r && r.height) btnH = Math.ceil(r.height); } }catch{}
-        const gap = 0; // zero gap as requested
-        pal.style.bottom = ((sbh|0) + btnH + gap) + 'px';
+        const gap = 0;
+        palBR.style.bottom = ((sbh|0) + btnH + gap) + 'px';
+      }
+      // Align top-right overlay with scrollbar (sbw) at the very top of the editor viewport
+      if (palTR){
+        palTR.style.right = (sbw|0) + 'px';
+        palTR.style.top = '0px';
       }
     }catch{}
   }
@@ -12308,10 +12336,11 @@
   let _overlayPaletteVisible = true; // start visible every session
   function _toggleOverlayPaletteVisibility(){
     try{
-      const pal = document.getElementById('overlayPalette');
-      if (!pal) return;
+      const palBR = document.getElementById('overlayPalette');
+      const palTR = document.getElementById('overlayPaletteTop');
       _overlayPaletteVisible = !_overlayPaletteVisible;
-      pal.style.display = _overlayPaletteVisible ? 'flex' : 'none';
+      if (palBR) palBR.style.display = _overlayPaletteVisible ? 'flex' : 'none';
+      if (palTR) palTR.style.display = _overlayPaletteVisible ? 'flex' : 'none';
       try{ _positionPaletteUI(); }catch{}
     }catch{}
   }
