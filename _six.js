@@ -685,6 +685,92 @@
       try{ toast('encode set: ' + ((_encDisplayLines(meta).line2)? (_encDisplayLines(meta).line1+' bomb') : _encDisplayLines(meta).line1), 900); }catch{}
     }catch{}
   }
+
+  // ---- Case (ignorecase/smartcase) popup helpers ----
+  let _caseSel = 0; // 0: always(noignorecase), 1: smart(ignorecase+smartcase), 2: insens(ignorecase+nosmartcase)
+  function _casePopupVisible(){ try{ const pop=document.getElementById('casepopup'); return !!(pop && pop.style.display!=='none'); }catch{ return false; } }
+  function _casePopupHide(){ try{ const pop=document.getElementById('casepopup'); if (pop) pop.style.display='none'; }catch{} }
+  function _caseCurrentIndex(){
+    try{
+      const b=currentBuffer(); const ic=!!(b&&b.ignorecase); const sc=!!(b&&b.smartcase);
+      if (!ic) return 0; // always distinguish
+      return sc ? 1 : 2;
+    }catch{ return 0; }
+  }
+  function _applyCaseIndex(idx){
+    try{
+      const b=currentBuffer(); if (!b) return;
+      if (idx===0){ b.ignorecase=false; _schedulePersist('ignorecase'); }
+      else if (idx===1){ b.ignorecase=true; b.smartcase=true; _schedulePersist('ignorecase'); _schedulePersist('smartcase'); }
+      else { b.ignorecase=true; b.smartcase=false; _schedulePersist('ignorecase'); _schedulePersist('smartcase'); }
+      _updateHlsearchFull();
+      _updateOverlayCaseVisual();
+      toast('検索時 大/小: ' + (idx===0?'常に区別':idx===1?'混在時区別':'同一視'), 900);
+    }catch{}
+  }
+  function _casePopupRender(){
+    try{
+      const pop = document.getElementById('casepopup'); if (!pop) return;
+      pop.innerHTML='';
+      const inner = document.createElement('div'); inner.className='inner';
+      // match encpopup defaults inline
+      inner.style.maxHeight = '45vh';
+      inner.style.overflow = 'auto';
+      pop.appendChild(inner);
+      const items = [ '常に区別', '混在時区別', '同一視' ];
+      if (!Number.isFinite(_caseSel)) _caseSel = _caseCurrentIndex();
+      _caseSel = Math.max(0, Math.min(items.length-1, _caseSel|0));
+      items.forEach((label,i)=>{
+        const item = document.createElement('div'); item.className='item'; if (i===_caseSel) item.classList.add('active');
+        // inline styles to mirror #encpopup .item
+        item.style.display = 'flex';
+        item.style.gap = '8px';
+        item.style.alignItems = 'center';
+        item.style.padding = '6px 10px';
+        item.style.cursor = 'default';
+        item.style.background = (i===_caseSel) ? 'var(--popupActiveLine, #1a2030)' : 'transparent';
+        const mark = document.createElement('span'); mark.textContent=(i===_caseSel)?'●':'○'; mark.style.width='1.2em'; mark.style.textAlign='center'; mark.style.opacity='0.8';
+        const name = document.createElement('div'); name.className='name'; name.textContent = label; name.style.whiteSpace='pre';
+        item.appendChild(mark); item.appendChild(name);
+        item.addEventListener('mousedown', (ev)=>{ try{ ev.preventDefault(); ev.stopPropagation(); }catch{}; _caseSel=i; _applyCaseIndex(i); _casePopupHide(); setTimeout(()=>{ try{ editor && editor.focus && editor.focus(); }catch{} },0); });
+        item.addEventListener('mouseenter', ()=>{ try{ _caseSel=i; _casePopupRender(); }catch{} });
+        item.addEventListener('click', (ev)=>{ try{ ev.preventDefault(); ev.stopPropagation(); }catch{}; _caseSel=i; _applyCaseIndex(i); _casePopupHide(); setTimeout(()=>{ try{ editor && editor.focus && editor.focus(); }catch{} },0); });
+        inner.appendChild(item);
+      });
+    }catch{}
+  }
+  function _casePopupShow(anchor){
+    try{
+      let pop = document.getElementById('casepopup');
+      if (!pop){
+        pop = document.createElement('div');
+        pop.id = 'casepopup';
+        pop.style.position='fixed';
+        pop.style.maxHeight='45vh';
+        pop.style.background='#0f1117';
+        pop.style.color='#e6e6e6';
+        pop.style.border='1px solid #2a3244';
+        pop.style.boxShadow='0 10px 24px rgba(0,0,0,0.4)';
+        pop.style.zIndex='10000';
+        pop.style.borderRadius='6px';
+        pop.style.overflow='hidden';
+        pop.style.minWidth='240px';
+        document.body.appendChild(pop);
+      }
+      pop.style.display='';
+      try{ _caseSel = _caseCurrentIndex(); }catch{ _caseSel = 0; }
+      _casePopupRender();
+      // Position near anchor (overlay button)
+      const r = anchor && anchor.getBoundingClientRect ? anchor.getBoundingClientRect() : { right:(window.innerWidth||0)-8, bottom:8 };
+      const vw = (window.innerWidth||0), vh=(window.innerHeight||0);
+      const pw = (pop.offsetWidth||240), ph=(pop.offsetHeight||120);
+      let left = Math.max(8, Math.min(vw - pw - 8, Math.round(r.right - pw)));
+      let top  = Math.max(8, Math.min(vh - ph - 8, Math.round(r.bottom + 6)));
+      pop.style.left = left + 'px';
+      pop.style.top  = top + 'px';
+    }catch{}
+  }
+  function _casePopupMoveSel(dir){ try{ const n=3; _caseSel = (((_caseSel|0)+(dir>0?1:-1)) + n) % n; _casePopupRender(); }catch{} }
   // Sticky preview for :s — keep previous match position while pattern grows if it still matches
   let _incPrevEl = null;        // DOM element for incremental preview highlight
   let _incPrevLastStart = null; // last preview start offset
@@ -5402,15 +5488,17 @@
     if (/^:set\s+ignorecase\s*$/i.test(cmd)){
       const b=currentBuffer(); if (b){ b.ignorecase=true; _schedulePersist('ignorecase'); }
       _updateHlsearchFull();
+      try{ _updateOverlayCaseVisual(); }catch{}
       toast('ignorecase: on', 900); return;
     }
     if (/^:set\s+noignorecase\s*$/i.test(cmd)){
       const b=currentBuffer(); if (b){ b.ignorecase=false; _schedulePersist('ignorecase'); }
       _updateHlsearchFull();
+      try{ _updateOverlayCaseVisual(); }catch{}
       toast('ignorecase: off', 900); return;
     }
     if (/^:set\s+ignorecase!\s*$/i.test(cmd)){
-      const b=currentBuffer(); if (b){ b.ignorecase=!b.ignorecase; _schedulePersist('ignorecase'); _updateHlsearchFull(); toast('ignorecase: ' + (b.ignorecase?'on':'off'), 900); }
+      const b=currentBuffer(); if (b){ b.ignorecase=!b.ignorecase; _schedulePersist('ignorecase'); _updateHlsearchFull(); try{ _updateOverlayCaseVisual(); }catch{} toast('ignorecase: ' + (b.ignorecase?'on':'off'), 900); }
       return;
     }
     if (/^:set\s+ignorecase\?\s*$/i.test(cmd)){
@@ -5420,15 +5508,17 @@
     if (/^:set\s+smartcase\s*$/i.test(cmd)){
       const b=currentBuffer(); if (b){ b.smartcase=true; _schedulePersist('smartcase'); }
       _updateHlsearchFull();
+      try{ _updateOverlayCaseVisual(); }catch{}
       toast('smartcase: on', 900); return;
     }
     if (/^:set\s+nosmartcase\s*$/i.test(cmd)){
       const b=currentBuffer(); if (b){ b.smartcase=false; _schedulePersist('smartcase'); }
       _updateHlsearchFull();
+      try{ _updateOverlayCaseVisual(); }catch{}
       toast('smartcase: off', 900); return;
     }
     if (/^:set\s+smartcase!\s*$/i.test(cmd)){
-      const b=currentBuffer(); if (b){ b.smartcase=!b.smartcase; _schedulePersist('smartcase'); _updateHlsearchFull(); toast('smartcase: ' + (b.smartcase?'on':'off'), 900); }
+      const b=currentBuffer(); if (b){ b.smartcase=!b.smartcase; _schedulePersist('smartcase'); _updateHlsearchFull(); try{ _updateOverlayCaseVisual(); }catch{} toast('smartcase: ' + (b.smartcase?'on':'off'), 900); }
       return;
     }
     if (/^:set\s+smartcase\?\s*$/i.test(cmd)){
@@ -12021,8 +12111,9 @@
         palTR.style.zIndex = '3';
         palTR.style.pointerEvents = 'auto';
         palTR.style.display = 'flex';
+        palTR.style.flexDirection = 'column';
         palTR.style.gap = '4px';
-        palTR.style.alignItems = 'flex-start';
+        palTR.style.alignItems = 'flex-end';
         palTR.style.background = 'rgba(0,0,0,0)';
         palTR.style.border = 'none';
         palTR.style.borderRadius = '0';
@@ -12286,13 +12377,63 @@
       gridBR.appendChild(helpBtn);   // bottom-right
       palBR.appendChild(gridBR);
 
-      // Build top-right palette content (buffer-scoped): shiftwidth only for now
+      // Build top-right palette content (buffer-scoped)
       palTR.appendChild(swBtn);
+
+      // 検索時 大/小（ignorecase/smartcase のまとめボタン） — shiftwidthの下に配置
+      const caseBtn = document.createElement('button');
+      caseBtn.type = 'button';
+      caseBtn.id = 'overlayBtnCase';
+      // Align width with shiftwidth button
+      caseBtn.style.minWidth = '100px';
+      caseBtn.style.border = '1px solid #2a3244';
+      caseBtn.style.background = '#1a2030';
+      caseBtn.style.color = '#e6e6e6';
+      caseBtn.style.borderRadius = '6px';
+      caseBtn.style.padding = '6px 8px';
+      caseBtn.style.cursor = 'pointer';
+      caseBtn.style.font = "12px/1.25 system-ui, -apple-system, 'Segoe UI', sans-serif";
+      caseBtn.style.opacity = '0.92';
+      caseBtn.style.userSelect = 'none';
+      caseBtn.style.outline = 'none';
+      attachHover(caseBtn);
+      caseBtn.addEventListener('mousedown', (e)=>{ try{ lastFocusedEl = document.activeElement; e.preventDefault(); }catch{} });
+      const caseWrap = document.createElement('div');
+      caseWrap.style.display = 'flex';
+      caseWrap.style.flexDirection = 'column';
+      caseWrap.style.gap = '2px';
+      const caseTitle = document.createElement('div');
+      caseTitle.textContent = '検索時 大/小';
+      caseTitle.style.textAlign = 'center';
+      caseTitle.style.fontWeight = '500';
+      const caseLine = document.createElement('div');
+      caseLine.id = 'overlayBtnCase_label';
+      caseLine.style.display = 'block';
+      caseLine.style.textAlign = 'center';
+      caseLine.style.padding = '2px 8px';
+      caseLine.style.border = '1px solid #2a3244';
+      caseLine.style.borderRadius = '6px';
+      caseLine.style.fontSize = '11px';
+      caseLine.style.lineHeight = '1.5';
+      // 影付きの浮き上がった紺色
+      caseLine.style.background = '#0e2348';
+      caseLine.style.boxShadow = '0 1px 2px rgba(0,0,0,0.6), inset 0 0 0 1px rgba(255,255,255,0.06)';
+      caseLine.style.color = '#e6f0ff';
+      caseWrap.appendChild(caseTitle);
+      caseWrap.appendChild(caseLine);
+      caseBtn.appendChild(caseWrap);
+      caseBtn.addEventListener('click', (e)=>{
+        try{ e.preventDefault(); e.stopPropagation(); }catch{}
+        if (_casePopupVisible()) _casePopupHide(); else _casePopupShow(caseBtn);
+        try{ if (lastFocusedEl && typeof lastFocusedEl.focus==='function') lastFocusedEl.focus(); }catch{}
+      });
+      palTR.appendChild(caseBtn);
 
   // initialize visual state for hlsearch & list pills
   try{ _updateOverlayHlsearchVisual(); }catch{}
   try{ _updateOverlayListVisual(); }catch{}
   try{ _updateOverlayShiftwidthVisual(); }catch{}
+  try{ _updateOverlayCaseVisual(); }catch{}
       // Initial position sync with scrollbars
       try{ _positionPaletteUI(); }catch{}
       
@@ -12406,6 +12547,20 @@
     }catch{}
   }
 
+  // Reflect current ignorecase/smartcase state to overlay case button label
+  function _updateOverlayCaseVisual(){
+    try{
+      const el = document.getElementById('overlayBtnCase_label');
+      if (!el) return;
+      const b = currentBuffer();
+      const ic = !!(b && b.ignorecase);
+      const sc = !!(b && b.smartcase);
+      let label = '常に区別';
+      if (ic){ label = sc ? '混在時区別' : '同一視'; }
+      el.textContent = label;
+    }catch{}
+  }
+
   function _wireHelpOpenShortcut(){
     // Consume F1–F9 globally to block browser/host default actions.
     // Actions: F1–F8 switch tabs (also from :b popup); F9 opens Help when no modal/other popup is visible.
@@ -12421,6 +12576,7 @@
           const isModalOpen = !!(_modalOverlay && _modalOverlay.style && _modalOverlay.style.display !== 'none');
           const inCmd = (_mode === 'CMD');
           const encOpen  = (typeof _encPopupVisible==='function' && _encPopupVisible());
+          const caseOpen = (typeof _casePopupVisible==='function' && _casePopupVisible());
           const fileOpen = (typeof _filePopupVisible==='function' && _filePopupVisible());
           const bufOpen  = (typeof _bufPopupVisible==='function' && _bufPopupVisible());
 
@@ -12453,6 +12609,7 @@
             if (!isModalOpen){
               try{ e.preventDefault(); e.stopPropagation(); }catch{}
               try{ if (encOpen) _encPopupHide(); }catch{}
+              try{ if (caseOpen) _casePopupHide(); }catch{}
               try{ if (fileOpen) _filePopupHide(); }catch{}
               try{ if (bufOpen) _bufPopupHide(); }catch{}
               helpModal({ defaultTab: 'cmd' });
@@ -12625,6 +12782,40 @@
               }
             }catch{}
           }, true);
+          // Case popup: outside-click close and keyboard navigation (capture-phase)
+          try{
+            const caseBtnEl = document.getElementById('overlayBtnCase');
+            // Close on outside click
+            document.addEventListener('mousedown', (e)=>{
+              try{
+                const pop = document.getElementById('casepopup');
+                if (!pop || pop.style.display==='none') return;
+                const withinPopup = pop.contains(e.target);
+                const withinBtn = caseBtnEl && caseBtnEl.contains && caseBtnEl.contains(e.target);
+                if (!withinPopup && !withinBtn){ _casePopupHide(); }
+              }catch{}
+            }, true);
+            // Keyboard navigation
+            window.addEventListener('keydown', (e)=>{
+              try{
+                if (!_casePopupVisible()) return;
+                const key = e.key;
+                if (key==='Escape'){ e.preventDefault(); e.stopPropagation(); _casePopupHide(); return; }
+                if (key==='ArrowUp' || key==='k'){ e.preventDefault(); e.stopPropagation(); _casePopupMoveSel(-1); return; }
+                if (key==='ArrowDown' || key==='j' || key==='Tab'){ e.preventDefault(); e.stopPropagation(); _casePopupMoveSel(+1); return; }
+                if (key==='Home'){ e.preventDefault(); e.stopPropagation(); try{ _caseSel = 0; _casePopupRender(); }catch{} return; }
+                if (key==='End'){ e.preventDefault(); e.stopPropagation(); try{ _caseSel = 2; _casePopupRender(); }catch{} return; }
+                if (e.key==='Enter'){
+                  e.preventDefault(); e.stopPropagation();
+                  const idx = Math.max(0, Math.min(2, _caseSel|0));
+                  _applyCaseIndex(idx);
+                  _casePopupHide();
+                  setTimeout(()=>{ try{ editor && editor.focus && editor.focus(); }catch{} }, 0);
+                  return;
+                }
+              }catch{}
+            }, true);
+          }catch{}
           // Ensure Esc closes :e file popup even when focus is not in cmdinput
           window.addEventListener('keydown', (e)=>{
             try{
