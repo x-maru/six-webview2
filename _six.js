@@ -232,6 +232,7 @@
           viewRow: Number.isFinite(b.viewRow)?(b.viewRow|0):0,
           viewCol: Number.isFinite(b.viewCol)?(b.viewCol|0):0,
           viewScrollTop: Number.isFinite(b.viewScrollTop)?(b.viewScrollTop|0):0,
+          edScale: (Number.isFinite(b.edScale) ? b.edScale : 1),
           savedMode: b.savedMode||'NORMAL',
           savedVisual: (b.savedVisual ? { linewise: !!b.savedVisual.linewise, anchorR: b.savedVisual.anchorR|0, anchorC: b.savedVisual.anchorC|0, caretR: b.savedVisual.caretR|0, caretC: b.savedVisual.caretC|0 } : null),
               shiftwidth: Number.isFinite(b.shiftwidth)? (b.shiftwidth|0) : 4,
@@ -314,7 +315,8 @@
         const shiftwidth = Number.isFinite(it && it.shiftwidth) ? Math.max(1, (it.shiftwidth|0)) : 4;
         const ignorecase = !!(it && it.ignorecase);
         const smartcase  = !!(it && it.smartcase);
-        _addBuffer({ name, path, text, modified, enc, ff, bom, shiftwidth, ignorecase, smartcase });
+        const edScale = Number.isFinite(it && it.edScale) ? _nearestScale(it.edScale) : 1;
+        _addBuffer({ name, path, text, modified, enc, ff, bom, shiftwidth, ignorecase, smartcase, edScale });
         try{
           const b = buffers[buffers.length-1];
           // If savedText is provided, trust it; otherwise, if not modified, set savedText=text
@@ -398,7 +400,18 @@
         }catch{}
       }
       const act = Math.max(0, Math.min(buffers.length?buffers.length-1:0, (j.active|0)));
-      if (buffers.length>0){ _switchToBuffer(act); _setTitle(); _renderTabbar(); }
+      if (buffers.length>0){
+        // Force a real activate even when act===0. During session restore the first
+        // added buffer temporarily sets currentIdx=0 in _addBuffer; if we switch
+        // without resetting, _switchToBuffer would (1) early-return when act===0 or
+        // (2) save the "previous" (index 0) view state using default caret/scroll (0),
+        // wiping the restored viewRow/viewScrollTop for F1 (#715/#717). Avoid both by
+        // clearing currentIdx so _switchToBuffer performs a full restore without
+        // persisting a bogus pre-switch state.
+        currentIdx = -1;
+        _switchToBuffer(act);
+        _setTitle(); _renderTabbar();
+      }
       return buffers.length>0;
     }catch{ return false; }
   }
@@ -2129,13 +2142,20 @@
   setVar('six-help-close-border', themeGet('helpCloseBorder', t.helpCloseBorder));
   // Popup active line color (encodeSet popup etc.)
   setVar('popupActiveLine', themeGet('popupActiveLine', t.popupActiveLine));
-      // apply persisted scale if any
+      // apply persisted scale if any (fallback only). If a buffer becomes active later,
+      // that buffer's edScale will override this. Keep metrics in sync to avoid
+      // mismatched font-size vs line-height on first paint (#714).
       try{
-        const s = localStorage.getItem('six.edScale');
-        const n = s ? parseFloat(s) : NaN;
-        if (Number.isFinite(n) && n > 0.3 && n < 5){ _edScale = _nearestScale(n); }
+        // Skip overriding when a buffer is already active (session restore in progress)
+        const hasActiveBuffer = (Array.isArray(buffers) && buffers.length>0 && (currentIdx|0) >= 0);
+        if (!hasActiveBuffer){
+          const s = localStorage.getItem('six.edScale');
+          const n = s ? parseFloat(s) : NaN;
+          if (Number.isFinite(n) && n > 0.3 && n < 5){ _edScale = _nearestScale(n); }
+        }
       }catch{}
       try{ root.style.setProperty('--edScale', String(_edScale)); }catch{}
+      try{ _syncEditorMetrics(); }catch{}
   // Cache baseline caret colors (IME override removed, kept for potential future theming)
       try{
         const cs = getComputedStyle(root);
@@ -2173,7 +2193,21 @@
     _repositionCaret();
     updateGutter();
     _renderHlMatchesVisible();
+    // persist per-buffer scale
+    try{ const b=currentBuffer(); if (b){ b.edScale = _edScale; _schedulePersist('edScale'); } }catch{}
     _showZoomHUD();
+  }
+
+  // Apply editor scale without HUD/localStorage writes (buffer switch)
+  function _applyEditorScaleSilent(next){
+    try{
+      const root = document.documentElement;
+      const min = _scaleSteps[0], max = _scaleSteps[_scaleSteps.length-1];
+      const clamped = Math.min(max, Math.max(min, next));
+      _edScale = _nearestScale(clamped);
+      try{ root.style.setProperty('--edScale', String(_edScale)); }catch{}
+      _syncEditorMetrics();
+    }catch{}
   }
 
   // --- Zoom HUD ---
@@ -2265,6 +2299,8 @@
         _savedTick: 0,
         _undo: [],
         _redo: [],
+        // per-buffer zoom scale (editor-only zoom)
+        edScale: (Number.isFinite(b.edScale) ? _nearestScale(b.edScale) : 1),
         // per-buffer shiftwidth (indent width in spaces)
         shiftwidth: Number.isFinite(b.shiftwidth)? Math.max(1, (b.shiftwidth|0)) : 4,
         // per-buffer case sensitivity options (#696)
@@ -2343,6 +2379,9 @@
       const b = buffers[i];
       // 3) Load text into editor
       editor.value = String(b.text||'');
+        // 3.5) Apply this buffer's zoom scale silently (no HUD/LS) and refresh visible-lines cache
+        try{ const s = Number.isFinite(b && b.edScale) ? b.edScale : 1; _applyEditorScaleSilent(s); }catch{}
+        try{ clampViewportExactLines(); }catch{}
       // 4) Restore caret and scroll position for this buffer
       const vr = Number.isFinite(b.viewRow) ? (b.viewRow|0) : 0;
       const vc = Number.isFinite(b.viewCol) ? (b.viewCol|0) : 0;
@@ -2379,6 +2418,9 @@
       // Re-apply saved scroll position on the next frame and shortly after to ensure it sticks.
       try{
         const applyScroll = ()=>{
+          try{ clampViewportExactLines(); }catch{}
+          // Re-assert saved caret/viewport to defeat any early-frame overrides (#715)
+          try{ _setCaret(vr, vc); }catch{}
           try{ editor.scrollTop = Math.max(0, vsSnap); }catch{}
           try{ _repositionCaret(); updateGutter(); }catch{}
           // Keep native selection aligned with caret; do not let this change scroll position
@@ -2401,6 +2443,8 @@
         setTimeout(applyScroll, 80);
         // Add one more delayed reinforcement to defeat late layout/scroll listeners
         setTimeout(applyScroll, 180);
+        // Fallback: ensure viewport visibility is restored even if rAF doesn't fire (#715)
+        setTimeout(()=>{ try{ if (vp) vp.style.visibility = prevVis; }catch{} }, 120);
         // Suppress any automatic scroll adjustments briefly after switching buffers
         // to prevent ensureScrolloff or other flows from recentering the viewport (#357)
         try{ _scrollGuardUntil = Date.now() + 1400; }catch{}
