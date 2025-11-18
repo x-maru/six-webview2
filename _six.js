@@ -7516,6 +7516,19 @@
     };
     // Use non-passive to be able to prevent default browser zoom
     try{ viewport.addEventListener('wheel', wheelZoom, { passive:false }); }catch{ viewport.addEventListener('wheel', wheelZoom); }
+    // Also capture Ctrl+Wheel anywhere in the window (outside textarea/tabbar etc.) and treat as editor zoom
+    try{
+      window.addEventListener('wheel', (e)=>{
+        if (e && e.ctrlKey){
+          try{ e.preventDefault(); e.stopPropagation(); }catch{}
+          wheelZoom(e);
+        }
+      }, { passive:false, capture:true });
+    }catch{
+      window.addEventListener('wheel', (e)=>{
+        if (e && e.ctrlKey){ try{ e.preventDefault(); e.stopPropagation(); }catch{}; wheelZoom(e); }
+      });
+    }
     // Scroll snapping is handled in the unified RAF above
     // IME破棄時のビジュアルベル制御（スパム防止のため軽いスロットリング）
     let _imeBellLastAt = 0;
