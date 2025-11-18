@@ -4517,25 +4517,35 @@
     const lines = _splitLines();
     let r = row, c = col;
     for(;;){
-      if (r >= lines.length) return { r: lines.length-1, c: _lineLen(lines.length-1) };
+      if (r >= lines.length) return { r: Math.max(0, lines.length-1), c: _lineLen(Math.max(0, lines.length-1)) };
       const line = lines[r] || '';
       const n = line.length;
+      if (c < 0) c = 0;
       if (c > n) c = n;
-      if (c >= n){ r++; c = 0; continue; }
-      // skip spaces first
+      // At end-of-line: treat stepping to start of next line as one 'w' unit (counts each newline) (#701)
+      if (c >= n){
+        // #702: Group consecutive newlines as one whitespace run. Skip all empty lines,
+        // then land on the first non-space column of the next non-empty line.
+        let r2 = r + 1;
+        while (r2 < lines.length && (lines[r2]||'') === ''){ r2++; }
+        if (r2 >= lines.length){ return { r, c: n }; }
+        const line2 = lines[r2] || '';
+        let c2 = 0;
+        while (c2 < line2.length && _wordTypeAtInLine(line2, c2) === _WT_SPACE){ c2 = _nextIndex(line2, c2); }
+        return { r: r2, c: c2 };
+      }
+      // If on spaces within the line, jump to the next non-space within this line (spaces as one unit)
       let t = _wordTypeAtInLine(line, c);
       if (t === _WT_SPACE){
         while (c < n && _wordTypeAtInLine(line, c) === _WT_SPACE){ c = _nextIndex(line, c); }
         if (c < n) return { r, c };
-        r++; c = 0; continue;
+        // fell off end; next loop iteration will treat newline as its own step
+        continue;
       }
-      // in a non-space run: leave current run
+      // In a non-space run: leave the current run and stop right after it (do not skip following spaces) (#701)
       const tRun = t;
       while (c < n && _wordTypeAtInLine(line, c) === tRun){ c = _nextIndex(line, c); }
-      // then skip spaces to next start
-      while (c < n && _wordTypeAtInLine(line, c) === _WT_SPACE){ c = _nextIndex(line, c); }
-      if (c < n) return { r, c };
-      r++; c = 0;
+      return { r, c };
     }
   }
   function _prevWordStart(row, col){
@@ -4546,28 +4556,29 @@
       const line = (r>=0 && r<lines.length) ? (lines[r]||'') : '';
       const n = line.length;
       if (c > n) c = n;
-      if (c > 0){
-        // step left one code point first
-        c = _prevIndex(line, c);
-        // skip spaces/newlines to the left
-        while (c >= 0 && _wordTypeAtInLine(line, c) === _WT_SPACE){
-          // If at the first code point and it's space, advance to previous line trigger
-          if (c === 0){ c = -1; break; }
-          c = _prevIndex(line, c);
-        }
-        if (c < 0){ r--; c = (r>=0 ? (lines[r]||'').length : 0); continue; }
-        const tRun = _wordTypeAtInLine(line, c);
-        // go to start of this run
-        while (c > 0){
-          const prev = _prevIndex(line, c);
-          if (prev < 0) break;
-          if (_wordTypeAtInLine(line, prev) !== tRun) break;
-          c = prev;
-        }
-        return { r, c };
-      } else {
-        r--; c = (r>=0 ? (lines[r]||'').length : 0);
+      // At start-of-line: jump across consecutive empty lines to the previous non-empty line end (grouped) (#702)
+      if (c === 0){
+        let r2 = r - 1;
+        while (r2 >= 0 && (lines[r2]||'') === ''){ r2--; }
+        if (r2 >= 0){ return { r: r2, c: (lines[r2]||'').length }; }
+        return { r:0, c:0 };
       }
+      // Move left one code point, then if on spaces skip leftward spaces; otherwise, move to start of the current run
+      c = _prevIndex(line, c);
+      // If landed within spaces, skip spaces (but stay on the same line)
+      while (c >= 0 && _wordTypeAtInLine(line, c) === _WT_SPACE){
+        if (c === 0) break;
+        c = _prevIndex(line, c);
+      }
+      if (c < 0){ return { r: Math.max(0, r-1), c: _lineLen(Math.max(0, r-1)) }; }
+      const tRun = _wordTypeAtInLine(line, c);
+      while (c > 0){
+        const prev = _prevIndex(line, c);
+        if (prev < 0) break;
+        if (_wordTypeAtInLine(line, prev) !== tRun) break;
+        c = prev;
+      }
+      return { r, c };
     }
   }
   function _moveWordW(count){ let r=caretRow, c=caretCol; const times=Math.max(1,count|0); for(let i=0;i<times;i++){ const p=_nextWordStart(r,c); r=p.r; c=p.c; } _setCaret(r,c); }
