@@ -577,16 +577,20 @@
     { enc:'shift_jis', ff:'unix', bom:false }
   ];
   function _encDisplayLines(meta){
-    const e = (meta&&meta.enc)||'utf-8';
-    const ff = (meta&&meta.ff)||'unix';
+    const eRaw = (meta&&meta.enc)||'utf-8';
+    const ffRaw = (meta&&meta.ff)||'unix';
     const bom = !!(meta&&meta.bom);
-    const line1 = e + ' ' + ff;
-    const line2 = (e==='utf-8' && bom) ? 'bomb' : '';
+    const enc = (String(eRaw).toLowerCase()==='utf-8') ? 'UTF-8'
+               : (String(eRaw).toLowerCase()==='shift_jis') ? 'SJIS'
+               : String(eRaw);
+    const ff = (ffRaw==='dos' ? 'CRLF' : ffRaw==='unix' ? 'LF' : String(ffRaw||''));
+    const line1 = enc + ' ' + ff;
+    const line2 = bom ? 'B' : '';
     return { line1, line2 };
   }
   function _updateEncBtnLabel(){
     try{
-      if (!encBtn) return;
+      if (!encBtn || !encBtn.isConnected) return;
       const b=currentBuffer();
       const meta = b ? { enc:b.enc||'utf-8', ff:b.ff||'unix', bom:!!b.bom } : { enc:'utf-8', ff:'unix', bom:false };
       const d = _encDisplayLines(meta);
@@ -644,7 +648,7 @@
       });
     }catch{}
   }
-  function _encPopupShow(){
+  function _encPopupShow(anchor){
     try{
       const pop = document.getElementById('encpopup'); if (!pop) return;
       pop.style.display = '';
@@ -652,8 +656,9 @@
       try{ _encSel = _encFindIndex(_encCurrentMeta()); }catch{ _encSel = 0; }
       _encPopupRender();
       // position near the button
-      if (encBtn){
-        const r = encBtn.getBoundingClientRect();
+      const anchorEl = (anchor && anchor.getBoundingClientRect) ? anchor : (encBtn || null);
+      if (anchorEl){
+        const r = anchorEl.getBoundingClientRect();
         // temporary visibility to measure
         const vw = (window.innerWidth||0), vh=(window.innerHeight||0);
         const pw = (pop.offsetWidth||240), ph=(pop.offsetHeight||200);
@@ -681,7 +686,9 @@
       // mark modified due to metadata change (without touching text)
       try{ b._changeTick = ((b._changeTick|0) + 1)|0; b.modified = ((b._changeTick|0) !== (b._savedTick|0)); }catch{}
       _updateEncBtnLabel();
+      try{ _updateOverlayEncodeVisual(); }catch{}
       try{ _setTitle && _setTitle(); _renderTabbar && _renderTabbar(); }catch{}
+      try{ _renderListChars && _renderListChars(); }catch{}
       try{ toast('encode set: ' + ((_encDisplayLines(meta).line2)? (_encDisplayLines(meta).line1+' bomb') : _encDisplayLines(meta).line1), 900); }catch{}
     }catch{}
   }
@@ -12378,6 +12385,31 @@
       palBR.appendChild(gridBR);
 
       // Build top-right palette content (buffer-scoped)
+      // Encode button (moved from tabbar; placed above shiftwidth)
+      const encOLBtn = document.createElement('button');
+      encOLBtn.type = 'button';
+      encOLBtn.id = 'overlayBtnEncode';
+      encOLBtn.style.minWidth = '100px';
+      encOLBtn.style.border = '1px solid #2a3244';
+      encOLBtn.style.background = '#1a2030';
+      encOLBtn.style.color = '#e6e6e6';
+      encOLBtn.style.borderRadius = '6px';
+      encOLBtn.style.padding = '6px 8px';
+      encOLBtn.style.cursor = 'pointer';
+      encOLBtn.style.font = "12px/1.25 system-ui, -apple-system, 'Segoe UI', sans-serif";
+      encOLBtn.style.opacity = '0.92';
+      encOLBtn.style.userSelect = 'none';
+      encOLBtn.style.outline = 'none';
+      attachHover(encOLBtn);
+      encOLBtn.addEventListener('mousedown', (e)=>{ try{ lastFocusedEl = document.activeElement; e.preventDefault(); }catch{} });
+      const encWrap = document.createElement('div');
+      encWrap.style.display = 'flex'; encWrap.style.flexDirection = 'column'; encWrap.style.gap = '2px';
+      const encTitle = document.createElement('div'); encTitle.textContent = 'encode'; encTitle.style.textAlign = 'center'; encTitle.style.fontWeight = '500';
+      const encLine = document.createElement('div'); encLine.id = 'overlayBtnEncode_label'; encLine.style.display = 'block'; encLine.style.textAlign = 'center'; encLine.style.padding = '2px 8px'; encLine.style.border = '1px solid #2a3244'; encLine.style.borderRadius = '6px'; encLine.style.fontSize = '11px'; encLine.style.lineHeight = '1.5'; encLine.style.background = '#0e2348'; encLine.style.boxShadow = '0 1px 2px rgba(0,0,0,0.6), inset 0 0 0 1px rgba(255,255,255,0.06)'; encLine.style.color = '#e6f0ff';
+      encWrap.appendChild(encTitle); encWrap.appendChild(encLine); encOLBtn.appendChild(encWrap);
+      encOLBtn.addEventListener('click', (e)=>{ try{ e.preventDefault(); e.stopPropagation(); }catch{}; if (_encPopupVisible()){ _encPopupHide(); } else { _encPopupShow(encOLBtn); } try{ if (lastFocusedEl && typeof lastFocusedEl.focus==='function') lastFocusedEl.focus(); }catch{} });
+      palTR.appendChild(encOLBtn);
+
       palTR.appendChild(swBtn);
 
       // 検索時 大/小（ignorecase/smartcase のまとめボタン） — shiftwidthの下に配置
@@ -12432,6 +12464,7 @@
   // initialize visual state for hlsearch & list pills
   try{ _updateOverlayHlsearchVisual(); }catch{}
   try{ _updateOverlayListVisual(); }catch{}
+  try{ _updateOverlayEncodeVisual(); }catch{}
   try{ _updateOverlayShiftwidthVisual(); }catch{}
   try{ _updateOverlayCaseVisual(); }catch{}
       // Initial position sync with scrollbars
@@ -12558,6 +12591,19 @@
       let label = '常に区別';
       if (ic){ label = sc ? '混在時区別' : '同一視'; }
       el.textContent = label;
+    }catch{}
+  }
+
+  // Reflect current encode/ff/bom to overlay encode button label
+  function _updateOverlayEncodeVisual(){
+    try{
+      const el = document.getElementById('overlayBtnEncode_label');
+      if (!el) return;
+      const b=currentBuffer();
+      const meta = b ? { enc:b.enc||'utf-8', ff:b.ff||'unix', bom:!!b.bom } : { enc:'utf-8', ff:'unix', bom:false };
+      const d = _encDisplayLines(meta);
+      // On overlay label: show single line, append bomb inline when present
+      el.textContent = d.line2 ? (d.line1 + ' ' + d.line2) : d.line1;
     }catch{}
   }
 
@@ -12744,10 +12790,12 @@
               }
             }catch{}
           }, true);
-          if (encBtn){
+          // Remove legacy tabbar encode button (moved to right-top overlay)
+          try{ if (encBtn && encBtn.parentNode){ encBtn.parentNode.removeChild(encBtn); } }catch{}
+          if (encBtn && encBtn.isConnected){
             encBtn.style.whiteSpace = 'pre';
             encBtn.addEventListener('mousedown', (e)=>{ e.preventDefault(); });
-            encBtn.addEventListener('click', (e)=>{ try{ e.preventDefault(); e.stopPropagation(); }catch{}; if (_encPopupVisible()){ _encPopupHide(); } else { _encPopupShow(); }});
+            encBtn.addEventListener('click', (e)=>{ try{ e.preventDefault(); e.stopPropagation(); }catch{}; if (_encPopupVisible()){ _encPopupHide(); } else { _encPopupShow(encBtn); }});
           }
           // Close on outside click
           document.addEventListener('mousedown', (e)=>{
@@ -12755,8 +12803,10 @@
               const pop = document.getElementById('encpopup');
               if (!pop || pop.style.display==='none') return;
               const withinPopup = pop.contains(e.target);
-              const withinBtn = encBtn && encBtn.contains && encBtn.contains(e.target);
-              if (!withinPopup && !withinBtn){ _encPopupHide(); }
+              const withinBtn1 = encBtn && encBtn.contains && encBtn.contains(e.target);
+              const encOL = document.getElementById('overlayBtnEncode');
+              const withinBtn2 = encOL && encOL.contains && encOL.contains(e.target);
+              if (!withinPopup && !withinBtn1 && !withinBtn2){ _encPopupHide(); }
             }catch{}
           }, true);
           // Keyboard navigation for popup (capture-phase)
