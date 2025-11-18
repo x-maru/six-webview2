@@ -235,6 +235,8 @@
           savedMode: b.savedMode||'NORMAL',
           savedVisual: (b.savedVisual ? { linewise: !!b.savedVisual.linewise, anchorR: b.savedVisual.anchorR|0, anchorC: b.savedVisual.anchorC|0, caretR: b.savedVisual.caretR|0, caretC: b.savedVisual.caretC|0 } : null),
               shiftwidth: Number.isFinite(b.shiftwidth)? (b.shiftwidth|0) : 4,
+        ignorecase: !!b.ignorecase,
+        smartcase:  !!b.smartcase,
     undo: undoArr,
     extMtime: (typeof b._extMtime === 'number') ? b._extMtime : null,
     extSize: (typeof b._extSize === 'number') ? b._extSize : null,
@@ -310,7 +312,9 @@
         const ff  = (it && it.ff)  || 'unix';
         const bom = !!(it && it.bom);
         const shiftwidth = Number.isFinite(it && it.shiftwidth) ? Math.max(1, (it.shiftwidth|0)) : 4;
-        _addBuffer({ name, path, text, modified, enc, ff, bom, shiftwidth });
+        const ignorecase = !!(it && it.ignorecase);
+        const smartcase  = !!(it && it.smartcase);
+        _addBuffer({ name, path, text, modified, enc, ff, bom, shiftwidth, ignorecase, smartcase });
         try{
           const b = buffers[buffers.length-1];
           // If savedText is provided, trust it; otherwise, if not modified, set savedText=text
@@ -328,6 +332,9 @@
             : null;
           // restore shiftwidth (default 4)
           try{ b.shiftwidth = Number.isFinite(it && it.shiftwidth) ? Math.max(1, (it.shiftwidth|0)) : (Number.isFinite(b.shiftwidth)?b.shiftwidth:4); }catch{ b.shiftwidth = (Number.isFinite(b.shiftwidth)?b.shiftwidth:4); }
+          // restore case flags (default false)
+          try{ b.ignorecase = !!(it && it.ignorecase); }catch{ b.ignorecase = !!b.ignorecase; }
+          try{ b.smartcase  = !!(it && it.smartcase);  }catch{ b.smartcase  = !!b.smartcase;  }
           // recompute ticks from modified flag
           b._changeTick = modified ? 1 : 0; b._savedTick = 0; b.modified = !!modified;
           // Restore undo snapshots (limited) if present
@@ -805,7 +812,18 @@
           pat = pat.replace(/(?<!\\)\\n/g,'\n').replace(/(?<!\\)\\t/g,'\t');
         }catch{ /* lookbehind 非対応環境では単純置換（副作用で \\n が展開される場合あり） */ try{ pat = pat.replace(/\\n/g,'\n').replace(/\\t/g,'\t'); }catch{} }
       const flagsGiven = String((mF?mF[2]:(mB?mB[2]:''))||'');
-  const flags = (/i/.test(flagsGiven)?'i':'');
+      // Case sensitivity (preview): honor /i or /I; else buffer ignorecase(+smartcase)
+      let needI = false;
+      if (/i/.test(flagsGiven)){ needI = true; }
+      else if (/I/.test(flagsGiven)){ needI = false; }
+      else {
+        try{
+          const b=currentBuffer();
+          const ic=!!(b&&b.ignorecase); const sc=!!(b&&b.smartcase);
+          if (ic){ if (sc && /[A-Z]/.test(pat)){ needI=false; } else { needI=true; } }
+        }catch{}
+      }
+      const flags = needI ? 'i' : '';
   // Always enable multiline so ^/$ match per-line by default
   const flagsRe = ('m' + (flags.includes('i')?'i':''));
       // For :s incremental preview: capture a stable anchor once at first pattern detection
@@ -1155,7 +1173,17 @@
       if (!_optHlsearch) return;
       if (!(_lastSearch && _lastSearch.src)) return;
   const src = String(_lastSearch.src||'');
-  let flags = String(_lastSearch.flags||'');
+  // Determine effective case flag: explicit i/I overrides; else derive from buffer ignorecase+smartcase
+  let useI = false;
+  if (_lastSearch && _lastSearch.explicitCase === 'i'){ useI = true; }
+  else if (_lastSearch && _lastSearch.explicitCase === 'I'){ useI = false; }
+  else {
+    try{
+      const b=currentBuffer(); const ic=!!(b&&b.ignorecase); const sc=!!(b&&b.smartcase);
+      if (ic){ if (sc && /[A-Z]/.test(src)){ useI=false; } else { useI=true; } }
+    }catch{}
+  }
+  let flags = useI ? 'i' : '';
   const text = String(editor.value||'');
   // Ensure multiline + global for hlsearch regardless of stored flags
   if (!flags.includes('m')) flags += 'm';
@@ -2146,6 +2174,9 @@
         _redo: [],
         // per-buffer shiftwidth (indent width in spaces)
         shiftwidth: Number.isFinite(b.shiftwidth)? Math.max(1, (b.shiftwidth|0)) : 4,
+        // per-buffer case sensitivity options (#696)
+        ignorecase: !!b.ignorecase,
+        smartcase:  !!b.smartcase,
         // original final newline presence (established on initial load/create) — #598
         _origHadFinalLF: text0.endsWith('\n'),
         // encoding/newline metadata
@@ -4617,7 +4648,24 @@
         if (!pat && _lastSearch){ pat = _lastSearch.src; }
         if (pat){
           const dir = forward? 'fwd':'bwd';
-          const flags = (flagsGiven || (_lastSearch && _lastSearch.src===pat ? _lastSearch.flags : ''));
+          // Case sensitivity: explicit /i or /I override; otherwise buffer ignorecase(+smartcase) (#696)
+          let explicitInsensitive = /i/.test(flagsGiven);
+          let explicitSensitive   = /I/.test(flagsGiven);
+          let needI = false;
+          if (explicitInsensitive){ needI = true; }
+          else if (explicitSensitive){ needI = false; }
+          else {
+            try{
+              const b=currentBuffer();
+              const ic = !!(b&&b.ignorecase);
+              const sc = !!(b&&b.smartcase);
+              if (ic){
+                if (sc && /[A-Z]/.test(pat)){ needI = false; }
+                else { needI = true; }
+              }
+            }catch{}
+          }
+          const flags = needI ? 'i' : '';
           // Use the stable anchor captured when entering the search prompt so
           // confirmation jumps to the nearest match from the original caret.
           const fromOff = (function(){
@@ -4645,7 +4693,8 @@
               _repositionCaret(); updateGutter();
               // Preserve original direction separately so 'n' keeps the original
               // and 'N' always uses the inverse of that original (avoid bouncing between two matches).
-              _lastSearch = { src: pat, flags: flags||'', dir, origDir: dir };
+              const explicitCase = explicitInsensitive ? 'i' : (explicitSensitive ? 'I' : '');
+              _lastSearch = { src: pat, flags: flags||'', dir, origDir: dir, explicitCase };
               _updateHlsearchFull();
             }catch{}
           } else {
@@ -4668,13 +4717,23 @@
         const pat = String(ms[2]||'');
         const repl = String(ms[3]||'');
   const flagsGiven = String(ms[4]||'');
-  // Validate flags: allow only lowercase g, i, c, n (uppercase should be invalid)
-  const invalid = flagsGiven.replace(/[gicn]/g, '');
+  // Validate flags: allow g i I c n (I=force case-sensitive) (#696)
+  const invalid = flagsGiven.replace(/[giIcn]/g, '');
   if (invalid){ toast('invalid flags: ' + invalid); try{ _triggerVisualBell(); }catch{} return; }
   if (!pat){ toast('empty pattern'); try{ _triggerVisualBell(); }catch{} return; }
-  // Always multiline so ^/$ anchor per line; add i if requested
+  // Determine case flag: explicit i / I overrides buffer ignorecase+smartcase
+  let wantI = null; // true=insensitive, false=sensitive, null=defer to buffer opts
+  if (/i/.test(flagsGiven)) wantI = true;
+  if (/I/.test(flagsGiven)) wantI = false; // if both present, I wins (later assignment)
+  if (wantI==null){
+    try{
+      const b=currentBuffer(); const ic=!!(b&&b.ignorecase); const sc=!!(b&&b.smartcase);
+      if (ic){ if (sc && /[A-Z]/.test(pat)){ wantI=false; } else { wantI=true; } }
+    }catch{}
+  }
+  // Always multiline so ^/$ anchor per line; add i if needed
   let reFlags = 'm';
-  if (/i/.test(flagsGiven)) reFlags += 'i';
+  if (wantI===true) reFlags += 'i';
         // We'll use a global regex for scan; per-line non-g behavior is handled manually
         let reAll = null; try{ reAll = new RegExp(pat, reFlags+'g'); }catch{ reAll=null; }
   if (!reAll){ toast('invalid pattern'); try{ _triggerVisualBell(); }catch{} return; }
@@ -5327,6 +5386,42 @@
     }
     if (/^:set\s+hlsearch!\s*$/i.test(cmd)){
       _optHlsearch = !_optHlsearch; _updateHlsearchFull(); try{ _updateOverlayHlsearchVisual(); }catch{} toast('hlsearch: ' + (_optHlsearch?'on':'off'), 900); return;
+    }
+    // :set ignorecase / :set noignorecase / :set ignorecase! / :set ignorecase?
+    if (/^:set\s+ignorecase\s*$/i.test(cmd)){
+      const b=currentBuffer(); if (b){ b.ignorecase=true; _schedulePersist('ignorecase'); }
+      _updateHlsearchFull();
+      toast('ignorecase: on', 900); return;
+    }
+    if (/^:set\s+noignorecase\s*$/i.test(cmd)){
+      const b=currentBuffer(); if (b){ b.ignorecase=false; _schedulePersist('ignorecase'); }
+      _updateHlsearchFull();
+      toast('ignorecase: off', 900); return;
+    }
+    if (/^:set\s+ignorecase!\s*$/i.test(cmd)){
+      const b=currentBuffer(); if (b){ b.ignorecase=!b.ignorecase; _schedulePersist('ignorecase'); _updateHlsearchFull(); toast('ignorecase: ' + (b.ignorecase?'on':'off'), 900); }
+      return;
+    }
+    if (/^:set\s+ignorecase\?\s*$/i.test(cmd)){
+      const b=currentBuffer(); toast('ignorecase: ' + (b&&b.ignorecase?'on':'off'), 1200); return;
+    }
+    // :set smartcase / :set nosmartcase / :set smartcase! / :set smartcase?
+    if (/^:set\s+smartcase\s*$/i.test(cmd)){
+      const b=currentBuffer(); if (b){ b.smartcase=true; _schedulePersist('smartcase'); }
+      _updateHlsearchFull();
+      toast('smartcase: on', 900); return;
+    }
+    if (/^:set\s+nosmartcase\s*$/i.test(cmd)){
+      const b=currentBuffer(); if (b){ b.smartcase=false; _schedulePersist('smartcase'); }
+      _updateHlsearchFull();
+      toast('smartcase: off', 900); return;
+    }
+    if (/^:set\s+smartcase!\s*$/i.test(cmd)){
+      const b=currentBuffer(); if (b){ b.smartcase=!b.smartcase; _schedulePersist('smartcase'); _updateHlsearchFull(); toast('smartcase: ' + (b.smartcase?'on':'off'), 900); }
+      return;
+    }
+    if (/^:set\s+smartcase\?\s*$/i.test(cmd)){
+      const b=currentBuffer(); toast('smartcase: ' + (b&&b.smartcase?'on':'off'), 1200); return;
     }
     // :set list / :set nolist / :set list! / :set list?
     if (/^:set\s+list\s*$/i.test(cmd)){
@@ -6589,6 +6684,14 @@
             section('インデント', [
               [K(':set shiftwidth=N'), sep(' / '), K(':set sw=N'), sep(' インデント幅（半角スペース数）を設定（バッファ毎・セッション保存・既定値4）')],
               [K(':set shiftwidth?'), sep(' 現在の '), K('shiftwidth'), sep(' を表示')]
+            ],[
+              K(':set ignorecase'), sep(' / '), K(':set noignorecase'), sep(' 検索で大文字小文字を無視 / 区別（バッファ毎）')
+            ],[
+              K(':set ignorecase!'), sep(' トグル '), K(':set ignorecase?'), sep(' 状態表示')
+            ],[
+              K(':set smartcase'), sep(' / '), K(':set nosmartcase'), sep(' smartcase: 英大文字含むパターンで大文字小文字を区別')
+            ],[
+              K(':set smartcase!'), sep(' トグル '), K(':set smartcase?'), sep(' 状態表示')
             ]);
             // その他
             section('その他', [
@@ -9094,9 +9197,54 @@
           const dir = rev ? (origDir==='fwd'?'bwd':'fwd') : origDir;
           _scrolloffPaused = false; _scrolloffPauseAnchorR = -1; _scrolloffPauseAnchorC = -1;
           const caretOff = (function(){ try{ return _offsetFromRC(caretRow, caretCol)|0; }catch{ return 0; } })();
-          // Include current match by offset adjustment (forward: -1, backward: +2) then allow wrap
-          const fromAdj = (dir==='fwd') ? (caretOff-1) : (caretOff+2);
-          const res = _searchFindNext(_lastSearch.src, _lastSearch.flags||'', dir, fromAdj, true);
+          // Include current match when unique; otherwise prefer next/prev.
+          // Forward: caretOff-1; Backward: caretOff+1 (so previous when available, else wrap to current)
+          const fromAdj = (dir==='fwd') ? (caretOff-1) : (caretOff+1);
+          // Derive effective case flag dynamically unless explicit i/I was given when recording last search
+          const pat = String(_lastSearch.src||'');
+          let effI = false;
+          if (_lastSearch && _lastSearch.explicitCase === 'i'){ effI = true; }
+          else if (_lastSearch && _lastSearch.explicitCase === 'I'){ effI = false; }
+          else {
+            try{
+              const b=currentBuffer(); const ic=!!(b&&b.ignorecase); const sc=!!(b&&b.smartcase);
+              if (ic){ if (sc && /[A-Z]/.test(pat)){ effI=false; } else { effI=true; } }
+            }catch{}
+          }
+          let res = _searchFindNext(pat, (effI?'i':''), dir, fromAdj, true);
+          // If searching backward and the result is the same occurrence that currently contains the caret,
+          // step once more to the previous match so we actually move to the prior candidate (#698).
+          if (dir==='bwd' && res && Number.isFinite(res.start)){
+            try{
+              const curStart = res.start|0;
+              const curLen = Math.max(0, res.len|0);
+              if (curLen>0){
+                if (caretOff >= curStart && caretOff < (curStart + curLen)){
+                  const res2 = _searchFindNext(pat, (effI?'i':''), 'bwd', curStart, true);
+                  if (res2 && Number.isFinite(res2.start)){
+                    res = res2;
+                  }
+                }
+              }
+            }catch{}
+          }
+          // If searching forward and result contains the caret (same occurrence),
+          // jump to the next occurrence by starting just after the end of this match.
+          if (dir==='fwd' && res && Number.isFinite(res.start)){
+            try{
+              const curStart = res.start|0;
+              const curLen = Math.max(0, res.len|0);
+              if (curLen>0){
+                if (caretOff >= curStart && caretOff < (curStart + curLen)){
+                  const afterEndOff = (curStart + curLen - 1)|0; // +1 will be applied inside _searchFindNext
+                  const res2 = _searchFindNext(pat, (effI?'i':''), 'fwd', afterEndOff, true);
+                  if (res2 && Number.isFinite(res2.start)){
+                    res = res2;
+                  }
+                }
+              }
+            }catch{}
+          }
           if (res && Number.isFinite(res.start)){
             try{
               const sRC = _rcFromOffset(res.start);
