@@ -2207,6 +2207,8 @@
       _edScale = _nearestScale(clamped);
       try{ root.style.setProperty('--edScale', String(_edScale)); }catch{}
       _syncEditorMetrics();
+      // Refresh Zoom HUD value on silent apply (tab switch)
+      _showZoomHUD();
     }catch{}
   }
 
@@ -2219,6 +2221,8 @@
       // Make HUD non-focusable and prevent it from stealing focus on interaction
       try{ el.setAttribute('tabindex','-1'); }catch{}
       try{ el.addEventListener('mousedown', (e)=>{ e.preventDefault(); }, true); }catch{}
+      // Always visible HUD: ensure it is shown and initialized
+      try{ el.style.display = 'block'; }catch{}
       const v = document.getElementById('zoomVal'); if (v) v.textContent = _formatZoom();
       const minus = document.getElementById('zoomMinus');
       const plus = document.getElementById('zoomPlus');
@@ -2243,10 +2247,9 @@
       const v = document.getElementById('zoomVal');
       if (!el) return;
       if (v) v.textContent = _formatZoom();
-      // Force visible explicitly (initial CSS is display:none)
-      el.style.display = 'block';
+      // Always visible: keep displayed and do not auto-hide
+      try{ el.style.display = 'block'; }catch{}
       if (_zoomHudTimer){ clearTimeout(_zoomHudTimer); _zoomHudTimer=null; }
-      _zoomHudTimer = setTimeout(()=>{ try{ el.style.display='none'; }catch{} }, 3000);
     }catch{}
   }
 

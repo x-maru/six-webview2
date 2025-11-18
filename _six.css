@@ -41,8 +41,7 @@ body { font: var(--fontBase, 18px)/20px Consolas, 'Courier New', monospace; over
 #tabbar .tab .name { white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
 #tabbar .tab .name::first-letter { font-size: 1.1em; vertical-align: -1px; }
 #tabbar .tab .mod { color:#ff5b5b; margin-left:6px; font-weight:700; }
-#encBtn { white-space: pre; min-width: 84px; border:1px solid #2a3244; background:#1a2030; color:#e6e6e6; border-radius:6px; padding:4px 8px; cursor:pointer; font: 12px/1.25 system-ui, -apple-system, 'Segoe UI', sans-serif; opacity:0.92; user-select:none; outline:none; height: 28px; display:flex; align-items:center; }
-#encBtn:hover{ filter: brightness(1.06); }
+/* legacy encBtn removed (moved to overlay palette) */
 #posinfo { white-space: pre; min-width: 16ch; /* enough for 行99999, 列999/998 */
 	background: transparent; border:0; padding:0 4px; height:28px; display:flex; align-items:center;
 	font: var(--fontBase, 18px)/1 Consolas, 'Courier New', monospace; /* match tab label size */
@@ -204,9 +203,9 @@ body { font: var(--fontBase, 18px)/20px Consolas, 'Courier New', monospace; over
 #encpopup .item.active { background: var(--popupActiveLine, #1a2030); }
 #encpopup .name { flex:1; white-space: pre; }
 
-/* Zoom HUD (over tabbar) */
-#zoomhud { position: fixed; right: 10px; top: 2px; z-index: 10002; display:none; }
-#zoomhud .box { background: rgba(26,32,48,0.96); color:#e6e6e6; border:1px solid #2a3244; border-radius: 6px; padding:4px 8px; font: 12px/1.4 system-ui, -apple-system, 'Segoe UI', sans-serif; box-shadow: 0 6px 14px rgba(0,0,0,0.35); display:flex; gap:8px; align-items:center; }
+/* Zoom HUD (inline in tabbar) */
+#zoomhud { display:flex; align-items:center; }
+#zoomhud .box { background: transparent; color:#e6e6e6; border:1px solid #2a3244; border-radius: 6px; padding:4px 8px; font: 12px/1.4 system-ui, -apple-system, 'Segoe UI', sans-serif; box-shadow: 0 6px 14px rgba(0,0,0,0.35); display:flex; gap:8px; align-items:center; }
 #zoomhud .val { font-weight: 600; min-width: 48px; text-align: right; }
 #zoomhud button { border: 1px solid #2a3244; background: #1a2030; color:#e6e6e6; border-radius: 4px; padding:2px 6px; cursor:pointer; font: 11px/1.2 system-ui, -apple-system, 'Segoe UI', sans-serif; }
 #zoomhud button:hover { filter: brightness(1.06); }
