@@ -11043,6 +11043,8 @@
   // ディレクトリ移動直後のみ、ポップアップ選択→入力欄への反映を抑止し、Enterも無効化するための猶予ガード
   // Tab 補完は引き続き有効。タイムスタンプで短時間のみ適用する。
   let _fileReflectGuardUntil = 0;
+  // Debug: show code points for popup entry names (#732)
+  let _filePopupDebugChars = false;
 
   // NTFS で不許可な名前かどうかを判定（WSL配下の表示で選択不可にする目的）
   function _isNtfsIllegalName(name){
@@ -11756,12 +11758,15 @@
         try{ if (nm && nm.normalize) nm = nm.normalize('NFKC'); }catch{}
         // Convert any fullwidth ASCII range (FF01-FF5E) back to basic ASCII (0021-007E)
         try{ nm = nm.replace(/[\uFF01-\uFF5E]/g, c=> String.fromCharCode(c.charCodeAt(0) - 0xFEE0)); }catch{}
+        // Strip embedded NUL or other control chars except LF/TAB (root cause of pseudo-fullwidth appearance)
+        try{ nm = nm.replace(/[\u0000-\u001F]/g, ch=> (ch==='\n'||ch==='\t')? ch : ''); }catch{}
         if(nm) return _normalizeColonVariants(nm);
       }catch{}
       try{
         let nm = _normalizeColonVariants(String(it&&it.name||''));
         try{ if (nm && nm.normalize) nm = nm.normalize('NFKC'); }catch{}
         try{ nm = nm.replace(/[\uFF01-\uFF5E]/g, c=> String.fromCharCode(c.charCodeAt(0) - 0xFEE0)); }catch{}
+        try{ nm = nm.replace(/[\u0000-\u001F]/g, ch=> (ch==='\n'||ch==='\t')? ch : ''); }catch{}
         return nm;
       }catch{ return ''; }
     };
@@ -11777,6 +11782,28 @@
       const name = document.createElement('span'); name.className='name';
       const dispName = _bestEntryName(it);
       name.textContent = dispName + (it.isDir? '/':'');
+      // Debug tooltip with codepoints
+      try{
+        if (_filePopupDebugChars){
+          const raw = dispName + (it.isDir? '/':'');
+          const parts = [];
+          for (let k=0;k<raw.length;k++){
+            const ch = raw[k];
+            const cp = ch.codePointAt(0).toString(16).toUpperCase().padStart(4,'0');
+            // Basic classification
+            let cls='';
+            const cnum = ch.codePointAt(0);
+            if (cnum>=0xFF01 && cnum<=0xFF5E) cls='FW-ASCII';
+            else if (cnum>=0x2000 && cnum<=0x206F) cls='Punct/Space';
+            else if (cnum===0x2424) cls='SYMBOL-EOL';
+            else if (cnum===0x000A) cls='LF';
+            else if (cnum<0x0020) cls='CTRL';
+            parts.push(ch + ' U+' + cp + (cls? (' '+cls):''));
+            if (cnum>0xFFFF) k++; // surrogate consumed
+          }
+          name.title = parts.join('\n');
+        }
+      }catch{}
       if (it && it._disabled){
         try{ div.className += ' disabled'; }catch{}
         try{ name.style.color = '#d33'; }catch{}
@@ -11941,6 +11968,22 @@
   try{ const act = bufpopupInner.querySelector('.item.active, .item.muted'); if (act && act.scrollIntoView) act.scrollIntoView({block:'nearest', inline:'nearest'}); }catch{}
   window.__sixFileRendering = false;
   }
+
+  // Global key handler to toggle codepoint debug (Ctrl+Shift+D while file popup visible)
+  try{
+    window.addEventListener('keydown', (e)=>{
+      try{
+        if (e.key==='D' && e.ctrlKey && e.shiftKey && !e.altKey && !e.metaKey){
+          if (typeof _filePopupVisible==='function' && _filePopupVisible()){
+            e.preventDefault(); e.stopPropagation();
+            _filePopupDebugChars = !_filePopupDebugChars;
+            toast('popup codepoints: ' + (_filePopupDebugChars?'ON':'OFF'), 1500);
+            _filePopupRender();
+          }
+        }
+      }catch{}
+    }, true);
+  }catch{}
   function _filePopupShow(){
     if (!bufpopup) return;
     try{ if (typeof _encPopupHide==='function') _encPopupHide(); }catch{}
