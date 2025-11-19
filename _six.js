@@ -12370,10 +12370,10 @@ const VERSION_STR = 'vi like TextEditor "six" v' + VERSION;
         try{ if (lastFocusedEl && typeof lastFocusedEl.focus === 'function'){ lastFocusedEl.focus(); } }catch{}
       });
 
-      // Help button（右下配置, 2行ラベル: ヘルプ / F9,:help）
+      // Help button（右下配置, 2行ラベル: ヘルプ / F9, :help）
       const helpBtn = document.createElement('button');
       helpBtn.type = 'button';
-      helpBtn.textContent = 'ヘルプ\nF9,:help';
+      helpBtn.textContent = 'ヘルプ\nF9, :help';
       helpBtn.style.whiteSpace = 'pre';
       helpBtn.style.minWidth = '64px';
       helpBtn.style.border = '1px solid #2a3244';
@@ -12519,7 +12519,7 @@ const VERSION_STR = 'vi like TextEditor "six" v' + VERSION;
 
       palTR.appendChild(swBtn);
 
-      // 検索時 大/小（ignorecase/smartcase のまとめボタン） — shiftwidthの下に配置
+      // 検索時 A/a（ignorecase/smartcase のまとめボタン） — shiftwidthの下に配置
       const caseBtn = document.createElement('button');
       caseBtn.type = 'button';
       caseBtn.id = 'overlayBtnCase';
@@ -12542,7 +12542,7 @@ const VERSION_STR = 'vi like TextEditor "six" v' + VERSION;
       caseWrap.style.flexDirection = 'column';
       caseWrap.style.gap = '2px';
       const caseTitle = document.createElement('div');
-      caseTitle.textContent = '検索時 大/小';
+      caseTitle.textContent = '検索時 A/a';
       caseTitle.style.textAlign = 'center';
       caseTitle.style.fontWeight = '500';
       const caseLine = document.createElement('div');
