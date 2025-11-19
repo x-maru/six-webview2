@@ -26,9 +26,20 @@ param(
   [switch]$AllowMulti = $false
 )
 
+$global:SixLaunched = $false
 $here  = Split-Path -Parent $MyInvocation.MyCommand.Path
 if (-not $AllowMulti) {
-  $mutexName = 'six-webview2-singleton'
+  $hash = ''
+  try {
+    $sha = [System.Security.Cryptography.SHA256]::Create()
+    $bytes = [System.Text.Encoding]::UTF8.GetBytes($here)
+    $hb = $sha.ComputeHash($bytes)
+    $hash = ([System.BitConverter]::ToString($hb)).Replace('-', '').Substring(0,12)
+  } catch {
+    $hash = ($here -replace '[^a-zA-Z0-9]', '_')
+    if ($hash.Length -gt 12) { $hash = $hash.Substring($hash.Length-12) }
+  }
+  $mutexName = "six-webview2-$hash"
   try {
     $createdNew = $false
     $global:SixMutex = [System.Threading.Mutex]::new($false, $mutexName, [ref]$createdNew)
@@ -57,8 +68,9 @@ Write-Host "six.ps1 starting in: $here"
 $index = Join-Path $here $Html
 
 if (-not (Test-Path $index)) {
-  Write-Host "HTML not found: $index"
-  exit 1
+  Write-Error "HTML not found: $index"
+  if ($KeepOpen) { Write-Host 'Press Enter to exit...'; Read-Host | Out-Null }
+  return
 }
 
 # Normalize Doc to relative from script folder (for file:// fetch convenience)
@@ -95,6 +107,13 @@ function Test-NanoApi([string]$Base){
     $hc.Timeout = [System.TimeSpan]::FromMilliseconds(1200)
     $resp = $hc.GetAsync($Base + 'ping').GetAwaiter().GetResult()
     return ($resp -and $resp.IsSuccessStatusCode)
+  } catch { return $false }
+}
+
+function Test-TcpPortFree([int]$Port){
+  try {
+    $l = [System.Net.Sockets.TcpListener]::new([System.Net.IPAddress]::Loopback, $Port)
+    $l.Start(); $l.Stop(); return $true
   } catch { return $false }
 }
 
@@ -159,14 +178,26 @@ if ($Docs -and $Docs.Count -gt 0) {
 # Build file:/// URL for the layout html
 $indexAbs = (Resolve-Path $index).Path
 $indexUri = [System.Uri]::new($indexAbs)
-# Pick a loopback port and start API
-$apiPort = Get-Random -Minimum 20000 -Maximum 60000
-Start-NanoApi -Port $apiPort
-$apiBase = "http://127.0.0.1:$apiPort/"
-# Warm-up: retry /ping briefly (max ~1.2s)
-for($i=0; $i -lt 8; $i++){
-  if (Test-NanoApi -Base $apiBase) { break }
+# Pick a loopback port and start API once (avoid multiple servers)
+$apiPort = $null; $apiBase = $null; $apiStarted = $false
+# choose a free port first (few tries)
+$tryPort = $null
+for($attempt=0; $attempt -lt 6; $attempt++){
+  $cand = Get-Random -Minimum 25000 -Maximum 61000
+  if (Test-TcpPortFree -Port $cand) { $tryPort = $cand; break }
+}
+if (-not $tryPort) { $tryPort = Get-Random -Minimum 25000 -Maximum 61000 }
+try { Start-NanoApi -Port $tryPort } catch {}
+$base = "http://127.0.0.1:$tryPort/"
+$ok = $false
+for($i=0; $i -lt 20; $i++){
+  if (Test-NanoApi -Base $base) { $ok = $true; break }
   Start-Sleep -Milliseconds 150
+}
+if ($ok) { $apiPort = $tryPort; $apiBase = $base; $apiStarted = $true }
+else {
+  $apiPort = $tryPort; $apiBase = $base
+  Write-Host "Warning: Nano API did not respond on $tryPort. UI features may be limited."
 }
 if ($DocItems.Count -ge 2) {
   # 複数ドキュメントは bundle=Base64(JSON) で渡す（data は含めない）
@@ -266,17 +297,19 @@ function Start-WebView2Host([string]$Url){
 
 # 1) Try WebView2 host first
 $launched = Start-WebView2Host -Url $targetUrl
+if ($launched) { $global:SixLaunched = $true }
 if (-not $launched) {
   # 2) Fallback to Edge app mode
   $edge = "C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe"
   if (!(Test-Path $edge)) { $edge = "C:\Program Files\Microsoft\Edge\Application\msedge.exe" }
   if (Test-Path $edge) {
-    $profileDir = Join-Path $here ".edge-profile"
+    $profileDir = Join-Path $here ".wv2-profile"
     if ($ResetProfile) { try { Remove-Item -Recurse -Force -ErrorAction SilentlyContinue $profileDir } catch {} }
     if (-not (Test-Path $profileDir)) { New-Item -ItemType Directory -Path $profileDir | Out-Null }
     $args = @("--allow-file-access-from-files","--user-data-dir=$profileDir","--app=$targetUrl")
     if ($DevInsecure) { $args = @("--allow-file-access-from-files","--disable-web-security","--user-data-dir=$profileDir","--app=$targetUrl") }
     $p = Start-Process -FilePath $edge -ArgumentList $args -WorkingDirectory $here -PassThru
+    $global:SixLaunched = $true
     $deadline = (Get-Date).AddMinutes([Math]::Max(1, $WaitMinutes))
     $seenWindow = $false; $lastHadWindow = Get-Date
     while ((Get-Date) -lt $deadline) {

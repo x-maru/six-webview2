@@ -2273,7 +2273,7 @@
       try{ _apiNoteSuccess(); }catch{}
       const raw = (j && Array.isArray(j.shares)) ? j.shares : [];
       const seen = new Set();
-      const clean = (s)=>{ try{ let t=String(s||''); t=t.replace(/[\u200B-\u200D\u2060\u00A0]/g,''); t=t.replace(/[\u0000-\u001F]/g,''); return t.trim(); }catch{ return String(s||''); } };
+      const clean = (s)=>{ try{ let t=String(s||''); t=t.replace(/[\u200B-\u200D\u2060\u00A0]/g,''); t=t.replace(/[\u0000-\u001F]/g,''); try{ t=t.normalize('NFKC'); }catch{} return t.trim(); }catch{ return String(s||''); } };
       const entries = [];
       for (const e of raw){ const n0=e&&e.name; const n1=clean(n0); if(!n1) continue; if(n1==='.'||n1==='..'||n1.includes('/')) continue; const key=n1.toLowerCase(); if(seen.has(key)) continue; seen.add(key); const url=(e&&e.url)?String(e.url):('file:////'+host+'/'+encodeURIComponent(n1)+'/'); entries.push({ name:n1, isDir:true, url }); }
       entries.sort((a,b)=> a.name.localeCompare(b.name));
@@ -7529,6 +7529,18 @@
         if (e && e.ctrlKey){ try{ e.preventDefault(); e.stopPropagation(); }catch{}; wheelZoom(e); }
       });
     }
+    // Capture Ctrl+pinch (trackpad gesture) and suppress browser zoom HUD; map to editor zoom
+    const gestureZoom = (e)=>{
+      try{ e.preventDefault(); e.stopPropagation(); }catch{}
+      const now = Date.now();
+      if (now - _lastZoomStepAt < 140) return;
+      const s = (typeof e.scale === 'number') ? e.scale : 1;
+      if (s > 1.02){ _stepEditorScale(+1); _lastZoomStepAt = now; _zoomGuardUntil = now + 250; }
+      else if (s < 0.98){ _stepEditorScale(-1); _lastZoomStepAt = now; _zoomGuardUntil = now + 250; }
+    };
+    try{ window.addEventListener('gesturestart', (e)=>{ try{ e.preventDefault(); e.stopPropagation(); }catch{} }, { passive:false, capture:true }); }catch{ /* no-op */ }
+    try{ window.addEventListener('gesturechange', gestureZoom, { passive:false, capture:true }); }catch{ /* no-op */ }
+    try{ window.addEventListener('gestureend',   (e)=>{ try{ e.preventDefault(); e.stopPropagation(); }catch{} }, { passive:false, capture:true }); }catch{ /* no-op */ }
     // Scroll snapping is handled in the unified RAF above
     // IME破棄時のビジュアルベル制御（スパム防止のため軽いスロットリング）
     let _imeBellLastAt = 0;
@@ -9774,8 +9786,13 @@
                     // ファイルを開く（確定）
                     try{ if (_isNtfsIllegalName(q)){ toast('Windows(NTFS)では無効な名前です',1800); _triggerVisualBell && _triggerVisualBell(); return; } }catch{}
                     _loadFromPath(ent.url, null, {mode:'new'});
-                    // 履歴には補完後の最終文字列を入れる
-                    try{ const hist = ':e ' + _collapseDotDotPath(String(_fileTypedDirRaw||'') + String(ent.name||'')); _cmdHistoryMaybePush(hist); }catch{}
+                    // 履歴には URL 末尾から復元した名前を優先して入れる
+                    try{
+                      let nm = String(ent && ent.name || '');
+                      try{ const u=new URL(String(ent&&ent.url||'')); const parts=String(u.pathname||'').split('/').filter(Boolean); const dec=decodeURIComponent(parts[parts.length-1]||''); if (dec) nm=dec; }catch{}
+                      const hist = ':e ' + _collapseDotDotPath(String(_fileTypedDirRaw||'') + nm);
+                      _cmdHistoryMaybePush(hist);
+                    }catch{}
                     _filePopupHide(); _bufPopupHide(); _setMode('NORMAL'); cmdinput.value=''; setTimeout(()=>editor.focus(), 0);
                     return;
                   }
@@ -9795,7 +9812,11 @@
                     } else {
                       try{ if (_isNtfsIllegalName(String(one.name||''))){ toast('Windows(NTFS)では無効な名前です',1800); _triggerVisualBell && _triggerVisualBell(); return false; } }catch{}
                       _loadFromPath(one.url, null, {mode:'new'});
-                      try{ const hist=':e ' + _collapseDotDotPath(String(_fileTypedDirRaw||'') + String(one.name||'')); _cmdHistoryMaybePush(hist); }catch{}
+                      try{
+                        let nm = String(one && one.name || '');
+                        try{ const u=new URL(String(one&&one.url||'')); const parts=String(u.pathname||'').split('/').filter(Boolean); const dec=decodeURIComponent(parts[parts.length-1]||''); if (dec) nm=dec; }catch{}
+                        const hist=':e ' + _collapseDotDotPath(String(_fileTypedDirRaw||'') + nm); _cmdHistoryMaybePush(hist);
+                      }catch{}
                       _filePopupHide(); _bufPopupHide(); _setMode('NORMAL'); cmdinput.value=''; setTimeout(()=>editor.focus(), 0);
                       return true;
                     }
@@ -9963,7 +9984,11 @@
             }
             _filePopupHide();
             _bufPopupHide();
-            try{ const hist=':e ' + _collapseDotDotPath(String(_fileTypedDirRaw||'') + String(it.name||'')); _cmdHistoryMaybePush(hist); }catch{}
+            try{
+              let nm = String(it && it.name || '');
+              try{ const u=new URL(String(it&&it.url||'')); const parts=String(u.pathname||'').split('/').filter(Boolean); const dec=decodeURIComponent(parts[parts.length-1]||''); if (dec) nm=dec; }catch{}
+              const hist=':e ' + _collapseDotDotPath(String(_fileTypedDirRaw||'') + nm); _cmdHistoryMaybePush(hist);
+            }catch{}
             _setMode('NORMAL');
             cmdinput.value = '';
             setTimeout(()=>editor.focus(), 0);
@@ -10531,6 +10556,7 @@
                       // ゼロ幅系や制御っぽい不可視を除去（表示/一致の安定化）
                       t = t.replace(/[\u200B-\u200D\u2060\u00A0]/g, '');
                       t = t.replace(/[\u0000-\u001F]/g, '');
+                      try{ t = t.normalize('NFKC'); }catch{}
                       return t.trim();
                     }catch{ return String(s||''); }
                   };
@@ -11726,10 +11752,18 @@
         if (it && it._up) return '..';
         const u=new URL(String(it&&it.url||''));
         const parts=String(u.pathname||'').split('/').filter(Boolean);
-        const nm=decodeURIComponent(parts[parts.length-1]||'');
+        let nm=decodeURIComponent(parts[parts.length-1]||'');
+        try{ if (nm && nm.normalize) nm = nm.normalize('NFKC'); }catch{}
+        // Convert any fullwidth ASCII range (FF01-FF5E) back to basic ASCII (0021-007E)
+        try{ nm = nm.replace(/[\uFF01-\uFF5E]/g, c=> String.fromCharCode(c.charCodeAt(0) - 0xFEE0)); }catch{}
         if(nm) return _normalizeColonVariants(nm);
       }catch{}
-      try{ return _normalizeColonVariants(String(it&&it.name||'')); }catch{ return ''; }
+      try{
+        let nm = _normalizeColonVariants(String(it&&it.name||''));
+        try{ if (nm && nm.normalize) nm = nm.normalize('NFKC'); }catch{}
+        try{ nm = nm.replace(/[\uFF01-\uFF5E]/g, c=> String.fromCharCode(c.charCodeAt(0) - 0xFEE0)); }catch{}
+        return nm;
+      }catch{ return ''; }
     };
     for (let i=0;i<list.length;i++){
       const it = list[i];
@@ -11896,7 +11930,7 @@
           // ファイル: 選択不可でなければ読み込み
           _loadFromPath(it.url, null, {mode:'new'});
           // Enter と同等に、入力欄をクリアし NORMAL に戻す
-          try{ const hist=':e ' + _collapseDotDotPath(String(_fileTypedDirRaw||'') + String(it.name||'')); _cmdHistoryMaybePush(hist); }catch{}
+          try{ const hist=':e ' + _collapseDotDotPath(String(_fileTypedDirRaw||'') + String(_bestEntryName(it)||'')); _cmdHistoryMaybePush(hist); }catch{}
           try{ if (cmdinput) cmdinput.value=''; }catch{}
           _filePopupHide(); _bufPopupHide(); _setMode('NORMAL'); setTimeout(()=>editor.focus(),0);
         }

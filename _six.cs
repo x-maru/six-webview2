@@ -342,6 +342,7 @@ public class __CLASSNAME__ {
               if (!string.IsNullOrEmpty(host) && string.Equals(host, "wsl.localhost", StringComparison.OrdinalIgnoreCase)){
                 try{
                   var psi = new ProcessStartInfo(){ FileName = "wsl.exe", Arguments = "-l -q", UseShellExecute=false, RedirectStandardOutput=true, RedirectStandardError=true, CreateNoWindow=true };
+                  try{ psi.StandardOutputEncoding = Encoding.UTF8; psi.StandardErrorEncoding = Encoding.UTF8; }catch{}
                   using (var p = Process.Start(psi)){
                     if (p!=null){
                       string output = p.StandardOutput.ReadToEnd();
@@ -349,7 +350,9 @@ public class __CLASSNAME__ {
                       if (!string.IsNullOrEmpty(output)){
                         using (var sr = new StringReader(output)){
                           string line; while((line = sr.ReadLine()) != null){
-                            var name = line.Trim(); if (name.Length==0) continue;
+                            var nameRaw = line.Trim(); if (nameRaw.Length==0) continue;
+                            string name;
+                            try{ name = nameRaw.Normalize(NormalizationForm.FormKC); }catch{ name = nameRaw; }
                             var url = "file:////wsl.localhost/" + Uri.EscapeDataString(name) + "/";
                             if(!firstE) shares.Append(','); firstE=false;
                             shares.Append("{\"name\":\""+JsonEscape(name)+"\",\"isDir\":true,\"url\":\""+JsonEscape(url)+"\"}");

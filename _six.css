@@ -188,7 +188,13 @@ body { font: var(--fontBase, 18px)/20px Consolas, 'Courier New', monospace; over
 #bufpopup .item.active { background:#1a2030; }
 #bufpopup .num { min-width: 20px; color:#a6accd; }
 #bufpopup .num { font-size: 1.15em; }
-#bufpopup .name { flex:1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+#bufpopup .name { flex:1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; 
+	/* Avoid accidental full-width glyph substitution for ASCII */
+	font-feature-settings: "fwid" 0, "pwid" 0, "kern" 0 !important; font-variant-east-asian: proportional-width !important; 
+	/* Force a monospace-ish fallback to defeat width alternates */
+	font-family: ui-monospace, Consolas, 'Courier New', monospace; 
+	/* Reduce renderer-dependent bidi shaping; treat as plain text */
+	unicode-bidi: plaintext; }
 /* muted selection (incremental search no-match) */
 #bufpopup .item.muted { background: rgba(255, 64, 64, 0.18); }
 

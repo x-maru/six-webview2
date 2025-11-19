@@ -26,7 +26,19 @@ public static class SixHostApp {
     var form = new Form(); form.Text = "six-webview2"; form.Width = 1200; form.Height = 800; var wv = new WebView2(){ Dock = DockStyle.Fill }; form.Controls.Add(wv);
     try{ string iconPath = ICON_PATH_PLACEHOLDER; if (!string.IsNullOrEmpty(iconPath) && File.Exists(iconPath)){ using (var bmp = new Bitmap(iconPath)){ IntPtr hIcon = bmp.GetHicon(); using (var tmp = Icon.FromHandle(hIcon)){ form.Icon = (Icon)tmp.Clone(); } DestroyIcon(hIcon); } } }catch{}
     form.Load += async (_, __) => {
-      var env = await CoreWebView2Environment.CreateAsync(); await wv.EnsureCoreWebView2Async(env); wv.CoreWebView2.Settings.AreDefaultScriptDialogsEnabled = false;
+      string profile = null;
+      try{
+        var raw = url ?? ""; int h = raw.IndexOf('#'); if (h >= 0) raw = raw.Substring(0, h);
+        var u = new Uri(raw);
+        string baseDir = null;
+        if (u.IsFile) baseDir = Path.GetDirectoryName(u.LocalPath); else baseDir = Environment.CurrentDirectory;
+        if (!string.IsNullOrEmpty(baseDir)){
+          profile = Path.Combine(baseDir, ".wv2-profile");
+          try{ Directory.CreateDirectory(profile); }catch{}
+        }
+      }catch{}
+      var env = await CoreWebView2Environment.CreateAsync(browserExecutableFolder: null, userDataFolder: profile, options: null);
+      await wv.EnsureCoreWebView2Async(env); wv.CoreWebView2.Settings.AreDefaultScriptDialogsEnabled = false;
       wv.CoreWebView2.WebMessageReceived += (s, e) => {
         try{
           var txt = e.TryGetWebMessageAsString(); if (string.IsNullOrEmpty(txt)) return;
