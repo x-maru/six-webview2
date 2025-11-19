@@ -1,4 +1,4 @@
-# six-webview2 launcher (Edge app mode replacement)
+﻿# six-webview2 launcher (Edge app mode replacement)
 param(
   # Positional arg(s): one or more documents to open (even if .html)
   [Parameter(Position=0, ValueFromRemainingArguments=$true)]
