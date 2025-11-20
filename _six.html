@@ -27,11 +27,11 @@
       <span id="posinfo" title="カーソル位置"></span>
       <!-- zoom HUD (inline in tabbar; always visible) -->
       <div id="zoomhud" aria-hidden="false">
-        <div class="box">
-          <span class="val" id="zoomVal">100%</span>
+        <div class="box" style="padding:0 0.25rem;">
+          <span class="val" id="zoomVal" style="margin:0;">100%</span>
           <button id="zoomMinus" title="縮小">―</button>
           <button id="zoomPlus" title="拡大">＋</button>
-          <button id="zoomReset" title="リセット">リセット</button>
+          <button id="zoomReset" title="リセット">Reset</button>
         </div>
       </div>
     </div>
@@ -61,7 +61,7 @@
   <div id="toast" style="display:none"><span class="msg"></span></div>
 
   <!-- palette toggle button (always visible; outside overlayPalette) -->
-  <button id="paletteToggleBtn" type="button" title="オーバーレイパレット表示/非表示 (Ctrl+F9)" style="position:fixed; right:12px; bottom:6px; z-index:10001; display:block; font:11px/1.25 system-ui,-apple-system,'Segoe UI',sans-serif; padding:4px 8px; border:1px solid #2a3244; background:#1a2030; color:#e6e6e6; border-radius:6px; cursor:pointer; user-select:none; line-height:1.2;">
+  <button id="paletteToggleBtn" type="button" title="オーバーレイパレット表示/非表示 (Ctrl+F9)" style="position:fixed; right:12px; bottom:6px; z-index:10001; display:flex; align-items:center; font:11px/1.25 system-ui,-apple-system,'Segoe UI',sans-serif; padding:4px 8px; border:1px solid #2a3244; background:#1a2030; color:#e6e6e6; border-radius:6px; cursor:pointer; user-select:none; line-height:1.2;">
     <span style="display:inline-block; filter: grayscale(100%);">🎨</span><span style="display:inline-block; margin-left:6px;">^F9</span>
   </button>
 
