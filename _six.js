@@ -186,7 +186,7 @@ const VERSION_STR = 'vi like TextEditor "six" v' + VERSION;
   function _syncActiveViewStateIntoBuffer(){
     try{
       const b = currentBuffer();
-    if (!b) return; // Ensure buffer exists
+      if (!b) return; // Ensure buffer exists
         b.viewRow = caretRow | 0; b.viewCol = caretCol | 0;
       // snap to line grid for stability
       const st = (editor && typeof editor.scrollTop==='number') ? (editor.scrollTop|0) : 0;
@@ -2327,6 +2327,7 @@ const VERSION_STR = 'vi like TextEditor "six" v' + VERSION;
         // persist VISUAL selection across tabs
         savedVisual: null,
         // external modification tracking (mtime/size established when buffer becomes unmodified after save/load)
+        _externalDeleteIgnored: false, // 外部削除通知のキャンセル後、再起動まで抑止するためのフラグ
         _extMtime: null,
         _extSize: null,
         _externalChangeIgnored: false,
@@ -2507,6 +2508,50 @@ const VERSION_STR = 'vi like TextEditor "six" v' + VERSION;
         if (b && b.path && /^file:\/\//i.test(b.path)){
           /* [switch] external-check trigger log removed */
           _maybeCheckExternalChangeOnActivate(i);
+          // タブ復帰時の削除検出信頼性向上: 初回で見逃した削除を短期再試行（キャッシュ・FS伝播遅延対策）
+          try{
+            setTimeout(()=>{
+              (async()=>{
+                try{
+                  const bb = (i>=0 && i<buffers.length)? buffers[i] : null;
+                  if (!bb || bb!==currentBuffer()) return; // still active
+                  if (!bb.path || !/^file:\/\//i.test(bb.path)) return;
+                  if (bb._externalDeleteIgnored) return;
+                  if (bb._externalDeleteRecoveredAt && (Date.now() - bb._externalDeleteRecoveredAt < 2000)) return;
+                  // 直近でチェック中なら待つ
+                  if (bb._checkingExternal) return;
+                  // 本体処理では削除を判定できなかったケースのみ対象: baseline 有り & mtime/size 未更新 & 直後再statで null
+                  // baseline 条件 (どちらか設定済)
+                  const hasBaseline = (typeof bb._extMtime==='number') || (typeof bb._extSize==='number');
+                  // 初回後まもなくなので throttle とは独立に stat 実行
+                  const meta1 = await _statFileMeta(bb.path);
+                  if (meta1){ return; } // まだ存在 → 削除なし
+                  // 再度キャッシュ破棄後にもう一度（_statFileMeta 内部で破棄済だが念のため二重防御）
+                  try{ const parent = _dirnameURL(bb.path); const key = (function(){ try{ return _ensureSlash(parent)?.toString()||null; }catch{ return null; } })(); if (key && _dirCache && _dirCache.delete){ _dirCache.delete(key); } }catch{}
+                  const meta2 = await _statFileMeta(bb.path);
+                  if (!meta2 && hasBaseline){
+                    const label = bb.path ? _prettyFileUrlLabel(bb.path) : (bb.name||'(untitled)');
+                    const id = await choiceModal({ title:'外部削除検出(再試行)', detail:`このファイルはsixの外部で削除された可能性があります。保存しますか？\n${label}`,
+                      buttons:[{id:'save',label:'保存',primary:true},{id:'cancel',label:'キャンセル'}] });
+                    if (id==='save'){
+                      const textData = _normalizeTextForSaveInternal((bb===currentBuffer() && editor)? (editor.value||'') : (bb.text||''));
+                      const r = await _saveToURLWithExternalCheck(bb, bb.path, textData);
+                      if (r && r.status==='saved'){ try{ bb._externalDeleteIgnored=false; bb._externalDeleteRecoveredAt=Date.now();
+                        const txt = (bb===currentBuffer() && editor)? (editor.value||'') : (bb.text||'');
+                        bb.text = txt; bb.savedText = txt; bb._savedTick = (bb._changeTick|0); bb.modified = false;
+                        toast('保存しました');
+                        // タブ表示即時反映
+                        _setTitle && _setTitle(); _renderTabbar && _renderTabbar();
+                      }catch{} }
+                    } else {
+                      bb._externalDeleteIgnored = true;
+                      toast('外部削除を検出(再試行): キャンセルしました', 2000);
+                    }
+                  }
+                }catch{}
+              })();
+            }, 360); // 360ms 後 (FS反映 + キャッシュ破棄後)
+          }catch{}
         } else {
           try{ b._externalChangeIgnored = false; }catch{}
         }
@@ -2520,7 +2565,36 @@ const VERSION_STR = 'vi like TextEditor "six" v' + VERSION;
       const b = buffers[idx]; if (!b) return;
       if (!b.path || !/^file:\/\//i.test(b.path)){ /* [ext-check] skip log removed */ return; }
       const now = Date.now();
-      if (b._extLastCheckAt && (now - b._extLastCheckAt < 1500)) { /* [ext-check] throttle-skip log removed */ return; }
+      if (b._extLastCheckAt && (now - b._extLastCheckAt < 1500)) {
+        // スロットル期間中でも軽量な外部削除のみ再確認（変更検出遅延を避ける）
+        try{
+          if (!b._checkingExternal){
+            if (b._externalDeleteRecoveredAt && (Date.now() - b._externalDeleteRecoveredAt < 2000)) return;
+            const metaQuick = await _statFileMeta(b.path);
+            if (!metaQuick && !b._externalDeleteIgnored){
+              try{
+                const label = b.path ? _prettyFileUrlLabel(b.path) : (b.name||'(untitled)');
+                const id = await choiceModal({ title:'外部削除検出', detail:`このファイルはsixの外部で削除されました。保存しますか？\n${label}`,
+                  buttons:[{id:'save',label:'保存',primary:true},{id:'cancel',label:'キャンセル'}] });
+                if (id==='save'){
+                  const textData = _normalizeTextForSaveInternal((idx===currentIdx && editor)? (editor.value||'') : (b.text||''));
+                  const r = await _saveToURLWithExternalCheck(b, b.path, textData);
+                  if (r && r.status==='saved'){ try{ b._externalDeleteIgnored=false; b._externalDeleteRecoveredAt=Date.now();
+                    const txt2 = (idx===currentIdx && editor)? (editor.value||'') : (b.text||'');
+                    b.text = txt2; b.savedText = txt2; b._savedTick = (b._changeTick|0); b.modified = false;
+                    toast('保存しました');
+                    _setTitle && _setTitle(); _renderTabbar && _renderTabbar();
+                  }catch{} }
+                } else {
+                  b._externalDeleteIgnored = true;
+                  toast('外部削除を検出: キャンセルしました', 2000);
+                }
+              }catch{}
+            }
+          }
+        }catch{}
+        return; /* throttle branch exit */
+      }
       b._extLastCheckAt = now;
       if (b._checkingExternal){ /* [ext-check] already-checking log removed */ return; }
       /* [ext-check] invoke log removed */
@@ -2647,6 +2721,7 @@ const VERSION_STR = 'vi like TextEditor "six" v' + VERSION;
           const underUnc = !!(uBase && uBase.protocol==='file:' && uBase.host);
           const looksPartialSeg = /^[^\\/:*?"<>|]+$/.test(q);
           if (underUnc && looksPartialSeg){
+          // Additional processing can be added here if needed
             return true;
           }
         }catch{}
@@ -7460,6 +7535,16 @@ const VERSION_STR = 'vi like TextEditor "six" v' + VERSION;
       if (b && b.path && /^file:\/\//i.test(b.path)){
         _maybeCheckExternalChangeOnActivate(idx);
       }
+      // セッション復元直後など idx 未確定の可能性に備え、少し遅延して再試行
+      setTimeout(()=>{
+        try{
+          const idx2 = (typeof currentIdx==='number') ? currentIdx : -1;
+          const b2 = (idx2>=0 && idx2<buffers.length) ? buffers[idx2] : null;
+          if (b2 && b2.path && /^file:\/\//i.test(b2.path)){
+            _maybeCheckExternalChangeOnActivate(idx2);
+          }
+        }catch{}
+      }, 220);
     }catch{}
   });
   // タブ切替なしでアプリが不可視→可視になった場合も同様に確認
@@ -7471,6 +7556,16 @@ const VERSION_STR = 'vi like TextEditor "six" v' + VERSION;
         if (b && b.path && /^file:\/\//i.test(b.path)){
           _maybeCheckExternalChangeOnActivate(idx);
         }
+        // 端末/環境により発火順が前後する場合のフォローとして遅延再試行
+        setTimeout(()=>{
+          try{
+            const idx2 = (typeof currentIdx==='number') ? currentIdx : -1;
+            const b2 = (idx2>=0 && idx2<buffers.length) ? buffers[idx2] : null;
+            if (b2 && b2.path && /^file:\/\//i.test(b2.path)){
+              _maybeCheckExternalChangeOnActivate(idx2);
+            }
+          }catch{}
+        }, 220);
       }
     }catch{}
   });
@@ -12884,6 +12979,18 @@ const VERSION_STR = 'vi like TextEditor "six" v' + VERSION;
               if (touched){ try{ _schedulePersist('startup-mtime'); }catch{} }
             })();
           }, 0);
+        }catch{}
+        // 起動直後（セッション復元直後）にもアクティブファイルの外部削除/変更を一度確認
+        try{
+          setTimeout(()=>{
+            try{
+              const idx = (typeof currentIdx==='number') ? currentIdx : -1;
+              const b = (idx>=0 && idx<buffers.length) ? buffers[idx] : null;
+              if (b && b.path && /^file:\/\//i.test(b.path)){
+                _maybeCheckExternalChangeOnActivate(idx);
+              }
+            }catch{}
+          }, 180);
         }catch{}
   // Ensure initial IME hint/visuals match current mode (typically NORMAL)
   try{ _setMode(_mode); }catch{}
