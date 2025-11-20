@@ -34,6 +34,10 @@ set "TMP_PS=%TEMP%\six_install_%RANDOM%%RANDOM%.ps1"
 >> "%TMP_PS%" echo $s.Arguments        = '-NoLogo -NoProfile -ExecutionPolicy Bypass -File "' + $six + '"'
 >> "%TMP_PS%" echo $s.WorkingDirectory = $ScriptDir
 >> "%TMP_PS%" echo $s.WindowStyle = 7  # 7=Minimized
+>> "%TMP_PS%" echo # Icon: require existing multi-size ICO (no fallback)
+>> "%TMP_PS%" echo $ico = Join-Path $ScriptDir 'six_shortcut.ico'
+>> "%TMP_PS%" echo if (-not (Test-Path $ico)) { Write-Error 'six_shortcut.ico not found. Aborting shortcut creation.'; exit 23 }
+>> "%TMP_PS%" echo $s.IconLocation = $ico
 >> "%TMP_PS%" echo $s.Save()
 >> "%TMP_PS%" echo Write-Host ('Shortcut created: ' ^+ $ln)
 
