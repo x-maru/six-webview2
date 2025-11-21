@@ -11138,6 +11138,12 @@ const VERSION_STR = 'vi like TextEditor "six" v' + VERSION;
   let _fileNextStartBaseURL = null;
   // ポップアップ起動直後に現在選択（通常 ".."）を入力欄へ1度だけ反映するためのフラグ
   let _fileReflectedOnOpen = false;
+  // 初回裸 :e 起動時 ".." 自動補完用 (#758)
+  let _fileInitialUpPrefill = false;
+  let _fileInitialSelectActive = false; // 初回自動補完で ".." が選択状態
+  // 子ディレクトリ降下直後の ".." 自動補完トリガ (#761)
+  let _filePostNavUpPrefill = false;
+  let _fileAutoUpPrefilledTransient = false; // 降下直後1回のみの状態識別
   // ディレクトリ移動直後のみ、ポップアップ選択→入力欄への反映を抑止し、Enterも無効化するための猶予ガード
   // Tab 補完は引き続き有効。タイムスタンプで短時間のみ適用する。
   let _fileReflectGuardUntil = 0;
@@ -11816,7 +11822,7 @@ const VERSION_STR = 'vi like TextEditor "six" v' + VERSION;
     // 入力欄の文字はフィルタではなくインクリメンタルサーチとして扱い、選択のみ移動（反映は上下キーで）
     try{
       const qRawOrig = String(_fileFilter||'');
-      const qTrim = qRawOrig.replace(/\/+$/,'');
+      const qTrim = (_fileInitialSelectActive ? '' : qRawOrig.replace(/\/+$/,'')); // 初回開き ".." 選択中は絞り込み抑止 (#761)
       if (qTrim){
         if (qTrim === '..'){
           // 親ディレクトリ指定は常にカーソル表示
@@ -11885,7 +11891,7 @@ const VERSION_STR = 'vi like TextEditor "six" v' + VERSION;
       }
       // フィルタ非一致はグレー表示 (#576)
       try{
-        const qRaw = String(_fileFilter||'').replace(/\/+$/,'').trim();
+        const qRaw = (_fileInitialSelectActive ? '' : String(_fileFilter||'').replace(/\/+$/,'').trim()); // 初回開きは非一致グレー抑止 (#761)
         if (qRaw){
           let caseSensitive=false; try{ const b=_ensureSlash(_fileBaseURL); if (b && b.protocol==='file:' && b.host && b.host.toLowerCase()==='wsl.localhost') caseSensitive=true; }catch{}
           const starts = (nm)=> caseSensitive ? nm.startsWith(qRaw) : nm.toLowerCase().startsWith(qRaw.toLowerCase());
@@ -12041,6 +12047,57 @@ const VERSION_STR = 'vi like TextEditor "six" v' + VERSION;
   // アクティブ（またはミュート）項目が見切れていれば可視範囲にスクロール
   try{ const act = bufpopupInner.querySelector('.item.active, .item.muted'); if (act && act.scrollIntoView) act.scrollIntoView({block:'nearest', inline:'nearest'}); }catch{}
   window.__sixFileRendering = false;
+    // レンダ終了後に初期 '..' 補完を適用（非同期列挙前は再試行される）
+    try{ _filePopupApplyInitialUpPrefill(); }catch{}
+    // 子ディレクトリ遷移直後の '..' 自動補完（選択なし）
+    try{ _filePopupApplyPostNavUpPrefill(); }catch{}
+  }
+  function _filePopupApplyInitialUpPrefill(){
+    try{
+      if (!_fileInitialUpPrefill) return;
+      if (!_filePopupVisible || !_filePopupVisible()) return;
+      // 抑止条件（ホスト直下など）
+      let suppressUp=false; try{ const baseNow=_ensureSlash(_fileBaseURL); suppressUp = (!!_filePopupNoUp) || (baseNow && (_isHostRoot(baseNow) || _isUncShareRoot(baseNow))); }catch{}
+      if (suppressUp){ _fileInitialUpPrefill=false; return; }
+      const listNow = _filePopupComputeList();
+      const idxUp = listNow.findIndex(e=> e && e._up);
+      if (idxUp<0){ return; }
+      // 既にエントリがロード済で '..' が存在する → 補完
+      if (cmdinput){
+        cmdinput.value=':e ..';
+        try{ cmdinput.focus(); cmdinput.setSelectionRange(cmdinput.value.length-2, cmdinput.value.length); }catch{}
+      }
+      _fileFilter='..';
+      _fileSel=idxUp;
+      _fileSelMuted=false;
+      _fileInitialSelectActive=true;
+      _fileInitialUpPrefill=false; // 一度のみ
+      // 強調更新
+      _filePopupRender();
+    }catch{ _fileInitialUpPrefill=false; }
+  }
+  function _filePopupApplyPostNavUpPrefill(){
+    try{
+      if (!_filePopupVisible || !_filePopupVisible()) return;
+      if (!_filePostNavUpPrefill) return;
+      // ホスト直下などでは '..' を提示しない
+      let suppressUp=false; try{ const baseNow=_ensureSlash(_fileBaseURL); suppressUp = (!!_filePopupNoUp) || (baseNow && (_isHostRoot(baseNow) || _isUncShareRoot(baseNow))); }catch{}
+      if (suppressUp){ _filePostNavUpPrefill=false; return; }
+      const listNow = _filePopupComputeList();
+      const idxUp = listNow.findIndex(e=> e && e._up);
+      if (idxUp < 0){ return; }
+      // サブフォルダ遷移直後: 入力欄に '..' を自動補完（選択はしない）
+      if (cmdinput){
+        cmdinput.value=':e ' + _collapseDotDotPath(String(_fileTypedDirRaw||'') + '..');
+        try{ cmdinput.focus(); const pos=(cmdinput.value||'').length; cmdinput.setSelectionRange(pos,pos); }catch{}
+      }
+      _fileFilter='..';
+      _fileSel = idxUp; _fileSelMuted=false;
+      _fileAutoUpPrefilledTransient = true; // 矢印初回移動で解除するためのフラグ
+      _filePostNavUpPrefill = false; // 一度のみ
+      // 反映
+      _filePopupRender();
+    }catch{ _filePostNavUpPrefill=false; }
   }
 
   
@@ -12050,9 +12107,17 @@ const VERSION_STR = 'vi like TextEditor "six" v' + VERSION;
     bufpopup.dataset.kind='file';
     bufpopup.style.display='';
     _layoutBufPopup();
+    // 初回裸の :e のみ '..' 自動補完フェーズをセット (#758)
+    try{
+      const vRaw = (cmdinput && cmdinput.value)||'';
+      _fileInitialUpPrefill = /^\s*:?\s*e\s*$/.test(vRaw);
+      _fileInitialSelectActive = false;
+    }catch{ _fileInitialUpPrefill=false; _fileInitialSelectActive=false; }
     // Immediately reposition command float below the :e popup with the specified gap
     try{ if (_mode==='CMD' && cmdfloat && cmdfloat.style.display!=='none'){ _positionCmdFloat(); } }catch{}
     _filePopupRender();
+    // 同期列挙完了済みなら即適用試行
+    try{ _filePopupApplyInitialUpPrefill(); }catch{}
   }
   function _filePopupHide(){ if (!bufpopup) return; if (_filePopupVisible()){ bufpopup.style.display='none'; _fileLoading=false; try{ _fileReflectedOnOpen=false; }catch{} try{ window.__sixFileRendering=false; }catch{} } }
   // 旧: 一覧の単純移動は廃止（反映ロジック付きの新実装は下）
@@ -12064,6 +12129,13 @@ const VERSION_STR = 'vi like TextEditor "six" v' + VERSION;
     const prevSel = _fileSel|0;
     _fileSel = Math.max(0, Math.min(list.length-1, _fileSel + d));
     _fileSelMuted = false; // 矢印移動で通常のハイライトに復帰
+    // 初期 '..' 選択状態なら解除（選択範囲をカーソル末尾へ）
+    if (_fileInitialSelectActive){
+      try{ if (cmdinput){ const pos=(cmdinput.value||'').length; cmdinput.setSelectionRange(pos,pos); } }catch{}
+      _fileInitialSelectActive=false;
+      // #759: 自動補完された '..' はユーザ入力扱いではないので、フィルタをクリアして他候補へ移動可能にする
+      if (_fileFilter==='..'){ _fileFilter=''; }
+    }
     // フィルタ非空なら非一致項目をスキップ (#576)
     try{
       const qTrim = String(_fileFilter||'').replace(/\/+$/,'').trim();

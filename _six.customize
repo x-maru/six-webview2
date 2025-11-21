@@ -66,10 +66,10 @@ window.THEME = {
   tabText: "#e0ffe0",
   activeTabBg: "#c0eae0",
   activeTabText: "#406a60",
-  tabScrollBtnEnableBG: "white", // タブスクロールボタン(活性)
-  tabScrollBtnEnableText: "orange", // タブスクロールボタン(活性)
-  tabScrollBtnDisableBG: "black", // タブスクロールボタン(非活性)
-  tabScrollBtnDisableText: "cyan", // タブスクロールボタン(非活性)
+  tabScrollBtnEnableBG: "#40d040", // タブスクロールボタン(活性)
+  tabScrollBtnEnableText: "#008000", // タブスクロールボタン(活性)
+  tabScrollBtnDisableBG: "#102a10", // タブスクロールボタン(非活性)
+  tabScrollBtnDisableText: "#305030", // タブスクロールボタン(非活性)
   posInfoText: "#c0ffca", // "行Y, 列X/W"
 
   // Visual selection default colors
