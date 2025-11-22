@@ -24,22 +24,35 @@ window.THEME = {
   modeInsertFGColor: "#ffe0e0",
   modeVisualFGColor: "#e0e0ff",
 
-  // Editor text color and sizes
-  editorTextColor: "rgb(0,95,31)",
+  // 本文文字色
+  editorTextColor: "#00501a",
 
-  // Inactive line/gutter gradient (top -> bottom)
-  lineGradientStart: "rgb(243,251,243)",
-  lineGradientEnd: "rgb(237,243,237)",
-  inactiveGutterGradientStart: "rgb(235,239,235)",
-  inactiveGutterGradientEnd: "rgb(219,227,219)",
+  // 行背景(カーソル外)グラデーション
+  lineGradientStart: "#f4fff4",
+  lineGradientEnd: "#f5f7f5",
+  // 行番号背景(カーソル外)グラデーション
+  inactiveGutterGradientStart: "#e8f8e8",
+  inactiveGutterGradientEnd: "#d9e2d9",
   gutterNumberColor: "#b0b0b0",
 
-  // Active line/gutter gradient (editor and gutter)
-  activeLineGradientStart: "rgb(231,255,231)",
-  activeLineGradientEnd: "rgb(203,243,203)",
+  // 行背景(NORMALカーソル行)グラデーション
+  activeLineGradientStart: "#e4ffe4",
+  activeLineGradientEnd: "#e2fde2",
+  // 行番号背景(NORMALカーソル行)グラデーション
   activeGutterGradientStart: "#d0ead0",
   activeGutterGradientEnd: "#c0dac0",
+  // 行背景(INSERTカーソル行)グラデーション
+  activeEditLineGradStart: "#fff0f0",
+  activeEditLineGradEnd: "#ffe0e0",
+  // 行番号背景(INSERTカーソル行)グラデーション
+  activeEditGutterGradStart: "#efe0e0",
+  activeEditGutterGradEnd: "#efd0c0",
+  // NORMAL行番号 文字色
   activeLineNumberColor: "#100000",
+
+  // INSERT mode specific gradients
+  editCaretGradStart: "rgba(255,79,0,0.95)",
+  editCaretGradMid: "rgba(255,79,0,0.01)",
 
   eofFillColor: "#0f1117",
   eofGutterFillColor: "rgb(235,239,235)",
@@ -51,14 +64,6 @@ window.THEME = {
   caretGradientStart: "#ff0000",
   caretGradientMid: "rgba(255,0,0,0.5)",
   caretWidthPx: 2,
-
-  // INSERT mode specific gradients (#437/#438)
-  activeEditLineGradStart: "#fff0f0",
-  activeEditLineGradEnd: "#ffe0e0",
-  activeEditGutterGradStart: "#efe0e0",
-  activeEditGutterGradEnd: "#efd0c0",
-  editCaretGradStart: "rgba(255,79,0,0.95)",
-  editCaretGradMid: "rgba(255,79,0,0.01)",
 
   // タブバー
   tabBarBg: "#102a10",
