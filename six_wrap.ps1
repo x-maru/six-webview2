@@ -17,7 +17,36 @@ try { Start-Transcript -Path $LogPath -Append -ErrorAction SilentlyContinue | Ou
 $oldEap = $ErrorActionPreference
 $ErrorActionPreference = 'Stop'
 try {
-  & $script @Args
+  # 分離: six.ps1 のスイッチ引数を抽出し、残りを Docs として扱う
+  $raw = @() + $Args
+  $docs = @()
+  $switches = @()
+  for($i=0; $i -lt $raw.Count; $i++){
+    $a = $raw[$i]
+    switch -regex ($a) {
+      '^-Diag$'           { $switches += '-Diag'; continue }
+      '^-AllowMulti$'     { $switches += '-AllowMulti'; continue }
+      '^-DevInsecure$'    { $switches += '-DevInsecure'; continue }
+      '^-ResetProfile$'   { $switches += '-ResetProfile'; continue }
+      '^-KeepOpen$'       { $switches += '-KeepOpen'; continue }
+      '^-ShowUrl$'        { $switches += '-ShowUrl'; continue }
+      '^-InstanceTag$'    { 
+        if ($i+1 -lt $raw.Count -and ($raw[$i+1] -notmatch '^-')) { $switches += '-InstanceTag'; $switches += $raw[$i+1]; $i++; } else { $switches += '-InstanceTag' }
+        continue 
+      }
+      '^-WaitMinutes$'    { 
+        if ($i+1 -lt $raw.Count -and ($raw[$i+1] -match '^[0-9]+$')) { $switches += '-WaitMinutes'; $switches += $raw[$i+1]; $i++; } else { $switches += '-WaitMinutes' }
+        continue 
+      }
+      '^-Html$'           { 
+        if ($i+1 -lt $raw.Count -and ($raw[$i+1] -notmatch '^-')) { $switches += '-Html'; $switches += $raw[$i+1]; $i++; } else { $switches += '-Html' }
+        continue 
+      }
+      default { $docs += $a }
+    }
+  }
+  # Docs は位置引数として先行、スイッチは後ろへ
+  & $script @docs @switches
 } catch {
   $err = $_
   try {

@@ -23,11 +23,23 @@ param(
   [switch]$ShowUrl = $false,
 
   # Allow multiple instances (bypass single-instance mutex). Default: false
-  [switch]$AllowMulti = $false
+  [switch]$AllowMulti = $false,
+  # Optional instance tag appended to mutex name for parallel debug runs
+  [string]$InstanceTag,
+  # Suppress non-error informational logs
+  # Diag: 通常はエラーのみ出力し、指定時に情報ログも表示 (PowerShell共通 -Verbose と衝突回避)
+  [switch]$Diag = $false
 )
 
 $global:SixLaunched = $false
 $here  = Split-Path -Parent $MyInvocation.MyCommand.Path
+
+# Sanitize instance tag early for reuse (profile dir, mutex)
+$InstanceTagSan = $null
+if ($InstanceTag) {
+  try { $InstanceTagSan = ($InstanceTag -replace '[^a-zA-Z0-9_-]', '_') } catch { $InstanceTagSan = 'tag' }
+  if ($InstanceTagSan.Length -gt 24) { $InstanceTagSan = $InstanceTagSan.Substring(0,24) }
+}
 if (-not $AllowMulti) {
   $hash = ''
   try {
@@ -39,7 +51,7 @@ if (-not $AllowMulti) {
     $hash = ($here -replace '[^a-zA-Z0-9]', '_')
     if ($hash.Length -gt 12) { $hash = $hash.Substring($hash.Length-12) }
   }
-  $mutexName = "six-webview2-$hash"
+  $mutexName = if ($InstanceTagSan) { "six-webview2-$hash-$InstanceTagSan" } else { "six-webview2-$hash" }
   try {
     $createdNew = $false
     $global:SixMutex = [System.Threading.Mutex]::new($false, $mutexName, [ref]$createdNew)
@@ -64,7 +76,7 @@ if (-not $AllowMulti) {
     Write-Host "Mutex setup failed: $($_.Exception.Message)" -ForegroundColor DarkYellow
   }
 }
-Write-Host "six.ps1 starting in: $here"
+if ($Diag) { Write-Host "six.ps1 starting in: $here" }
 $index = Join-Path $here $Html
 
 if (-not (Test-Path $index)) {
@@ -115,6 +127,21 @@ function Test-TcpPortFree([int]$Port){
     $l = [System.Net.Sockets.TcpListener]::new([System.Net.IPAddress]::Loopback, $Port)
     $l.Start(); $l.Stop(); return $true
   } catch { return $false }
+}
+
+# More reliable: attempt an actual TCP connect to detect a listening server.
+function Test-TcpPortOccupied([int]$Port){
+  try {
+    $client = [System.Net.Sockets.TcpClient]::new()
+    $iar = $client.BeginConnect([System.Net.IPAddress]::Loopback, $Port, $null, $null)
+    $ok = $iar.AsyncWaitHandle.WaitOne(300)
+    if (-not $ok) { try { $client.Close() } catch {}; return $false }
+    $client.EndConnect($iar)
+    try { $client.Close() } catch {}
+    return $true
+  } catch {
+    return $false
+  }
 }
 
 function Start-WebView2Host([string]$Url){
@@ -173,6 +200,14 @@ if ($Docs -and $Docs.Count -gt 0) {
   }
 }
 
+# Filter out tokens that are actually known switch names accidentally captured as docs (robust against wrapper forwarding).
+try {
+  $knownSwitches = @('-Diag','-AllowMulti','-DevInsecure','-ResetProfile','-KeepOpen','-ShowUrl','-WaitMinutes','-Html','-InstanceTag')
+  if ($DocItems.Count -gt 0) {
+    $DocItems = $DocItems | Where-Object { $_.doc -and (-not ($knownSwitches -contains $_.doc)) }
+  }
+} catch {}
+
 # Start a minimal loopback HTTP API (TcpListener) for directory listing
 # Returns JSON { entries: [ { name, isDir, url } ] }
 # Build file:/// URL for the layout html
@@ -187,18 +222,99 @@ for($attempt=0; $attempt -lt 6; $attempt++){
   if (Test-TcpPortFree -Port $cand) { $tryPort = $cand; break }
 }
 if (-not $tryPort) { $tryPort = Get-Random -Minimum 25000 -Maximum 61000 }
-try { Start-NanoApi -Port $tryPort } catch {}
+try {
+  Start-NanoApi -Port $tryPort
+  if ($Diag) { Write-Host "[nanoapi] start attempted on $tryPort" }
+} catch {
+  Write-Host "[nanoapi] start failed: $($_.Exception.Message)" -ForegroundColor Yellow
+}
+try {
+  Start-Sleep -Milliseconds 120  # allow listener to enter Accept loop
+  $portOccupied = Test-TcpPortOccupied -Port $tryPort
+  $freeProbe = Test-TcpPortFree -Port $tryPort
+  # freeProbe true means we could bind+release (may race); occupied true means a real listener accepted or handshake succeeded
+  if ($Diag) { Write-Host "[nanoapi] port occupied(connect): $portOccupied freeProbe:$freeProbe" }
+} catch { Write-Host "[nanoapi] port occupied check error: $($_.Exception.Message)" -ForegroundColor Yellow }
+try {
+  if ($global:_nano -and $global:_nano.GetType().GetMethod('IsAlive')) {
+    $alive = $false
+    try { $alive = $global:_nano.IsAlive() } catch { $alive = $false }
+    if ($Diag) { Write-Host "[nanoapi] IsAlive(): $alive" }
+  }
+} catch { Write-Host "[nanoapi] IsAlive() check error: $($_.Exception.Message)" -ForegroundColor Yellow }
+
+## --- Ping loop & diagnostics (HttpClient assembly load + fallback) ---------
+try {
+  Add-Type -AssemblyName System.Net.Http -ErrorAction Stop
+} catch {
+  Write-Host "[nanoapi] System.Net.Http load failed: $($_.Exception.Message)" -ForegroundColor DarkYellow
+}
+$haveHttpClient = $false
+try { $null = [System.Net.Http.HttpClient]; $haveHttpClient = $true } catch { $haveHttpClient = $false }
+if (-not $haveHttpClient) { Write-Host "[nanoapi] HttpClient unavailable; using HttpWebRequest fallback" -ForegroundColor DarkYellow }
+
 $base = "http://127.0.0.1:$tryPort/"
 $ok = $false
-for($i=0; $i -lt 20; $i++){
-  if (Test-NanoApi -Base $base) { $ok = $true; break }
-  Start-Sleep -Milliseconds 150
+for($i=0; $i -lt 30; $i++){
+  $pong = $false
+  try {
+    if ($haveHttpClient) {
+      $hcTry = [System.Net.Http.HttpClient]::new(); $hcTry.Timeout = [TimeSpan]::FromMilliseconds(1000)
+      $respTry = $hcTry.GetAsync($base + 'ping').GetAwaiter().GetResult()
+      if ($respTry) {
+        $pong = $respTry.IsSuccessStatusCode
+        if ($Diag) { Write-Host "[nanoapi] ping attempt $i status=$($respTry.StatusCode) success=$pong via=HttpClient" }
+      } else {
+        if ($Diag) { Write-Host "[nanoapi] ping attempt $i null response via=HttpClient" }
+      }
+    } else {
+      $req = [System.Net.WebRequest]::Create($base + 'ping')
+      $req.Method = 'GET'
+      $resp = $req.GetResponse()
+      # Try to cast to HttpWebResponse to read StatusCode; fallback assumes success if no exception
+      $httpResp = $null
+      if ($resp -is [System.Net.HttpWebResponse]) {
+        $httpResp = [System.Net.HttpWebResponse]$resp
+      }
+      if ($httpResp) {
+        $pong = ($httpResp.StatusCode -eq 200)
+        if ($Diag) { Write-Host "[nanoapi] ping attempt $i status=$($httpResp.StatusCode) success=$pong via=HttpWebRequest" }
+      } else {
+        $pong = $true
+        if ($Diag) { Write-Host "[nanoapi] ping attempt $i fallback success via=WebRequest" }
+      }
+      try { $resp.Close() } catch {}
+    }
+  } catch {
+    Write-Host "[nanoapi] ping attempt $i exception: $($_.Exception.Message)"
+  }
+  if ($pong) { $ok = $true; if ($Diag) { Write-Host "[nanoapi] /ping OK on attempt $i" }; break }
+  if ($i -in 0,5,10,20 -and $Diag){ Write-Host "[nanoapi] waiting for /ping (attempt $i)" }
+  if ($i -eq 5) {
+    $postStartAlive = $false
+    if ($global:_nano -and $global:_nano.GetType().GetMethod('IsAlive')) {
+      try { $postStartAlive = $global:_nano.IsAlive() } catch { $postStartAlive = $false }
+    }
+    if ($Diag) { Write-Host "[nanoapi] mid-loop IsAlive=$postStartAlive" }
+  }
+  if ($i -eq 8) {
+    try {
+      $portStillBound = -not (Test-TcpPortFree -Port $tryPort)
+      if ($Diag) { Write-Host "[nanoapi] re-check port bound (attempt $i): $portStillBound" }
+    } catch { Write-Host "[nanoapi] re-check port error: $($_.Exception.Message)" -ForegroundColor DarkYellow }
+  }
+  Start-Sleep -Milliseconds 160
 }
+if (-not $ok){ Write-Host "[nanoapi] final ping failed after attempts" -ForegroundColor DarkYellow }
+try {
+  if ($global:_nano -and $global:_nano.GetType().GetMethod('LastError')) {
+    $le = $null
+    try { $le = $global:_nano.LastError() } catch {}
+    if ($le) { Write-Host "[nanoapi] LastError: $le" -ForegroundColor Yellow }
+  }
+} catch {}
 if ($ok) { $apiPort = $tryPort; $apiBase = $base; $apiStarted = $true }
-else {
-  $apiPort = $tryPort; $apiBase = $base
-  Write-Host "Warning: Nano API did not respond on $tryPort. UI features may be limited."
-}
+else { $apiPort = $tryPort; $apiBase = $base; Write-Host "Warning: Nano API did not respond on $tryPort. UI features may be limited." }
 if ($DocItems.Count -ge 2) {
   # 複数ドキュメントは bundle=Base64(JSON) で渡す（data は含めない）
   $json = $DocItems | ConvertTo-Json -Depth 2 -Compress
@@ -263,7 +379,7 @@ if ($DocItems.Count -ge 2) {
   $targetUrl = $indexUri.AbsoluteUri + "#api=" + ([System.Uri]::EscapeDataString($apiBase))
 }
 
-if ($ShowUrl) { Write-Host "Launching URL: $targetUrl" }
+if ($ShowUrl -and $Diag) { Write-Host "Launching URL: $targetUrl" }
 
 function Start-WebView2Host([string]$Url){
   $nugetBase = Join-Path $env:USERPROFILE ".nuget/packages/microsoft.web.webview2"
@@ -303,7 +419,9 @@ if (-not $launched) {
   $edge = "C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe"
   if (!(Test-Path $edge)) { $edge = "C:\Program Files\Microsoft\Edge\Application\msedge.exe" }
   if (Test-Path $edge) {
-    $profileDir = Join-Path $here ".wv2-profile"
+    $profileDirBase = ".wv2-profile"
+    if ($InstanceTagSan) { $profileDirBase = ".wv2-profile-" + $InstanceTagSan }
+    $profileDir = Join-Path $here $profileDirBase
     if ($ResetProfile) { try { Remove-Item -Recurse -Force -ErrorAction SilentlyContinue $profileDir } catch {} }
     if (-not (Test-Path $profileDir)) { New-Item -ItemType Directory -Path $profileDir | Out-Null }
     $args = @("--allow-file-access-from-files","--user-data-dir=$profileDir","--app=$targetUrl")

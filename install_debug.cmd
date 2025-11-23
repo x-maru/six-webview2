@@ -16,7 +16,7 @@ set "TMP_PS=%TEMP%\six_install_dbg_%RANDOM%%RANDOM%.ps1"
 >> "%TMP_PS%" echo $cmdPath = $env:ComSpec; if (-not (Test-Path $cmdPath)) { $cmdPath = Join-Path $env:SystemRoot 'System32/cmd.exe' }
 >> "%TMP_PS%" echo $s.TargetPath       = $cmdPath
 >> "%TMP_PS%" echo $six = Join-Path $ScriptDir 'six.ps1'
->> "%TMP_PS%" echo $s.Arguments        = '/k "' + $PsPath + ' -NoLogo -NoProfile -ExecutionPolicy Bypass -File "' + $six + '" -KeepOpen -ShowUrl -AllowMulti"'
+>> "%TMP_PS%" echo $s.Arguments        = '/k "' + $PsPath + ' -NoLogo -NoProfile -ExecutionPolicy Bypass -File "' + $six + '" -KeepOpen -ShowUrl -AllowMulti -InstanceTag debug -Diag"'
 >> "%TMP_PS%" echo $s.WorkingDirectory = $ScriptDir
 >> "%TMP_PS%" echo $s.Save()
 >> "%TMP_PS%" echo Write-Host ('Debug shortcut created: ' ^+ $ln)

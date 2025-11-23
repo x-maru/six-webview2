@@ -1,6 +1,5 @@
 ﻿const VERSION = 0.9;
 const VERSION_STR = 'vi like TextEditor "six" v' + VERSION;
-
 // six migration oriented bootstrap (spec-aligned skeleton with file load)
 (function(){
   // Multi-instance lock (#643): prevent opening a second active instance.
@@ -19,7 +18,10 @@ const VERSION_STR = 'vi like TextEditor "six" v' + VERSION;
         msg.textContent = 'six: already running (multi-instance blocked)';
         msg.style.position='fixed'; msg.style.top='40%'; msg.style.left='50%'; msg.style.transform='translate(-50%,-50%)';
         msg.style.background='rgba(0,0,0,0.8)'; msg.style.color='yellow'; msg.style.padding='16px 24px'; msg.style.font='16px monospace'; msg.style.zIndex='99999'; msg.style.border='1px solid #666';
-        document.body.appendChild(msg);
+                  // raw (WSL host prefix補正後表示) を再取得
+                  let disp2 = String(_fileTypedDirRaw||'');
+                  try{ const b=_ensureSlash(_fileBaseURL); if (b && b.protocol==='file:' && b.host && b.host.toLowerCase()==='wsl.localhost'){ disp2='//'+b.host+'/'+disp2.replace(/^\/+/,''); } }catch{}
+                  cmdinput.value = ':e ' + _collapseDotDotPath(disp2 + '..');
       }catch{}
       try{ setTimeout(()=>{ try{ window.close(); }catch{} }, 900); }catch{}
       return; // stop bootstrap; do not restore session
@@ -306,8 +308,18 @@ const VERSION_STR = 'vi like TextEditor "six" v' + VERSION;
     try{
       const s = localStorage.getItem(_SESSION_KEY);
       if (!s) return false;
-        const j = JSON.parse(s); 
-        if (!j || !Array.isArray(j.buffers)) return false; 
+      // Corruption quick check: concatenated JSON objects or trailing junk
+      try{
+        const trimmed = s.trim();
+        // Heuristic: if more than one opening brace at start without matching closing at end
+        if (/}\s*{/.test(trimmed)){
+          // Try naive split and keep first valid object only; otherwise clear
+          const firstPart = trimmed.replace(/}\s*{[\s\S]*$/, '}');
+          try{ JSON.parse(firstPart); localStorage.setItem(_SESSION_KEY, firstPart); }catch{ localStorage.removeItem(_SESSION_KEY); return false; }
+        }
+      }catch{}
+      let j; try{ j = JSON.parse(localStorage.getItem(_SESSION_KEY)); }catch(e){ try{ localStorage.removeItem(_SESSION_KEY); }catch{} return false; }
+      if (!j || !Array.isArray(j.buffers)) return false; 
       // Attempt window restore (best-effort). Requires host support in WebView2.
       try{ _restoreWindowFromSession(j.windowState); }catch{}
       // Restore scrolloff if present; otherwise fall back to default 3 (#473)
@@ -2677,6 +2689,7 @@ const VERSION_STR = 'vi like TextEditor "six" v' + VERSION;
           // タブ復帰時の削除検出信頼性向上: 初回で見逃した削除を短期再試行（キャッシュ・FS伝播遅延対策）
           try{
             setTimeout(()=>{
+              // (旧) Enter直接入力禁止名チェック削除 (#862 で統合処理へ移行)
               (async()=>{
                 try{
                   const bb = (i>=0 && i<buffers.length)? buffers[i] : null;
@@ -3406,6 +3419,11 @@ const VERSION_STR = 'vi like TextEditor "six" v' + VERSION;
       bundleB64 = qh.get('bundle');
     }
     if (api) { try{ _apiBase = api.endsWith('/') ? api : (api + '/'); }catch{} }
+    // Guard: If doc is actually a launcher switch (e.g. -Diag) treat as absent so we fall back to session restore.
+    try{
+      const knownSwitches = ['-Diag','-AllowMulti','-DevInsecure','-ResetProfile','-KeepOpen','-ShowUrl','-WaitMinutes','-Html','-InstanceTag'];
+      if (doc && knownSwitches.indexOf(doc) >= 0){ doc = null; name = null; dataB64 = null; }
+    }catch{}
     // ネイティブ API は非対応とする
     // bundle (複数ドキュメント) 優先
     if (bundleB64){
@@ -9814,6 +9832,40 @@ const VERSION_STR = 'vi like TextEditor "six" v' + VERSION;
         }catch{}
       });
       cmdinput.addEventListener('keydown',(e)=>{
+        // '/' 押下で選択ディレクトリへ即降下 (#836)
+        try{
+          if (e.key==='/' && !e.ctrlKey && !e.metaKey && !e.altKey && _filePopupVisible()){
+            const listNow = Array.isArray(_fileEntries)? _fileEntries : [];
+            const selIdx = Math.max(0, Math.min(listNow.length-1, _fileSel|0));
+            const entSel = listNow[selIdx];
+            // caret が末尾 & 選択がディレクトリ
+            const caretAtEnd = (function(){ try{ return cmdinput.selectionStart === cmdinput.value.length && cmdinput.selectionEnd === cmdinput.value.length; }catch{ return false; } })();
+            if (caretAtEnd && entSel && entSel.isDir){
+              e.preventDefault(); e.stopPropagation();
+              // 降下処理: _fileTypedDirRaw へ追加し一覧再取得
+              const q = String(entSel.name||''); if (!q){ return; }
+              _fileJustNavAt = Date.now(); _fileReflectGuardUntil = Date.now() + 600; _fileNavRetryCount = 0; _fileSelMuted = false;
+              _fileTypedDirRaw = (_fileTypedDirRaw||'') + q + '/';
+              // 入力欄更新（末尾スラッシュを残し、その後の自動再描画で選択補完）
+              try{ cmdinput.value=':e ' + _collapseDotDotPath(_fileTypedDirRaw); }catch{}
+              // 次のレンダで反映をスキップ (末尾スラッシュ消失防止)
+              window._fileSkipReflectOnce = true;
+              // 子一覧ロード
+              try{
+                _fileBaseURL = _ensureSlash(new URL(q+'/', _fileBaseURL));
+              }catch{}
+              _fileEntries=[]; _fileLoading=true; try{ window._fileLastListStartTs=Date.now(); }catch{} _fileFilter='';
+              if (_filePopupVisible()) _filePopupRender();
+              const reqKeyDir = (function(){ try{ return _ensureSlash(_fileBaseURL)?.toString()||null; }catch{ return null; } })();
+              _listDirEntriesWithQuickRetry(_fileBaseURL)
+                .then(list2=>{ try{ const curKey=_ensureSlash(_fileBaseURL)?.toString()||null; if(!reqKeyDir||curKey===reqKeyDir){ _fileEntries=Array.isArray(list2)? list2: []; if(Array.isArray(list2)&&list2.length>0){ _fileStableEntries=list2.slice(); _fileStableBaseKey=curKey; } _fileSel=0; } }catch{} })
+                .finally(()=>{ _fileLoading=false; if (_filePopupVisible()) _filePopupRender(); });
+              return; // ハンドリング済み
+            }
+            // 非ディレクトリ/条件外ならそのまま入力継続 (反映スキップして末尾'/'残す)
+            window._fileSkipReflectOnce = true;
+          }
+        }catch{}
         // :b popup 拡張 — 'd' で選択バッファを破棄（:b のままのときのみ有効）
         try{
           if (_bufPopupVisible() && !e.ctrlKey && !e.altKey && !e.metaKey && e.key==='d'){
@@ -9999,7 +10051,7 @@ const VERSION_STR = 'vi like TextEditor "six" v' + VERSION;
                     // 二段階降下の第1段: _fileTypedDirRaw に追加して子一覧取得後、先頭ディレクトリ名をステージ
                     _fileJustNavAt = Date.now(); _fileReflectGuardUntil = Date.now() + 500; _fileNavRetryCount = 0; _fileSelMuted = false;
                     _fileTypedDirRaw = (_fileTypedDirRaw||'') + q + '/';
-                            if (cmdinput){ cmdinput.value=':e ' + (_fileRelativeMode? _fileTypedDirRaw : _collapseDotDotPath(_fileTypedDirRaw)); }
+                            if (cmdinput){ cmdinput.value=':e ' + _collapseDotDotPath(_fileTypedDirRaw); }
                     const baseAfter = _fileBaseURL = _ensureSlash(new URL(q+'/', _fileBaseURL));
                     _fileEntries = []; _fileLoading = true; try{ window._fileLastListStartTs = Date.now(); }catch{} _fileFilter=''; if (_filePopupVisible()) _filePopupRender();
                     const reqKeyDir = (function(){ try{ return _ensureSlash(_fileBaseURL)?.toString()||null; }catch{ return null; } })();
@@ -10085,7 +10137,7 @@ const VERSION_STR = 'vi like TextEditor "six" v' + VERSION;
                       _fileJustNavAt = Date.now(); _fileReflectGuardUntil = Date.now() + 500; _fileNavRetryCount = 0; _fileSelMuted = false;
                       _fileTypedDirRaw = (_fileTypedDirRaw||'') + q + '/';
                       // 入力欄はベースパスのみ更新（補完は後段 autoprefill）
-                      if (cmdinput){ cmdinput.value=':e ' + (_fileRelativeMode? _fileTypedDirRaw : _collapseDotDotPath(_fileTypedDirRaw)); }
+                      if (cmdinput){ cmdinput.value=':e ' + _collapseDotDotPath(_fileTypedDirRaw); }
                       // 非同期で子をロード→先頭ディレクトリがあれば追記（スラッシュ無しで選択状態）
                       const baseAfter = _fileBaseURL = _ensureSlash(new URL(q+'/', _fileBaseURL));
                       _fileEntries = []; _fileLoading = true; try{ window._fileLastListStartTs = Date.now(); }catch{} _fileFilter=''; if (_filePopupVisible()) _filePopupRender();
@@ -10166,7 +10218,8 @@ const VERSION_STR = 'vi like TextEditor "six" v' + VERSION;
                   // ただし一覧ローディング中は誤確定を防ぐため保留
                   if (_fileLoading){ return; }
                   (async()=>{
-                    try{ if (_isNtfsIllegalName(q)){ toast('Windows(NTFS)では無効な名前です',1800); _triggerVisualBell && _triggerVisualBell(); return; } }catch{}
+                    // 入力直接確定時も共通禁止名判定を適用 (#862)
+                    try{ if (_isNtfsProhibitedNameAny(q, null)){ toast('Windows(NTFS)では無効な名前のため開けません',1800); _triggerVisualBell && _triggerVisualBell(); return; } }catch{}
                     const ok = await _loadFromPath(q, _fileBaseURL, { silentOnFail:true, mode:'new' });
                     if (!ok){
                       let finalURL = null;
@@ -10239,6 +10292,8 @@ const VERSION_STR = 'vi like TextEditor "six" v' + VERSION;
               // ただし一覧ローディング中は誤確定を防ぐため保留
               if (_fileLoading){ return; }
               (async()=>{
+                // 候補なし確定時も共通禁止名判定 (#862)
+                try{ if (_isNtfsProhibitedNameAny(q, null)){ toast('Windows(NTFS)では無効な名前のため開けません',1800); _triggerVisualBell && _triggerVisualBell(); return; } }catch{}
                 const ok = await _loadFromPath(q, _fileBaseURL, { silentOnFail:true, mode:'new' });
                 if (!ok){
                   let finalURL = null;
@@ -10293,19 +10348,8 @@ const VERSION_STR = 'vi like TextEditor "six" v' + VERSION;
                     if (cmdinput){ cmdinput.value=':e ' + _collapseDotDotPath(_fileTypedDirRaw); }
                     // 基点も進める（入力解析待ちで遅延しないように）
                     _fileBaseURL = nextBase;
-                    // 子ディレクトリへ Enter で降りた直後、".." 自動補完フラグをセット
-                    try{ _filePostNavUpPrefill = true; }catch{}
-                    // 即時入力欄にも ".." を表示（ユーザ操作感向上）
-                    try{
-                      const baseNowEarly = _ensureSlash(_fileBaseURL);
-                      const suppressUpEarly = (!!_filePopupNoUp) || (baseNowEarly && (_isHostRoot(baseNowEarly) || _isUncShareRoot(baseNowEarly)));
-                      if (!suppressUpEarly && cmdinput){
-                        // UI表示は常に現在の typedDirRaw を基点に '..' を付加（相対一貫性のため）
-                        cmdinput.value = ':e ' + _collapseDotDotPath(String(_fileTypedDirRaw||'') + '..');
-                        // keep filter unchanged so arrows work normally
-                        try{ const pos=(cmdinput.value||'').length; cmdinput.setSelectionRange(pos,pos); }catch{}
-                      }
-                    }catch{}
+                    // ".." 自動補完撤去 (#856): 降下後はそのまま保持し不要な親ジャンプ誘発を防止
+                    try{ console.debug('[dir-enter child descend]', { base: String(_fileBaseURL), typed:_fileTypedDirRaw }); }catch{}
                     // Enter遷移では非同期列挙を明示的に開始（クリックと同等のタイミング）
                     try{
                       const baseNowEnter = _ensureSlash(_fileBaseURL);
@@ -10323,16 +10367,7 @@ const VERSION_STR = 'vi like TextEditor "six" v' + VERSION;
                                 const suppressUpFinal = (!!_filePopupNoUp) || (baseNowEnter && (_isHostRoot(baseNowEnter) || _isUncShareRoot(baseNowEnter)));
                                 _fileSel = (suppressUpFinal?0:1);
                               }catch{}
-                              // 列挙完了時にも '..' 強制反映（上書きされた場合の再補正）
-                              try{
-                                if (!_filePopupNoUp && cmdinput){
-                                  const want=':e ' + _collapseDotDotPath(String(_fileTypedDirRaw||'') + '..');
-                                  if (cmdinput.value !== want){
-                                    cmdinput.value = want; // do not alter filter here
-                                    try{ const pos=(cmdinput.value||'').length; cmdinput.setSelectionRange(pos,pos); }catch{}
-                                  }
-                                }
-                              }catch{}
+                                        // ".." 強制反映撤去 (#856)
                             }
                           }catch{}
                         })
@@ -11438,6 +11473,8 @@ const VERSION_STR = 'vi like TextEditor "six" v' + VERSION;
       }catch{}
       name.textContent = disp;
       div.appendChild(num); div.appendChild(name);
+      // 動的再バインド用に名前を保持（クリック時に現在一覧から再探索し stale クロージャを回避） (#848/#850)
+      try{ div.dataset.entryName = String(it && it.name || ''); }catch{}
       div.addEventListener('click', ()=>{
         // クリック確定でも Esc 相当の終了処理 → 次フレームで切替 の順に統一
         let st0 = 0; try{ st0 = (editor && typeof editor.scrollTop==='number') ? (editor.scrollTop|0) : 0; }catch{}
@@ -11479,7 +11516,7 @@ const VERSION_STR = 'vi like TextEditor "six" v' + VERSION;
   let _fileFilter = '';
   let _fileBaseURL = null;       // URL オブジェクト（末尾/を保証）
   let _fileTypedDirRaw = '';     // ユーザーが :e の後に入力したディレクトリ部分（最後の区切りまで）
-  let _fileRelativeMode = false; // blank :e 開始時は相対運用（フルパスへ展開せず）
+  // _fileRelativeMode 廃止 (#853)
   let _fileEntries = [];         // {name,isDir,url}
   let _fileLoading = false;      // ディレクトリ一覧ロード中か
   let _fileListTimer = null;     // :e 入力時の列挙ディレイ用
@@ -11507,6 +11544,19 @@ const VERSION_STR = 'vi like TextEditor "six" v' + VERSION;
       console.debug('[parentNav]', rec);
     }catch{}
   }
+  // 子ディレクトリクリック遷移デバッグ (#844-#847)
+  if (typeof window._fileClickDebug === 'undefined') window._fileClickDebug = false;
+  let _fileClickLogs = [];
+  function _fileClickLog(entry){
+    try{
+      if (!window._fileClickDebug) return;
+      const ts = new Date().toISOString();
+      const rec = Object.assign({ ts }, entry||{});
+      _fileClickLogs.push(rec);
+      if (_fileClickLogs.length > 400) _fileClickLogs.splice(0, _fileClickLogs.length - 400);
+      console.debug('[clickDir]', rec);
+    }catch{}
+  }
   let _fileInvalid = false; // 不正な :e 入力中（一覧の代わりに '********' を表示）
   let _filePopupNoUp = false; // 特殊ケース（":e //" の疑似候補表示など）で ".." を消す
   // 選択ドリルダウン時に、:e 入力ハンドラのデバウンスをバイパスするためのキー
@@ -11523,13 +11573,13 @@ const VERSION_STR = 'vi like TextEditor "six" v' + VERSION;
   let _fileInitialUpPrefill = false;
   let _fileInitialSelectActive = false; // 初回自動補完で ".." が選択状態
   // 子ディレクトリ降下直後の ".." 自動補完トリガ (#761)
-  let _filePostNavUpPrefill = false;
+  // _filePostNavUpPrefill 廃止 (#856 ディレクトリ降下後の ".." 自動補完を撤去)
   let _fileAutoUpPrefilledTransient = false; // 降下直後1回のみの状態識別
   // ディレクトリ移動直後のみ、ポップアップ選択→入力欄への反映を抑止し、Enterも無効化するための猶予ガード
   // Tab 補完は引き続き有効。タイムスタンプで短時間のみ適用する。
   let _fileReflectGuardUntil = 0;
   // 相対モード初回 ':e ' で開いた直後一度だけ先頭候補を補完したかどうか
-  let _fileInitialRelPrefillDone = false;
+  // _fileInitialRelPrefillDone 廃止 (#853)
 
   // NTFS で不許可な名前かどうかを判定（WSL配下の表示で選択不可にする目的）
   function _isNtfsIllegalName(name){
@@ -11539,10 +11589,14 @@ const VERSION_STR = 'vi like TextEditor "six" v' + VERSION;
       if (s === '..') return false;
       // 禁止文字: < > : " | ? *
       if (/[<>:"|?*]/.test(s)) return true;
+      // UI 表示上コロンが私用領域文字（PUA）へ置換されるケース (例 U+F03A '') もコロン扱いで禁止 (#861)
+      if (/\uF03A/.test(s)) return true;
       // よくある「代替コロン」類（全角/小さいコロン/比率記号など）も念のため捕捉
       if (/[\uFF1A\uFE55\u2236\u02D0\u02F8]/.test(s)) return true; // ：﹕∶ː˸
       // モジバケ等で %3A が残っている（または二重エンコード %253A）場合も無効扱い
       if (/%25?3a/i.test(s)) return true;
+      // PUA コロン (U+F03A) のエンコード形 (%EF%80%BA) も無効扱い (#861)
+      if (/%ef%80%ba/i.test(s)) return true;
       // 末尾のピリオド/スペースは禁止
       if (/[\. ]$/.test(s)) return true;
       // 予約名（拡張子の前のベース名で判定、拡張子が付いていても不可）
@@ -11566,6 +11620,8 @@ const VERSION_STR = 'vi like TextEditor "six" v' + VERSION;
       // デコード不可や保険として、エンコード表現にも含まれていれば無効扱い
       if (/%3a/i.test(last)) return true;      // ':'
       if (/%253a/i.test(last)) return true;    // 二重エンコードケース
+      // PUA コロン (U+F03A) の UTF-8 エンコード (%EF%80%BA) を含む末尾も無効 (#861)
+      if (/%ef%80%ba/i.test(last)) return true;
       // その他の禁則（" < > | ? * など）は encodeURIComponent 済みなら %22 等になるが、
       // Linux 側で実際に使われ得るのは ':' が主目的のため、ここでは ':' を優先検出。
       return false;
@@ -11579,11 +11635,27 @@ const VERSION_STR = 'vi like TextEditor "six" v' + VERSION;
       // 代表例: "xxx:Zone.Identifier" の派生（モジバケや全角コロン込みでラフに検出）
       if (/zone\.identifier/i.test(s)){
         if (/:/.test(s)) return true;
-        if (/[\uFF1A\uFE55\u2236\u02D0\u02F8]/.test(s)) return true; // ：﹕∶ː˸
+        if(/[\uFF1A\uFE55\u2236\u02D0\u02F8\uF03A]/.test(s)) return true; // ：﹕∶ː˸ + 私用領域コロン (#861)
         if (/%25?3a/i.test(s)) return true; // %3A or %253A
+        if (/%ef%80%ba/i.test(s)) return true; // PUA コロンエンコード (#861)
         // 区切りが非英数字・非ドットで不自然なケースも無効扱い
         if (/[^A-Za-z0-9._-]Zone\.Identifier/i.test(s)) return true;
       }
+      return false;
+    }catch{ return false; }
+  }
+
+  // 統合 NTFS 禁止名判定: ファイル/ディレクトリ名と URL の末尾から包括的に検出 (#862)
+  function _isNtfsProhibitedNameAny(name, url){
+    try{
+      const fname = String(name||'');
+      if (_isNtfsIllegalName(fname)) return true;
+      if (_nameHintsNtfsIllegalLike(fname)) return true;
+      if (/[:]/.test(fname)) return true; // 直接コロン
+      if (/\uF03A/.test(fname)) return true; // PUA コロン
+      if (/%25?3a/i.test(fname)) return true; // エンコード/二重エンコード
+      if (/%ef%80%ba/i.test(fname)) return true; // PUA コロン UTF-8 (%EF%80%BA)
+      if (url && _urlLastSegHasNtfsBad(url)) return true;
       return false;
     }catch{ return false; }
   }
@@ -11993,7 +12065,9 @@ const VERSION_STR = 'vi like TextEditor "six" v' + VERSION;
             if (fsPath){
               const apiFs = _apiBase + 'dir?fs=' + encodeURIComponent(fsPath);
               let j2;
-              const timeout3 = isUnc ? 6000 : 2000;
+              // UNC(\\host\share\...) は遅延しやすいためタイムアウトを延長。isUnc 未定義エラー対策で都度判定 (#850)
+              const _isUncFs = (p)=>{ try{ return /^\\\\[^\\]+/.test(p); }catch{ return false; } };
+              const timeout3 = _isUncFs(fsPath) ? 6000 : 2000;
               try{ j2 = await _fetchJSONWithTimeout(apiFs, timeout3); try{ _apiNoteSuccess(); }catch{} }catch(e3){ if (_apiIsEnabled()){ try{ _apiNoteFailure(); }catch{} } throw e3; }
               if (j2 && Array.isArray(j2.entries)){
                 const arr2 = j2.entries.map(e=>{
@@ -12070,19 +12144,11 @@ const VERSION_STR = 'vi like TextEditor "six" v' + VERSION;
     // 仕様変更: 疑似候補 ".."（親ディレクトリ行）を一覧に挿入しない。
     // 親移動は Alt+U で行う。ここでは _fileEntries の内容のみを描画する。
     const list = [];
-    // WSL(\\wsl$ / wsl.localhost) 配下では、NTFSで無効となる名前を選択不可にマーキング
-    let underWsl = false;
-    try{
-      const b = _ensureSlash(_fileBaseURL);
-      const h = (b && b.host ? b.host.toLowerCase() : '');
-      underWsl = !!(b && b.protocol==='file:' && (h==='wsl.localhost' || h==='wsl$'));
-    }catch{}
+    // 共通 NTFS 禁止名判定（WSL/UNC/ローカルを問わず列挙時にマーキング） #862
     for (const e of _fileEntries){
       if (!e){ continue; }
-      if (underWsl){
-        const disabled = _isNtfsIllegalName(e.name||'') || _urlLastSegHasNtfsBad(e.url||'') || _nameHintsNtfsIllegalLike(e.name||'');
-        if (disabled){ list.push(Object.assign({}, e, { _disabled: true })); continue; }
-      }
+      const disabled = _isNtfsProhibitedNameAny(e.name||'', e.url||'');
+      if (disabled){ list.push(Object.assign({}, e, { _disabled: true })); continue; }
       list.push(e);
     }
     return list;
@@ -12144,6 +12210,255 @@ const VERSION_STR = 'vi like TextEditor "six" v' + VERSION;
     if (window.__sixFileRendering) return; window.__sixFileRendering = true;
     bufpopup.dataset.kind = 'file';
     bufpopupInner.innerHTML = '';
+    // Path header (breadcrumb) (#830)
+    try{
+      const header = document.createElement('div'); header.className='path-header';
+      const baseDir = (function(){ try{ return _fileBaseURL ? _ensureSlash(_fileBaseURL) : null; }catch{ return null; } })();
+      const hostPart = (function(){ try{ return baseDir ? (baseDir.host||'') : ''; }catch{ return ''; } })();
+      let rawPath = (function(){ try{ return baseDir ? String(baseDir.pathname||'') : ''; }catch{ return ''; } })();
+      rawPath = rawPath.replace(/\\/g,'/');
+      // Remove leading '/' (file:///C:/Users -> /C:/Users)
+      if (rawPath.startsWith('/')) rawPath = rawPath.slice(1);
+      // Ensure ends with '/' for directory
+      if (rawPath && !/\/$/ .test(rawPath)) rawPath += '/';
+      // UNC/WSL host semantics: When hostPart present, path as-is (do not prepend host again in segment labels)
+      // Split into segments (ignore final empty segment after trailing '/')
+      let segs = rawPath.split('/').filter(s=>s.length>0);
+      // Windows ドライブ先頭は 'C:/' 形式で表示 (末尾スラッシュ保持)
+      // Windowsドライブ表示は "C:" のまま (末尾スラッシュ付与しない) (#833)
+      try{ if (segs.length>0 && /^[A-Za-z]:\/$/.test(segs[0])) segs[0] = segs[0].replace(/\/$/, ''); }catch{}
+      // Build cumulative paths
+      let cumulative = [];
+      const pushSlash = ()=>{ const slash=document.createElement('span'); slash.className='slash'; slash.textContent=' / '; header.appendChild(slash); };
+      // WSL プレフィックス表示 (非クリック文字列)
+      if (hostPart && hostPart.toLowerCase()==='wsl.localhost'){
+        const prefix = document.createElement('span');
+        prefix.className='prefix-host'; prefix.textContent='//wsl.localhost'; // 末尾スラッシュ除去 (#833)
+        header.appendChild(prefix);
+        if (segs.length>0) pushSlash();
+      }
+      const clickableWraps = [];
+      segs.forEach((seg, idx)=>{
+        const isLast = (idx === segs.length-1);
+        cumulative.push(seg);
+        const targetPath = cumulative.join('/') + '/';
+        if (isLast){
+          const lastSpan = document.createElement('span'); lastSpan.className='crumb-last'; lastSpan.textContent=seg; // 非クリック (#832/#833)
+          if (seg.length < 4) lastSpan.classList.add('short');
+          header.appendChild(lastSpan);
+        } else {
+          const wrap = document.createElement('div'); wrap.style.position='relative'; wrap.style.display='inline-flex'; wrap.style.alignItems='flex-end';
+          const btn = document.createElement('button'); btn.type='button'; btn.textContent=seg; if (seg.length < 4) btn.classList.add('short');
+          btn.addEventListener('click', ()=>{
+            try{
+              // パンくずクリック開始時に親ナビ pending を明示解除し二重上位遷移を抑制 (#851)
+              try{ _fileNavParentPending=false; window._fileParentNavAutoRunFlag=false; }catch{}
+              try{ window._fileParentNavGuardUntil = Date.now() + 450; }catch{}
+              try{ console.debug('[pathHeader nav pre]', { seg, targetPath }); }catch{}
+              // 直前（遷移前）のディレクトリ末尾セグメントを記憶し、親へ移動後そのディレクトリを選択状態にする (#857)
+              let prevSeg = '';
+              try{
+                const prevBase = _ensureSlash(_fileBaseURL);
+                if (prevBase){
+                  let p = decodeURIComponent(prevBase.pathname||'').replace(/\/+$/,'');
+                  const i = p.lastIndexOf('/');
+                  prevSeg = (i>=0 ? p.slice(i+1) : p);
+                }
+              }catch{}
+              try{ _filePostSelectName = prevSeg || null; }catch{}
+              let urlStr = 'file://';
+              if (hostPart){ urlStr += '//' + hostPart + '/' + targetPath; } else { urlStr += '///' + targetPath; }
+              const newBase = _ensureSlash(new URL(urlStr));
+              _fileBaseURL = newBase; _fileTypedDirRaw = targetPath; _fileFilter=''; _fileAutoPrefillOnNextRender=null;
+              _fileEntries=[]; _fileSel=0; _fileLoading=true; try{ window._fileLastListStartTs=Date.now(); }catch{}
+              // 入力欄追従 (#833)
+              try{ _reflectCmdInputFullPath(hostPart, targetPath); }catch{}
+              const reqKey = (function(){ try{ return _ensureSlash(_fileBaseURL)?.toString()||null; }catch{ return null; } })();
+              console.debug('[pathHeader nav]', { target:targetPath, url:urlStr });
+              _listDirEntriesWithQuickRetry(_fileBaseURL)
+                .then(list=>{ try{ const curKey=_ensureSlash(_fileBaseURL)?.toString()||null; if (!reqKey || reqKey===curKey){ _fileEntries=Array.isArray(list)? list: []; if (Array.isArray(list)&&list.length>0){ _fileStableEntries=list.slice(); _fileStableBaseKey=curKey; } } }catch{} })
+                .finally(()=>{ _fileLoading=false; if (_filePopupVisible()) _filePopupRender(); try{ console.debug('[pathHeader nav done]', { seg, targetPath, base:_fileBaseURL?String(_fileBaseURL):null }); }catch{} });
+            }catch(e){ console.warn('[pathHeader nav error]', e); }
+          });
+          wrap.appendChild(btn); header.appendChild(wrap); clickableWraps.push({ wrap, btn, idx }); pushSlash();
+        }
+      });
+      // Fキー: 親方向 (最終=現在は除外)。F1=1つ上 ... 最大8。
+      function _navigateUpLevels(levels){
+        try{
+          if (!Number.isFinite(levels) || levels < 1) return;
+          const segCount = segs.length; const targetIdx = segCount - 1 - levels; if (targetIdx < 0) return;
+          const upSegs = segs.slice(0, targetIdx+1); const pathRel = upSegs.join('/') + '/';
+          let urlStr='file://'; if (hostPart){ urlStr += '//' + hostPart + '/' + pathRel; } else { urlStr += '///' + pathRel; }
+          // 遡上前の末尾セグメントを post-select ターゲットに保持 (#857)
+          let prevSeg='';
+          try{
+            const prevBase=_ensureSlash(_fileBaseURL);
+            if (prevBase){
+              let p=decodeURIComponent(prevBase.pathname||'').replace(/\/+$/,'');
+              const i=p.lastIndexOf('/');
+              prevSeg=(i>=0? p.slice(i+1): p);
+            }
+          }catch{}
+          try{ _filePostSelectName = prevSeg || null; }catch{}
+          const newBase=_ensureSlash(new URL(urlStr)); _fileBaseURL=newBase; _fileTypedDirRaw=pathRel; _fileFilter=''; _fileAutoPrefillOnNextRender=null;
+          // 多段遡上時も pending フラグ解除して追加の自動親遷移を防ぐ (#851)
+          try{ _fileNavParentPending=false; window._fileParentNavAutoRunFlag=false; window._fileParentNavGuardUntil = Date.now() + 450; }catch{}
+          _fileEntries=[]; _fileSel=0; _fileLoading=true; try{ window._fileLastListStartTs=Date.now(); }catch{}
+          // 入力欄追従 (F2/F3等多段遡上) (#833)
+          try{ _reflectCmdInputFullPath(hostPart, pathRel); }catch{}
+          const reqKey=(function(){ try{ return _ensureSlash(_fileBaseURL)?.toString()||null; }catch{ return null; } })();
+          console.debug('[fkey nav]', { levels, target:pathRel, url:urlStr });
+          _listDirEntriesWithQuickRetry(_fileBaseURL)
+            .then(list=>{ try{ const curKey=_ensureSlash(_fileBaseURL)?.toString()||null; if (!reqKey || reqKey===curKey){ _fileEntries=Array.isArray(list)? list: []; if (Array.isArray(list)&&list.length>0){ _fileStableEntries=list.slice(); _fileStableBaseKey=curKey; } } }catch{} })
+            .finally(()=>{ _fileLoading=false; if (_filePopupVisible()) _filePopupRender(); });
+        }catch(e){ console.warn('[fkey nav error]', e); }
+      }
+      // CMD入力欄へ常にフルパスを反映 (末尾'/'除去 + 最後のセグメント選択) (#834)
+      function _reflectCmdInputFullPath(hostPartRaw, pathRaw){
+        if (!cmdinput) return;
+        try{
+          let body = String(pathRaw||'');
+          // 末尾スラッシュ除去 (ルート『/』や 'C:' の場合は残さない)
+          if (body.length>1 && /\/$/.test(body)) body = body.replace(/\/+$/,'');
+          let display = body;
+          if (hostPartRaw && hostPartRaw.toLowerCase()==='wsl.localhost'){
+            display = '//' + hostPartRaw + '/' + display.replace(/^\/+/, '');
+          }
+          // Windows ドライブ: 'C:/' -> 'C:'
+          display = display.replace(/^([A-Za-z]:)\/$/, '$1');
+          const prefix = ':e ';
+          const full = prefix + display;
+          cmdinput.value = full;
+          // 最後の '/' を探し、その右側を選択 (無い場合は全体後半=末尾から0長さ選択)
+          const lastSlashIdx = full.lastIndexOf('/');
+          let selStart = full.length; let selEnd = full.length;
+          if (lastSlashIdx >= prefix.length){
+            selStart = lastSlashIdx + 1; selEnd = full.length; // ディレクトリ名部分
+          } else if (/^:e\s+[A-Za-z]:$/.test(full)){ // ドライブ単体 'C:' 選択
+            selStart = prefix.length; selEnd = full.length;
+          }
+          try{ cmdinput.setSelectionRange(selStart, selEnd); }catch{}
+        }catch{}
+      }
+      const maxLevels = Math.min(8, Math.max(0, segs.length-1));
+      for (let level=1; level<=maxLevels; level++){
+        const targetIdx = segs.length - 1 - level; if (targetIdx < 0) continue;
+        const wrapInfo = clickableWraps.find(w=>w.idx===targetIdx); if (!wrapInfo) continue;
+        try{
+          const tag = document.createElement('div'); const fKey='F'+String(level);
+          tag.className='fkey-tag'; tag.textContent=fKey; tag.dataset.level=String(level);
+          tag.title=fKey + ' で親ディレクトリへ移動 ('+level+'つ上)';
+          tag.addEventListener('click', (ev)=>{ ev.preventDefault(); ev.stopPropagation(); _navigateUpLevels(level); });
+          wrapInfo.wrap.appendChild(tag);
+        }catch(e){ console.debug('[fkey-tag error]', e); }
+      }
+      try{
+        const _fkeyHandler=(e)=>{ try{ if(!e||!/^F[1-8]$/.test(e.key)) return; const visible=(_filePopupVisible&&_filePopupVisible()); if(!visible) return; if(_mode!=='CMD') return; const num=parseInt(e.key.slice(1),10); if(!Number.isFinite(num)||num<1) return; e.preventDefault(); e.stopPropagation(); _navigateUpLevels(num); }catch{} };
+        try{ window.removeEventListener('keydown', window.__sixFKeyHandler, true); }catch{}
+        window.__sixFKeyHandler=_fkeyHandler; window.addEventListener('keydown', _fkeyHandler, true);
+      }catch{}
+      // レンダ直後: フィルタ未入力時は選択行を反映 (#836)
+      try{
+        if (_mode==='CMD' && cmdinput && (!_fileFilter || _fileFilter.length===0)){
+          if (window._fileSkipReflectOnce){ window._fileSkipReflectOnce=false; } else {
+            const listNow = (function(){
+              try{
+                // list 変数は後段で定義されるがここではまだ未構築の可能性があるため再取得
+                return Array.isArray(_fileEntries)? _fileEntries : [];
+              }catch{ return []; }
+            })();
+            const selIdx = Math.max(0, Math.min(listNow.length-1, _fileSel|0));
+            const entSel = listNow[selIdx];
+            // ベースディレクトリ（末尾スラッシュ付）
+            const basePathRel = (segs.length? segs.join('/') + '/' : '');
+            if (entSel && entSel.name){
+              // 選択行名を末尾に付与してその部分を選択
+              let display = basePathRel + String(entSel.name||'');
+              // WSL prefix
+              if (hostPart && hostPart.toLowerCase()==='wsl.localhost'){
+                display = '//' + hostPart + '/' + display.replace(/^\/+/, '');
+              }
+              // Windowsドライブ: 'C:/' + name -> 'C:/'維持
+              display = display.replace(/^([A-Za-z]:)([^/]|$)/, '$1/$2');
+              const prefix=':e ';
+              cmdinput.value = prefix + display;
+              const selStart = (prefix + basePathRel).length + (hostPart && hostPart.toLowerCase()==='wsl.localhost'? ('//'+hostPart+'/').length : 0);
+              const basePrefixExtra = (hostPart && hostPart.toLowerCase()==='wsl.localhost'? ('//'+hostPart+'/').length : 0);
+              // 正しい開始位置再計算 (WSL時 prefix + //host/ + basePathRel)
+              const hostExtra = (hostPart && hostPart.toLowerCase()==='wsl.localhost') ? ('//'+hostPart+'/').length : 0;
+              const startPos = prefix.length + hostExtra + basePathRel.length;
+              const endPos = cmdinput.value.length;
+              try{ cmdinput.setSelectionRange(startPos, endPos); }catch{}
+            } else {
+              // 選択行なし: フルパスのみ反映
+              _reflectCmdInputFullPath(hostPart, basePathRel);
+            }
+          }
+        }
+      }catch{}
+      // 未割当のFキーはスキップ。キーイベント追加 (popup描画ごとに最新再登録)。
+      function _navigateUpLevels(levels){
+        try{
+          if (!Number.isFinite(levels) || levels < 1) return;
+          const segCount = segs.length;
+          const targetIdx = segCount - 1 - levels;
+          if (targetIdx < 0) return;
+          // 組み立て: targetIdx までの cumulative path
+          const upSegs = segs.slice(0, targetIdx+1);
+          const pathRel = upSegs.join('/') + '/';
+          let urlStr = 'file://';
+          if (hostPart){ urlStr += '//' + hostPart + '/' + pathRel; }
+          else { urlStr += '///' + pathRel; }
+          const newBase = _ensureSlash(new URL(urlStr));
+          _fileBaseURL = newBase;
+          _fileTypedDirRaw = pathRel;
+          _fileFilter = '';
+          _fileAutoPrefillOnNextRender = null;
+          _fileEntries = []; _fileSel=0; _fileLoading=true; try{ window._fileLastListStartTs = Date.now(); }catch{}
+          const reqKey = (function(){ try{ return _ensureSlash(_fileBaseURL)?.toString()||null; }catch{ return null; } })();
+          console.debug('[fkey nav]', { levels, target:pathRel, url:urlStr });
+          _listDirEntriesWithQuickRetry(_fileBaseURL)
+            .then(list=>{ try{ const curKey=_ensureSlash(_fileBaseURL)?.toString()||null; if (!reqKey || reqKey===curKey){ _fileEntries=Array.isArray(list)? list: []; if (Array.isArray(list)&&list.length>0){ _fileStableEntries=list.slice(); _fileStableBaseKey=curKey; } } }catch{} })
+            .finally(()=>{ _fileLoading=false; if (_filePopupVisible()) _filePopupRender(); });
+        }catch(e){ console.warn('[fkey nav error]', e); }
+      }
+      try{
+        // 既存のグローバル F1 (親1つ) とは別の多段遡上: capture 優先
+        const _fkeyHandler = (e)=>{
+          try{
+            if (!e || !/^F[1-8]$/.test(e.key)) return;
+            const visible = (_filePopupVisible && _filePopupVisible());
+            if (!visible) return; // popup 可視のみ
+            // CMD モードのみ動作
+            if (_mode !== 'CMD') return;
+            const num = parseInt(e.key.slice(1),10);
+            if (!Number.isFinite(num) || num<1) return;
+            e.preventDefault(); e.stopPropagation();
+            _navigateUpLevels(num);
+          }catch{}
+        };
+        // 一旦既存を除去して再登録 (多重描画防止)
+        try{ window.removeEventListener('keydown', window.__sixFKeyHandler, true); }catch{}
+        window.__sixFKeyHandler = _fkeyHandler;
+        window.addEventListener('keydown', _fkeyHandler, true);
+      }catch{}
+      // If no segments (root), show just host or placeholder
+      if (segs.length===0){
+        const rootBtn=document.createElement('button'); rootBtn.type='button'; rootBtn.textContent = hostPart ? hostPart : '/'; rootBtn.className='active'; header.appendChild(rootBtn);
+      }
+      // ヘッダはスクロール領域外（上側固定）へ配置 (#839)
+      try{
+        let host = bufpopup.querySelector('.path-header-host');
+        if (!host){
+          host = document.createElement('div'); host.className='path-header-host';
+          // inner の直前に挿入して flex-column で固定
+          if (bufpopupInner){ bufpopup.insertBefore(host, bufpopupInner); }
+          else { bufpopup.appendChild(host); }
+        }
+        host.innerHTML=''; host.appendChild(header);
+      }catch{ bufpopupInner.appendChild(header); }
+    }catch{}
     // 基点変更ごとにリトライカウンタ初期化 (#826)
     try{
       const curKey = (function(){ try{ return _ensureSlash(_fileBaseURL)?.toString()||null; }catch{ return null; } })();
@@ -12243,6 +12558,24 @@ const VERSION_STR = 'vi like TextEditor "six" v' + VERSION;
         }
       } else {
         _fileSelMuted = false;
+      }
+    }catch{}
+    // 追加: フィルタ一致候補一覧と位置をグローバルに保持し、上下移動を非ラップ化 (#838)
+    try{
+      const qTrim = String(_fileFilter||'').replace(/\/+$/,'').trim();
+      let caseSensitive=false; try{ const b=_ensureSlash(_fileBaseURL); if (b && b.protocol==='file:' && b.host && b.host.toLowerCase()==='wsl.localhost') caseSensitive=true; }catch{}
+      const starts = (nm)=> caseSensitive ? nm.startsWith(qTrim) : nm.toLowerCase().startsWith(qTrim.toLowerCase());
+      if (qTrim && qTrim!=='.' && qTrim!=='..'){
+        const matches = list.map((e,i)=> (e && starts(String(e.name||''))) ? i : -1).filter(i=> i>=0);
+        window._fileFilteredIndices = matches;
+        if (matches.length>0){
+          if (!matches.includes(_fileSel)) _fileSel = matches[0];
+          let pos = matches.indexOf(_fileSel); if (pos < 0) pos = 0; window._fileFilterPos = pos;
+        } else {
+          window._fileFilteredIndices = []; window._fileFilterPos = 0;
+        }
+      } else {
+        window._fileFilteredIndices = []; window._fileFilterPos = 0;
       }
     }catch{}
   _fileSel = Math.max(0, Math.min(list.length-1, _fileSel));
@@ -12379,6 +12712,7 @@ const VERSION_STR = 'vi like TextEditor "six" v' + VERSION;
       const name = document.createElement('span'); name.className='name';
       const dispName = _bestEntryName(it);
       name.textContent = dispName + (it.isDir? '/':'');
+      try{ div.dataset.entryName = String(it && it.name || ''); }catch{}
       if (it && it._disabled){
         try{ div.className += ' disabled'; }catch{}
         try{ name.style.color = '#d33'; }catch{}
@@ -12400,6 +12734,21 @@ const VERSION_STR = 'vi like TextEditor "six" v' + VERSION;
       // クリックでフォーカスを奪わない
       div.addEventListener('mousedown', (ev)=>{ ev.preventDefault(); });
       div.addEventListener('click', ()=>{
+        // クリック開始時に parentNav 自動実行待機フラグを明示的に解除（誤遷移二重発火抑止）
+        try{ _fileNavParentPending = false; window._fileParentNavAutoRunFlag=false; }catch{}
+        try{ const baseStr0=_ensureSlash(_fileBaseURL)?.toString()||''; _fileClickLog({ phase:'click-start', base:baseStr0, typedDirRaw:String(_fileTypedDirRaw||''), domName: div && div.dataset ? div.dataset.entryName : null }); }catch{}
+        // 動的再取得（staleクロージャ疑い対策）: DOMに保持した名前から現在の一覧を再探索
+        try{
+          const nmDom = div && div.dataset ? (div.dataset.entryName||'') : '';
+          const origName = (it && it.name) ? String(it.name) : '';
+          let rebound = null;
+          try{
+            const entriesNow = Array.isArray(_fileEntries)? _fileEntries:[];
+            rebound = entriesNow.find(e=> e && e.isDir && !e._up && String(e.name||'')===nmDom) || null;
+          }catch{}
+          if (rebound){ it = rebound; }
+          _fileClickLog({ phase:'rebinding', domName:nmDom, origName, reboundName: (rebound && rebound.name)||null });
+        }catch{}
         if (it && it._disabled){ try{ _triggerVisualBell && _triggerVisualBell(); }catch{} try{ toast('Windows(NTFS)では無効な名前のため開けません', 1800); }catch{} return; }
         // クリック時も補完専用: 入力欄に貼り付けて input ハンドラに委譲
         if (it.isDir){
@@ -12426,7 +12775,60 @@ const VERSION_STR = 'vi like TextEditor "six" v' + VERSION;
                 return; // 補完のみで抜ける
               }
             }catch{}
-            const nextBase = _ensureSlash(new URL(it.url, _fileBaseURL));
+            // 子ディレクトリ遷移: 現在ディレクトリ(最終セグメント)自身は遷移しない。ローカル・WSL・UNC 全て名前連結で統一 (#846 再修正)
+            let nextBase = null;
+            try{
+              const b = _ensureSlash(_fileBaseURL);
+              if (!b){ return; }
+              const itemName = String(it && it.name || '');
+              if (!itemName){ return; }
+              const pathParts = (function(){
+                try{ return (b.pathname||'').replace(/\\/g,'/').replace(/\/+$/,'').split('/').filter(Boolean); }catch{ return []; }
+              })();
+              const lastSeg = pathParts.length? pathParts[pathParts.length-1] : '';
+              const dbg = { phase:'pre-build', base:String(b), baseHost:b.host||'', basePath:b.pathname||'', pathParts:pathParts.slice(), lastSeg, itemName, itUrl:String(it&&it.url||''), typedDirRaw:String(_fileTypedDirRaw||'') };
+              // 初期ログ（従来 post-build のみだったため前段階も記録）
+              try{ _fileClickLog(Object.assign({}, dbg, { phase:'pre-build' })); }catch{}
+              // 現在のディレクトリ自身 (it.url === _fileBaseURL) の重複表示があればスキップ (#849)
+              try{
+                const baseStrCur = _ensureSlash(_fileBaseURL)?.toString()||'';
+                const itUrlStr = String(it && it.url || '');
+                if (baseStrCur && itUrlStr && itUrlStr === baseStrCur){
+                  _fileClickLog(Object.assign({}, dbg, { phase:'self-url-skip', baseStrCur, itUrlStr }));
+                  try{ toast && toast('現在のディレクトリです', 800); }catch{}
+                  return;
+                }
+              }catch{}
+              if (itemName === lastSeg){
+                // 自己ディレクトリ -> 何もしない
+                try{ toast && toast('現在のディレクトリです', 800); }catch{}
+                _fileClickLog(Object.assign({}, dbg, { phase:'self-dir-skip' }));
+                try{ _fileClickLog({ phase:'branch-decision', branch:'self-dir-skip', item:itemName, lastSeg }); }catch{}
+                return;
+              }
+              // 入力欄の生ディレクトリが既に itemName/ で終わっている場合も自己クリックとみなして抑止（基点ズレ時の二重遷移防止）
+              try{
+                const typedRawNow = String(_fileTypedDirRaw||'');
+                if (typedRawNow.endsWith(itemName + '/')){
+                  _fileClickLog(Object.assign({}, dbg, { phase:'self-typed-skip', typedRawNow }));
+                  try{ toast && toast('現在のディレクトリです', 800); }catch{}
+                  try{ _fileClickLog({ phase:'branch-decision', branch:'self-typed-skip', item:itemName }); }catch{}
+                  return;
+                }
+              }catch{}
+              const newParts = pathParts.concat(itemName);
+              const newPath = '/' + newParts.join('/') + '/';
+              if (b.host){
+                nextBase = _ensureSlash(new URL('file://' + '//' + b.host + newPath));
+              } else {
+                // Windows ドライブ /C:/Users → 先頭スラッシュを保持したまま
+                nextBase = _ensureSlash(new URL('file://' + '///' + newPath.replace(/^\/+/, '')));
+              }
+              try{ dbg.newPath=newPath; dbg.nextBaseStr=String(nextBase); }catch{}
+              _fileClickLog(Object.assign({}, dbg, { phase:'post-build' }));
+              try{ _fileClickLog({ phase:'branch-decision', branch:'child-descend', item:itemName, from:String(b), to:String(nextBase) }); }catch{}
+            }catch{ nextBase = null; }
+            if (!nextBase) return; // 解決不能時は中断
             // 選択直後の短期リトライウィンドウを開始
             _fileJustNavAt = Date.now();
             // 直後の反映/Enterガードを短期オン
@@ -12437,6 +12839,7 @@ const VERSION_STR = 'vi like TextEditor "six" v' + VERSION;
             // 旧一覧のまま残らないよう直ちにローディング表示へ
             _fileEntries = []; _fileSel = 0; _fileLoading = true; if (_filePopupVisible()) _filePopupRender();
             if (it._up){
+              try{ _fileClickLog({ phase:'branch-decision', branch:'parent-up', item:String(it&&it.name||'') }); }catch{}
               // 親: 直前セグメントは baseURL から頑健に取得し、基点も即更新
               let s = (_fileTypedDirRaw||'').replace(/\\/g,'/').replace(/\/+$/,'');
               const idx = s.lastIndexOf('/');
@@ -12492,27 +12895,59 @@ const VERSION_STR = 'vi like TextEditor "six" v' + VERSION;
             } else {
               // Enter/Tab と同じ補完のみに徹する。"//" 段階で "wsl.localhost/" を選んだ場合は先頭 "//" を保持。
               // "/" はローカルルートとして通常処理（UNC化しない）。
-              const isAtRootDoubleSlash = /^\s*:?\s*e\s+\/\/$/i.test((cmdinput && cmdinput.value)||'') || (_fileTypedDirRaw==='//');
-              if (isAtRootDoubleSlash){
-                _fileTypedDirRaw = '//' + _bestEntryName(it) + '/';
-              } else {
-                _fileTypedDirRaw = (_fileTypedDirRaw||'') + _bestEntryName(it) + '/';
-              }
+              // WSLホストパス重複バグ (#858) 対策: typedDirRaw を常に baseURL から再構築し末尾に itemName を単一付加
+              try{
+                const bNow = _ensureSlash(_fileBaseURL);
+                if (bNow && bNow.host && bNow.host.toLowerCase()==='wsl.localhost'){
+                  let body = decodeURIComponent(bNow.pathname||'').replace(/^\/+/,'');
+                  if (body && !/\/$/.test(body)) body += '/';
+                  // 既存 typedDirRaw が二重化している場合の除去: 末尾半分が先頭と完全一致なら一度だけ残す
+                  const dedupe = (s)=>{
+                    try{
+                      const parts = s.split('/').filter(Boolean);
+                      for (let n=Math.floor(parts.length/2); n>=2; n--){
+                        const head = parts.slice(0,n).join('/');
+                        const tail = parts.slice(-n).join('/');
+                        if (head === tail){ return head + '/'; }
+                      }
+                    }catch{}
+                    return s;
+                  };
+                  body = dedupe(body);
+                  _fileTypedDirRaw = '//' + bNow.host + '/' + body + _bestEntryName(it) + '/';
+                  _fileClickLog({ phase:'wsl-build', host:bNow.host, body, item:_bestEntryName(it) });
+                } else {
+                  // 通常パス: 既存方式（単純連結）
+                  const isAtRootDoubleSlash = /^\s*:?\s*e\s+\/\/$/i.test((cmdinput && cmdinput.value)||'') || (_fileTypedDirRaw==='//');
+                  if (isAtRootDoubleSlash){
+                    _fileTypedDirRaw = '//' + _bestEntryName(it) + '/';
+                  } else {
+                    _fileTypedDirRaw = (_fileTypedDirRaw||'') + _bestEntryName(it) + '/';
+                  }
+                }
+              }catch{ _fileTypedDirRaw = (_fileTypedDirRaw||'') + _bestEntryName(it) + '/'; }
+              // 二重化一般ケースの後処理: パス内で同一シーケンスが連続した場合は前半のみ残す
+              try{
+                if (/^\/\/wsl\.localhost\//i.test(_fileTypedDirRaw)){
+                  const body = _fileTypedDirRaw.replace(/^\/\/wsl\.localhost\//i,'');
+                  const parts = body.split('/').filter(Boolean);
+                  for (let n=Math.floor(parts.length/2); n>=2; n--){
+                    const head = parts.slice(0,n).join('/');
+                    const tail = parts.slice(n, n+n).join('/');
+                    if (tail && head===tail){
+                      const rest = parts.slice(n+n).join('/');
+                      _fileTypedDirRaw = '//' + 'wsl.localhost' + '/' + head + (rest? '/'+rest:'') + '/';
+                      _fileClickLog({ phase:'wsl-dedupe', head, rest });
+                      break;
+                    }
+                  }
+                }
+              }catch{}
               if (cmdinput){ cmdinput.value=':e ' + _collapseDotDotPath(_fileTypedDirRaw); }
               // 基点も進める
               _fileBaseURL = nextBase;
-              // 子ディレクトリへクリックで降りた直後、".." を補完するためのフラグをセット
-              try{ _filePostNavUpPrefill = true; }catch{}
-              // 即時入力欄プリフィル（非同期列挙前でもユーザに ".." を見せる）
-              try{
-                const baseNowEarly = _ensureSlash(_fileBaseURL);
-                const suppressUpEarly = (!!_filePopupNoUp) || (baseNowEarly && (_isHostRoot(baseNowEarly) || _isUncShareRoot(baseNowEarly)));
-                if (!suppressUpEarly && cmdinput){
-                  cmdinput.value = ':e ' + _collapseDotDotPath(String(_fileTypedDirRaw||'') + '..');
-                  // フィルタは維持（".." で絞り込まない）
-                  try{ const pos=(cmdinput.value||'').length; cmdinput.setSelectionRange(pos,pos); }catch{}
-                }
-              }catch{}
+              // クリック降下時の ".." 自動補完撤去 (#856)
+              try{ console.debug('[dir-click child descend]', { base:String(_fileBaseURL), typed:_fileTypedDirRaw }); }catch{}
               // 子ディレクトリへのクリック移動でも即列挙を開始（#350）
               try{
                 const baseNow = _ensureSlash(_fileBaseURL);
@@ -12548,27 +12983,13 @@ const VERSION_STR = 'vi like TextEditor "six" v' + VERSION;
       });
       bufpopupInner.appendChild(div);
     }
-  // アクティブ（またはミュート）項目が見切れていれば可視範囲にスクロール
+  // アクティブ（またはミュート）項目を常に表示（ラップ移動対応） (#842)
   try{ const act = bufpopupInner.querySelector('.item.active, .item.muted'); if (act && act.scrollIntoView) act.scrollIntoView({block:'nearest', inline:'nearest'}); }catch{}
   window.__sixFileRendering = false;
     // 旧仕様安全ネット（".." 自動補完）は廃止。
     // 相対モード初回自動補完: 入力欄が ':e ' かつ relativeMode で一覧があれば先頭ディレクトリ名を補完し選択状態にする
     try{
-      if (_fileRelativeMode && !_fileInitialRelPrefillDone){
-        if (cmdinput && /^\s*:e\s*$/.test(cmdinput.value||'') && list.length>0){
-          const first = list[0];
-          const nm = (first && first.name) ? String(first.name) : '';
-          if (nm){
-            // 期待仕様: 末尾スラッシュを付けず "name" のみ補完し選択状態
-            cmdinput.value = ':e ' + nm;
-            try{ cmdinput.focus(); cmdinput.setSelectionRange(3, 3+nm.length); }catch{}
-            _fileTypedDirRaw = ''; // relative モードでは typedDirRaw は空
-            // 初回自動補完では narrowing を発動させないため _fileFilter は空に保つ
-            _fileFilter = '';
-            _fileInitialRelPrefillDone = true;
-          }
-        }
-      }
+      // relative モード初回自動補完機能は廃止 (#853)
     }catch{}
   }
   function _filePopupApplyInitialUpPrefill(){ /* no-op (".." 初期補完廃止) */ }
@@ -12584,8 +13005,7 @@ const VERSION_STR = 'vi like TextEditor "six" v' + VERSION;
     // 相対モード判定（空の :e で開いた場合）と基点設定
     try{
       const vRaw = (cmdinput && cmdinput.value)||'';
-      const isBlank = /^\s*:e\s*$/.test(vRaw);
-      _fileRelativeMode = isBlank;
+      // relative モード判定廃止 (#853)
       const cur = currentBuffer();
       if (cur && cur.path){
         _fileBaseURL = _ensureSlash(_dirnameURL(cur.path));
@@ -12597,14 +13017,13 @@ const VERSION_STR = 'vi like TextEditor "six" v' + VERSION;
       // ディレクトリURLへ正規化（末尾スラッシュ付与）
       try{ if (_fileBaseURL && !/\/$/.test(_fileBaseURL.pathname||'')) _fileBaseURL = _ensureSlash(_dirnameURL(_fileBaseURL.toString())); }catch{}
       try{ _fileVisibleBaseKey = _fileBaseURL ? _fileBaseURL.toString() : _fileVisibleBaseKey; }catch{}
-      if (_fileRelativeMode){ _fileTypedDirRaw=''; } else {
-        try{
-          let raw = _inputDirRawFromURL(_fileBaseURL) || (_fileBaseURL && _fileBaseURL.pathname.replace(/^\//,'')) || '';
-          if (raw && !/\/$/.test(raw)) raw+='/';
-          _fileTypedDirRaw = raw;
-        }catch{ _fileTypedDirRaw=''; }
-      }
-    }catch{ _fileRelativeMode=false; }
+      try{
+        let raw = _inputDirRawFromURL(_fileBaseURL) || (_fileBaseURL && _fileBaseURL.pathname.replace(/^\//,'')) || '';
+        if (raw && !/\/$/.test(raw)) raw+='/';
+        _fileTypedDirRaw = raw;
+      }catch{ _fileTypedDirRaw=''; }
+      try{ console.debug('[e-show]', { base: (_fileBaseURL?_fileBaseURL.toString():null), typedDirRaw:_fileTypedDirRaw }); }catch{}
+    }catch{}
     try{ _fileInitialUpPrefill=false; _fileInitialSelectActive=false; }catch{}
     // Immediately reposition command float below the :e popup with the specified gap
     try{ if (_mode==='CMD' && cmdfloat && cmdfloat.style.display!=='none'){ _positionCmdFloat(); } }catch{}
@@ -12629,7 +13048,7 @@ const VERSION_STR = 'vi like TextEditor "six" v' + VERSION;
     }catch{}
     // 初回相対モード自動補完（非同期列挙考慮: 最大3回）
     try{
-      if (_fileRelativeMode){ _fileInitialRelPrefillDone=false; let tries=0; const tick=()=>{ tries++; if (!_filePopupVisible()) return; if (!_fileInitialRelPrefillDone){ _filePopupRender(); } if (tries<3 && !_fileInitialRelPrefillDone){ setTimeout(tick,120); } }; setTimeout(tick,60); }
+      // relative モード再レンダ遅延処理廃止 (#853)
     }catch{}
     // 同期列挙完了済みなら即適用試行
     try{ _filePopupApplyInitialUpPrefill(); }catch{}
@@ -12642,7 +13061,24 @@ const VERSION_STR = 'vi like TextEditor "six" v' + VERSION;
     const list = _filePopupComputeList();
     _fileSelAuto = false; // ユーザ操作により自動選択を停止
     const prevSel = _fileSel|0;
-    _fileSel = Math.max(0, Math.min(list.length-1, _fileSel + d));
+    // 新ロジック: フィルタ一致候補間を非ラップ移動し、グローバル位置 _fileFilterPos を利用 (#838)
+    const filtered = Array.isArray(window._fileFilteredIndices) ? window._fileFilteredIndices : [];
+    if (filtered.length>0){
+      // ラップ移動: 端で更に進むと反対側へ (#842)
+      let pos = (typeof window._fileFilterPos==='number') ? window._fileFilterPos : filtered.indexOf(_fileSel);
+      if (pos < 0) pos = 0;
+      if (d>0){ pos = (pos + 1) % filtered.length; }
+      else if (d<0){ pos = (pos - 1 + filtered.length) % filtered.length; }
+      window._fileFilterPos = pos;
+      _fileSel = filtered[pos];
+    } else {
+      // フィルタなし: 全体インデックスでラップ
+      if (list.length>0){
+        _fileSel = (_fileSel + d + list.length) % list.length;
+      } else {
+        _fileSel = 0;
+      }
+    }
     _fileSelMuted = false; // 矢印移動で通常のハイライトに復帰
     // 初期 '..' 選択状態なら解除（選択範囲をカーソル末尾へ）
     if (_fileInitialSelectActive){
@@ -12651,31 +13087,6 @@ const VERSION_STR = 'vi like TextEditor "six" v' + VERSION;
       // #759: 自動補完された '..' はユーザ入力扱いではないので、フィルタをクリアして他候補へ移動可能にする
       if (_fileFilter==='..'){ _fileFilter=''; }
     }
-    // フィルタ非空なら非一致項目をスキップ (#576)
-    try{
-      const qTrim = String(_fileFilter||'').replace(/\/+$/,'').trim();
-      if (qTrim){
-        let caseSensitive=false; try{ const b=_ensureSlash(_fileBaseURL); if (b && b.protocol==='file:' && b.host && b.host.toLowerCase()==='wsl.localhost') caseSensitive=true; }catch{}
-        const starts = (nm)=> caseSensitive ? nm.startsWith(qTrim) : nm.toLowerCase().startsWith(qTrim.toLowerCase());
-        const anyMatch = list.some(e=> e && starts(String(e.name||'')));
-        if (anyMatch){
-          const dir = d>0?1:-1;
-          let cur = _fileSel;
-          let found = false;
-          for (let i=0;i<list.length;i++){
-            // ラップして巡回
-            cur = (cur + dir + list.length) % list.length;
-            const it = list[cur];
-            if (it && starts(String(it.name||''))){ _fileSel = cur; found = true; break; }
-          }
-          // 見つからなければ元に戻す（非一致へ動かさない）
-          if (!found){ _fileSel = prevSel; }
-        } else {
-          // 一致候補が無ければ元に戻す（非一致へ動かさない）
-          _fileSel = prevSel;
-        }
-      }
-    }catch{}
     try{
       const it = list[_fileSel];
       // 仕様変更(#573): 無効項目でも入力欄へ名前を反映（Enter/click時はブロック）
@@ -12692,26 +13103,33 @@ const VERSION_STR = 'vi like TextEditor "six" v' + VERSION;
         // ディレクトリ移動直後の短期は、選択反映をスキップ
         const guardActive = (Date.now() < (_fileReflectGuardUntil||0));
         if (!guardActive){
-        if (_fileRelativeMode){
-          // relative: 選択中項目名のみ（末尾スラッシュなし）を補完。矢印移動では _fileFilter を更新しない（絞り込み抑止）。
-          const out = ':e ' + bestName;
-          cmdinput.value = out;
-          if (!_fileInitialRelPrefillDone){
-            try{ cmdinput.setSelectionRange(3, out.length); }catch{}
-          } else {
-            try{ const pos = (cmdinput.value||'').length; cmdinput.setSelectionRange(pos,pos); }catch{}
-          }
-        } else {
           const val = ':e ' + _collapseDotDotPath((_fileTypedDirRaw||'') + bestName);
           cmdinput.value = val;
           try{ const pos=(cmdinput.value||'').length; cmdinput.setSelectionRange(pos,pos); }catch{}
-        }
+        
         // 入力欄に選択内容を反映してもフィルタは保持（#576 スキップ用）。ミュートは解除。
         _fileSelMuted = false;
         }
       }
     }catch{}
+    const prevScroll = (function(){ try{ return bufpopupInner ? bufpopupInner.scrollTop : 0; }catch{ return 0; } })();
     _filePopupRender();
+    // 選択行を必要最小限で可視化 (scrolloff=0的挙動) (#837)
+    // 要望 (#843): scrolloff=99999 相当の挙動へ変更。
+    // つまり選択行が常にビュー中央付近に来るようスクロールし、端条件による最小移動ではなく積極的中央化。
+    try{
+      const inner = bufpopupInner;
+      if (inner){
+        const rows = inner.querySelectorAll('.item');
+        if (rows.length>0 && _fileSel>=0 && _fileSel<rows.length){
+          const target = rows[_fileSel];
+          const desiredTop = Math.max(0, target.offsetTop - Math.round((inner.clientHeight - target.offsetHeight)/2));
+          const maxTop = Math.max(0, inner.scrollHeight - inner.clientHeight);
+          const clamped = Math.min(maxTop, desiredTop);
+          inner.scrollTop = clamped;
+        }
+      }
+    }catch{}
   }
 
   // フォーカス管理: ポップアップそのものでもエディタ/コマンドのフォーカスを維持
