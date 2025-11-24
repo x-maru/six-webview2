@@ -4535,13 +4535,8 @@ const VERSION_STR = 'vi like TextEditor "six" v' + VERSION;
     const big = scrolloff >= 99999;
     // Allow extra "virtual" page steps so EOF の下に N 行分の余白が見える
     const baseMaxTop = Math.max(1, linesTotal - vis + 1);
-    const _readEofPadLines = ()=>{
-      try{
-        const r = getComputedStyle(document.documentElement).getPropertyValue('--eofPadLines');
-        const n = parseInt(String(r||'').trim(), 10);
-        return (Number.isFinite(n) && n>=0) ? n : 1;
-      }catch{ return 1; }
-    };
+    // 固定余白行数 (#865): カスタマイズ不要のため常に 6 行を許容
+    const _readEofPadLines = ()=>6;
     const _eofPad = _readEofPadLines();
     const maxTopWithPad = Math.min(linesTotal, baseMaxTop + _eofPad);
 
@@ -4817,14 +4812,40 @@ const VERSION_STR = 'vi like TextEditor "six" v' + VERSION;
     const line = lines[newRow] || '';
     const newCol = _colForVisual(line, _desiredVisualCol|0);
     // commit without updating desired (keep it across j/k)
+    const prevRow = caretRow|0;
     caretRow = newRow;
     _suppressDesiredOnce = true;
     _setCaret(newRow, newCol, { suppressDesired: true });
-    // Prefer no scroll on first motion after switch if caret is visible; otherwise force ensure
+    // EOF パッドスクロール試行 (NORMAL) #864/#867 共通ヘルパー利用
+    if (delta>0 && newRow===prevRow && newRow===lines.length-1){
+      if (_maybeScrollEofPadStep('normal-eof-pad-scroll')) return;
+    }
+    // 通常処理: Prefer no scroll on first motion after switch if caret is visible; otherwise force ensure
     _ensureAfterMotion();
     // motion log
     try{ _debugPush({ t:Date.now(), type:'motion', mode:_mode, kind:'lines', delta:delta|0, toR:caretRow|0, toC:caretCol|0 }); }catch{}
     try{ _anomalyMaybeEnd('lines-motion'); }catch{}
+  }
+  // 共通 EOF パッド 1 行スクロール (#864/#865/#867)
+  function _maybeScrollEofPadStep(kind){
+    try{
+      const lines=_splitLines();
+      if (caretRow !== lines.length-1) return false;
+      const vis=_visibleLinesExact();
+      const linesTotal=_totalLines();
+      const baseMaxTop=Math.max(1, linesTotal - vis + 1);
+      const eofPad=6; // 固定 (#865)
+      const maxTopWithPad=Math.min(linesTotal, baseMaxTop + eofPad);
+      const curTop=_topLine();
+      if (curTop >= maxTopWithPad) return false;
+      const nextTop=Math.min(maxTopWithPad, curTop + 1);
+      editor.scrollTop=(nextTop-1)*LINE_HEIGHT;
+      // 行グリッドへスナップ
+      try{ const st=editor.scrollTop||0; const snap=Math.floor(st/LINE_HEIGHT)*LINE_HEIGHT; if (Math.abs(snap-st)>0.01){ editor.scrollTop=snap; } }catch{}
+      _repositionCaret(); updateGutter();
+      try{ _debugPush({ t:Date.now(), type:'motion', mode:_mode, kind:kind||'eof-pad-scroll', top:nextTop, maxTopWithPad }); }catch{}
+      return true;
+    }catch{ return false; }
   }
   function _moveCaretCols(delta){
     const line = (_splitLines()[caretRow] || '');
@@ -8210,6 +8231,8 @@ const VERSION_STR = 'vi like TextEditor "six" v' + VERSION;
                   return; // ここで処理完了
                 }
               }
+              // EOF パッドスクロール (INSERT) 共通ヘルパー利用 (#866/#867)
+              if (_maybeScrollEofPadStep('insert-eof-pad-scroll')){ e.preventDefault(); e.stopPropagation(); try{ _flagCaretMotion(); }catch{} return; }
             }
           }catch{}
           // 他の移動キーは後段 setTimeout で同期
