@@ -1932,17 +1932,17 @@ const VERSION_STR = 'vi like TextEditor "six" v' + VERSION;
       // (separate from the OS title bar) or modify the host application window chrome.
       const b = currentBuffer();
       const mod = (b && b.modified) ? ' *' : '';
-      // タイトルバーにはアクティブタブのフルパスを表示（Fキー等の前置なし）
+      // タイトルバー表示: "ファイル名 - フルパス"（タスクバーで先頭に名前が見えるように）
       if (b){
-        let title = '';
-        if (b.path){
-          try{
-            // file:// は見やすいパス表記へ（UNC/WSL/Windows ドライブ対応）
-            title = _prettyFileUrlLabel(b.path);
-          }catch{ title = String(b.path||''); }
+        const hasPath = !!(b.path);
+        if (hasPath){
+          let full = '';
+          try{ full = _prettyFileUrlLabel(b.path); }catch{ full = String(b.path||''); }
+          const fname = (function(){ try{ return _basename(b.path); }catch{ return (b.name||'untitled'); } })();
+          document.title = (fname || 'untitled') + ' - ' + full + mod;
+        } else {
+          document.title = (b.name || 'untitled') + mod;
         }
-        if (!title){ title = b.name || 'untitled'; }
-        document.title = title + mod;
       } else {
         const title = 'six-webview2';
         document.title = title;
