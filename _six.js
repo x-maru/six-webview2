@@ -93,9 +93,8 @@ const VERSION_STR = 'vi like TextEditor "six" v' + VERSION;
       if (!posinfoEl) return;
       const lines = _splitLines();
       const r = Math.max(0, Math.min(lines.length-1, caretRow|0));
-      _fileParentLog({ phase:'enter', baseURL:String(_fileBaseURL), baseDir:String(baseDir), fullPath, typedRaw:_fileTypedDirRaw, isDriveRoot, isUncHostRoot });
-        const line = lines[r] || '';
-        // 可視幅計測は後段の _visualWidthUpToLine を利用
+      const line = lines[r] || '';
+      // 可視幅計測は後段の _visualWidthUpToLine を利用
       const visCol = _visualWidthUpToLine(line, caretCol|0);
       const visTotal = _visualWidthUpToLine(line, (line||'').length);
       // 表示形式: 「行Y, 列X/W」 (#633)
