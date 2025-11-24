@@ -21,8 +21,8 @@ window.THEME = {
 
   // [NORMAL]/[INSERT]/[VISUAL] text color
   modeNormalFGColor: "#e0e0e0",
-  modeInsertFGColor: "#ffe0e0",
-  modeVisualFGColor: "#e0e0ff",
+  modeInsertFGColor: "#ffb0b0",
+  modeVisualFGColor: "#c0daff",
 
   // 本文文字色
   editorTextColor: "#00501a",
@@ -33,33 +33,31 @@ window.THEME = {
   // 行番号背景(カーソル外)グラデーション
   inactiveGutterGradientStart: "#e8f8e8",
   inactiveGutterGradientEnd: "#d9e2d9",
-  gutterNumberColor: "#b0b0b0",
+  // 行番号 文字色(カーソル外)
+  gutterNumberColor: "#808080",
 
-  // 行背景(NORMALカーソル行)グラデーション
+  // 行背景背景(NORMALカーソル行)グラデーション
   activeLineGradientStart: "#e4ffe4",
   activeLineGradientEnd: "#e2fde2",
   // 行番号背景(NORMALカーソル行)グラデーション
   activeGutterGradientStart: "#d0ead0",
   activeGutterGradientEnd: "#c0dac0",
-  // 行背景(INSERTカーソル行)グラデーション
+  // 行背景背景(INSERTカーソル行)グラデーション
   activeEditLineGradStart: "#fff0f0",
   activeEditLineGradEnd: "#ffe0e0",
   // 行番号背景(INSERTカーソル行)グラデーション
   activeEditGutterGradStart: "#efe0e0",
   activeEditGutterGradEnd: "#efd0c0",
-  // NORMAL行番号 文字色
-  activeLineNumberColor: "#100000",
+  // 行番号(NORMAL/INSERTカーソル行) 文字色
+  activeLineNumberColor: "#a00000",
 
   // INSERT mode specific gradients
   editCaretGradStart: "rgba(255,79,0,0.95)",
   editCaretGradMid: "rgba(255,79,0,0.01)",
 
-  eofFillColor: "#0f1117",
   eofGutterFillColor: "rgb(235,239,235)",
   gutterGradientStart: "rgb(235,239,235)",
   gutterGradientEnd: "rgb(219,227,219)",
-
-  activeLineBg: "#1b2231",
 
   caretGradientStart: "#ff0000",
   caretGradientMid: "rgba(255,0,0,0.5)",

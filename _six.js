@@ -106,17 +106,6 @@ const VERSION_STR = 'vi like TextEditor "six" v' + VERSION;
   }
   try{ tabScrollLeftBtn && tabScrollLeftBtn.addEventListener('click', ()=>{ try{ if (!tabScrollLeftBtn.classList.contains('disabled')) _scrollTabsBy(-1); }catch{} }); }catch{}
   try{ tabScrollRightBtn && tabScrollRightBtn.addEventListener('click', ()=>{ try{ if (!tabScrollRightBtn.classList.contains('disabled')) _scrollTabsBy(+1); }catch{} }); }catch{}
-  try{ tabbarTabs && tabbarTabs.addEventListener('scroll', _updateTabScrollButtons); }catch{}
-  // Update tab scroll buttons and track normal window bounds on resize
-  try{ window.addEventListener('resize', ()=>{ try{ _updateTabScrollButtons(); }catch{} try{ _updateNormalBoundsFromWindow(); }catch{} }); }catch{}
-  const encBtn    = document.getElementById('encBtn');
-  const cmdinput   = document.getElementById('cmdinput');
-  const cmdfloat   = document.getElementById('cmdfloat');
-  const modestatus = document.getElementById('modestatus');
-
-
-  // layout constants (should match CSS)
-  let LINE_HEIGHT = 20;        // px (will sync with computed CSS)
   let FONT_SIZE   = 18;        // px (will sync with computed CSS)
   const HSCROLL_RESERVE = 0;     // px
   const ROUND_THRESH = 0.5;      // fraction
@@ -674,7 +663,7 @@ const VERSION_STR = 'vi like TextEditor "six" v' + VERSION;
           if (!_fileBaseURL){ try{ const cur=currentBuffer&&currentBuffer(); if (cur && cur.path){ _fileBaseURL=_dirnameURL(cur.path); } }catch{} }
           let baseDir = null;
           try{ baseDir = _fileBaseURL ? _ensureSlash(_fileBaseURL) : null; }catch{}
-          if (baseDir){
+          if (!pop){
             try{ if (!/\/$/.test(baseDir.pathname||'')) baseDir = _ensureSlash(_dirnameURL(baseDir.toString())); }catch{}
             const fullPath = String(baseDir.pathname||'').replace(/\\/g,'/');
             // WSL distribution root判定: file://wsl.localhost/<dist>/ を最上位として扱い、そこでは停止 (#821)
@@ -686,12 +675,24 @@ const VERSION_STR = 'vi like TextEditor "six" v' + VERSION;
               console.debug('[parentNav stub WSL-dist-root]', { fullPath });
               return;
             }
-            // ルート '/' へ上がれるよう cutIdx>=0 を許容（trimmed 空は停止） (#820)
             if (cutIdx>=0 && trimmed){
               const parentPath = trimmed.slice(0, cutIdx+1);
               _fileTypedDirRaw = parentPath.replace(/^\//,'');
               let parent=baseDir; try{ parent=_ensureSlash(new URL('../', baseDir)); }catch{}
               if (parent){
+          // ホバー外れで自動閉じ (#900)
+          if (!pop.__hoverHide){ pop.__hoverHide = true; pop.addEventListener('mouseleave', ()=>{ try{ _casePopupHide(); }catch{} }); }
+          // 最小幅: 「混在時区別」に合わせる (#901)
+          try{
+            // Find the item whose label is "混在時区別"; fall back to widest item
+            const items = Array.from(pop.querySelectorAll('.item'));
+            let target = items.find(x=> (x && typeof x.textContent==='string' && x.textContent.trim()==='混在時区別')) || null;
+            if (!target){ target = items.reduce((a,b)=>{ return ((a&&a.offsetWidth||0) > (b&&b.offsetWidth||0)) ? a : b; }, null); }
+            if (target){
+              const w = Math.ceil(target.getBoundingClientRect().width);
+              if (w>0){ pop.style.minWidth = w + 'px'; }
+            }
+          }catch{}
                 // 現在ディレクトリ名（直前ディレクトリ）を prevSeg として取得し、初回親移動直後でも選択復元できるようにする (#819)
                 let prevSeg='';
                 try{ prevSeg = trimmed.slice(cutIdx+1) || ''; }catch{}
@@ -829,13 +830,19 @@ const VERSION_STR = 'vi like TextEditor "six" v' + VERSION;
       pop.innerHTML='';
       const inner = document.createElement('div'); inner.className='inner'; inner.style.maxHeight='45vh'; inner.style.overflow='auto'; pop.appendChild(inner);
       const cur=_encCurrentMeta();
-      if (!Number.isFinite(_encSel)){ _encSel=_encFindIndex(cur); } else { const n=_allowedEncodeSets.length|0; _encSel=Math.max(0, Math.min(n>0?n-1:0, _encSel|0)); }
+      // sel=-1 のときは「非ハイライト表示」
+      let hasSel = Number.isFinite(_encSel) && (_encSel|0) >= 0;
+      if (!Number.isFinite(_encSel)){
+        _encSel = _encFindIndex(cur); hasSel = true;
+      } else if (hasSel){
+        const n=_allowedEncodeSets.length|0; _encSel=Math.max(0, Math.min(n>0?n-1:0, _encSel|0));
+      }
       _allowedEncodeSets.forEach((meta,i)=>{
-        const item=document.createElement('div'); item.className='item'; if (i===_encSel) item.classList.add('active');
-        item.style.display='flex'; item.style.gap='8px'; item.style.alignItems='center'; item.style.padding='6px 10px'; item.style.cursor='default';
-        const mark=document.createElement('span'); mark.textContent=(i===_encSel)?'●':'○'; mark.style.width='1.2em'; mark.style.textAlign='center'; mark.style.opacity='0.7';
-        const name=document.createElement('span'); name.className='name'; name.textContent=_encDisplayLines(meta).line1||''; name.style.whiteSpace='pre';
-        item.appendChild(mark); item.appendChild(name);
+        const item=document.createElement('div'); item.className='item'; if (hasSel && i===_encSel) item.classList.add('active');
+        item.style.display='block'; item.style.padding='4px 10px'; item.style.cursor='pointer'; item.style.whiteSpace='nowrap'; item.style.borderRadius='4px'; item.style.textAlign='right';
+        item.textContent = _encDisplayLines(meta).line1 || '';
+        // ハイライト背景（zoomPopupと統一）
+        item.style.background = (hasSel && i===_encSel) ? 'var(--popupActiveLine, #1a2030)' : 'transparent';
         item.addEventListener('mousedown', ev=>{ try{ ev.preventDefault(); }catch{} });
         item.addEventListener('mouseenter', ()=>{ try{ _encSel=i; _encPopupRender(); }catch{} });
         item.addEventListener('click', ()=>{ try{ _encSel=i; _applyEncodeMeta(meta); _encPopupHide(); setTimeout(()=>{ try{ editor && editor.focus && editor.focus(); }catch{} },0); }catch{} });
@@ -864,6 +871,11 @@ const VERSION_STR = 'vi like TextEditor "six" v' + VERSION;
       pop.style.display='';
       if (!Number.isFinite(_encSel)){ try{ _encSel=_encFindIndex(_encCurrentMeta()); }catch{ _encSel=0; } }
       _encPopupRender();
+      // ホバー外れでハイライトのみ消去 (#903)
+      if (!pop.__hoverHide){
+        pop.__hoverHide = true;
+        pop.addEventListener('mouseleave', ()=>{ try{ _encSel = -1; _encPopupRender(); }catch{} });
+      }
       const anchorEl=(anchor && anchor.getBoundingClientRect)? anchor : null;
       if (anchorEl){
         const r=anchorEl.getBoundingClientRect();
@@ -932,20 +944,14 @@ const VERSION_STR = 'vi like TextEditor "six" v' + VERSION;
       inner.style.overflow = 'auto';
       pop.appendChild(inner);
       const items = [ '常に区別', '混在時区別', '同一視' ];
-      if (!Number.isFinite(_caseSel)) _caseSel = _caseCurrentIndex();
-      _caseSel = Math.max(0, Math.min(items.length-1, _caseSel|0));
+      let hasSel = Number.isFinite(_caseSel) && (_caseSel|0) >= 0;
+      if (!Number.isFinite(_caseSel)) { _caseSel = _caseCurrentIndex(); hasSel = true; }
+      if (hasSel){ _caseSel = Math.max(0, Math.min(items.length-1, _caseSel|0)); }
       items.forEach((label,i)=>{
-        const item = document.createElement('div'); item.className='item'; if (i===_caseSel) item.classList.add('active');
-        // inline styles to mirror #encpopup .item
-        item.style.display = 'flex';
-        item.style.gap = '8px';
-        item.style.alignItems = 'center';
-        item.style.padding = '6px 10px';
-        item.style.cursor = 'default';
-        item.style.background = (i===_caseSel) ? 'var(--popupActiveLine, #1a2030)' : 'transparent';
-        const mark = document.createElement('span'); mark.textContent=(i===_caseSel)?'●':'○'; mark.style.width='1.2em'; mark.style.textAlign='center'; mark.style.opacity='0.8';
-        const name = document.createElement('div'); name.className='name'; name.textContent = label; name.style.whiteSpace='pre';
-        item.appendChild(mark); item.appendChild(name);
+        const item = document.createElement('div'); item.className='item'; if (hasSel && i===_caseSel) item.classList.add('active');
+        item.style.display='block'; item.style.padding='4px 10px'; item.style.cursor='pointer'; item.style.whiteSpace='nowrap'; item.style.borderRadius='4px'; item.style.textAlign='right';
+        item.textContent = label;
+        item.style.background = (hasSel && i===_caseSel) ? 'var(--popupActiveLine, #1a2030)' : 'transparent';
         item.addEventListener('mousedown', (ev)=>{ try{ ev.preventDefault(); ev.stopPropagation(); }catch{}; _caseSel=i; _applyCaseIndex(i); _casePopupHide(); setTimeout(()=>{ try{ editor && editor.focus && editor.focus(); }catch{} },0); });
         item.addEventListener('mouseenter', ()=>{ try{ _caseSel=i; _casePopupRender(); }catch{} });
         item.addEventListener('click', (ev)=>{ try{ ev.preventDefault(); ev.stopPropagation(); }catch{}; _caseSel=i; _applyCaseIndex(i); _casePopupHide(); setTimeout(()=>{ try{ editor && editor.focus && editor.focus(); }catch{} },0); });
@@ -968,12 +974,35 @@ const VERSION_STR = 'vi like TextEditor "six" v' + VERSION;
         pop.style.zIndex='10000';
         pop.style.borderRadius='6px';
         pop.style.overflow='hidden';
-        pop.style.minWidth='240px';
+        pop.style.boxSizing='border-box';
         document.body.appendChild(pop);
       }
       pop.style.display='';
       try{ _caseSel = _caseCurrentIndex(); }catch{ _caseSel = 0; }
       _casePopupRender();
+      // 初回のみ幅ロック: "混在時区別" の項目幅 (rAF後測定で安定) (#905)
+      if (!pop.dataset.widthLocked){
+        requestAnimationFrame(()=>{
+          try{
+            const target = Array.from(pop.querySelectorAll('.item')).find(el=>el.textContent.trim()==='混在時区別');
+            if (target){
+              const w = Math.ceil(target.getBoundingClientRect().width);
+              const padW = w + 2; // 微調整
+              pop.style.width = padW + 'px';
+              pop.style.minWidth = padW + 'px';
+              pop.dataset.widthLocked = String(padW);
+            }
+          }catch{}
+        });
+      } else {
+        // 既にロックされている場合は強制再適用（再描画で崩れた場合の保険）
+        try{ const w=parseInt(pop.dataset.widthLocked,10); if (Number.isFinite(w) && w>0){ pop.style.width=w+'px'; pop.style.minWidth=w+'px'; } }catch{}
+      }
+      // ホバー外れでハイライトのみ消去 (#903)
+      if (!pop.__hoverHide){
+        pop.__hoverHide = true;
+        pop.addEventListener('mouseleave', ()=>{ try{ _caseSel = -1; _casePopupRender(); }catch{} });
+      }
       // Position near anchor (overlay button)
       const r = anchor && anchor.getBoundingClientRect ? anchor.getBoundingClientRect() : { right:(window.innerWidth||0)-8, bottom:8 };
       const vw = (window.innerWidth||0), vh=(window.innerHeight||0);
@@ -2273,9 +2302,9 @@ const VERSION_STR = 'vi like TextEditor "six" v' + VERSION;
   setVar('activeEditLineGradEnd', themeGet('activeEditLineGradEnd', t.activeEditLineGradEnd));
   setVar('editCaretGradStart', themeGet('editCaretGradStart', t.editCaretGradStart));
   setVar('editCaretGradMid', themeGet('editCaretGradMid', t.editCaretGradMid));
-      setVar('activeLineBg', themeGet('activeLineBg', t.activeLineBg));
-  setVar('tabBarBg', t.tabBarBg);
-  setVar('tabBarFg', t.tabBarFg);
+        setVar('activeLineBg', themeGet('activeLineBg', t.activeLineBg));
+      setVar('tabBarBg', themeGet('tabBarBg', t.tabBarBg));
+      setVar('tabBarFg', themeGet('tabBarFg', t.tabBarFg));
   // Tab colors (#455) with yellow fallback if missing
   setVar('tabBg', themeGet('tabBg', t.tabBg));
   setVar('tabText', themeGet('tabText', t.tabText));
@@ -2340,6 +2369,9 @@ const VERSION_STR = 'vi like TextEditor "six" v' + VERSION;
   setVar('six-help-close-border', themeGet('helpCloseBorder', t.helpCloseBorder));
   // Popup active line color (encodeSet popup etc.)
   setVar('popupActiveLine', themeGet('popupActiveLine', t.popupActiveLine));
+  // EOF fill colors (editor area and gutter)
+  setVar('eofFillColor', themeGet('eofFillColor', t.eofFillColor));
+  setVar('eofGutterFillColor', themeGet('eofGutterFillColor', t.eofGutterFillColor));
       // apply persisted scale if any (fallback only). If a buffer becomes active later,
       // that buffer's edScale will override this. Keep metrics in sync to avoid
       // mismatched font-size vs line-height on first paint (#714).
@@ -2415,38 +2447,12 @@ const VERSION_STR = 'vi like TextEditor "six" v' + VERSION;
   function _formatZoom(){ return Math.round(_edScale*100) + '%'; }
   function _wireZoomHUD(){
     try{
-      const el = document.getElementById('zoomhud'); if (!el) return;
-      // Make HUD non-focusable and prevent it from stealing focus on interaction
-      try{ el.setAttribute('tabindex','-1'); }catch{}
-      try{ el.addEventListener('mousedown', (e)=>{ e.preventDefault(); }, true); }catch{}
-      // Always visible HUD: ensure it is shown and initialized
-      try{ el.style.display = 'block'; }catch{}
-      const v = document.getElementById('zoomVal'); if (v) v.textContent = _formatZoom();
-      const minus = document.getElementById('zoomMinus');
-      const plus = document.getElementById('zoomPlus');
-      const reset = document.getElementById('zoomReset');
-      if (minus){
-        try{ minus.setAttribute('tabindex','-1'); }catch{}
-        minus.onclick = ()=>{ _stepEditorScale(-1); try{ setTimeout(()=>{ try{ editor && editor.focus && editor.focus(); }catch{} }, 0); }catch{} };
-      }
-      if (plus){
-        try{ plus.setAttribute('tabindex','-1'); }catch{}
-        plus.onclick = ()=>{ _stepEditorScale(+1); try{ setTimeout(()=>{ try{ editor && editor.focus && editor.focus(); }catch{} }, 0); }catch{} };
-      }
-      if (reset){
-        try{ reset.setAttribute('tabindex','-1'); }catch{}
-        reset.onclick = ()=>{ _setEditorScale(1); try{ setTimeout(()=>{ try{ editor && editor.focus && editor.focus(); }catch{} }, 0); }catch{} };
-      }
+      const v = document.getElementById('overlayZoomVal'); if (v) v.textContent=_formatZoom();
     }catch{}
   }
   function _showZoomHUD(){
     try{
-      const el = document.getElementById('zoomhud');
-      const v = document.getElementById('zoomVal');
-      if (!el) return;
-      if (v) v.textContent = _formatZoom();
-      // Always visible: keep displayed and do not auto-hide
-      try{ el.style.display = 'block'; }catch{}
+      const v = document.getElementById('overlayZoomVal'); if (v) v.textContent=_formatZoom();
       if (_zoomHudTimer){ clearTimeout(_zoomHudTimer); _zoomHudTimer=null; }
     }catch{}
   }
@@ -4825,8 +4831,9 @@ const VERSION_STR = 'vi like TextEditor "six" v' + VERSION;
       }catch{}
       if (r.eof){
         el.textContent = '';
-        el.style.background = (T.eofGutterFillColor||'#0f1117');
-        el.style.color = (T.gutterNumberColor||'#57607a');
+        // Use CSS vars with yellow fallback to surface missing theme keys (#901)
+        el.style.background = 'var(--eofGutterFillColor, yellow)';
+        el.style.color = 'var(--gutterNumberColor, yellow)';
       } else {
         el.textContent = r.ln;
         if (r.active){
@@ -4841,7 +4848,7 @@ const VERSION_STR = 'vi like TextEditor "six" v' + VERSION;
           // Inactive rows: transparent to let container's tiled background show (prevents flicker)
           el.style.background = '';
         }
-        el.style.color = r.active ? (T.activeLineNumberColor||'#a6accd') : (T.gutterNumberColor||'#57607a');
+        el.style.color = r.active ? 'var(--activeLineNumberColor, yellow)' : 'var(--gutterNumberColor, yellow)';
       }
     }
     // remove extra children
@@ -13711,6 +13718,8 @@ const VERSION_STR = 'vi like TextEditor "six" v' + VERSION;
           toggleBtn.addEventListener('click', (e)=>{ try{ e.preventDefault(); }catch{} _toggleOverlayPaletteVisibility(); });
           // Enlarge the palette icon (first line) to 1.5x
           try{ const icon = toggleBtn.querySelector('span'); if (icon){ icon.style.fontSize = '1.5em'; icon.style.lineHeight = '1'; } }catch{}
+          // Right-click禁止 (#900)
+          try{ toggleBtn.addEventListener('contextmenu', (e)=>{ try{ e.preventDefault(); e.stopPropagation(); }catch{} }); }catch{}
         }
       }catch{}
       // Create roots once
@@ -13786,6 +13795,8 @@ const VERSION_STR = 'vi like TextEditor "six" v' + VERSION;
       hlBtn.style.userSelect = 'none';
       hlBtn.style.outline = 'none';
       attachHover(hlBtn);
+      // Suppress context menu on overlay buttons (#899)
+      hlBtn.addEventListener('contextmenu', (e)=>{ try{ e.preventDefault(); e.stopPropagation(); }catch{} });
       // Prevent focus change on mouse click
       hlBtn.addEventListener('mousedown', (e)=>{ try{ lastFocusedEl = document.activeElement; e.preventDefault(); }catch{} });
       // inner layout
@@ -13847,6 +13858,7 @@ const VERSION_STR = 'vi like TextEditor "six" v' + VERSION;
       swBtn.style.userSelect = 'none';
       swBtn.style.outline = 'none';
       attachHover(swBtn);
+      swBtn.addEventListener('contextmenu', (e)=>{ try{ e.preventDefault(); e.stopPropagation(); }catch{} });
       swBtn.addEventListener('mousedown', (e)=>{ try{ lastFocusedEl = document.activeElement; e.preventDefault(); }catch{} });
       const swWrap = document.createElement('div');
       swWrap.style.display = 'flex';
@@ -13908,6 +13920,7 @@ const VERSION_STR = 'vi like TextEditor "six" v' + VERSION;
       helpBtn.style.userSelect = 'none';
       helpBtn.style.outline = 'none';
       attachHover(helpBtn);
+      helpBtn.addEventListener('contextmenu', (e)=>{ try{ e.preventDefault(); e.stopPropagation(); }catch{} });
       helpBtn.addEventListener('mousedown', (e)=>{ try{ lastFocusedEl = document.activeElement; e.preventDefault(); }catch{} });
       helpBtn.addEventListener('click', (e)=>{
         try{ e.preventDefault(); e.stopPropagation(); }catch{}
@@ -13937,6 +13950,7 @@ const VERSION_STR = 'vi like TextEditor "six" v' + VERSION;
       listBtn.style.userSelect = 'none';
       listBtn.style.outline = 'none';
       attachHover(listBtn);
+      listBtn.addEventListener('contextmenu', (e)=>{ try{ e.preventDefault(); e.stopPropagation(); }catch{} });
       listBtn.addEventListener('mousedown', (e)=>{ try{ lastFocusedEl = document.activeElement; e.preventDefault(); }catch{} });
       const listWrap = document.createElement('div');
       listWrap.style.display = 'flex';
@@ -13982,6 +13996,7 @@ const VERSION_STR = 'vi like TextEditor "six" v' + VERSION;
       quitBtn.style.outline = 'none';
       attachHover(quitBtn);
       let lastFocusedEl2 = null;
+      quitBtn.addEventListener('contextmenu', (e)=>{ try{ e.preventDefault(); e.stopPropagation(); }catch{} });
       quitBtn.addEventListener('mousedown', (e)=>{ try{ lastFocusedEl2 = document.activeElement; e.preventDefault(); }catch{} });
       quitBtn.addEventListener('click', (e)=>{
         try{ e.preventDefault(); e.stopPropagation(); }catch{}
@@ -14014,6 +14029,65 @@ const VERSION_STR = 'vi like TextEditor "six" v' + VERSION;
 
       // Build top-right palette content (buffer-scoped)
       // Encode button (moved from tabbar; placed above shiftwidth)
+      // Zoom button (new: placed above encode; original tabbar HUD removed) (#893)
+      const zoomBtn = document.createElement('button');
+      zoomBtn.type='button'; zoomBtn.id='overlayBtnZoom';
+      // encodeボタンと幅揃え (100px) / 余白やギャップ詰める
+      zoomBtn.style.minWidth='100px'; zoomBtn.style.border='1px solid #2a3244'; zoomBtn.style.background='#1a2030'; zoomBtn.style.color='#e6e6e6';
+      zoomBtn.style.borderRadius='6px'; zoomBtn.style.padding='4px 6px'; zoomBtn.style.cursor='pointer'; zoomBtn.style.font="12px/1.25 system-ui, -apple-system, 'Segoe UI', sans-serif"; zoomBtn.style.opacity='0.92'; zoomBtn.style.userSelect='none'; zoomBtn.style.outline='none';
+      zoomBtn.style.display='flex'; zoomBtn.style.alignItems='center'; zoomBtn.style.justifyContent='flex-start'; zoomBtn.style.gap='4px';
+      attachHover(zoomBtn);
+      zoomBtn.addEventListener('contextmenu', (e)=>{ try{ e.preventDefault(); e.stopPropagation(); }catch{} });
+      zoomBtn.addEventListener('mousedown',(e)=>{ try{ lastFocusedEl=document.activeElement; e.preventDefault(); }catch{} });
+      const zoomTitle=document.createElement('span'); zoomTitle.textContent='Zoom'; zoomTitle.style.fontWeight='500'; zoomTitle.style.userSelect='none';
+      const zoomCurBtn=document.createElement('span'); zoomCurBtn.id='overlayZoomVal'; zoomCurBtn.style.display='inline-block'; zoomCurBtn.style.padding='2px 10px'; zoomCurBtn.style.border='1px solid #2a3244'; zoomCurBtn.style.borderRadius='6px'; zoomCurBtn.style.fontSize='11px'; zoomCurBtn.style.lineHeight='1.5'; zoomCurBtn.style.userSelect='none'; zoomCurBtn.style.cursor='pointer'; zoomCurBtn.style.background='#0e2348'; zoomCurBtn.style.boxShadow='0 1px 2px rgba(0,0,0,0.6), inset 0 0 0 1px rgba(255,255,255,0.06)'; zoomCurBtn.style.color='#e6f0ff';
+      zoomCurBtn.addEventListener('contextmenu', (e)=>{ try{ e.preventDefault(); e.stopPropagation(); }catch{} });
+      zoomBtn.appendChild(zoomTitle); zoomBtn.appendChild(zoomCurBtn); palTR.appendChild(zoomBtn);
+      // Popup list
+      const zoomPopup=document.createElement('div'); zoomPopup.id='overlayZoomPopup'; zoomPopup.style.position='absolute'; zoomPopup.style.display='none'; zoomPopup.style.background='#0f1117'; zoomPopup.style.border='1px solid #2a3244'; zoomPopup.style.borderRadius='6px'; zoomPopup.style.padding='4px 6px'; zoomPopup.style.boxShadow='0 6px 14px rgba(0,0,0,0.5)'; zoomPopup.style.zIndex='4';
+      // 固定フォントサイズ (zoom90% 相当で固定)
+      zoomPopup.style.fontSize = 'calc(var(--editorFontBase, 20px) * 0.90)';
+      zoomPopup.style.lineHeight = '1.4';
+      zoomPopup.style.fontFamily = "Cascadia Code, Cascadia Mono, JetBrains Mono, Fira Code, Consolas, Yu Gothic, 游ゴシック Light, Meiryo, monospace";
+      // 他popupと同じホバー色を取得
+      const _cssVar = (name, fallback)=>{ try{ const s=getComputedStyle(document.documentElement); const v=s.getPropertyValue(name).trim(); return v||fallback; }catch{ return fallback; } };
+      const hoverBg = _cssVar('--popupActiveLine', '#1a2030');
+      const steps=[..._scaleSteps].sort((a,b)=>b-a); // 上に300%来るよう降順
+      const makeSep = ()=>{ const sep=document.createElement('div'); sep.style.height='0.5em'; sep.style.pointerEvents='none'; return sep; };
+      for(const s of steps){
+        if (Math.abs(s-1.0) < 1e-9){ zoomPopup.appendChild(makeSep()); }
+        const item=document.createElement('div'); item.textContent=Math.round(s*100)+'%'; item.style.padding='2px 8px'; item.style.cursor='pointer'; item.style.borderRadius='4px'; item.style.whiteSpace='nowrap'; item.dataset.scale=String(s);
+        // すべて右寄せ (#896)
+        item.style.textAlign = 'right';
+        item.addEventListener('mouseenter',()=>{ item.style.background=hoverBg; });
+        item.addEventListener('mouseleave',()=>{ item.style.background='transparent'; });
+        item.addEventListener('click',(e)=>{ try{ e.preventDefault(); e.stopPropagation(); }catch{} _setEditorScale(s); _showZoomHUD(); zoomPopup.style.display='none'; try{ if (lastFocusedEl && typeof lastFocusedEl.focus==='function') lastFocusedEl.focus(); }catch{} });
+        zoomPopup.appendChild(item);
+        if (Math.abs(s-1.0) < 1e-9){ zoomPopup.appendChild(makeSep()); }
+      }
+      palTR.appendChild(zoomPopup);
+      const toggleZoomPopup=()=>{
+        try{
+          if(zoomPopup.style.display==='none'){
+            zoomPopup.style.display='block';
+            // Zoomボタン全体右端に揃える (他popupと同様) (#898)
+            const r=zoomBtn.getBoundingClientRect();
+            const vp=document.getElementById('editorViewport');
+            if(vp){
+              const vr=vp.getBoundingClientRect();
+              const rightPx = Math.max(0, Math.round(vr.right - r.right));
+              zoomPopup.style.right = rightPx + 'px';
+              zoomPopup.style.left = 'auto';
+              zoomPopup.style.top = ((r.bottom - vr.top)|0) + 'px';
+            }
+          }else{ zoomPopup.style.display='none'; }
+        }catch{}
+      };
+      zoomCurBtn.addEventListener('click',(e)=>{ try{ e.preventDefault(); e.stopPropagation(); }catch{} toggleZoomPopup(); });
+      // クリック外閉じ
+      document.addEventListener('mousedown',(e)=>{ try{ if(zoomPopup.style.display==='none') return; if(!zoomPopup.contains(e.target) && !zoomCurBtn.contains(e.target)){ zoomPopup.style.display='none'; } }catch{} }, true);
+      try{ _wireZoomHUD(); }catch{}
+
       const encOLBtn = document.createElement('button');
       encOLBtn.type = 'button';
       encOLBtn.id = 'overlayBtnEncode';
@@ -14029,6 +14103,7 @@ const VERSION_STR = 'vi like TextEditor "six" v' + VERSION;
       encOLBtn.style.userSelect = 'none';
       encOLBtn.style.outline = 'none';
       attachHover(encOLBtn);
+      encOLBtn.addEventListener('contextmenu', (e)=>{ try{ e.preventDefault(); e.stopPropagation(); }catch{} });
       encOLBtn.addEventListener('mousedown', (e)=>{ try{ lastFocusedEl = document.activeElement; e.preventDefault(); }catch{} });
       const encWrap = document.createElement('div');
       encWrap.style.display = 'flex'; encWrap.style.flexDirection = 'column'; encWrap.style.gap = '2px';
@@ -14057,6 +14132,7 @@ const VERSION_STR = 'vi like TextEditor "six" v' + VERSION;
       caseBtn.style.userSelect = 'none';
       caseBtn.style.outline = 'none';
       attachHover(caseBtn);
+      caseBtn.addEventListener('contextmenu', (e)=>{ try{ e.preventDefault(); e.stopPropagation(); }catch{} });
       caseBtn.addEventListener('mousedown', (e)=>{ try{ lastFocusedEl = document.activeElement; e.preventDefault(); }catch{} });
       const caseWrap = document.createElement('div');
       caseWrap.style.display = 'flex';
