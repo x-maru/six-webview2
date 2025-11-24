@@ -3551,7 +3551,8 @@ const VERSION_STR = 'vi like TextEditor "six" v' + VERSION;
   /*********************************************************
    * Caret / Stripe
    *********************************************************/
-  function _repositionCaret(){
+  function _repositionCaret(opts){
+    opts = opts||{};
     const row1 = caretRow + 1;
     const topLine = _topLine();
     const offsetLines = row1 - topLine;
@@ -3587,6 +3588,23 @@ const VERSION_STR = 'vi like TextEditor "six" v' + VERSION;
     } else {
       edstripe.style.display='none';
       try{ edstripe.style.transform = ''; }catch{}
+    }
+    // VISUAL linewise 縦移動高速パス (#870 仮説: caret幅計測遅延による見た目ラグ)
+    // 縦移動直後は水平位置が大幅に変化しない前提で、幅計測を後段へ遅延し即時 top のみ更新。
+    if (opts.fastVertical && _visualActive && _visualLinewise){
+      let caret = caretLayer.querySelector('.caret');
+      if (!caret){ caret = document.createElement('div'); caret.className='caret'; caretLayer.appendChild(caret); }
+      caret.style.top = topPx + 'px';
+      caret.style.height = Math.max(1, Math.round(LINE_HEIGHT)) + 'px';
+      // transform remainder 適用（行境界ずれ防止）
+      try{ caret.style.transform = (Math.abs(rem) > 0.01) ? `translateY(${-rem}px)` : ''; }catch{}
+      // 幅は前回値維持。後で通常パスを rAF で補強。
+      if (window.requestAnimationFrame){
+        requestAnimationFrame(()=>{ try{ if (!_visualActive || !_visualLinewise) return; _repositionCaret(); }catch{} });
+      } else {
+        setTimeout(()=>{ try{ if (!_visualActive || !_visualLinewise) return; _repositionCaret(); }catch{} },0);
+      }
+      return;
     }
 
     // caret rectangle (column) using text measurement for monospace
@@ -4558,6 +4576,31 @@ const VERSION_STR = 'vi like TextEditor "six" v' + VERSION;
     const _eofPad = _readEofPadLines();
     const maxTopWithPad = Math.min(linesTotal, baseMaxTop + _eofPad);
 
+    // Special handling during VISUAL linewise selection: do minimal keep-in-view only (#869)
+    // Avoid enforcing scrolloff margins so range can extend freely without auto recenters.
+    if (_visualActive && _visualLinewise && !force && !centerOnce){
+      // Bring caret into view only when it would go off-screen; allow EOF pad visibility.
+      if (caretLine1 < topLine){
+        const newTop = Math.max(1, caretLine1);
+        if (newTop !== topLine) editor.scrollTop = (newTop-1)*LINE_HEIGHT;
+      } else if (caretLine1 > (topLine + vis - 1)){
+        let newTop = Math.max(1, caretLine1 - (vis - 1));
+        if (caretLine1 === linesTotal){ newTop = Math.min(newTop, maxTopWithPad); }
+        if (newTop !== topLine) editor.scrollTop = (newTop-1)*LINE_HEIGHT;
+      }
+      // Clamp at EOF (with pad) and snap to grid
+      try{
+        topLine = _topLine();
+        const maxTop = maxTopWithPad;
+        if (topLine > maxTop){ editor.scrollTop = (maxTop-1)*LINE_HEIGHT; }
+        const stCur = (editor.scrollTop||0);
+        const snapped = Math.floor(stCur/LINE_HEIGHT)*LINE_HEIGHT;
+        if (Math.abs(snapped - stCur) > 0.01){ editor.scrollTop = snapped; }
+        if (window.requestAnimationFrame){ requestAnimationFrame(()=>{ try{ const st1=(editor.scrollTop||0); const flo1=Math.floor(st1/LINE_HEIGHT)*LINE_HEIGHT; if (Math.abs(flo1-st1)>0.01){ editor.scrollTop=flo1; } _repositionCaret(); updateGutter(); }catch{} }); }
+      }catch{}
+      return;
+    }
+
     if (big || centerOnce || scrolloff >= Math.floor(vis/2)){
       let targetTop = Math.max(1, caretLine1 - Math.floor(vis/2));
       // When explicitly requested (e.g., 'G'), prefer showing EOF pad
@@ -4843,6 +4886,79 @@ const VERSION_STR = 'vi like TextEditor "six" v' + VERSION;
     // motion log
     try{ _debugPush({ t:Date.now(), type:'motion', mode:_mode, kind:'lines', delta:delta|0, toR:caretRow|0, toC:caretCol|0 }); }catch{}
     try{ _anomalyMaybeEnd('lines-motion'); }catch{}
+  }
+  // VISUAL linewise 専用の縦移動（アンチバウンス対策 #871）
+  let _visLineLastTargetRow = null;
+  // 多フレーム bounce 監視用 (#873)
+  let _visLineBounceFrames = 0; // 残り監視フレーム数
+  let _visLineBounceExpectRow = null;
+  let _visLineBounceActive = false;
+  function _visualLinewiseBounceTick(){
+    try{
+      if (!_visualActive || !_visualLinewise || _visLineBounceFrames<=0){ _visLineBounceActive=false; return; }
+      if (_visLineBounceExpectRow!=null && caretRow !== _visLineBounceExpectRow){
+        // 期待行へ再配置
+        const lines=_splitLines();
+        const line=lines[_visLineBounceExpectRow]||'';
+        caretRow=_visLineBounceExpectRow; caretCol=Math.min(caretCol|0, line.length);
+        _setCaret(caretRow, caretCol, { suppressDesired:true });
+        _repositionCaret(); updateGutter(); _updateVisualSelection();
+        try{ _debugPush({ t:Date.now(), type:'bounce-fix-multi', expect:_visLineBounceExpectRow, actual:caretRow }); }catch{}
+      }
+      _visLineBounceFrames--;
+      if (window && window.requestAnimationFrame){ requestAnimationFrame(_visualLinewiseBounceTick); }
+    }catch{ _visLineBounceActive=false; }
+  }
+  function _visualLinewiseScheduleBounceWatch(){
+    _visLineBounceExpectRow = _visLineLastTargetRow;
+    _visLineBounceFrames = 6; // 約数フレーム (~100ms前後) 監視
+    if (!_visLineBounceActive){ _visLineBounceActive=true; if (window && window.requestAnimationFrame){ requestAnimationFrame(_visualLinewiseBounceTick); } }
+  }
+  function _visualLinewiseMoveLines(delta){
+    try{
+      const lines = _splitLines();
+      const target = Math.max(0, Math.min(lines.length-1, caretRow + delta));
+      _visLineLastTargetRow = target;
+      if (target === caretRow) return; // 変化なし
+      // caretCol は行長を超えない範囲で維持
+      const line = lines[target] || '';
+      const col = Math.min(caretCol|0, line.length);
+      const anchorBefore = _visualAnchorR|0;
+      caretRow = target; caretCol = col;
+      _setCaret(caretRow, caretCol, { suppressDesired:true });
+      // scrolloff 最小確保 (ensureScrolloff VISUAL branchに任せる)
+      ensureScrolloff({ force:true });
+      // 強制アンカー維持 (#872) — 予期せぬアンカー移動があれば復元
+      if (_visualAnchorR !== anchorBefore){
+        try{ _debugPush({ t:Date.now(), type:'anchor-drift', was:anchorBefore, now:_visualAnchorR }); }catch{}
+        _visualAnchorR = anchorBefore;
+      }
+      _repositionCaret({ fastVertical:true }); updateGutter(); _updateVisualSelection();
+      // 直後再度アンカー確認（_updateVisualSelection 内副作用対策）
+      if (_visualAnchorR !== anchorBefore){ _visualAnchorR = anchorBefore; _updateVisualSelection(); }
+      try{ _debugPush({ t:Date.now(), type:'motion', mode:_mode, kind:'vis-line-lines', delta:delta|0, toR:caretRow|0 }); }catch{}
+      _visualLinewiseScheduleBounceWatch();
+    }catch{}
+  }
+  // rAF で caretRow が anchor 側へ不意に戻った場合再修正（早期 return 防止）
+  function _visualLinewiseAntiBounce(){
+    try{
+      if (!_visualActive || !_visualLinewise) return;
+      if (_visLineLastTargetRow == null) return;
+      if (caretRow !== _visLineLastTargetRow){
+        // 期待行へ再配置
+        const lines=_splitLines();
+        const line=lines[_visLineLastTargetRow]||'';
+        caretRow=_visLineLastTargetRow;
+        caretCol=Math.min(caretCol|0, line.length);
+        _setCaret(caretRow, caretCol, { suppressDesired:true });
+        _repositionCaret(); updateGutter(); _updateVisualSelection();
+        try{ _debugPush({ t:Date.now(), type:'bounce-fix', expect:_visLineLastTargetRow, actual:caretRow }); }catch{}
+      }
+    }catch{}
+  }
+  if (window && window.requestAnimationFrame){
+    try{ requestAnimationFrame(()=>{ _visualLinewiseAntiBounce(); }); }catch{}
   }
   // 共通 EOF パッド 1 行スクロール (#864/#865/#867)
   function _maybeScrollEofPadStep(kind){
@@ -8467,8 +8583,8 @@ const VERSION_STR = 'vi like TextEditor "six" v' + VERSION;
         }
     // Motions extend selection
   const moveAndUpdate=(fn)=>{ fn(); try{ _flagCaretMotion(); }catch{} _ensureAfterMotion(); _repositionCaret(); updateGutter(); _updateVisualSelection(); };
-        if (e.key==='ArrowDown'){ e.preventDefault(); const n=_consumeCount(); moveAndUpdate(()=>_moveCaretLines(n)); return; }
-        if (e.key==='ArrowUp'){ e.preventDefault(); const n=_consumeCount(); moveAndUpdate(()=>_moveCaretLines(-n)); return; }
+        if (e.key==='ArrowDown'){ e.preventDefault(); const n=_consumeCount(); if (_visualLinewise){ _visualLinewiseMoveLines(n); } else { moveAndUpdate(()=>_moveCaretLines(n)); } return; }
+        if (e.key==='ArrowUp'){ e.preventDefault(); const n=_consumeCount(); if (_visualLinewise){ _visualLinewiseMoveLines(-n); } else { moveAndUpdate(()=>_moveCaretLines(-n)); } return; }
         // In strict-normal-ime, ignore letter motions (and their Process-coded variants) while composing; arrows still work
         if (_optStrictNormalIME && _imeComposing){
           const isHJKLCode = (e.code==='KeyH'||e.code==='KeyJ'||e.code==='KeyK'||e.code==='KeyL');
@@ -8480,8 +8596,8 @@ const VERSION_STR = 'vi like TextEditor "six" v' + VERSION;
           }
         }
         // Accept Process-coded j/k when composing (non-strict): map by code
-        if (e.key==='j' || (e.key==='Process' && e.code==='KeyJ')){ e.preventDefault(); try{ _debugPush({ t:Date.now(), type:'motion-exec', mode:_mode, key:'j', code:e.code, via:(e.key==='Process'?'Process/KeyJ':'j') }); }catch{} const n=_consumeCount(); moveAndUpdate(()=>_moveCaretLines(n)); return; }
-        if (e.key==='k' || (e.key==='Process' && e.code==='KeyK')){ e.preventDefault(); try{ _debugPush({ t:Date.now(), type:'motion-exec', mode:_mode, key:'k', code:e.code, via:(e.key==='Process'?'Process/KeyK':'k') }); }catch{} const n=_consumeCount(); moveAndUpdate(()=>_moveCaretLines(-n)); return; }
+        if (e.key==='j' || (e.key==='Process' && e.code==='KeyJ')){ e.preventDefault(); try{ _debugPush({ t:Date.now(), type:'motion-exec', mode:_mode, key:'j', code:e.code, via:(e.key==='Process'?'Process/KeyJ':'j') }); }catch{} const n=_consumeCount(); if (_visualLinewise){ _visualLinewiseMoveLines(n); } else { moveAndUpdate(()=>_moveCaretLines(n)); } return; }
+        if (e.key==='k' || (e.key==='Process' && e.code==='KeyK')){ e.preventDefault(); try{ _debugPush({ t:Date.now(), type:'motion-exec', mode:_mode, key:'k', code:e.code, via:(e.key==='Process'?'Process/KeyK':'k') }); }catch{} const n=_consumeCount(); if (_visualLinewise){ _visualLinewiseMoveLines(-n); } else { moveAndUpdate(()=>_moveCaretLines(-n)); } return; }
   // Guard against anomalous IME mapping (#523): accept 'h' when code is KeyH or Process/KeyH; always accept ArrowLeft
   if ((e.key==='h' && e.code==='KeyH' && (!_optStrictNormalIME || !_imeComposing)) || (e.key==='Process' && e.code==='KeyH' && (!_optStrictNormalIME || !_imeComposing)) || e.key==='ArrowLeft'){
     e.preventDefault(); try{ _debugPush({ t:Date.now(), type:'motion-exec', mode:_mode, key:e.key, code:e.code, via:(e.key==='ArrowLeft'?'ArrowLeft':(e.code==='KeyH'?(e.key==='Process'?'Process/KeyH':'KeyH'):'unknown')) }); }catch{} const n=_consumeCount(); moveAndUpdate(()=>_moveCaretCols(-n)); return; }
