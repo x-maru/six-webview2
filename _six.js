@@ -5190,8 +5190,71 @@ const VERSION_STR = 'vi like TextEditor "six" v' + VERSION;
   }
   function _moveWORDW(count){ let r=caretRow, c=caretCol; const times=Math.max(1,count|0); for(let i=0;i<times;i++){ const p=_nextWORDStart(r,c); r=p.r; c=p.c; } _setCaret(r,c); }
   function _moveWORDB(count){ let r=caretRow, c=caretCol; const times=Math.max(1,count|0); for(let i=0;i<times;i++){ const p=_prevWORDStart(r,c); r=p.r; c=p.c; } _setCaret(r,c); }
-  function _moveParagraphNext(count){ const lines=_splitLines(); let r=caretRow; const times=Math.max(1,count|0); for(let i=0;i<times;i++){ let j=r+1; while (j<lines.length && !/^\s*$/.test(lines[j]||'')) j++; while (j<lines.length && /^\s*$/.test(lines[j]||'')) j++; if (j>=lines.length){ r=lines.length-1; break; } r=j; } const col=_firstNonBlankColOf(lines[r]||''); _setCaret(r,col); }
-  function _moveParagraphPrev(count){ const lines=_splitLines(); let r=caretRow; const times=Math.max(1,count|0); for(let i=0;i<times;i++){ let j=r-1; while (j>=0 && !/^\s*$/.test(lines[j]||'')) j--; while (j>=0 && /^\s*$/.test(lines[j]||'')) j--; if (j<0){ r=0; break; } let k=j; while (k>0 && !/^\s*$/.test(lines[k-1]||'')) k--; r=k; } const col=_firstNonBlankColOf(lines[r]||''); _setCaret(r,col); }
+  function _moveParagraphNext(count){
+    const lines=_splitLines();
+    const isBlank = (row)=>{ const s=lines[row]||''; return /^\s*$/.test(s); };
+    const firstNonBlankOfRow = (row)=> _firstNonBlankColOf(lines[row]||'');
+    let r = caretRow|0;
+    let c = caretCol|0;
+    const times = Math.max(1, count|0);
+    for (let i=0;i<times;i++){
+      if (r >= lines.length) { r = lines.length-1; break; }
+      // Vim paragraph forward: from any nonblank line, skip remainder of current block, then blank(s), land on first line of next block.
+      // From blank line(s), skip them and land on first nonblank below.
+      let j = r;
+      if (!isBlank(j)){
+        while (j < lines.length && !isBlank(j)) j++; // now j is first blank or EOF
+      }
+      while (j < lines.length && isBlank(j)) j++; // skip blank separator lines
+      if (j >= lines.length){
+        // EOF: stay on last nonblank line (paragraph end acts as boundary)
+        r = lines.length-1; c = firstNonBlankOfRow(r); break;
+      }
+      r = j; c = firstNonBlankOfRow(r);
+    }
+    _setCaret(r, c);
+  }
+  function _moveParagraphPrev(count){
+    const lines=_splitLines();
+    const isBlank = (row)=>{ const s=lines[row]||''; return /^\s*$/.test(s); };
+    const firstNonBlankOfRow = (row)=> _firstNonBlankColOf(lines[row]||'');
+    let r = caretRow|0;
+    let c = caretCol|0;
+    const times = Math.max(1, count|0);
+    for (let i=0;i<times;i++){
+      if (r < 0) { r = 0; break; }
+      if (!isBlank(r)){
+        // Within a paragraph block: find the first line of this non-blank block
+        let top = r;
+        while (top>0 && !isBlank(top-1)) top--;
+        const fnb = firstNonBlankOfRow(top);
+        if (r === top){
+          // Already on the first line of the block
+          if (c > fnb){
+            // Step 1: move to first non-blank of current top line, then stop this iteration
+            r = top; c = fnb; break; // only move to start-of-paragraph column once
+          }
+          // Move to previous paragraph block: go above blanks, then to that block's first line
+          let j = top-1; // line above current block
+          while (j>=0 && isBlank(j)) j--;
+          if (j < 0){ r = 0; c = firstNonBlankOfRow(0); break; }
+          while (j>0 && !isBlank(j-1)) j--;
+          r = j; c = firstNonBlankOfRow(r);
+        } else {
+          // Not at block top yet: go to top line of current block
+          r = top; c = fnb;
+        }
+      } else {
+        // On blank lines: skip blanks upward, then land on previous block's first line
+        let j = r-1;
+        while (j>=0 && isBlank(j)) j--;
+        if (j < 0){ r = 0; c = firstNonBlankOfRow(0); break; }
+        while (j>0 && !isBlank(j-1)) j--;
+        r = j; c = firstNonBlankOfRow(r);
+      }
+    }
+    _setCaret(r, c);
+  }
 
   /*********************************************************
    * runCommand (:N)
