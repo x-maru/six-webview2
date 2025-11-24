@@ -5041,7 +5041,13 @@ const VERSION_STR = 'vi like TextEditor "six" v' + VERSION;
     return j;
   }
   // Word types
-  const _WT_SPACE = 0, _WT_NL = 1, _WT_ALNUM = 2, _WT_KANA = 3, _WT_HAN = 4, _WT_SYMBOL = 5;
+  const _WT_SPACE = 0, _WT_NL = 1, _WT_ALNUM = 2, _WT_HIRA = 3, _WT_KATA = 4, _WT_HAN = 5, _WT_SYMBOL = 6;
+  // 長音類設定 (必須) (#888,#889)
+  let _longSoundLikeSet;
+  try{
+    if(!Array.isArray(window.SIX_LONG_SOUND_LIKE) || window.SIX_LONG_SOUND_LIKE.length===0){ throw new Error('SIX_LONG_SOUND_LIKE 未定義または空'); }
+    _longSoundLikeSet = new Set(window.SIX_LONG_SOUND_LIKE.map(v=>v|0));
+  }catch(e){ console.error(e); throw e; }
   function _isSpaceCp(cp){ return cp===0x20 || cp===0x09 || cp===0x3000; }
   function _isAsciiWordCp(cp){
     return (cp>=0x30 && cp<=0x39) || (cp>=0x41 && cp<=0x5A) || (cp>=0x61 && cp<=0x7A) || cp===0x5F;
@@ -5050,10 +5056,24 @@ const VERSION_STR = 'vi like TextEditor "six" v' + VERSION;
     // FF10–FF19 (0-9), FF21–FF3A (A-Z), FF41–FF5A (a-z), FF3F (underscore)
     return (cp>=0xFF10 && cp<=0xFF19) || (cp>=0xFF21 && cp<=0xFF3A) || (cp>=0xFF41 && cp<=0xFF5A) || cp===0xFF3F;
   }
-  function _isKanaCp(cp){
-    // Hiragana, Katakana, Halfwidth Katakana, plus middle dot/prolong mark within range
-    return (cp>=0x3040 && cp<=0x309F) || (cp>=0x30A0 && cp<=0x30FF) || (cp>=0xFF66 && cp<=0xFF9D) || cp===0x30FC || cp===0x30FB;
+  function _isHiraganaCp(cp){
+    // Hiragana block
+    return (cp>=0x3040 && cp<=0x309F);
   }
+  function _isKatakanaCp(cp){
+    // Katakana, Halfwidth Katakana (exclude prolonged sound mark handled separately), middle dot
+    if (cp===0x30FB) return true; // middle dot stays Katakana-like symbol
+    if (cp>=0x30A0 && cp<=0x30FF){
+      if (cp===0x30FC) return false; // prolonged sound mark handled as kana-long-like
+      return true;
+    }
+    if (cp>=0xFF66 && cp<=0xFF9D){
+      if (cp===0xFF70) return false; // halfwidth prolonged sound mark handled as kana-long-like
+      return true;
+    }
+    return false;
+  }
+  function _isKanaLongLikeCp(cp){ return _longSoundLikeSet.has(cp); }
   function _isHanCp(cp){
     // CJK Unified Ideographs + Extension A + Compatibility
     return (cp>=0x4E00 && cp<=0x9FFF) || (cp>=0x3400 && cp<=0x4DBF) || (cp>=0xF900 && cp<=0xFAFF);
@@ -5063,7 +5083,8 @@ const VERSION_STR = 'vi like TextEditor "six" v' + VERSION;
     if (cp < 0) return _WT_SPACE; // treat invalid as space boundary
     if (_isSpaceCp(cp)) return _WT_SPACE;
     if (_isAsciiWordCp(cp) || _isFullwidthAlnumCp(cp)) return _WT_ALNUM;
-    if (_isKanaCp(cp)) return _WT_KANA;
+    if (_isKanaLongLikeCp(cp) || _isHiraganaCp(cp)) return _WT_HIRA; // long-like => treat as HIRAGANA category
+    if (_isKatakanaCp(cp)) return _WT_KATA;
     if (_isHanCp(cp)) return _WT_HAN;
     return _WT_SYMBOL;
   }
@@ -5096,9 +5117,40 @@ const VERSION_STR = 'vi like TextEditor "six" v' + VERSION;
         // fell off end; next loop iteration will treat newline as its own step
         continue;
       }
-      // In a non-space run: leave the current run and stop right after it (do not skip following spaces) (#701)
+      // In a non-space run: JP-aware grouping (#888,#889)
       const tRun = t;
-      while (c < n && _wordTypeAtInLine(line, c) === tRun){ c = _nextIndex(line, c); }
+      if (tRun === _WT_HAN){
+        let seenKana = false;
+        while (c < n){
+          const tCur = _wordTypeAtInLine(line, c);
+          if (!seenKana){
+            if (tCur===_WT_HAN){ c = _nextIndex(line, c); continue; }
+            if (tCur===_WT_HIRA || tCur===_WT_KATA){ seenKana=true; c=_nextIndex(line,c); continue; }
+          } else {
+            if (tCur===_WT_HIRA || tCur===_WT_KATA){ c=_nextIndex(line,c); continue; }
+            if (tCur===_WT_HAN){ break; }
+          }
+          break;
+        }
+      } else if (tRun === _WT_KATA){
+        while (c < n){
+          const tCur=_wordTypeAtInLine(line,c);
+          if (tCur===_WT_KATA){ c=_nextIndex(line,c); continue; }
+          const cpCur=_cpAt(line,c);
+          if (_isKanaLongLikeCp(cpCur)){ c=_nextIndex(line,c); continue; }
+          break;
+        }
+      } else if (tRun === _WT_HIRA){
+        while (c < n){
+          const tCur=_wordTypeAtInLine(line,c);
+          if (tCur===_WT_HIRA){ c=_nextIndex(line,c); continue; }
+          const cpCur=_cpAt(line,c);
+          if (_isKanaLongLikeCp(cpCur)){ c=_nextIndex(line,c); continue; }
+          break;
+        }
+      } else {
+        while (c < n && _wordTypeAtInLine(line, c) === tRun){ c = _nextIndex(line, c); }
+      }
       return { r, c };
     }
   }
@@ -5126,11 +5178,38 @@ const VERSION_STR = 'vi like TextEditor "six" v' + VERSION;
       }
       if (c < 0){ return { r: Math.max(0, r-1), c: _lineLen(Math.max(0, r-1)) }; }
       const tRun = _wordTypeAtInLine(line, c);
-      while (c > 0){
-        const prev = _prevIndex(line, c);
-        if (prev < 0) break;
-        if (_wordTypeAtInLine(line, prev) !== tRun) break;
-        c = prev;
+      const startCp = _cpAt(line, c);
+      if (tRun === _WT_HAN){
+        while (c > 0){
+          const p=_prevIndex(line,c); if (p<0) break; const tPrev=_wordTypeAtInLine(line,p);
+          if (tPrev===_WT_HAN){ c=p; continue; }
+          // Stop before kana (asymmetric)
+          break;
+        }
+      } else if (tRun === _WT_HIRA || tRun === _WT_KATA || (_isKanaLongLikeCp(startCp) && tRun===_WT_HIRA)){
+        // 後方 kana 語: 現在のかな連続 + 直前の漢字連続 までを 1 語。さらにその前のかなには跨らない。
+        const treatKatakanaAsKana = (tRun===_WT_HIRA && _isKanaLongLikeCp(startCp));
+        let consumedHanBlock = false;
+        while (c > 0){
+          const p=_prevIndex(line,c); if (p<0) break; const tPrev=_wordTypeAtInLine(line,p); const cpPrev=_cpAt(line,p);
+          if (!consumedHanBlock){
+            // まず同種かな/長音類を巻き取る
+            if (tPrev===_WT_HIRA || (tPrev===_WT_KATA && (tRun===_WT_KATA || treatKatakanaAsKana)) || _isKanaLongLikeCp(cpPrev)){
+              c=p; continue;
+            }
+            // 次に直前の漢字連続ブロックを 1 度だけ巻き取る
+            if (tPrev===_WT_HAN){ consumedHanBlock=true; c=p; continue; }
+            break;
+          } else {
+            // 漢字ブロック継続中: 連続漢字のみ巻き取る。それ以外(かな/記号等)で停止。
+            if (tPrev===_WT_HAN){ c=p; continue; }
+            break;
+          }
+        }
+      } else {
+        while (c > 0){
+          const p=_prevIndex(line,c); if (p<0) break; if (_wordTypeAtInLine(line,p)!==tRun) break; c=p;
+        }
       }
       return { r, c };
     }

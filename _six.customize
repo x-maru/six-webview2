@@ -124,3 +124,16 @@ window.THEME = {
   popupActiveLine: "#00a090", // active line highlight
   popupHeaderBg: "#000030"
 };
+
+// かな/カナでの長音として扱う記号 (単語単位の移動に利用)。コードポイント配列。
+// 必須: 未定義/空配列なら起動時にエラー。
+window.SIX_LONG_SOUND_LIKE = [
+  0x30FC, // ー Prolonged Sound Mark
+  0xFF70, // ｰ Halfwidth Prolonged Sound Mark
+  0xFF0D, // Fullwidth Hyphen-Minus
+  0x2212, // Minus Sign
+  0x2010, // Hyphen
+  0x2013, // En Dash
+  0x2014, // Em Dash
+  0x2015  // Horizontal Bar
+];
