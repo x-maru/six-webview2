@@ -45,6 +45,24 @@ const VERSION_STR = 'vi like TextEditor "six" v' + VERSION;
   const tabScrollLeftBtn = tabbarEl ? document.getElementById('tabScrollLeft') : null;
   const tabScrollRightBtn = tabbarEl ? document.getElementById('tabScrollRight') : null;
   const posinfoEl = document.getElementById('posinfo');
+  // ユーザー水平ホイール直後の自動水平再センタリング抑止ガード (#868)
+  let _userHScrollGuardUntil = 0;
+  // NORMAL/VISUAL モードで ctrl なしの横方向 wheel (チルト) により明示的に scrollLeft を加算しガードセット
+  try{
+    viewport && viewport.addEventListener('wheel', (e)=>{
+      try{
+        if (!e.ctrlKey && Math.abs(e.deltaX) > 0){
+          // deltaX 正負で自然方向に移動。ブラウザは右スクロールで正値になるケースが多い。
+          const cur = (editor && typeof editor.scrollLeft==='number')? (editor.scrollLeft|0) : 0;
+          const step = e.deltaX; // そのまま使用（OS 依存で適度なピクセル値）
+          const next = Math.max(0, cur + step);
+          if (editor && next !== cur){ editor.scrollLeft = next; }
+          _userHScrollGuardUntil = Date.now() + 600; // 600ms 自動再センタリング抑止
+          e.preventDefault(); e.stopPropagation();
+        }
+      }catch{}
+    }, { passive:false });
+  }catch{}
   function _updateTabScrollButtons(){
     try{
       if (!tabbarTabs || !tabScrollLeftBtn || !tabScrollRightBtn) return;
@@ -3689,9 +3707,9 @@ const VERSION_STR = 'vi like TextEditor "six" v' + VERSION;
     }catch{}
     const cw = Math.max(1, Math.round(chW * 0.9));
     try{ caret.style.setProperty('--caretWidth', cw + 'px'); }catch{}
-    // Auto horizontal scroll to keep caret visible in NORMAL/VISUAL
+    // Auto horizontal scroll to keep caret visible in NORMAL/VISUAL (水平ホイール直後ガード中は抑止) (#868)
     try{
-      if (_mode === 'NORMAL' || _mode === 'VISUAL'){
+      if ((_mode === 'NORMAL' || _mode === 'VISUAL') && (Date.now() > _userHScrollGuardUntil)){
         const gw = (gutter && gutter.clientWidth) ? gutter.clientWidth : 0;
         const visW = Math.max(0, (viewport && viewport.clientWidth ? viewport.clientWidth : 0) - gw);
         let hscroll = (editor && typeof editor.scrollLeft === 'number') ? (editor.scrollLeft|0) : 0;
