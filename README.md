@@ -1,4 +1,4 @@
-﻿# vi like text editor "six"
+# vi like text editor "six"
 
 # インストール
 - 配布ファイルを解凍すると出てくるフォルダがそのままインストールパスになる。

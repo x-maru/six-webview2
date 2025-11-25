@@ -1,4 +1,4 @@
-﻿const VERSION = '0.9.1';
+const VERSION = '0.9.1';
 const VERSION_STR = 'vi like TextEditor "six" v' + VERSION;
 // Build sentinel (#912) - confirm script actually refreshed & executed
 try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}

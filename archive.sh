@@ -6,9 +6,12 @@ set -euo pipefail
 SDIR=$(cd "$(dirname "$0")" && pwd)
 cd "$SDIR"
 
-## Extract VERSION (numeric) from _six.js robustly without advanced regex.
-raw_line="$(grep -m1 'const VERSION' _six.js || true)"
-VERSION="$(printf '%s' "$raw_line" | tr -d '\r' | sed 's/.*VERSION[[:space:]]*=[[:space:]]*//; s/[;].*//; s/[[:space:]]//g')"
+## Extract VERSION (string) from _six.js (handles quoted value e.g. '0.9.1').
+raw_line="$(grep -m1 -E 'const[[:space:]]+VERSION[[:space:]]*=' _six.js || true)"
+# Extract quoted or unquoted RHS up to semicolon; handle optional BOM by not anchoring at line start.
+VERSION="$(printf '%s' "$raw_line" | tr -d '\r' | sed -E "s/.*const[[:space:]]+VERSION[[:space:]]*=[[:space:]]*['\"]([^'\"]+)['\"].*/\1/;
+											   s/.*const[[:space:]]+VERSION[[:space:]]*=[[:space:]]*([^;[:space:]]+).*/\1/;
+											   s/[[:space:]]//g")"
 
 if [ -z "${VERSION}" ]; then
 	echo "ERROR: VERSION not found in _six.js (line grep returned: '$raw_line')" >&2
@@ -17,7 +20,7 @@ if [ -z "${VERSION}" ]; then
 fi
 
 if ! printf '%s' "$VERSION" | grep -Eq '^[0-9]+(\.[0-9]+)*$'; then
-	echo "ERROR: Extracted VERSION '$VERSION' not numeric" >&2
+	echo "ERROR: Extracted VERSION '$VERSION' not numeric dotted string" >&2
 	exit 2
 fi
 
