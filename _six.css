@@ -83,16 +83,15 @@ body { font: var(--fontBase, 18px)/20px Consolas, 'Courier New', monospace; over
 		linear-gradient(var(--gutterGradientStart, #141821), var(--gutterGradientEnd, #0f1117));
 	color: var(--gutterNumberColor, #57607a); text-align:right; padding-right: 0; box-sizing:border-box;
 	font-size: calc(var(--editorFontBase, 20px) * var(--edScale));
-	/* Prefer thinner monospace faces; fall back gracefully */
-	/* Prefer monospaced CJK fonts earlier to stabilize East Asian punctuation widths */
+	/* Prefer thinner monospace faces; fall back gracefully (default = original order) */
 	font-family: "Cascadia Code", "Cascadia Mono", "JetBrains Mono", "Fira Code", "Consolas", "Yu Gothic", "游ゴシック Light", "Meiryo", monospace !important;
 	font-weight: 200 !important;
 }
 #gutter div { line-height: var(--lhEff, var(--lh)); padding-right: calc(6px * var(--edScale)); box-sizing: border-box; width: 100%; /* use line-height centering; avoid flex rounding drift; make row background span full gutter incl. padding */ }
 #editor { flex: 1; background: transparent; color: var(--editorTextColor, #e6e6e6); border:0; outline:0; resize:none; line-height: var(--lhEff, var(--lh)); tab-size: var(--tabstop, 8); -moz-tab-size: var(--tabstop, 8); white-space: pre; padding: 0 0 calc(var(--eofPadLines, 10) * var(--lhEff, var(--lh))) 0; margin: 0; box-sizing: content-box; position: relative; z-index: 1; font-size: calc(var(--editorFontBase, 20px) * var(--edScale));
-	/* Prefer monospaced CJK fonts earlier to stabilize East Asian punctuation widths */
+	/* Default = original order (CJK not forced first) */
 	font-family: "Cascadia Code", "Cascadia Mono", "JetBrains Mono", "Fira Code", "Consolas", "Yu Gothic", "游ゴシック Light", "Meiryo", monospace !important;
-	font-weight: 200 !important;
+	font-weight: 220 !important;
 	/* Stabilize glyph metrics for measurement: disable kerning/ligatures (do not force full-width variants) */
 	font-kerning: none; font-variant-ligatures: none;
 	/* Disable proportional kana/alt spacing if the font supports it (best-effort) */
@@ -257,3 +256,20 @@ body { font: var(--fontBase, 18px)/20px Consolas, 'Courier New', monospace; over
 
 /* Visual Bell flash overlay */
 #vbflash { position:absolute; inset:0; background:black; opacity:0; pointer-events:none; z-index: 10; }
+
+/* Punctuation subset face: SixEditorMix (only punctuation; other glyphs use normal stack) */
+@font-face {
+	font-family: 'SixEditorMix';
+	/* Prefer CJK mono if available; broaden fallbacks to common JP fonts */
+	src: local("Source Han Code JP"), local("Sarasa Mono J"), local("MS Gothic"), local("IPAGothic"),
+		 local("Noto Sans CJK JP"), local("Noto Sans JP"), local("Noto Sans Japanese");
+	unicode-range: U+3001, U+3002, U+FF0C, U+FF0E, U+2026; /* 、 。 ， ． … */
+	font-display: swap;
+}
+/* Use the punctuation face first, then the regular stack so weights map correctly */
+#editor, #gutter {
+	font-family: 'SixEditorMix',
+		"Cascadia Code", "Cascadia Mono", "JetBrains Mono", "Fira Code", "Consolas",
+		"Sarasa Mono J", "Noto Sans Mono", "Noto Sans CJK JP", "Noto Sans JP", "Noto Sans Japanese",
+		"Yu Gothic", "游ゴシック Light", "Meiryo", "MS Gothic", monospace !important;
+}

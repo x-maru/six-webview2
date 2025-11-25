@@ -3913,7 +3913,8 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
         return (w && w>0) ? w : (_isFullwidth(ch) ? _fullRefW : _halfRefW);
       }catch{ return _halfRefW; }
     };
-    const _isHangablePunct = (ch)=> /[\u3001\u3002\uFF0C\uFF0E]/.test(ch||'');
+    // 食い込み(ハンギング)防止対象: 、。 ， ． … (#938)
+    const _isHangablePunct = (ch)=> /[\u3001\u3002\uFF0C\uFF0E\u2026]/.test(ch||'');
     const _isFullwidth = (ch)=> /[\u1100-\u115F\u2E80-\uA4CF\uAC00-\uD7A3\uF900-\uFAFF\uFE10-\uFE19\uFE30-\uFE6F\u3000-\u303F\uFF01-\uFF60\uFFE0-\uFFE6]/.test(ch||'');
     // Primary width measurement up to caretCol
   // Expand tabs before measurement to avoid mid-tab caret mis-centering
@@ -3926,12 +3927,21 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
       while (k>=0 && _isHangablePunct(line[k])) k--;
       const clusterStart = k+1;
       if (clusterStart < caretCol){
-        // width before the cluster via direct measure
+        // クラスタ直前までの幅
         _measureSpan.textContent = line.slice(0, clusterStart);
         const baseX = _measureSpan.getBoundingClientRect().width || 0;
+        // 連続句読点を「各文字=全角セル幅」に統一。フォントのハンギングによる食い込みを排除 (#934/#935/#936)
         let sum = 0;
         for (let i=clusterStart; i<caretCol; i++){
-          sum += _charWidth(line[i]);
+          const ch = line[i];
+          // 実測幅
+          _measureSpan.textContent = ch;
+          let wChar = _measureSpan.getBoundingClientRect().width || 0;
+          // 対象句読点は強制的に full-width 基準へ (閾値: 実測が基準の85%未満なら上書き)
+          if (_isHangablePunct(ch)){
+            if (wChar < _fullRefW * 0.85) wChar = _fullRefW; else wChar = Math.max(wChar, _fullRefW); // ハンギングで僅差でも最終的に full 幅に揃える
+          }
+          sum += wChar;
         }
         x = baseX + sum;
       }
@@ -6413,6 +6423,7 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
     if (/^:set\s+norawkeys\s*$/i.test(cmd)){ _optRawKeys = false; toast('rawkeys: off', 900); return; }
     if (/^:set\s+rawkeys!\s*$/i.test(cmd)){ _optRawKeys = !_optRawKeys; toast('rawkeys: ' + (_optRawKeys?'on':'off'), 900); return; }
     if (/^:set\s+rawkeys\?\s*$/i.test(cmd)){ toast('rawkeys: ' + (_optRawKeys?'on':'off'), 1200); return; }
+    // (removed :set guifont? and :set cjkpunctmono* deprecated commands #947)
     // :lastsynctime — print last synchronized filesystem mtime/size of current buffer (debug; no I/O)
     if (/^:lastsynctime\s*$/i.test(cmd)){
       const b = currentBuffer();

@@ -25,7 +25,7 @@ window.THEME = {
   modeVisualFGColor: "#c0daff",
 
   // 本文文字色
-  editorTextColor: "#00501a",
+  editorTextColor: "#004a0a",
 
   // 行背景(カーソル外)グラデーション
   lineGradientStart: "#f4fff4",
@@ -36,20 +36,20 @@ window.THEME = {
   // 行番号 文字色(カーソル外)
   gutterNumberColor: "#808080",
 
-  // 行背景背景(NORMALカーソル行)グラデーション
+  // 行背景(NORMALカーソル行)グラデーション
   activeLineGradientStart: "#e4ffe4",
-  activeLineGradientEnd: "#e2fde2",
+  activeLineGradientEnd: "#e0fbe0",
   // 行番号背景(NORMALカーソル行)グラデーション
   activeGutterGradientStart: "#d0ead0",
   activeGutterGradientEnd: "#c0dac0",
-  // 行背景背景(INSERTカーソル行)グラデーション
+  // 行背景(INSERTカーソル行)グラデーション
   activeEditLineGradStart: "#fff0f0",
   activeEditLineGradEnd: "#ffe0e0",
   // 行番号背景(INSERTカーソル行)グラデーション
   activeEditGutterGradStart: "#efe0e0",
   activeEditGutterGradEnd: "#efd0c0",
   // 行番号(NORMAL/INSERTカーソル行) 文字色
-  activeLineNumberColor: "#a00000",
+  activeLineNumberColor: "#20a090",
 
   // INSERT mode specific gradients
   editCaretGradStart: "rgba(255,79,0,0.95)",
