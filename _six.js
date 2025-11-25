@@ -1,4 +1,4 @@
-﻿const VERSION = 0.9;
+﻿const VERSION = '0.9.1';
 const VERSION_STR = 'vi like TextEditor "six" v' + VERSION;
 // six migration oriented bootstrap (spec-aligned skeleton with file load)
 (function(){
