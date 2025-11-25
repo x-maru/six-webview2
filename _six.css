@@ -38,6 +38,19 @@ body { font: var(--fontBase, 18px)/20px Consolas, 'Courier New', monospace; over
 #tabbar .tabscroll span { pointer-events:none; }
 #tabbar .tab:hover { filter: brightness(1.05); }
 #tabbar .tab.active { background: var(--activeTabBg, yellow); color: var(--activeTabText, yellow); border-bottom-color: var(--activeTabBg, yellow); font-weight:600; }
+#tabbar .tabs.dragging { user-select:none; }
+/* Placeholder was removed (#918); preserve rule for safety (no-op) */
+#tabbar .tabs .tab.placeholder { display:none; }
+/* Drag ghost: full opacity & pointer cursor (#920) */
+.drag-ghost { z-index:10000; opacity:1 !important; cursor:pointer; box-shadow:0 2px 6px rgba(0,0,0,0.30); }
+.drag-ghost { filter:none !important; mix-blend-mode:normal !important; transition:none !important; background: var(--tabBg, yellow) !important; color: var(--tabText, yellow) !important; }
+/* Global cursor override during tab drag (#920) */
+.tab-drag-active #editorViewport,
+.tab-drag-active #editor,
+.tab-drag-active #gutter,
+.tab-drag-active #tabbar,
+.tab-drag-active #tabbar .tab,
+.tab-drag-active * { cursor: pointer !important; }
 #tabbar .tab .name { white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
 #tabbar .tab .name::first-letter { font-size: 1.1em; vertical-align: -1px; }
 #tabbar .tab .mod { color:#ff5b5b; margin-left:6px; font-weight:700; }

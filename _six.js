@@ -1,5 +1,7 @@
 ﻿const VERSION = '0.9.1';
 const VERSION_STR = 'vi like TextEditor "six" v' + VERSION;
+// Build sentinel (#912) - confirm script actually refreshed & executed
+try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
 // six migration oriented bootstrap (spec-aligned skeleton with file load)
 (function(){
   // Multi-instance lock (#643): prevent opening a second active instance.
@@ -3103,6 +3105,7 @@ const VERSION_STR = 'vi like TextEditor "six" v' + VERSION;
     buffers.forEach((b, i)=>{
       const div = document.createElement('div');
       div.className = 'tab' + (i===currentIdx ? ' active' : '');
+      try{ div.dataset.index = String(i); }catch{}
       let label = '';
       if (b.path && /^file:\/\//i.test(b.path)){
         // すべてのタブで同一体裁（ファイル名のみ）
@@ -3134,8 +3137,8 @@ const VERSION_STR = 'vi like TextEditor "six" v' + VERSION;
       div.appendChild(nameSpan);
       if (b.modified){ const mod = document.createElement('span'); mod.className='mod'; mod.textContent='*'; div.appendChild(mod); }
   // クリックでフォーカスを奪わない（mousedown 既定動作を抑止）
-  div.addEventListener('mousedown', (ev)=>{ ev.preventDefault(); });
-  div.addEventListener('click', ()=>{ _switchToBuffer(i); setTimeout(()=>editor.focus(),0); });
+  div.addEventListener('mousedown', (ev)=>{ ev.preventDefault(); try{ _tabDragCandidateIndex = i; _tabDragStartX = ev.clientX|0; _tabDragStartScrollLeft = tabbarTabs.scrollLeft|0; _tabDragStartBuffer = buffers[i]; _tabDragPreventClick=false; }catch{} });
+  div.addEventListener('click', ()=>{ if (_tabDragPreventClick){ return; } _switchToBuffer(i); setTimeout(()=>editor.focus(),0); });
       tabbarTabs.appendChild(div);
       if (i===currentIdx) activeEl = div;
     });
@@ -3166,20 +3169,212 @@ const VERSION_STR = 'vi like TextEditor "six" v' + VERSION;
     try{ _updateEncBtnLabel(); }catch{}
   }
 
-  function _isDirHint(s){
-    if (!s) return false;
-    if (s === '.' || s === '..') return true;
-    if (/[\\\/]+$/.test(s)) return true; // ends with / or \
-    return false;
+  // --- Tab drag & drop reordering (#909/#910/#911) ---
+  let _tabDragCandidateIndex = null; // index before drag starts
+  let _tabDragStartX = 0;
+  let _tabDragActive = false;
+  let _tabDragIndex = -1; // index at drag start (same as candidate)
+  let _tabDragStartBuffer = null; // buffer object being dragged
+  let _tabDragStartScrollLeft = 0;
+  const _TAB_DRAG_THRESHOLD = 6; // pixels horizontal before activating drag
+  let _TAB_DRAG_DEBUG = true; // 調査用 (必要なら false)
+  let _tabDragGhostEl = null;
+  let _tabDragOrigEl = null;
+  let _tabDragOrigIndex = -1; // 元のインデックス
+  let _tabDragOrigLeft = 0;
+  let _tabDragOffsetX = 0;
+  let _tabDragPreventClick = false;
+  let _tabDragAutoScrollTimer = null;
+  let _tabDragAutoScrollDir = 0; // -1 left, +1 right
+  function _tabDragAutoScrollStop(){
+    if (_tabDragAutoScrollTimer){ try{ clearInterval(_tabDragAutoScrollTimer); }catch{} _tabDragAutoScrollTimer=null; }
+    _tabDragAutoScrollDir = 0;
   }
-
+  function _tabDragAutoScrollStart(dir){
+    if (!tabbarTabs) return;
+    if (dir!==-1 && dir!==1) return;
+    if (_tabDragAutoScrollDir === dir && _tabDragAutoScrollTimer) return; // already running same direction
+    _tabDragAutoScrollStop();
+    _tabDragAutoScrollDir = dir;
+    // 1タブ幅: 現在表示中最初のタブ要素の幅を取得。なければ 80px フォールバック。
+    let tabW = 80;
+    try{
+      const first = tabbarTabs.querySelector('.tab');
+      if (first){ const r=first.getBoundingClientRect(); if (r && r.width>12) tabW = Math.round(r.width); }
+    }catch{}
+    _tabDragAutoScrollTimer = setInterval(()=>{
+      try{
+        if (!_tabDragActive){ _tabDragAutoScrollStop(); return; }
+        const max = Math.max(0, (tabbarTabs.scrollWidth|0) - (tabbarTabs.clientWidth|0));
+        let next = (tabbarTabs.scrollLeft|0) + (dir * tabW);
+        if (next < 0) next = 0; if (next > max) next = max;
+        tabbarTabs.scrollLeft = next;
+        try{ _updateTabScrollButtons(); }catch{}
+      }catch{}
+    }, 220); // 過剰スクロール防止のため 220ms 間隔
+  }
+  function _tabDragReset(){
+    _tabDragCandidateIndex = null;
+    _tabDragActive = false;
+    _tabDragIndex = -1;
+    _tabDragStartBuffer = null;
+    if (_tabDragGhostEl && _tabDragGhostEl.parentNode) _tabDragGhostEl.parentNode.removeChild(_tabDragGhostEl);
+    if (_tabDragOrigEl) _tabDragOrigEl.style.visibility='';
+    _tabDragGhostEl = null;
+    _tabDragOrigEl = null;
+    _tabDragPreventClick = false;
+    _tabDragOrigIndex = -1;
+    _tabDragAutoScrollStop();
+    try{ document.documentElement.classList.remove('tab-drag-active'); }catch{}
+  }
+  function _tabDragMaybeStart(ev){
+    if (_tabDragActive) return;
+    if (_tabDragCandidateIndex==null) return;
+    const dx = Math.abs((ev.clientX|0) - _tabDragStartX);
+    if (dx < _TAB_DRAG_THRESHOLD) return;
+    _tabDragActive = true;
+    _tabDragPreventClick = true;
+    _tabDragIndex = _tabDragCandidateIndex|0;
+    try{ _tabDragStartBuffer = buffers[_tabDragIndex]; }catch{}
+    try{ tabbarTabs.classList.add('dragging'); }catch{}
+    try{ document.documentElement.classList.add('tab-drag-active'); }catch{}
+    const orig = Array.from(tabbarTabs.children).find(ch=>ch.dataset && ch.dataset.index==String(_tabDragIndex));
+    if (!orig){ if (_TAB_DRAG_DEBUG) console.debug('[tab-drag] orig not found'); return; }
+    _tabDragOrigEl = orig;
+    _tabDragOrigIndex = _tabDragIndex;
+    const r = orig.getBoundingClientRect();
+    _tabDragOrigLeft = r.left;
+    _tabDragOffsetX = ev.clientX - r.left;
+    _tabDragGhostEl = orig.cloneNode(true);
+    _tabDragGhostEl.classList.add('drag-ghost');
+    _tabDragGhostEl.style.position='fixed';
+    _tabDragGhostEl.style.top = r.top+'px';
+    _tabDragGhostEl.style.left = r.left+'px';
+    _tabDragGhostEl.style.width = r.width+'px';
+    _tabDragGhostEl.style.pointerEvents='none';
+    // #922: 完全不透明化を強制（親コンテキストの合成影響除去）
+    try{
+      const cs = getComputedStyle(orig);
+      _tabDragGhostEl.style.opacity='1';
+      _tabDragGhostEl.style.backgroundColor = cs.backgroundColor || 'yellow';
+      _tabDragGhostEl.style.color = cs.color || 'yellow';
+      _tabDragGhostEl.style.filter='none';
+      _tabDragGhostEl.style.mixBlendMode='normal';
+      _tabDragGhostEl.style.transition='none';
+      _tabDragGhostEl.style.outline='none';
+      _tabDragGhostEl.style.border=cs.border || '1px solid #1c2230';
+      _tabDragGhostEl.style.boxSizing='border-box';
+      _tabDragGhostEl.style.willChange='left, top';
+      // #923: 高さ/フォント縮小を防ぐためオリジナルの明示値を固定化
+      _tabDragGhostEl.style.fontSize = cs.fontSize;
+      _tabDragGhostEl.style.lineHeight = cs.lineHeight;
+      _tabDragGhostEl.style.height = r.height + 'px'; // 元タブの実ピクセル高を使用 (90%などの相対値を排除)
+      _tabDragGhostEl.style.display = cs.display || 'flex';
+      _tabDragGhostEl.style.alignItems = 'center';
+    }catch{}
+    document.body.appendChild(_tabDragGhostEl);
+    // プレースホルダ不要 (#918): 元タブ自身を visibility:hidden で残し、閾値越えたら DOM 位置を移動してギャップを新位置に生成。
+    orig.style.visibility='hidden';
+    if (_TAB_DRAG_DEBUG) console.debug('[tab-drag] start index=', _tabDragIndex, 'buffer=', _tabDragStartBuffer && _tabDragStartBuffer.name);
+  }
+  function _tabDragHandleMove(ev){
+    try{
+      if (_tabDragCandidateIndex==null) return;
+      // #914: WebView2 で drag 中に buttons==0 の move が発生し早期 drop してしまう現象があるため、buttons 判定を廃止し mouseup 専用化
+      _tabDragMaybeStart(ev);
+      if (!_tabDragActive) return;
+      if (!_tabDragGhostEl || !_tabDragOrigEl) return;
+      const x = ev.clientX - _tabDragOffsetX;
+      _tabDragGhostEl.style.left = x + 'px';
+      const children = Array.from(tabbarTabs.children).filter(c=>c.classList && c.classList.contains('tab') && c!==_tabDragOrigEl);
+      if (!children.length) return;
+      let targetIndex = children.length; // default end
+      for (let ci=0; ci<children.length; ci++){
+        const r = children[ci].getBoundingClientRect();
+        const mid = r.left + r.width/2;
+        if (ev.clientX < mid){ targetIndex = ci; break; }
+      }
+      // DOM 移動 (orig hidden element) によるスライド演出 (#918 + #919)
+      const allTabsInOrder = Array.from(tabbarTabs.children).filter(c=>c.classList.contains('tab'));
+      const gapIndex = allTabsInOrder.indexOf(_tabDragOrigEl);
+      if (gapIndex < 0) return;
+      let desiredPos = targetIndex;
+      // 右方向へ移動時 (desiredPos > gapIndex) は対象タブを跨いだ後に gap をそのタブの次に置きたいので +1 補正 (#919)
+      if (desiredPos > gapIndex) desiredPos = desiredPos + 1;
+      if (desiredPos > allTabsInOrder.length) desiredPos = allTabsInOrder.length; // 末尾越え調整
+      if (desiredPos < 0) desiredPos = 0;
+      if (desiredPos !== gapIndex){
+        try{
+          const refList = Array.from(tabbarTabs.children).filter(c=>c.classList.contains('tab'));
+          const destNode = (desiredPos >= refList.length)? null : refList[desiredPos];
+          if (destNode){
+            tabbarTabs.insertBefore(_tabDragOrigEl, destNode);
+          } else {
+            tabbarTabs.appendChild(_tabDragOrigEl);
+          }
+          if (_TAB_DRAG_DEBUG) console.debug('[tab-drag] gap move from', gapIndex, 'to', desiredPos, 'dir=', (desiredPos>gapIndex?'right':'left'));
+        }catch{}
+      }
+      // --- 自動スクロール判定 (#924) ---
+      try{
+        let hoverDir = 0;
+        if (tabScrollLeftBtn){ const rL = tabScrollLeftBtn.getBoundingClientRect(); if (ev.clientX>=rL.left && ev.clientX<=rL.right && ev.clientY>=rL.top && ev.clientY<=rL.bottom && !tabScrollLeftBtn.classList.contains('disabled')) hoverDir = -1; }
+        if (tabScrollRightBtn){ const rR = tabScrollRightBtn.getBoundingClientRect(); if (ev.clientX>=rR.left && ev.clientX<=rR.right && ev.clientY>=rR.top && ev.clientY<=rR.bottom && !tabScrollRightBtn.classList.contains('disabled')) hoverDir = +1; }
+        if (hoverDir){ _tabDragAutoScrollStart(hoverDir); } else { _tabDragAutoScrollStop(); }
+      }catch{}
+    }catch{}
+  }
+  function _tabDragHandleUp(ev){
+    try{
+      if (_tabDragActive && _tabDragOrigEl){
+        const allTabs = Array.from(tabbarTabs.children).filter(c=>c.classList.contains('tab'));
+        const finalIndex = allTabs.indexOf(_tabDragOrigEl);
+        const origIndex = _tabDragOrigIndex;
+        if (_TAB_DRAG_DEBUG) console.debug('[tab-drag] drop orig=', origIndex, 'final=', finalIndex);
+        if (finalIndex>=0 && origIndex>=0 && finalIndex!==origIndex){
+          const activeBuf = buffers[currentIdx];
+          const moving = buffers.splice(origIndex,1)[0];
+          buffers.splice(finalIndex,0,moving);
+          currentIdx = buffers.indexOf(activeBuf);
+          if (_TAB_DRAG_DEBUG) console.debug('[tab-drag] reordered');
+        } else {
+          if (_TAB_DRAG_DEBUG) console.debug('[tab-drag] no-change');
+        }
+        _renderTabbar();
+      }
+    }catch{}
+    _tabDragReset();
+  }
+  // ドラッグリスナー初期化 (一度だけ)
+  (function(){
+    try{
+      if (!window.__sixTabDragInstalled){
+        window.__sixTabDragInstalled = true;
+        document.addEventListener('mousemove', _tabDragHandleMove, true);
+        document.addEventListener('mouseup', _tabDragHandleUp, true);
+        // #917: document-level mouseleave が微小移動でも誤発火するため廃止。
+        // 代替: mouseout で relatedTarget==null (ウィンドウ外) のみキャンセル。
+        document.addEventListener('mouseout', (e)=>{
+          try{
+            if (!_tabDragActive) return;
+            if (e.relatedTarget === null){
+              // #918: ウィンドウ外に出たら現時点の gap 位置で確定 (drop 同等)
+              _tabDragHandleUp({ type:'mouseup' });
+            }
+          }catch{}
+        }, true);
+        // Pointer cancel (タッチ/OSジェスチャ割込) 対応
+        document.addEventListener('pointercancel', (e)=>{ if (_tabDragActive){ _tabDragReset(); if (_TAB_DRAG_DEBUG) console.debug('[tab-drag] cancel (pointercancel)'); } }, true);
+        if (_TAB_DRAG_DEBUG) console.debug('[tab-drag] listeners installed');
+      }
+    }catch{}
+  })();
   function _pickNative(cwdURL, name){
     // ネイティブピッカーは使用しない（常に null を返す）
     return Promise.resolve(null);
   }
 
   function _fetchTextSmart(urlStr){
-    // file:// は XHR のほうが成功しやすい（status 0 でも responseText が取れる場合がある）
     const isFile = /^file:\/\//i.test(urlStr);
     if (isFile){
       return new Promise((resolve, reject)=>{
@@ -11075,7 +11270,7 @@ const VERSION_STR = 'vi like TextEditor "six" v' + VERSION;
             }
           }
         }catch{}
-        try{ console.debug('[e-input-raw]', { v:vRaw, mode:_mode, prefillPrefix:window._fileLastPrefillPrefix||null, prefillSeg:window._fileLastPrefillSeg||null, prefillAge: window._fileLastPrefillTs? (Date.now()-window._fileLastPrefillTs):null, selStart, selEnd, prefSegStart, prefSegEnd }); }catch{}
+        // [e-input-raw] ログ (#915) 削除済み: ノイズ抑制
         // NBSP/ゼロ幅スペースなどの不可視を除去（貼り付け時の "U\u00A0b\u00A0u..." 問題の回避）
         const vSan = vRaw.replace(/[\u200B-\u200D\u2060\u00A0]/g, '');
         const v = vSan; // keep visible spaces for parsing
