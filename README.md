@@ -1,11 +1,12 @@
 ﻿# vi like text editor "six"
 
 # インストール
-zipファイルを解凍すると出てくるフォルダがそのままインストールパスになる。
-レジストリは使わないしフォルダごと移動したりリネームしてもOK。
-install.cmdを実行するとデスクトップに起動用ショートカット"six"が作成される。
-フォルダを移したりした場合は再度install.cmdを実行する。
+- 配布ファイルを解凍すると出てくるフォルダがそのままインストールパスになる。
+- レジストリは使わないしフォルダごと移動したりリネームしてもOK。
+- install.cmdを実行するとデスクトップに起動用ショートカット"six"が作成される。
+- フォルダを移したりした場合は再度install.cmdを実行する。
 (install.cmdは単にショートカットを作成するだけ)
+
 ※管理者権限なし・DLL等なしで実行できます
 
 # Vimとの大きな違い
@@ -13,9 +14,12 @@ install.cmdを実行するとデスクトップに起動用ショートカット
 - 編集モード(NORMAL/INSERT/VISUAL)をタブ毎に維持する
 - ウィンドウのクローズボックスなどで終了したときも次回起動時に全バッファの状態を復元する
   - 未保存のバッファの内容も復元されるので、保存しないままWindowsをシャットダウンしても大丈夫
-- `$`で行末に飛んだ際、行末文字の下の改行コードにcaretが乗る
+- `$`で行末に飛んだ際、末尾の改行コードにcaretが乗る(Vim,標準viではその手前)
 - CUIオンリーではないのでvimのサブセットというよりはgvimのサブセットに近いかも
   - タブ毎に異なる表示倍率にも出来る
+- Vimのレジスタは内部的に一部実装しているが積極的には機能として用意しない。
+- Windowsクリップボードに対応 (Yはyyではなくクリップボード版yank) ※yank:コピーバッファに格納
+  - ペーストはINSERTモードでのCtrl+Vを使う
 
 # 制限事項・断念事項
 - Ctrl+Zでウィンドウを最小化 →諦めた
@@ -36,20 +40,13 @@ install.cmdを実行するとデスクトップに起動用ショートカット
 ```
 ./six_wrap.ps1
 ./six_wrap.ps1 sample.txt todo.txt
-※実際には起動しっ放しでファイルオープンはsixの独自UIを使う。
 ```
+※実際には起動しっ放しでファイルオープンはsixの独自UIを使う。
 
 ## テーマ / スタイル
-
-THEME オブジェクト（[`_six-theme.js`](_six-theme.js)）を起動時に [`_applyTheme`](_six.js) が CSS Variables へ反映。  
-主変数:  
-- `--bodyBGColor`, `--lineBaseFill`  
-- `--gutterGradientStart`, `--gutterGradientEnd`  
-- `--activeLineBg`, `--gutterNumberColor`, `--activeLineNumberColor`  
-- `--eofGutterFillColor`, `--caretColor`, `--tabBarBg`, `--tabBarFg`  
-
-## 既知の制限
-- 大容量ファイル最適化（遅延ロード / 差分再描画）未実装
+- 色や:set変数の初期値などは_six.customizeで定義している。
+- 設定・切替のUIは未実装。
+- 編集して保存したらsixを`Ctrl+F5`でリドローすれば反映される
 
 ## ライセンス / 出典
-ガイド: `migration-prompt-webview2.md`
+Vimがお手本。

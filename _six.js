@@ -1014,6 +1014,32 @@ const VERSION_STR = 'vi like TextEditor "six" v' + VERSION;
     }catch{}
   }
   function _casePopupMoveSel(dir){ try{ const n=3; _caseSel = (((_caseSel|0)+(dir>0?1:-1)) + n) % n; _casePopupRender(); }catch{} }
+  // --- Global outside-click close for encode/case popups (#906) ---
+  (function(){
+    try{
+      if (!window.__sixOutsidePopupClose){
+        window.__sixOutsidePopupClose = true;
+        document.addEventListener('mousedown', (e)=>{
+          try{
+            const encOpen = (typeof _encPopupVisible==='function' && _encPopupVisible());
+            const caseOpen = (typeof _casePopupVisible==='function' && _casePopupVisible());
+            if (!encOpen && !caseOpen) return;
+            const encPop = document.getElementById('encpopup');
+            const casePop = document.getElementById('casepopup');
+            const withinEncPop = encPop && encPop.contains(e.target);
+            const withinCasePop = casePop && casePop.contains(e.target);
+            const withinEncBtn = (typeof encBtn!=='undefined' && encBtn && encBtn.contains && encBtn.contains(e.target));
+            // caseBtn はオーバーレイ生成後に存在 (#overlay palette)
+            let caseBtnEl = null; try{ caseBtnEl = document.getElementById('overlayBtnCase'); }catch{}
+            const withinCaseBtn = caseBtnEl && caseBtnEl.contains && caseBtnEl.contains(e.target);
+            // 外部クリック: どちらの popup にも / それぞれのボタンにも属さなければ閉じる
+            if (encOpen && !withinEncPop && !withinEncBtn){ _encPopupHide(); }
+            if (caseOpen && !withinCasePop && !withinCaseBtn){ _casePopupHide(); }
+          }catch{}
+        }, true); // capture phaseで早期捕捉
+      }
+    }catch{}
+  })();
   // Sticky preview for :s — keep previous match position while pattern grows if it still matches
   let _incPrevEl = null;        // DOM element for incremental preview highlight
   let _incPrevLastStart = null; // last preview start offset
@@ -7135,7 +7161,8 @@ const VERSION_STR = 'vi like TextEditor "six" v' + VERSION;
   try{ if (_modalDetail) _modalDetail.style.padding = '0'; }catch{}
   _modalButtons.innerHTML = '';
         // Title
-        try{ _modalTitle.textContent = 'Six ヘルプ'; }catch{}
+        // #907: ヘルプダイアログタイトルを VERSION_STR に統一（以前の "Six ヘルプ" を置換）
+        try{ if (typeof VERSION_STR !== 'undefined'){ _modalTitle.textContent = VERSION_STR; } else { _modalTitle.textContent = 'six'; } }catch{}
 
         // Prepare content skeleton
     _modalDetail.innerHTML = '';
@@ -11667,6 +11694,13 @@ const VERSION_STR = 'vi like TextEditor "six" v' + VERSION;
     if (!bufpopup || !bufpopupInner) return;
     bufpopup.dataset.kind = 'buf';
     bufpopupInner.innerHTML = '';
+    // #908: :b popup では :e 用のパスヘッダ(.path-header-host/.path-header)を残さない
+    try{
+      const staleHost = bufpopup.querySelector('.path-header-host');
+      if (staleHost && staleHost.parentNode){ staleHost.parentNode.removeChild(staleHost); }
+      // 念のため直接付与されていた header も除去
+      Array.from(bufpopup.querySelectorAll('.path-header')).forEach(h=>{ try{ if(h && h.parentNode && h.parentNode!==bufpopupInner){ h.parentNode.removeChild(h); } }catch{} });
+    }catch{}
     // 先に候補を計算（ヘッダのグレー表示条件に使用）
     const list = _bufPopupComputeList();
     // 操作ヘッダ: 「数字, Fキー ダイレクト選択」 + 「d バッファ破棄」
@@ -13696,7 +13730,7 @@ const VERSION_STR = 'vi like TextEditor "six" v' + VERSION;
       ':qで破棄しても問題ありません。',
       '※sixはバッファ無し状態で動作することはないので、他にバッファ(タブ)が無くなれば終了します。',
       '',
-      '好きに編集して`:e ファイル名`で保存することも可能です。\n'
+      '好きに編集して別名保存することも可能です。\n'
     ].join('\n');
     editor.value = t;
     if (buffers.length===0){ _addBuffer({ name: null, path: null, text: t, modified:false }); }
