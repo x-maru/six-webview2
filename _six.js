@@ -868,6 +868,9 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
         pop.style.fontSize='13px';
         pop.style.lineHeight='1.35';
         pop.style.display='none';
+        // Zoom popup と同じ内側余白に統一 (#931)
+        pop.style.padding='4px 6px';
+        pop.style.boxSizing='border-box';
         document.body.appendChild(pop);
       }
       pop.style.display='';
@@ -977,29 +980,30 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
         pop.style.borderRadius='6px';
         pop.style.overflow='hidden';
         pop.style.boxSizing='border-box';
+        // Zoom popup と同じ内側余白に統一 (#931)
+        pop.style.padding='4px 6px';
         document.body.appendChild(pop);
       }
       pop.style.display='';
       try{ _caseSel = _caseCurrentIndex(); }catch{ _caseSel = 0; }
       _casePopupRender();
-      // 初回のみ幅ロック: "混在時区別" の項目幅 (rAF後測定で安定) (#905)
-      if (!pop.dataset.widthLocked){
-        requestAnimationFrame(()=>{
-          try{
-            const target = Array.from(pop.querySelectorAll('.item')).find(el=>el.textContent.trim()==='混在時区別');
-            if (target){
-              const w = Math.ceil(target.getBoundingClientRect().width);
-              const padW = w + 2; // 微調整
-              pop.style.width = padW + 'px';
-              pop.style.minWidth = padW + 'px';
-              pop.dataset.widthLocked = String(padW);
-            }
-          }catch{}
-        });
-      } else {
-        // 既にロックされている場合は強制再適用（再描画で崩れた場合の保険）
-        try{ const w=parseInt(pop.dataset.widthLocked,10); if (Number.isFinite(w) && w>0){ pop.style.width=w+'px'; pop.style.minWidth=w+'px'; } }catch{}
-      }
+      // 幅ロック: "混在時区別" の項目幅に合わせ、padding/borderも含めて収まるように計算 (#905/#932)
+      requestAnimationFrame(()=>{
+        try{
+          const target = Array.from(pop.querySelectorAll('.item')).find(el=>el.textContent.trim()==='混在時区別');
+          if (target){
+            const itemW = Math.ceil(target.getBoundingClientRect().width); // 含: 項目のpadding
+            const cs = getComputedStyle(pop);
+            const pl = parseFloat(cs.paddingLeft)||0, pr = parseFloat(cs.paddingRight)||0;
+            const bl = parseFloat(cs.borderLeftWidth)||0, br = parseFloat(cs.borderRightWidth)||0;
+            const extras = Math.ceil(pl+pr+bl+br);
+            const finalW = itemW + 2 + extras; // 微調整+2は既存挙動踏襲
+            pop.style.width = finalW + 'px';
+            pop.style.minWidth = finalW + 'px';
+            pop.dataset.widthLocked = String(finalW);
+          }
+        }catch{}
+      });
       // ホバー外れでハイライトのみ消去 (#903)
       if (!pop.__hoverHide){
         pop.__hoverHide = true;
@@ -1016,27 +1020,35 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
     }catch{}
   }
   function _casePopupMoveSel(dir){ try{ const n=3; _caseSel = (((_caseSel|0)+(dir>0?1:-1)) + n) % n; _casePopupRender(); }catch{} }
-  // --- Global outside-click close for encode/case popups (#906) ---
+  // --- Global outside-click close for encode/case/zoom popups (#906/#929) ---
   (function(){
     try{
       if (!window.__sixOutsidePopupClose){
         window.__sixOutsidePopupClose = true;
         document.addEventListener('mousedown', (e)=>{
           try{
-            const encOpen = (typeof _encPopupVisible==='function' && _encPopupVisible());
+            const encOpen  = (typeof _encPopupVisible==='function' && _encPopupVisible());
             const caseOpen = (typeof _casePopupVisible==='function' && _casePopupVisible());
-            if (!encOpen && !caseOpen) return;
-            const encPop = document.getElementById('encpopup');
+            const zoomOpen = (function(){ try{ const z=document.getElementById('overlayZoomPopup'); return !!(z && z.style.display!=='none'); }catch{ return false; } })();
+            if (!encOpen && !caseOpen && !zoomOpen) return;
+            const encPop  = document.getElementById('encpopup');
             const casePop = document.getElementById('casepopup');
-            const withinEncPop = encPop && encPop.contains(e.target);
+            const zoomPop = document.getElementById('overlayZoomPopup');
+            const withinEncPop  = encPop  && encPop.contains(e.target);
             const withinCasePop = casePop && casePop.contains(e.target);
+            const withinZoomPop = zoomPop && zoomPop.contains(e.target);
             const withinEncBtn = (typeof encBtn!=='undefined' && encBtn && encBtn.contains && encBtn.contains(e.target));
-            // caseBtn はオーバーレイ生成後に存在 (#overlay palette)
+            // overlay encode button もボタン内として扱う (#933)
+            let encOLBtn = null; try{ encOLBtn = document.getElementById('overlayBtnEncode'); }catch{}
+            const withinEncOLBtn = encOLBtn && encOLBtn.contains && encOLBtn.contains(e.target);
             let caseBtnEl = null; try{ caseBtnEl = document.getElementById('overlayBtnCase'); }catch{}
             const withinCaseBtn = caseBtnEl && caseBtnEl.contains && caseBtnEl.contains(e.target);
-            // 外部クリック: どちらの popup にも / それぞれのボタンにも属さなければ閉じる
-            if (encOpen && !withinEncPop && !withinEncBtn){ _encPopupHide(); }
+            let zoomBtnEl = null; try{ zoomBtnEl = document.getElementById('overlayBtnZoom'); }catch{}
+            const withinZoomBtn = zoomBtnEl && zoomBtnEl.contains && zoomBtnEl.contains(e.target);
+            if (encOpen  && !withinEncPop  && !(withinEncBtn||withinEncOLBtn) ){ _encPopupHide(); }
             if (caseOpen && !withinCasePop && !withinCaseBtn){ _casePopupHide(); }
+            if (zoomOpen && !withinZoomPop && !withinZoomBtn){ try{ if (zoomPop) zoomPop.style.display='none'; }catch{} }
+            try{ const palTR=document.getElementById('overlayPaletteTop'); if(palTR && palTR.__applyPaletteOpacity) palTR.__applyPaletteOpacity(); }catch{}
           }catch{}
         }, true); // capture phaseで早期捕捉
       }
@@ -1052,6 +1064,8 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
   function _incPrevHide(){
     try{
       if (_incPrevEl && _incPrevEl.parentNode){ _incPrevEl.parentNode.removeChild(_incPrevEl); }
+        // Zoom popup と統一 (#930)
+        pop.style.padding='4px 6px';
     }catch{}
     _incPrevEl=null;
     try{ _incPrevExtra.forEach(el=>{ try{ if (el && el.parentNode){ el.parentNode.removeChild(el); } }catch{} }); }catch{}
@@ -1124,6 +1138,8 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
       let x2 = _measureSpan.getBoundingClientRect().width;
       if (!(x2 > x1)){
         // zero-length or unmeasurable width → hide preview (caret移動のみ)
+            // Zoom popup と統一 (#930)
+            pop.style.padding = '4px 6px';
         _incPrevHide();
         return;
       }
@@ -14309,12 +14325,15 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
               zoomPopup.style.left = 'auto';
               zoomPopup.style.top = ((r.bottom - vr.top)|0) + 'px';
             }
-          }else{ zoomPopup.style.display='none'; }
+            try{ const palTR=document.getElementById('overlayPaletteTop'); if(palTR && palTR.__applyPaletteOpacity) palTR.__applyPaletteOpacity(); }catch{}
+          }else{ zoomPopup.style.display='none'; try{ const palTR=document.getElementById('overlayPaletteTop'); if(palTR && palTR.__applyPaletteOpacity) palTR.__applyPaletteOpacity(); }catch{} }
         }catch{}
       };
       zoomCurBtn.addEventListener('click',(e)=>{ try{ e.preventDefault(); e.stopPropagation(); }catch{} toggleZoomPopup(); });
       // クリック外閉じ
       document.addEventListener('mousedown',(e)=>{ try{ if(zoomPopup.style.display==='none') return; if(!zoomPopup.contains(e.target) && !zoomCurBtn.contains(e.target)){ zoomPopup.style.display='none'; } }catch{} }, true);
+      // Zoom popup 外部クリックで閉じた後に不透明状態再計算 (#928)
+      document.addEventListener('mousedown',(e)=>{ try{ if(zoomPopup.style.display==='none') return; if(!zoomPopup.contains(e.target) && !zoomCurBtn.contains(e.target)){ try{ const palTR=document.getElementById('overlayPaletteTop'); if(palTR && palTR.__applyPaletteOpacity) setTimeout(()=>{ palTR.__applyPaletteOpacity(); },0); }catch{} } }catch{} }, true);
       try{ _wireZoomHUD(); }catch{}
 
       const encOLBtn = document.createElement('button');
@@ -14338,8 +14357,20 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
       encWrap.style.display = 'flex'; encWrap.style.flexDirection = 'column'; encWrap.style.gap = '2px';
       const encTitle = document.createElement('div'); encTitle.textContent = 'encode'; encTitle.style.textAlign = 'center'; encTitle.style.fontWeight = '500';
       const encLine = document.createElement('div'); encLine.id = 'overlayBtnEncode_label'; encLine.style.display = 'block'; encLine.style.textAlign = 'center'; encLine.style.padding = '2px 8px'; encLine.style.border = '1px solid #2a3244'; encLine.style.borderRadius = '6px'; encLine.style.fontSize = '11px'; encLine.style.lineHeight = '1.5'; encLine.style.background = '#0e2348'; encLine.style.boxShadow = '0 1px 2px rgba(0,0,0,0.6), inset 0 0 0 1px rgba(255,255,255,0.06)'; encLine.style.color = '#e6f0ff';
+      // ラベルクリックでも popup をトグル（開いていれば閉じる） (#931)
+      encLine.addEventListener('click', (ev)=>{
+        try{ ev.preventDefault(); ev.stopPropagation(); }catch{}
+        try{
+          if (_encPopupVisible()){
+            _encPopupHide();
+          } else {
+            _encPopupShow(encOLBtn);
+          }
+        }catch{}
+        try{ const palTR=document.getElementById('overlayPaletteTop'); if(palTR && palTR.__applyPaletteOpacity) palTR.__applyPaletteOpacity(); }catch{}
+      });
       encWrap.appendChild(encTitle); encWrap.appendChild(encLine); encOLBtn.appendChild(encWrap);
-      encOLBtn.addEventListener('click', (e)=>{ try{ e.preventDefault(); e.stopPropagation(); }catch{}; if (_encPopupVisible()){ _encPopupHide(); } else { _encPopupShow(encOLBtn); } try{ if (lastFocusedEl && typeof lastFocusedEl.focus==='function') lastFocusedEl.focus(); }catch{} });
+      encOLBtn.addEventListener('click', (e)=>{ try{ e.preventDefault(); e.stopPropagation(); }catch{}; if (_encPopupVisible()){ _encPopupHide(); } else { _encPopupShow(encOLBtn); } try{ if (lastFocusedEl && typeof lastFocusedEl.focus==='function') lastFocusedEl.focus(); }catch{} try{ const palTR=document.getElementById('overlayPaletteTop'); if(palTR && palTR.__applyPaletteOpacity) palTR.__applyPaletteOpacity(); }catch{} });
       palTR.appendChild(encOLBtn);
 
       palTR.appendChild(swBtn);
@@ -14391,6 +14422,7 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
         try{ e.preventDefault(); e.stopPropagation(); }catch{}
         if (_casePopupVisible()) _casePopupHide(); else _casePopupShow(caseBtn);
         try{ if (lastFocusedEl && typeof lastFocusedEl.focus==='function') lastFocusedEl.focus(); }catch{}
+        try{ const palTR=document.getElementById('overlayPaletteTop'); if(palTR && palTR.__applyPaletteOpacity) palTR.__applyPaletteOpacity(); }catch{}
       });
       palTR.appendChild(caseBtn);
 
@@ -14402,6 +14434,59 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
   try{ _updateOverlayCaseVisual(); }catch{}
       // Initial position sync with scrollbars
       try{ _positionPaletteUI(); }catch{}
+      // Overlay palette opacity control: default highly transparent; hover undims only one (#925)
+      try{
+        const palBR = document.getElementById('overlayPalette');
+        const palTR = document.getElementById('overlayPaletteTop');
+        if (palBR && palTR){
+          const dimOpacity = 0.12; // idle transparency (#926)
+          const fullOpacity = 0.92; // active/hover opacity
+          const setTransition = (btns)=>{ try{ btns.forEach(b=>{ b.style.transition = 'opacity 140ms ease'; }); }catch{} };
+          const setOpacity = (btns, v)=>{ try{ btns.forEach(b=>{ b.style.opacity = String(v); }); }catch{} };
+          const btnsBR = Array.from(palBR.querySelectorAll('button'));
+          const btnsTR = Array.from(palTR.querySelectorAll('button'));
+          setTransition(btnsBR); setTransition(btnsTR);
+          let focused = null; // 'bottom' | 'top' | null
+          const applyState = ()=>{
+            try{
+              const zoomPop = document.getElementById('overlayZoomPopup');
+              const encOpen = (typeof _encPopupVisible==='function' && _encPopupVisible());
+              const caseOpen = (typeof _casePopupVisible==='function' && _casePopupVisible());
+              const zoomOpen = (zoomPop && zoomPop.style.display!=='none');
+              const forceTop = !!(zoomOpen || encOpen || caseOpen);
+              const hoverTop = palTR.matches(':hover');
+              const hoverBottom = palBR.matches(':hover');
+              if (forceTop){
+                focused = 'top';
+              } else if (hoverTop){
+                focused = 'top';
+              } else if (hoverBottom){
+                focused = 'bottom';
+              } else {
+                focused = null;
+              }
+            }catch{}
+            if (focused === 'bottom'){ setOpacity(btnsBR, fullOpacity); setOpacity(btnsTR, dimOpacity); }
+            else if (focused === 'top'){ setOpacity(btnsBR, dimOpacity); setOpacity(btnsTR, fullOpacity); }
+            else { setOpacity(btnsBR, dimOpacity); setOpacity(btnsTR, dimOpacity); }
+          };
+          // Expose for external reapply (visibility toggle / popup open-close)
+          try{ palTR.__applyPaletteOpacity = applyState; }catch{}
+          // Initial: both dimmed
+          applyState();
+          // Hover wiring (mutual exclusivity, but popup override may supersede)
+          palBR.addEventListener('mouseenter', ()=>{ focused = 'bottom'; applyState(); });
+          palBR.addEventListener('mouseleave', ()=>{
+            try{ focused = palTR.matches(':hover') ? 'top' : null; }catch{ focused = null; }
+            applyState();
+          });
+          palTR.addEventListener('mouseenter', ()=>{ focused = 'top'; applyState(); });
+          palTR.addEventListener('mouseleave', ()=>{
+            try{ focused = palBR.matches(':hover') ? 'bottom' : null; }catch{ focused = null; }
+            applyState();
+          });
+        }
+      }catch{}
       
     }catch{}
   }
@@ -14449,6 +14534,32 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
       if (palBR) palBR.style.display = _overlayPaletteVisible ? 'flex' : 'none';
       if (palTR) palTR.style.display = _overlayPaletteVisible ? 'flex' : 'none';
       try{ _positionPaletteUI(); }catch{}
+      // 再表示時: 両パレットを一定時間フル不透明→フェードアウトで半透明 (#927)
+      if (_overlayPaletteVisible){
+        try{ if (window.__sixPaletteIntroTimer){ clearTimeout(window.__sixPaletteIntroTimer); } }catch{}
+        try{ if (window.__sixPaletteFadeRestore){ clearTimeout(window.__sixPaletteFadeRestore); } }catch{}
+        try{
+          const fullOpacity = 0.92, dimOpacity = 0.12;
+          const btns = [];
+          try{ if (palTR) btns.push(...palTR.querySelectorAll('button')); }catch{}
+          try{ if (palBR) btns.push(...palBR.querySelectorAll('button')); }catch{}
+          btns.forEach(b=>{ try{ b.style.transition='opacity 300ms ease'; b.style.opacity=String(fullOpacity); }catch{} });
+          window.__sixPaletteIntroTimer = setTimeout(()=>{
+            try{
+              if (!_overlayPaletteVisible) return; // hidden meanwhile
+              // 3秒後に 2秒かけてフェードアウト (#928)
+              btns.forEach(b=>{ try{ b.style.transition='opacity 2000ms ease'; }catch{} });
+              const palTR2=document.getElementById('overlayPaletteTop');
+              if (palTR2 && palTR2.__applyPaletteOpacity){ palTR2.__applyPaletteOpacity(); }
+              else { btns.forEach(b=>{ try{ b.style.opacity=String(dimOpacity); }catch{} }); }
+              // フェード完了後、通常トランジションへ復帰
+              window.__sixPaletteFadeRestore = setTimeout(()=>{
+                try{ if (!_overlayPaletteVisible) return; btns.forEach(b=>{ try{ b.style.transition='opacity 140ms ease'; }catch{} }); }catch{}
+              }, 2000);
+            }catch{}
+          }, 3000);
+        }catch{}
+      }
     }catch{}
   }
 
@@ -14764,7 +14875,7 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
               const withinBtn1 = encBtn && encBtn.contains && encBtn.contains(e.target);
               const encOL = document.getElementById('overlayBtnEncode');
               const withinBtn2 = encOL && encOL.contains && encOL.contains(e.target);
-              if (!withinPopup && !withinBtn1 && !withinBtn2){ _encPopupHide(); }
+              if (!withinPopup && !withinBtn1 && !withinBtn2){ _encPopupHide(); try{ const palTR=document.getElementById('overlayPaletteTop'); if(palTR && palTR.__applyPaletteOpacity) palTR.__applyPaletteOpacity(); }catch{} }
             }catch{}
           }, true);
           // Keyboard navigation for popup (capture-phase)
@@ -14800,7 +14911,7 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
                 if (!pop || pop.style.display==='none') return;
                 const withinPopup = pop.contains(e.target);
                 const withinBtn = caseBtnEl && caseBtnEl.contains && caseBtnEl.contains(e.target);
-                if (!withinPopup && !withinBtn){ _casePopupHide(); }
+                if (!withinPopup && !withinBtn){ _casePopupHide(); try{ const palTR=document.getElementById('overlayPaletteTop'); if(palTR && palTR.__applyPaletteOpacity) palTR.__applyPaletteOpacity(); }catch{} }
               }catch{}
             }, true);
             // Keyboard navigation
