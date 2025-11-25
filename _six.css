@@ -51,7 +51,7 @@ body { font: var(--fontBase, 18px)/20px Consolas, 'Courier New', monospace; over
 .tab-drag-active #tabbar,
 .tab-drag-active #tabbar .tab,
 .tab-drag-active * { cursor: pointer !important; }
-#tabbar .tab .name { white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+#tabbar .tab .name { white-space:nowrap; overflow:hidden; text-overflow:ellipsis; font-family: 'SixEditorMix', Consolas, 'Courier New', monospace; }
 #tabbar .tab .name::first-letter { font-size: 1.1em; vertical-align: -1px; }
 #tabbar .tab .mod { color:#ff5b5b; margin-left:6px; font-weight:700; }
 /* legacy encBtn removed (moved to overlay palette) */
@@ -216,11 +216,13 @@ body { font: var(--fontBase, 18px)/20px Consolas, 'Courier New', monospace; over
 #bufpopup .item.active { background: var(--popupActiveLine, #1a2030); }
 #bufpopup .num { min-width: 20px; color:#a6accd; }
 #bufpopup .num { font-size: 1.15em; }
+/* 固定列幅でF1..F8と⑨以降の開始X座標を統一 */
+#bufpopup .num { display:flex; align-items:center; font-family: 'SixEditorMix', ui-monospace, Consolas, 'Courier New', monospace; flex:0 0 var(--bufNumColWidth, 6.2ch); width: var(--bufNumColWidth, 6.2ch); box-sizing:border-box; }
 #bufpopup .name { flex:1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; 
 	/* Avoid accidental full-width glyph substitution for ASCII */
 	font-feature-settings: "fwid" 0, "pwid" 0, "kern" 0 !important; font-variant-east-asian: normal !important; 
-	/* Force a monospace-ish fallback to defeat width alternates */
-	font-family: ui-monospace, Consolas, 'Courier New', monospace; 
+	/* Prefer SixEditorMix for circled numbers, then monospace stack */
+	font-family: 'SixEditorMix', ui-monospace, Consolas, 'Courier New', monospace; 
 	/* Reduce renderer-dependent bidi shaping; treat as plain text */
 	unicode-bidi: plaintext; direction: ltr; font-kerning: none !important; font-variant-ligatures: none !important; letter-spacing: normal !important; word-spacing: normal !important; text-rendering: optimizeSpeed; }
 /* muted selection (incremental search no-match) */
@@ -263,7 +265,7 @@ body { font: var(--fontBase, 18px)/20px Consolas, 'Courier New', monospace; over
 	/* Prefer CJK mono if available; broaden fallbacks to common JP fonts */
 	src: local("Source Han Code JP"), local("Sarasa Mono J"), local("MS Gothic"), local("IPAGothic"),
 		 local("Noto Sans CJK JP"), local("Noto Sans JP"), local("Noto Sans Japanese");
-	unicode-range: U+3001, U+3002, U+FF0C, U+FF0E, U+2026; /* 、 。 ， ． … */
+	unicode-range: U+3001, U+3002, U+FF0C, U+FF0E, U+2026, U+2460-2473; /* 、 。 ， ． … + ①–⑳ */
 	font-display: swap;
 }
 /* Use the punctuation face first, then the regular stack so weights map correctly */

@@ -12008,7 +12008,7 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
       try{
         // 更新フラグ（*）：Fキー表示の左に固定幅で配置
         const chg = document.createElement('span');
-        try{ chg.style.display='inline-block'; chg.style.width='1ch'; chg.style.marginRight='0.25rem'; }catch{}
+        try{ chg.style.display='inline-block'; chg.style.width='1.4ch'; chg.style.marginRight='0.35rem'; chg.style.textAlign='center'; }catch{}
         if (b && b.modified){ chg.textContent='*'; try{ chg.style.color='#d33'; }catch{} }
         num.appendChild(chg);
         const n = i+1;
@@ -12019,9 +12019,17 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
           try{ k.style.borderRadius = '0.18rem'; k.style.padding = '0 0.22rem'; }catch{}
           num.appendChild(k);
         } else {
-          num.textContent = _bufferNumberLabel(n);
+          const lab = document.createElement('span');
+          lab.textContent = _bufferNumberLabel(n);
+          try{ lab.style.display='inline-block'; lab.style.padding='0 0.22rem'; lab.style.textAlign='center'; }catch{}
+          num.appendChild(lab);
         }
-      }catch{ num.textContent = _bufferNumberLabel(i+1); }
+      }catch{
+        const lab = document.createElement('span');
+        lab.textContent = _bufferNumberLabel(i+1);
+        try{ lab.style.display='inline-block'; lab.style.padding='0 0.22rem'; lab.style.textAlign='center'; }catch{}
+        num.appendChild(lab);
+      }
       const name = document.createElement('span'); name.className='name';
       // WSLなど file:// のときはアクティブタブ表示に合わせて 'file:' を外した体裁へ
       let disp = b && b.name || '(untitled)';
