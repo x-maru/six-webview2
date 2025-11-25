@@ -25,7 +25,7 @@ if ! printf '%s' "$VERSION" | grep -Eq '^[0-9]+(\.[0-9]+)*$'; then
 fi
 
 PKG="six_v${VERSION}"
-ARCHIVE="${PKG}.tar"
+ARCHIVE="${PKG}.zip"
 
 FILES=(
 	six.ps1
@@ -52,18 +52,38 @@ if [ ${#missing[@]} -gt 0 ]; then
 	exit 3
 fi
 
-echo "Packaging version $VERSION into $ARCHIVE" >&2
+echo "Packaging version $VERSION into $ARCHIVE (zip)" >&2
 rm -f "$ARCHIVE"
 
-# Use verbose flag if VERBOSE=1 in environment
-TARFLAGS="cf"
-if [ "${VERBOSE:-}" = "1" ]; then TARFLAGS="cvf"; fi
+# Temp work directory (unique per PID)
+TMPDIR="/tmp/six.$$"
+trap 'rc=$?; if [ -n "${TMPDIR:-}" ] && [ -d "$TMPDIR" ]; then rm -rf "$TMPDIR"; fi; exit $rc' EXIT
+mkdir -p "$TMPDIR/$PKG"
 
-tar $TARFLAGS "$ARCHIVE" --transform="s,^,${PKG}/," "${FILES[@]}"
+# Copy files into package directory (preserve modes & timestamps if possible)
+for f in "${FILES[@]}"; do
+		cp -p "$f" "$TMPDIR/$PKG/" || { echo "ERROR: copy failed: $f" >&2; exit 4; }
+done
+
+# Verify zip tool availability
+if ! command -v zip >/dev/null 2>&1; then
+		echo "ERROR: 'zip' command not found. Install zip (e.g. apt install zip)." >&2
+		exit 5
+fi
+
+# Build zip (recursive, no extra compression flags; Windows 11 can extract natively)
+(
+	cd "$TMPDIR"
+	if [ "${VERBOSE:-}" = "1" ]; then
+		zip -r "$SDIR/$ARCHIVE" "$PKG"
+	else
+		zip -rq "$SDIR/$ARCHIVE" "$PKG"
+	fi
+)
 
 if [ ! -s "$ARCHIVE" ]; then
-	echo "ERROR: Archive not created or empty: $ARCHIVE" >&2
-	exit 4
+		echo "ERROR: Zip not created or empty: $ARCHIVE" >&2
+		exit 6
 fi
 echo "SUCCESS: Created $ARCHIVE ($(du -h "$ARCHIVE" | awk '{print $1}'))" >&2
 
