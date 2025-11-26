@@ -2712,6 +2712,8 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
       }catch{}
       _setTitle(); _renderTabbar();
       try{ _updateOverlayShiftwidthVisual(); }catch{}
+      // ケース感度表示(検索時 A/a)をタブ切替時にも更新 (#955)
+      try{ _updateOverlayCaseVisual(); }catch{}
       _updateHlsearchFull();
       // Ensure editor regains focus after switch (covers INSERT restore as well)
       try{ setTimeout(()=>{ try{ editor && editor.focus && editor.focus(); }catch{} }, 0); }catch{}
