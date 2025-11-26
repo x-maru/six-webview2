@@ -11903,13 +11903,12 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
           const idxStr = String(i+1);
           return idxStr.startsWith(q);
         }
-        // text: 先頭一致（ファイル名/パス/装飾ラベル）
+        // text: 先頭一致（ファイル名と装飾ラベルのみ）— パスはフィルタ対象外
         const name = (b.name||'').toLowerCase();
-        const path = (b.path||'').toLowerCase();
         // Include plain number, function-key label, and circled number for filtering
         const n = i+1;
         const decorated = ((String(n) + ' ') + ('F'+n + ' ') + _bufferNumberLabel(n) + ' ' + (b.name||'')).toLowerCase();
-        return name.startsWith(q) || path.startsWith(q) || decorated.startsWith(q);
+        return name.startsWith(q) || decorated.startsWith(q);
       });
   }
   function _bufPopupRender(){
@@ -12040,7 +12039,21 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
           if (!disp) disp = b.name || '(untitled)';
         }
       }catch{}
-      name.textContent = disp;
+      // 表示を「ファイル名　(パス)」へ変更（全て通常色）。
+      try{
+        const lastSlash = Math.max(disp.lastIndexOf('/'), disp.lastIndexOf('\\'));
+        let dir = '';
+        let base = disp;
+        if (lastSlash >= 0){ dir = disp.slice(0, lastSlash+1); base = disp.slice(lastSlash+1); }
+        name.textContent = '';
+        const baseSpan = document.createElement('span'); baseSpan.className = 'base'; baseSpan.textContent = base || '';
+        name.appendChild(baseSpan);
+        if (dir){
+          name.appendChild(document.createTextNode('\u3000'));// 全角スペース
+          const dirSpan = document.createElement('span'); dirSpan.className = 'dir'; dirSpan.textContent = '(' + dir + ')';
+          name.appendChild(dirSpan);
+        }
+      }catch{ name.textContent = disp; }
       div.appendChild(num); div.appendChild(name);
       // 動的再バインド用に名前を保持（クリック時に現在一覧から再探索し stale クロージャを回避） (#848/#850)
       try{ div.dataset.entryName = String(it && it.name || ''); }catch{}

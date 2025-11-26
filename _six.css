@@ -225,6 +225,7 @@ body { font: var(--fontBase, 18px)/20px Consolas, 'Courier New', monospace; over
 	font-family: 'SixEditorMix', ui-monospace, Consolas, 'Courier New', monospace; 
 	/* Reduce renderer-dependent bidi shaping; treat as plain text */
 	unicode-bidi: plaintext; direction: ltr; font-kerning: none !important; font-variant-ligatures: none !important; letter-spacing: normal !important; word-spacing: normal !important; text-rendering: optimizeSpeed; }
+/* 仕様変更 (#954): パスは通常色。特別な色指定はしない。 */
 /* muted selection (incremental search no-match) */
 #bufpopup .item.muted { background: rgba(255, 64, 64, 0.18); }
 
