@@ -118,10 +118,66 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
   let caretRow = 0;
   let caretCol = 0;
   // IME / caret visuals state
-  // IME heuristics removed (#426 request) – no mode-based caret color overrides now
-  // (Previously: _imeActive, _imeFullwidth flags for composition & full-width detection)
-  // We retain baseline caret variables only for theme restoration.
+  // 動的caret色 (#1020, d79531f再実装): モード + IME ON/OFF でグラデーション切替。
+  // NORMAL/VISUAL: window.THEME.caretGradStart / caretGradMid
+  // INSERT(IME OFF): window.THEME.editCaretGradStart / editCaretGradMid
+  // INSERT(IME ON): window.THEME.editCaretIMEGradStart / editCaretIMEGradMid
+  // いずれか未定義なら yellow 固定（他へのフォールバック無し）。
+  let _imeActive = false; // composition中は true（IME ON とみなす簡易判定）
+  function _applyCaretGradient(){
+    try{
+      const T = (window && window.THEME) ? window.THEME : {};
+      let start = 'yellow', mid = 'yellow';
+      if (_mode === 'INSERT'){
+        if (_imeActive){
+          if (T.editCaretIMEGradStart && T.editCaretIMEGradMid){
+            start = T.editCaretIMEGradStart; mid = T.editCaretIMEGradMid;
+          }
+        } else {
+          if (T.editCaretGradStart && T.editCaretGradMid){
+            start = T.editCaretGradStart; mid = T.editCaretGradMid;
+          }
+        }
+      } else { // NORMAL / VISUAL / CMD
+        if (T.caretGradStart && T.caretGradMid){
+          start = T.caretGradStart; mid = T.caretGradMid;
+        }
+      }
+      // 現在のcaret要素へ適用（存在しなければ遅延適用）
+      try{
+        const caret = caretLayer && caretLayer.querySelector && caretLayer.querySelector('.caret');
+        if (caret){
+          caret.style.setProperty('--caretGradStart', start);
+          caret.style.setProperty('--caretGradMid', mid);
+        }
+      }catch{}
+      // rootにも書いておくことで初期生成前の背景計算を統一
+      try{ document.documentElement.style.setProperty('--caretGradStart', start); }catch{}
+      try{ document.documentElement.style.setProperty('--caretGradMid', mid); }catch{}
+    }catch{}
+  }
   let _caretGradStartBase = null, _caretGradMidBase = null; // theme baseline to restore
+  // IME compositionイベントで状態更新
+  try{
+    if (editor){
+      editor.addEventListener('compositionstart', ()=>{ _imeActive = true; try{ _applyCaretGradient(); }catch{} });
+      // 仕様(#1022): 未確定文字の確定瞬間では何もしない（IMEは継続ONとみなす）
+      editor.addEventListener('compositionend',   ()=>{ /* keep _imeActive as-is */ try{ _applyCaretGradient(); }catch{} });
+      // ASCII入力検知（INSERT中）: 最初のASCII文字で IME OFF グラデへ切替 (#1021)
+      editor.addEventListener('beforeinput', (e)=>{
+        try{
+          if (_mode !== 'INSERT') return;
+          // react only to plain text insertion (not composition updates)
+          const type = e && e.inputType ? e.inputType : '';
+          if (type !== 'insertText') return;
+          const data = (e && typeof e.data==='string') ? e.data : '';
+          // Detect visible ASCII range (space..tilde); ignore control chars
+          const isAscii = /[\x20-\x7E]/.test(data);
+          if (isAscii && _imeActive){ _imeActive = false; try{ _applyCaretGradient(); }catch{} }
+        }catch{}
+      });
+    }
+  }catch{}
   // session/quit control flags
   let _skipPersistOnUnloadOnce = false; // suppress one-time session persist at unload
   let _suppressPersistOnQuit = false;   // do not rewrite session on this quit path
@@ -3885,18 +3941,8 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
       caret.className = 'caret';
       caretLayer.appendChild(caret);
     }
-    // INSERT時はcaretグラデ色を置き換え（なければ黄色） (#437)
-    try{
-      if (_mode === 'INSERT'){
-        // Use CSS vars so theme changes reflect immediately and fallback stays yellow
-        caret.style.setProperty('--caretGradStart', 'var(--editCaretGradStart, yellow)');
-        caret.style.setProperty('--caretGradMid',   'var(--editCaretGradMid, yellow)');
-      } else {
-        // non-INSERT: restore baseline (no yellow fallback here; baseline must exist)
-        if (_caretGradStartBase) caret.style.setProperty('--caretGradStart', _caretGradStartBase);
-        if (_caretGradMidBase)   caret.style.setProperty('--caretGradMid', _caretGradMidBase);
-      }
-    }catch{}
+    // 動的caretグラデーション適用 (#1020)
+    try{ _applyCaretGradient(); }catch{}
     const lines = _splitLines();
     const line = lines[caretRow] || '';
     // Expand tabs using pixel-based tab stops (columns measured in space-width units) (#507)
@@ -6958,7 +7004,9 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
   }
 
   function _setMode(m){
+    const _prevMode = _mode;
     _mode = m;
+    try{ _applyCaretGradient(); }catch{}
     if (modestatus){
       // CMDモードでは表示を変更しない（[CMD]を出さない）
       if (m === 'NORMAL' || m === 'INSERT' || m === 'VISUAL'){
@@ -6988,6 +7036,9 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
     }
     // Begin an INSERT compound edit by pushing a snapshot before edits start
     if (m==='INSERT'){
+      // #1023: INSERT移行時は常に IME OFF 初期状態（IME ON色で開始しない）
+      // 既存の _imeActive 状態を無視して false に強制し、OFF用グラデを即適用。
+      try { _imeActive = false; _applyCaretGradient(); } catch {}
       // Allow IME in INSERT
       try{ if (editor){ editor.removeAttribute('inputmode'); editor.style.imeMode = ''; } }catch{}
       // ユーザー編集を許可（INSERT のみ）
@@ -7014,6 +7065,7 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
       // 内容変更は beforeinput/input で阻止するため readOnly も false のままにする。
       try{ if (editor){ editor.removeAttribute('inputmode'); editor.style.imeMode=''; editor.readOnly = false; } }catch{}
       // 以前の blur→focus による IME 強制終了は行わない（#522）。
+      _imeActive = false; try{ _applyCaretGradient(); }catch{}
     }
     // Show/hide floating command bar for CMD mode
     try{

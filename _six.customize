@@ -51,16 +51,21 @@ window.THEME = {
   // 行番号(NORMAL/INSERTカーソル行) 文字色
   activeLineNumberColor: "#20a090",
 
-  // INSERT mode specific gradients
-  editCaretGradStart: "rgba(255,79,0,0.95)",
-  editCaretGradMid: "rgba(255,79,0,0.01)",
-
   eofGutterFillColor: "rgb(235,239,235)",
   gutterGradientStart: "rgb(235,239,235)",
   gutterGradientEnd: "rgb(219,227,219)",
 
-  caretGradientStart: "#ff0000",
-  caretGradientMid: "rgba(255,0,0,0.5)",
+  // NORMAL/VISUALのcaretグラデーション(左→右の方向)
+  caretGradStart: "rgba(143,255,143,0.95)",
+  caretGradMid: "rgba(143,255,143,0.4)",
+
+  // INSERTでIME OFFのcaretグラデーション
+  editCaretGradStart: "rgba(255,79,0,0.95)",
+  editCaretGradMid: "rgba(255,79,0,0.5)",
+
+  // INSERTでIME ONのcaretグラデーション
+  editCaretIMEGradStart: "rgba(116,31,0,0.7)",
+  editCaretIMEGradMid: "rgba(116,31,0,0.4)",
   caretWidthPx: 2,
 
   // タブバー
