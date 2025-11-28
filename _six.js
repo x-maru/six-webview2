@@ -138,10 +138,18 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
             start = T.editCaretGradStart; mid = T.editCaretGradMid;
           }
         }
-      } else { // NORMAL / VISUAL / CMD
-        if (T.caretGradStart && T.caretGradMid){
-          start = T.caretGradStart; mid = T.caretGradMid;
+      } else if (_mode === 'NORMAL' || _mode === 'VISUAL') {
+        if (_imeActive){
+          if (T.caretIMEGradStart && T.caretIMEGradMid){
+            start = T.caretIMEGradStart; mid = T.caretIMEGradMid;
+          }
+        } else {
+          if (T.caretGradStart && T.caretGradMid){
+            start = T.caretGradStart; mid = T.caretGradMid;
+          }
         }
+      } else { // CMD などは従来通り（IME状態に依存しない）
+        if (T.caretGradStart && T.caretGradMid){ start = T.caretGradStart; mid = T.caretGradMid; }
       }
       // 現在のcaret要素へ適用（存在しなければ遅延適用）
       try{
