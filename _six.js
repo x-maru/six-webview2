@@ -122,46 +122,76 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
   // NORMAL/VISUAL: window.THEME.caretGradStart / caretGradMid
   // INSERT(IME OFF): window.THEME.editCaretGradStart / editCaretGradMid
   // INSERT(IME ON): window.THEME.editCaretIMEGradStart / editCaretIMEGradMid
+  let _caretWidthFixed = true;            // 固定幅: true なら再配置で幅を上書きしない
+  let _imeVisualLockUntil = 0;            // NORMAL/VISUAL直後の一時ロック（Esc遷移時の競合避け）
   // いずれか未定義なら yellow 固定（他へのフォールバック無し）。
   let _imeActive = false; // composition中は true（IME ON とみなす簡易判定）
   function _applyCaretGradient(){
     try{
       const T = (window && window.THEME) ? window.THEME : {};
       let start = 'yellow', mid = 'yellow';
+      // Caret width and mid stop in rem units
+      let widthLen = '1.0rem';
+      let midStopLen = '0.6rem';
+      // EscでINSERT→NORMALへ遷移した直後の短時間はIME視覚状態をOFF固定
+      const now = Date.now();
+      const imeActiveUse = (_mode === 'NORMAL' || _mode === 'VISUAL') && (now < _imeVisualLockUntil)
+        ? false : !!_imeActive;
+
       if (_mode === 'INSERT'){
-        if (_imeActive){
+        if (imeActiveUse){
           if (T.editCaretIMEGradStart && T.editCaretIMEGradMid){
             start = T.editCaretIMEGradStart; mid = T.editCaretIMEGradMid;
           }
+          // IME ON → width 2.0rem, mid at 1.2rem
+          widthLen = '2.0rem';
+          midStopLen = '1.2rem';
         } else {
           if (T.editCaretGradStart && T.editCaretGradMid){
             start = T.editCaretGradStart; mid = T.editCaretGradMid;
           }
+          // IME OFF → width 1.0rem, mid at 0.6rem
+          widthLen = '1.0rem';
+          midStopLen = '0.6rem';
         }
       } else if (_mode === 'NORMAL' || _mode === 'VISUAL') {
-        if (_imeActive){
+        if (imeActiveUse){
           if (T.caretIMEGradStart && T.caretIMEGradMid){
             start = T.caretIMEGradStart; mid = T.caretIMEGradMid;
           }
+          // IME ON → width 2.0rem, mid at 1.2rem
+          widthLen = '2.0rem';
+          midStopLen = '1.2rem';
         } else {
           if (T.caretGradStart && T.caretGradMid){
             start = T.caretGradStart; mid = T.caretGradMid;
           }
+          // IME OFF → width 1.0rem, mid at 0.6rem
+          widthLen = '1.0rem';
+          midStopLen = '0.6rem';
         }
       } else { // CMD などは従来通り（IME状態に依存しない）
         if (T.caretGradStart && T.caretGradMid){ start = T.caretGradStart; mid = T.caretGradMid; }
+        // Use IME OFF defaults for non-edit modes
+        widthLen = '1.0rem';
+        midStopLen = '0.6rem';
       }
+      _caretWidthFixed = true; // 常に固定幅として扱う（_repositionCaret での上書きを抑止）
       // 現在のcaret要素へ適用（存在しなければ遅延適用）
       try{
         const caret = caretLayer && caretLayer.querySelector && caretLayer.querySelector('.caret');
         if (caret){
           caret.style.setProperty('--caretGradStart', start);
           caret.style.setProperty('--caretGradMid', mid);
+          caret.style.setProperty('--caretWidth', widthLen);
+          caret.style.setProperty('--caretGradMidStop', midStopLen);
         }
       }catch{}
       // rootにも書いておくことで初期生成前の背景計算を統一
       try{ document.documentElement.style.setProperty('--caretGradStart', start); }catch{}
       try{ document.documentElement.style.setProperty('--caretGradMid', mid); }catch{}
+      try{ document.documentElement.style.setProperty('--caretWidth', widthLen); }catch{}
+      try{ document.documentElement.style.setProperty('--caretGradMidStop', midStopLen); }catch{}
     }catch{}
   }
   // 即時IME同期: Nano API /ime を短周期ポーリングして視覚を即時反映
@@ -4083,7 +4113,8 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
       if (_isHangablePunct(ch) && chW < _halfRefW*0.6){ chW = Math.max(_charWidth(ch), _halfRefW); }
     }catch{}
     const cw = Math.max(1, Math.round(chW * 0.9));
-    try{ caret.style.setProperty('--caretWidth', cw + 'px'); }catch{}
+    // 固定幅モードでは再配置時に幅を上書きしない
+    if (!_caretWidthFixed){ try{ caret.style.setProperty('--caretWidth', cw + 'px'); }catch{} }
     // Auto horizontal scroll to keep caret visible in NORMAL/VISUAL (水平ホイール直後ガード中は抑止) (#868)
     try{
       if ((_mode === 'NORMAL' || _mode === 'VISUAL') && (Date.now() > _userHScrollGuardUntil)){
@@ -7097,6 +7128,8 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
       // 内容変更は beforeinput/input で阻止するため readOnly も false のままにする。
       try{ if (editor){ editor.removeAttribute('inputmode'); editor.style.imeMode=''; editor.readOnly = false; } }catch{}
       // 以前の blur→focus による IME 強制終了は行わない（#522）。
+      // INSERT→NORMAL/VISUAL の直後は IME 視覚の一時ロックを入れて競合回避
+      try{ if (_prevMode==='INSERT' && (m==='NORMAL' || m==='VISUAL')){ _imeVisualLockUntil = Date.now() + 400; } }catch{}
       _imeActive = false; try{ _applyCaretGradient(); }catch{}
     }
     // Show/hide floating command bar for CMD mode

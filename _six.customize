@@ -57,7 +57,7 @@ window.THEME = {
 
   // NORMAL/VISUALでIME OFFのcaretグラデーション(左→右の方向)
   caretGradStart: "rgba(255,79,0,0.95)",
-  caretGradMid: "rgba(255,79,0,0.3)",
+  caretGradMid: "rgba(255,79,0,0.05)",
 
   // NORMAL/VISUALでIME ONのcaretグラデーション
   caretIMEGradStart: "rgba(0,0,0,0.9)",
@@ -65,12 +65,11 @@ window.THEME = {
 
   // INSERTでIME OFFのcaretグラデーション
   editCaretGradStart: "rgba(255,79,0,0.95)",
-  editCaretGradMid: "rgba(255,79,0,0.3)",
+  editCaretGradMid: "rgba(255,79,0,0.05)",
 
   // INSERTでIME ONのcaretグラデーション
-  editCaretIMEGradStart: "rgba(113,247,31, 1.0)",
-  editCaretIMEGradMid: "rgba(113,247,31,0.9)",
-  caretWidthPx: 2,
+  editCaretIMEGradStart: "rgba(113,247,31, 0.95)",
+  editCaretIMEGradMid: "rgba(113,247,31,0.05)",
 
   // タブバー
   tabBarBg: "#102a10",

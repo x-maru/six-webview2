@@ -151,7 +151,7 @@ body { font: var(--fontBase, 18px)/20px Consolas, 'Courier New', monospace; over
 	border-radius: 2px;
 }
 .caret {
-	position:absolute; width: var(--caretWidth, 2px);
+	position:absolute; width: var(--caretWidth, 1.0rem);
 	/* Default (mouse cursor visible): outline only, no fill, no blink */
 	background: transparent;
 	outline: 1px solid var(--caretGradStart, #ff5b5b);
@@ -161,7 +161,12 @@ body { font: var(--fontBase, 18px)/20px Consolas, 'Courier New', monospace; over
 /* When mouse cursor is hidden, use gradient fill and blink */
 .hide-cursor .caret{
 	outline: none;
-	background: linear-gradient(to right, var(--caretGradStart, #ff5b5b), var(--caretGradMid, rgba(255,0,0,0.2)), rgba(255,0,0,0.0));
+	background: linear-gradient(
+		to right,
+		var(--caretGradStart, #ff5b5b) 0,
+		var(--caretGradMid, rgba(255,0,0,0.2)) var(--caretGradMidStop, 0.6rem),
+		rgba(0,0,0,0) var(--caretWidth, 1.0rem)
+	);
 	animation: caret-blink 1s steps(1, end) infinite;
 }
 /* While caret is moving due to key repeat, keep it lit (no blink) */
