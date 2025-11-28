@@ -413,11 +413,26 @@ public static class F19EscHookService {
   [DllImport("kernel32.dll")] private static extern uint GetLastError();
   private const uint WM_QUIT = 0x0012;
   private const uint GA_ROOT = 2;
+    [DllImport("user32.dll", CharSet=CharSet.Auto)] private static extern IntPtr SendMessage(IntPtr hWnd, uint Msg, IntPtr wParam, IntPtr lParam);
+  [DllImport("user32.dll")] private static extern bool AttachThreadInput(uint idAttach, uint idAttachTo, bool fAttach);
+  [DllImport("user32.dll")] private static extern IntPtr GetFocus();
+  [DllImport("user32.dll")] private static extern bool GetGUIThreadInfo(uint idThread, ref GUITHREADINFO lpgui);
+  [DllImport("user32.dll")] private static extern bool EnumChildWindows(IntPtr hWndParent, EnumWindowsProc lpEnumFunc, IntPtr lParam);
+  public delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
+  [StructLayout(LayoutKind.Sequential)] public struct RECT { public int left; public int top; public int right; public int bottom; }
+  [StructLayout(LayoutKind.Sequential)] public struct GUITHREADINFO {
+    public uint cbSize; public uint flags; public IntPtr hwndActive; public IntPtr hwndFocus; public IntPtr hwndCapture; public IntPtr hwndMenuOwner; public IntPtr hwndMoveSize; public IntPtr hwndCaret; public RECT rcCaret;
+  }
+  [DllImport("imm32.dll")] private static extern IntPtr ImmGetContext(IntPtr hWnd);
+  [DllImport("imm32.dll")] private static extern bool ImmSetOpenStatus(IntPtr hIMC, bool fOpen);
+  [DllImport("imm32.dll")] private static extern bool ImmReleaseContext(IntPtr hWnd, IntPtr hIMC);
   [StructLayout(LayoutKind.Sequential)] public struct INPUT { public int type; public INPUTUNION U; }
   [StructLayout(LayoutKind.Explicit)] public struct INPUTUNION { [FieldOffset(0)] public KEYBDINPUT ki; }
   [StructLayout(LayoutKind.Sequential)] public struct KEYBDINPUT { public short wVk; public short wScan; public int dwFlags; public int time; public IntPtr dwExtraInfo; }
   [StructLayout(LayoutKind.Sequential)] public struct MSG { public IntPtr hWnd; public uint message; public UIntPtr wParam; public IntPtr lParam; public uint time; public int pt_x; public int pt_y; }
   private const int INPUT_KEYBOARD = 1; private const int KEYEVENTF_KEYUP = 0x0002;
+    private const uint WM_IME_CONTROL = 0x0283; private const int IMC_SETOPENSTATUS = 0x0006;
+    [DllImport("imm32.dll")] private static extern IntPtr ImmGetDefaultIMEWnd(IntPtr hWnd);
   public static void EnableDiag(){ _diag = true; try { Console.WriteLine("[hook] diag enabled"); } catch {} }
   public static void SetAllowPids(int[] pids){ _allowPids = (pids==null)? new int[0] : pids; if(_diag){ try { Console.WriteLine("[hook] allowPids=" + string.Join(",", _allowPids)); } catch {} } }
   public static string GetStats(){ return "running=" + _running + " hook=" + (int)_hook + " events=" + _eventCount + " escInjected=" + _escInjected + " suppressed=" + _suppressCount + " pidMiss=" + _pidMiss; }
@@ -476,6 +491,12 @@ public static class F19EscHookService {
             _suppressCount++; return (IntPtr)1; // suppress original F13..F24 (down/up)
           }
         }
+        // Esc 自体が押された場合も six 前景なら IME を閉じる（即時＋50ms再試行）
+        if (vk == VK_ESCAPE && isDown){
+          if (IsSixForeground()){
+            try{ ForceImeOffWithRetry(); }catch{}
+          }
+        }
       }
     }
     return CallNextHookEx(_hook, nCode, wParam, lParam);
@@ -501,6 +522,54 @@ public static class F19EscHookService {
       }
       if(_diag){ try { Console.WriteLine("[hook] Esc postmsg hwnd=" + (long)hwnd + " root=" + (long)root); } catch {} }
     }catch{}
+    // F19→Esc 注入時にも IME を閉じる（即時＋50ms再試行）
+    try{ ForceImeOffWithRetry(); }catch{}
+  }
+
+  private static void ForceImeOffWithRetry(){
+    try{ ForceImeOffOnce(); }catch{}
+    try{
+      var th1 = new Thread(()=>{ try{ Thread.Sleep(50); ForceImeOffOnce(); }catch{} }); th1.IsBackground = true; th1.Start();
+      var th2 = new Thread(()=>{ try{ Thread.Sleep(120); ForceImeOffOnce(); }catch{} }); th2.IsBackground = true; th2.Start();
+    }catch{}
+  }
+  private static void ForceImeOffOnce(){
+    try{
+      var root = GetForegroundWindow(); if (root==IntPtr.Zero) { if(_diag){ try { Console.WriteLine("[hook] no foreground window"); } catch {} } return; }
+      uint pid; var tid = GetWindowThreadProcessId(root, out pid);
+      IntPtr target = IntPtr.Zero;
+      try{
+        var gti = new GUITHREADINFO(); gti.cbSize = (uint)System.Runtime.InteropServices.Marshal.SizeOf(typeof(GUITHREADINFO));
+        if (GetGUIThreadInfo(tid, ref gti)) { target = gti.hwndFocus; }
+      }catch{}
+      if (target == IntPtr.Zero){
+        uint selfTid = GetCurrentThreadId(); bool attached = false;
+        try{ attached = AttachThreadInput(selfTid, tid, true); target = GetFocus(); }catch{} finally{ try{ if (attached) AttachThreadInput(selfTid, tid, false); }catch{} }
+      }
+      if (target != IntPtr.Zero){ if (TryImeOff(target)) { if(_diag){ try { Console.WriteLine("[hook] IME OFF via focus hwnd=" + (long)target); } catch {} } return; } }
+      if (TryImeOff(root)) { if(_diag){ try { Console.WriteLine("[hook] IME OFF via root hwnd=" + (long)root); } catch {} } return; }
+      bool done = false;
+      try{
+        EnumChildWindows(root, (h, l)=>{ if (done) return false; if (TryImeOff(h)) { done = true; if(_diag){ try { Console.WriteLine("[hook] IME OFF via child hwnd=" + (long)h); } catch {} } return false; } return true; }, IntPtr.Zero);
+      }catch{}
+      if (!done && _diag){ try { Console.WriteLine("[hook] IME context not available"); } catch {} }
+    }catch{}
+  }
+  private static bool TryImeOff(IntPtr hwnd){
+    try{
+      var hImc = ImmGetContext(hwnd);
+      if (hImc != IntPtr.Zero){
+        ImmSetOpenStatus(hImc, false);
+        ImmReleaseContext(hwnd, hImc);
+        return true;
+      }
+      var imeWnd = ImmGetDefaultIMEWnd(hwnd);
+      if (imeWnd != IntPtr.Zero){
+        SendMessage(imeWnd, WM_IME_CONTROL, (IntPtr)IMC_SETOPENSTATUS, IntPtr.Zero);
+        return true;
+      }
+    }catch{}
+    return false;
   }
 }
 '@
