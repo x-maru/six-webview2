@@ -526,6 +526,8 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
     try{
       if (!e) return false;
       if (e.key === 'Escape') return true;
+      // F19 を Esc として扱う (six 内限定): ブラウザ内キーイベントのみ対象 (#1006再実装)
+      if (e.key === 'F19') return true;
       // Ctrl+[ (Vim style) maps to ESC semantics; ignore Meta/Alt to avoid false positives
       if (e.ctrlKey && !e.altKey && !e.metaKey && e.key === '[') return true;
       // keyCode (legacy) fallback
@@ -1308,7 +1310,17 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
   let _optDebugKeys = false;
   const _debugKeyRing = [];
   const _DEBUG_KEY_MAX = 300;
-  function _debugPush(ev){ try{ if(!_optDebugKeys) return; _debugKeyRing.push(ev); if(_debugKeyRing.length>_DEBUG_KEY_MAX){ _debugKeyRing.splice(0,_debugKeyRing.length-_DEBUG_KEY_MAX); } }catch{} }
+  function _debugPush(ev){
+    try{
+      if(!_optDebugKeys) return;
+      _debugKeyRing.push(ev);
+      if(_debugKeyRing.length>_DEBUG_KEY_MAX){ _debugKeyRing.splice(0,_debugKeyRing.length-_DEBUG_KEY_MAX); }
+      // F19 可視化: key / code に F19 相当が来たら即 console に出す
+      try{
+        if (ev && ev.key && (ev.key==='F19')){ console.debug('[debugkeys:F19]', ev); }
+      }catch{}
+    }catch{}
+  }
   function _debugDumpString(){
     try{
       return _debugKeyRing.map((e,i)=>{
@@ -1390,6 +1402,21 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
       const now = Date.now();
       _rawPush({ t:now, type:'raw-keydown', key:e.key, code:e.code, repeat:!!e.repeat, trusted:!!e.isTrusted, ctrl:e.ctrlKey, alt:e.altKey, meta:e.metaKey });
       try{ _lastKeydownForAnom = { key:e.key, code:e.code, t:now }; }catch{}
+      // F19→Esc 変換（最上流キャプチャ段階）。ブラウザがF19を配信する環境ではここでEscapeに置換。
+      try{
+        if (e && e.key === 'F19'){
+          e.preventDefault(); e.stopPropagation();
+          const evInit = { key:'Escape', code:'Escape', keyCode:27, which:27, bubbles:true, cancelable:true };
+          const kd = new KeyboardEvent('keydown', evInit);
+          const ku = new KeyboardEvent('keyup',   evInit);
+          try{ window.dispatchEvent(kd); }catch{}
+          try{ document.dispatchEvent(kd); }catch{}
+          try{ window.dispatchEvent(ku); }catch{}
+          try{ document.dispatchEvent(ku); }catch{}
+          return;
+        }
+        
+      }catch{}
     }, true);
     window.addEventListener('keyup', (e)=>{
       _rawPush({ t:Date.now(), type:'raw-keyup', key:e.key, code:e.code, repeat:!!e.repeat, trusted:!!e.isTrusted, ctrl:e.ctrlKey, alt:e.altKey, meta:e.metaKey });

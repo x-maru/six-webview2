@@ -381,6 +381,130 @@ if ($DocItems.Count -ge 2) {
 
 if ($ShowUrl -and $Diag) { Write-Host "Launching URL: $targetUrl" }
 
+# --- Low-level keyboard hook: F19 -> Esc (six内限定) ----------------------
+# Edge appモード利用時、前景ウィンドウのプロセスが six 起動時の専用プロフィールディレクトリを
+# コマンドラインに含む msedge.exe の場合のみ、F19 を Esc として注入する。
+Add-Type -Language CSharp -TypeDefinition @'
+using System; using System.Diagnostics; using System.Runtime.InteropServices; using System.Threading;
+public static class F19EscHookService {
+  private static IntPtr _hook = IntPtr.Zero;
+  private static F19EscHookService.LowLevelKeyboardProc _proc = HookProc;
+  private static int[] _allowPids = new int[0];
+  private static Thread _th = null; private static uint _thId = 0; private static volatile bool _running = false;
+  private const int WH_KEYBOARD_LL = 13;
+  private const int WM_KEYDOWN = 0x0100; private const int WM_SYSKEYDOWN = 0x0104; private const int WM_KEYUP = 0x0101; private const int WM_SYSKEYUP = 0x0105;
+  private const int VK_ESCAPE = 0x1B;
+  private static bool _diag = false; private static int _eventCount = 0; private static int _escInjected = 0; private static int _suppressCount = 0; private static int _pidMiss = 0;
+  public delegate IntPtr LowLevelKeyboardProc(int nCode, IntPtr wParam, IntPtr lParam);
+  [StructLayout(LayoutKind.Sequential)] public struct KBDLLHOOKSTRUCT { public int vkCode; public int scanCode; public int flags; public int time; public IntPtr dwExtraInfo; }
+  [DllImport("user32.dll", SetLastError=true)] private static extern IntPtr SetWindowsHookEx(int idHook, LowLevelKeyboardProc lpfn, IntPtr hMod, uint dwThreadId);
+  [DllImport("user32.dll")] private static extern bool UnhookWindowsHookEx(IntPtr hhk);
+  [DllImport("user32.dll")] private static extern IntPtr CallNextHookEx(IntPtr hhk, int nCode, IntPtr wParam, IntPtr lParam);
+  [DllImport("user32.dll")] private static extern IntPtr GetForegroundWindow();
+  [DllImport("user32.dll")] private static extern IntPtr GetAncestor(IntPtr hWnd, uint gaFlags);
+  [DllImport("user32.dll")] private static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint lpdwProcessId);
+  [DllImport("user32.dll")] private static extern uint SendInput(uint nInputs, INPUT[] pInputs, int cbSize);
+  [DllImport("user32.dll")] private static extern bool GetMessage(out MSG lpMsg, IntPtr hWnd, uint wMsgFilterMin, uint wMsgFilterMax);
+  [DllImport("user32.dll")] private static extern bool TranslateMessage(ref MSG lpMsg);
+  [DllImport("user32.dll")] private static extern IntPtr DispatchMessage(ref MSG lpMsg);
+  [DllImport("user32.dll")] private static extern bool PostThreadMessage(uint idThread, uint Msg, UIntPtr wParam, IntPtr lParam);
+  [DllImport("user32.dll", SetLastError=true)] private static extern bool PostMessage(IntPtr hWnd, uint Msg, IntPtr wParam, IntPtr lParam);
+  [DllImport("kernel32.dll")] private static extern uint GetCurrentThreadId();
+  [DllImport("kernel32.dll")] private static extern uint GetLastError();
+  private const uint WM_QUIT = 0x0012;
+  private const uint GA_ROOT = 2;
+  [StructLayout(LayoutKind.Sequential)] public struct INPUT { public int type; public INPUTUNION U; }
+  [StructLayout(LayoutKind.Explicit)] public struct INPUTUNION { [FieldOffset(0)] public KEYBDINPUT ki; }
+  [StructLayout(LayoutKind.Sequential)] public struct KEYBDINPUT { public short wVk; public short wScan; public int dwFlags; public int time; public IntPtr dwExtraInfo; }
+  [StructLayout(LayoutKind.Sequential)] public struct MSG { public IntPtr hWnd; public uint message; public UIntPtr wParam; public IntPtr lParam; public uint time; public int pt_x; public int pt_y; }
+  private const int INPUT_KEYBOARD = 1; private const int KEYEVENTF_KEYUP = 0x0002;
+  public static void EnableDiag(){ _diag = true; try { Console.WriteLine("[hook] diag enabled"); } catch {} }
+  public static void SetAllowPids(int[] pids){ _allowPids = (pids==null)? new int[0] : pids; if(_diag){ try { Console.WriteLine("[hook] allowPids=" + string.Join(",", _allowPids)); } catch {} } }
+  public static string GetStats(){ return "running=" + _running + " hook=" + (int)_hook + " events=" + _eventCount + " escInjected=" + _escInjected + " suppressed=" + _suppressCount + " pidMiss=" + _pidMiss; }
+  public static void Start(){
+    if (_running) return;
+    _running = true;
+    _th = new Thread(()=>{
+      try{
+        _thId = GetCurrentThreadId();
+        _hook = SetWindowsHookEx(WH_KEYBOARD_LL, _proc, IntPtr.Zero, 0);
+        if (_diag){ try { Console.WriteLine("[hook] SetWindowsHookEx result=" + (int)_hook + " lastErr=" + GetLastError()); } catch {} }
+        MSG msg;
+        while (_running && GetMessage(out msg, IntPtr.Zero, 0, 0)){
+          TranslateMessage(ref msg); DispatchMessage(ref msg);
+          if (msg.message == WM_QUIT) break;
+        }
+      } catch {} finally {
+        try{ if (_hook!=IntPtr.Zero){ UnhookWindowsHookEx(_hook); if(_diag){ try { Console.WriteLine("[hook] unhooked"); } catch {} } _hook=IntPtr.Zero; } }catch{}
+        _running = false; _thId = 0;
+      }
+    });
+    _th.IsBackground = true; _th.Start();
+  }
+  public static void Stop(){
+    try{ _running = false; if (_thId!=0){ PostThreadMessage(_thId, WM_QUIT, UIntPtr.Zero, IntPtr.Zero); } }catch{}
+    try{ if (_th!=null && _th.IsAlive){ _th.Join(300); } }catch{}
+    try{ if (_hook!=IntPtr.Zero){ UnhookWindowsHookEx(_hook); _hook=IntPtr.Zero; } }catch{}
+  }
+  private static bool IsSixForeground(){
+    try{
+      var hwnd = GetForegroundWindow(); if (hwnd==IntPtr.Zero) return false;
+      uint pidChild; GetWindowThreadProcessId(hwnd, out pidChild);
+      // ルートウィンドウのPIDも許可対象に含める（WebView2の子ウィンドウ対策）
+      var root = GetAncestor(hwnd, GA_ROOT);
+      uint pidRoot = 0; if (root != IntPtr.Zero) { GetWindowThreadProcessId(root, out pidRoot); }
+      if (_allowPids==null || _allowPids.Length==0) return false;
+      foreach(var ap in _allowPids){ if (ap == (int)pidChild || (pidRoot!=0 && ap == (int)pidRoot)) return true; }
+      _pidMiss++; if(_diag){ try { Console.WriteLine("[hook] pid miss child=" + pidChild + " root=" + pidRoot); } catch {} }
+      return false;
+    }catch{ return false; }
+  }
+  public static IntPtr HookProc(int nCode, IntPtr wParam, IntPtr lParam){
+    if (nCode>=0){
+      int msg = (int)wParam;
+      bool isDown = (msg==WM_KEYDOWN || msg==WM_SYSKEYDOWN);
+      bool isUp   = (msg==WM_KEYUP   || msg==WM_SYSKEYUP);
+      if (isDown || isUp){
+        var kb = (KBDLLHOOKSTRUCT)Marshal.PtrToStructure(lParam, typeof(KBDLLHOOKSTRUCT));
+        // Robust: treat any F13..F24 as candidate and remap to Esc (six前景限定)
+        int vk = kb.vkCode;
+        _eventCount++;
+        if(_diag){ try { Console.WriteLine("[hook] vk=" + vk + " down=" + isDown + " up=" + isUp); } catch {} }
+        if (vk >= 0x7C && vk <= 0x87){
+          if (IsSixForeground()){
+            if (isDown) { InjectEsc(); _escInjected++; if(_diag){ try { Console.WriteLine("[hook] Esc injected for vk="+vk); } catch {} } }
+            _suppressCount++; return (IntPtr)1; // suppress original F13..F24 (down/up)
+          }
+        }
+      }
+    }
+    return CallNextHookEx(_hook, nCode, wParam, lParam);
+  }
+  private static void InjectEsc(){
+    try{
+      // 1) SendInput による仮想入力注入
+      var down = new INPUT{ type=INPUT_KEYBOARD, U=new INPUTUNION{ ki = new KEYBDINPUT{ wVk=VK_ESCAPE, wScan=0, dwFlags=0, time=0, dwExtraInfo=IntPtr.Zero } } };
+      var up   = new INPUT{ type=INPUT_KEYBOARD, U=new INPUTUNION{ ki = new KEYBDINPUT{ wVk=VK_ESCAPE, wScan=0, dwFlags=KEYEVENTF_KEYUP, time=0, dwExtraInfo=IntPtr.Zero } } };
+      INPUT[] arr = new INPUT[]{ down, up }; SendInput((uint)arr.Length, arr, Marshal.SizeOf(typeof(INPUT)));
+    }catch{}
+    try{
+      // 2) フォールバック: 前景とルートに PostMessage で WM_KEYDOWN/UP を送る
+      var hwnd = GetForegroundWindow();
+      var root = GetAncestor(hwnd, GA_ROOT);
+      if (hwnd != IntPtr.Zero){
+        PostMessage(hwnd, (uint)WM_KEYDOWN, (IntPtr)VK_ESCAPE, IntPtr.Zero);
+        PostMessage(hwnd, (uint)WM_KEYUP,   (IntPtr)VK_ESCAPE, IntPtr.Zero);
+      }
+      if (root != IntPtr.Zero && root != hwnd){
+        PostMessage(root, (uint)WM_KEYDOWN, (IntPtr)VK_ESCAPE, IntPtr.Zero);
+        PostMessage(root, (uint)WM_KEYUP,   (IntPtr)VK_ESCAPE, IntPtr.Zero);
+      }
+      if(_diag){ try { Console.WriteLine("[hook] Esc postmsg hwnd=" + (long)hwnd + " root=" + (long)root); } catch {} }
+    }catch{}
+  }
+}
+'@
+
 function Start-WebView2Host([string]$Url){
   $nugetBase = Join-Path $env:USERPROFILE ".nuget/packages/microsoft.web.webview2"
   $coreDll = $null; $wfDll = $null
@@ -412,6 +536,10 @@ function Start-WebView2Host([string]$Url){
 }
 
 # 1) Try WebView2 host first
+# WebView2ホスト経路でもフックを有効化するため、まず現在プロセスPIDで許可し起動
+try { [F19EscHookService]::SetAllowPids(@([System.Diagnostics.Process]::GetCurrentProcess().Id)); [F19EscHookService]::Start() } catch {}
+if ($Diag) { try { [F19EscHookService]::EnableDiag(); Write-Host "[hook] diag request sent" } catch {} }
+
 $launched = Start-WebView2Host -Url $targetUrl
 if ($launched) { $global:SixLaunched = $true }
 if (-not $launched) {
@@ -428,6 +556,20 @@ if (-not $launched) {
     if ($DevInsecure) { $args = @("--allow-file-access-from-files","--disable-web-security","--user-data-dir=$profileDir","--app=$targetUrl") }
     $p = Start-Process -FilePath $edge -ArgumentList $args -WorkingDirectory $here -PassThru
     $global:SixLaunched = $true
+    # Start/Update F19->Esc hook limited to this Edge instance profile
+    # 初期PID集合（親プロセスのみ）。レンダラ/サブプロセスは後続で追加
+    try { [F19EscHookService]::SetAllowPids(@($p.Id)); [F19EscHookService]::Start() } catch {}
+    if ($Diag) { try { [F19EscHookService]::EnableDiag() } catch {} }
+    # プロフィールディレクトリ文字列を含む msedge.exe プロセスを数回スキャンして PID を拡張
+    try {
+      $allow = @($p.Id)
+      for($scan=0; $scan -lt 5; $scan++){
+        Start-Sleep -Milliseconds (150 + ($scan*50))
+        $procs = Get-CimInstance Win32_Process -Filter "Name='msedge.exe'" -ErrorAction SilentlyContinue | Where-Object { $_.CommandLine -and $_.CommandLine.Contains($profileDir) }
+        foreach($q in $procs){ if ($allow -notcontains $q.ProcessId){ $allow += $q.ProcessId } }
+        try { [F19EscHookService]::SetAllowPids($allow) } catch {}
+      }
+    } catch {}
     $deadline = (Get-Date).AddMinutes([Math]::Max(1, $WaitMinutes))
     $seenWindow = $false; $lastHadWindow = Get-Date
     while ((Get-Date) -lt $deadline) {
@@ -455,3 +597,6 @@ if ($KeepOpen) { Write-Host 'Press Enter to exit...'; Read-Host | Out-Null }
 if (-not $AllowMulti) {
   try { if ($global:SixMutex) { $global:SixMutex.ReleaseMutex(); $global:SixMutex.Dispose(); $global:SixMutex = $null } } catch {}
 }
+
+# Stop keyboard hook on script end
+try { [F19EscHookService]::Stop() } catch {}

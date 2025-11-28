@@ -154,6 +154,7 @@ public class __CLASSNAME__ {
           }catch{}
           string status = "200 OK"; string contentType = "application/json; charset=utf-8"; string body = "{\"entries\":[]}";
           if (path.StartsWith("/ping")){ contentType = "text/plain; charset=utf-8"; body = "ok"; }
+          
           else if (path.StartsWith("/dir")){
             string query=null; int qm = path.IndexOf('?'); if (qm>=0) query = path.Substring(qm+1);
             string cwdUrl=null, fsPath=null; if (query!=null){ foreach(var pair in query.Split('&')){ if (pair.Length==0) continue; var kv=pair.Split('='); var k=UrlDecode(kv[0]); var v=(kv.Length>1? UrlDecode(kv[1]) : ""); if (k=="cwd"||k=="url") cwdUrl=v; if (k=="fs") fsPath=v; } }
@@ -391,5 +392,6 @@ public class __CLASSNAME__ {
       }
     } catch (Exception ex) { try{ lastError = ex.Message; Console.WriteLine("[nanoapi] top-level error: "+ex.Message); }catch{} }
   }
+
 }
 
