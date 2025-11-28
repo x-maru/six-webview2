@@ -9171,6 +9171,15 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
         return;
       }
     // NORMAL
+    // NORMAL only: Ctrl+Shift+Z → minimize window (API first, host message fallback)
+    if (e.ctrlKey && e.shiftKey && !e.altKey && !e.metaKey && (e.key==='Z' || e.key==='z')){
+      e.preventDefault();
+      try{ if (_apiBase){ fetch(_apiBase + 'win/minimize').catch(()=>{}); } }catch{}
+      try{ if (_isWebView2 && window && window.chrome && window.chrome.webview && typeof window.chrome.webview.postMessage==='function'){
+        window.chrome.webview.postMessage({ type:'six-window-minimize' });
+      } }catch{}
+      return;
+    }
   // Pending yank operator: interpret next key as motion or line-wise command
   if (_pendingOp === 'y'){
   // allow composing count for motion (digits only when Shift is NOT held)

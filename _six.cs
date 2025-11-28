@@ -6,9 +6,16 @@ using System.IO;
 using System.Threading;
 using System.Diagnostics;
 using System.Linq;
+using System.Runtime.InteropServices;
 
 // NOTE: six.ps1 replaces __CLASSNAME__ to a unique class per run to avoid type collisions.
 public class __CLASSNAME__ {
+  // Win32 interop for window control (minimize)
+  private const uint GA_ROOT = 2;
+  private const int SW_MINIMIZE = 6;
+  [DllImport("user32.dll")] private static extern IntPtr GetForegroundWindow();
+  [DllImport("user32.dll")] private static extern IntPtr GetAncestor(IntPtr hWnd, uint gaFlags);
+  [DllImport("user32.dll")] private static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
   static __CLASSNAME__(){
     try{
       var providerType = Type.GetType("System.Text.CodePagesEncodingProvider, System.Text.Encoding.CodePages", throwOnError:false);
@@ -375,6 +382,21 @@ public class __CLASSNAME__ {
               }
               shares.Append("]}"); body = shares.ToString();
             } catch { status = "400 Bad Request"; body = "{\"shares\":[]}"; }
+          } else if (path.StartsWith("/win/minimize")){
+            // Minimize the current foreground window (resolve to root window)
+            try{
+              IntPtr hwnd = GetForegroundWindow();
+              IntPtr root = hwnd;
+              try{ if (hwnd != IntPtr.Zero) root = GetAncestor(hwnd, GA_ROOT); }catch{}
+              if (root == IntPtr.Zero) root = hwnd;
+              bool ok = false;
+              try{ if (root != IntPtr.Zero) ok = ShowWindow(root, SW_MINIMIZE); }catch{}
+              contentType = "application/json; charset=utf-8";
+              status = ok ? "200 OK" : "200 OK"; // treat as success even if ShowWindow returned false
+              body = "{\"ok\":" + (ok?"true":"false") + "}";
+            } catch {
+              contentType = "application/json; charset=utf-8"; status = "500 Internal Server Error"; body = "{\"ok\":false}";
+            }
           } else { status = "404 Not Found"; body = "{\"entries\":[]}"; }
           var bytes = Encoding.UTF8.GetBytes(body);
           var headerJson = "HTTP/1.1 "+status
