@@ -394,6 +394,9 @@ public static class F19EscHookService {
   private const int WH_KEYBOARD_LL = 13;
   private const int WM_KEYDOWN = 0x0100; private const int WM_SYSKEYDOWN = 0x0104; private const int WM_KEYUP = 0x0101; private const int WM_SYSKEYUP = 0x0105;
   private const int VK_ESCAPE = 0x1B;
+  // User environment (JIS): kana/eisu observed as vk=22 and vk=26
+  private const int VK_KANA_OBS = 22;  // かな: force IME ON
+  private const int VK_EISU_OBS = 26;  // 英数: force IME OFF
   private static bool _diag = false; private static int _eventCount = 0; private static int _escInjected = 0; private static int _suppressCount = 0; private static int _pidMiss = 0;
   public delegate IntPtr LowLevelKeyboardProc(int nCode, IntPtr wParam, IntPtr lParam);
   [StructLayout(LayoutKind.Sequential)] public struct KBDLLHOOKSTRUCT { public int vkCode; public int scanCode; public int flags; public int time; public IntPtr dwExtraInfo; }
@@ -434,6 +437,8 @@ public static class F19EscHookService {
     private const uint WM_IME_CONTROL = 0x0283; private const int IMC_SETOPENSTATUS = 0x0006;
     [DllImport("imm32.dll")] private static extern IntPtr ImmGetDefaultIMEWnd(IntPtr hWnd);
   public static void EnableDiag(){ _diag = true; try { Console.WriteLine("[hook] diag enabled"); } catch {} }
+  private static string _imeNotifyBase = null; // e.g., http://127.0.0.1:12345/
+  public static void SetImeNotifyBase(string baseUrl){ try{ _imeNotifyBase = baseUrl; if(_diag){ try { Console.WriteLine("[hook] imeNotifyBase="+baseUrl); }catch{} } }catch{} }
   public static void SetAllowPids(int[] pids){ _allowPids = (pids==null)? new int[0] : pids; if(_diag){ try { Console.WriteLine("[hook] allowPids=" + string.Join(",", _allowPids)); } catch {} } }
   public static string GetStats(){ return "running=" + _running + " hook=" + (int)_hook + " events=" + _eventCount + " escInjected=" + _escInjected + " suppressed=" + _suppressCount + " pidMiss=" + _pidMiss; }
   public static void Start(){
@@ -485,6 +490,16 @@ public static class F19EscHookService {
         int vk = kb.vkCode;
         _eventCount++;
         if(_diag){ try { Console.WriteLine("[hook] vk=" + vk + " down=" + isDown + " up=" + isUp); } catch {} }
+        // Kana/Eisu handling (pass-through): when six is foreground, force IME state
+        if (IsSixForeground() && isDown){
+          if (vk == VK_KANA_OBS){
+            try{ ForceImeOnWithRetry(); if(_diag){ try { Console.WriteLine("[hook] Kana detected: IME ON"); } catch {} } }catch{}
+            try{ if(!string.IsNullOrEmpty(_imeNotifyBase)){ NotifyImeState("on"); } }catch{}
+          } else if (vk == VK_EISU_OBS){
+            try{ ForceImeOffWithRetry(); if(_diag){ try { Console.WriteLine("[hook] Eisu detected: IME OFF"); } catch {} } }catch{}
+            try{ if(!string.IsNullOrEmpty(_imeNotifyBase)){ NotifyImeState("off"); } }catch{}
+          }
+        }
         if (vk >= 0x7C && vk <= 0x87){
           if (IsSixForeground()){
             if (isDown) { InjectEsc(); _escInjected++; if(_diag){ try { Console.WriteLine("[hook] Esc injected for vk="+vk); } catch {} } }
@@ -571,6 +586,67 @@ public static class F19EscHookService {
     }catch{}
     return false;
   }
+
+  private static bool TryImeOn(IntPtr hwnd){
+    try{
+      var hImc = ImmGetContext(hwnd);
+      if (hImc != IntPtr.Zero){
+        ImmSetOpenStatus(hImc, true);
+        ImmReleaseContext(hwnd, hImc);
+        return true;
+      }
+      var imeWnd = ImmGetDefaultIMEWnd(hwnd);
+      if (imeWnd != IntPtr.Zero){
+        SendMessage(imeWnd, WM_IME_CONTROL, (IntPtr)IMC_SETOPENSTATUS, (IntPtr)1);
+        return true;
+      }
+    }catch{}
+    return false;
+  }
+
+  private static void ForceImeOnWithRetry(){
+    try{ ForceImeOnOnce(); }catch{}
+    try{
+      var th1 = new Thread(()=>{ try{ Thread.Sleep(50); ForceImeOnOnce(); }catch{} }); th1.IsBackground = true; th1.Start();
+      var th2 = new Thread(()=>{ try{ Thread.Sleep(120); ForceImeOnOnce(); }catch{} }); th2.IsBackground = true; th2.Start();
+    }catch{}
+  }
+
+  private static void ForceImeOnOnce(){
+    try{
+      var root = GetForegroundWindow(); if (root==IntPtr.Zero) { if(_diag){ try { Console.WriteLine("[hook] no foreground window (on)"); } catch {} } return; }
+      uint pid; var tid = GetWindowThreadProcessId(root, out pid);
+      IntPtr target = IntPtr.Zero;
+      try{
+        var gti = new GUITHREADINFO(); gti.cbSize = (uint)System.Runtime.InteropServices.Marshal.SizeOf(typeof(GUITHREADINFO));
+        if (GetGUIThreadInfo(tid, ref gti)) { target = gti.hwndFocus; }
+      }catch{}
+      if (target == IntPtr.Zero){
+        uint selfTid = GetCurrentThreadId(); bool attached = false;
+        try{ attached = AttachThreadInput(selfTid, tid, true); target = GetFocus(); }catch{} finally{ try{ if (attached) AttachThreadInput(selfTid, tid, false); }catch{} }
+      }
+      if (target != IntPtr.Zero){ if (TryImeOn(target)) { if(_diag){ try { Console.WriteLine("[hook] IME ON via focus hwnd=" + (long)target); } catch {} } return; } }
+      if (TryImeOn(root)) { if(_diag){ try { Console.WriteLine("[hook] IME ON via root hwnd=" + (long)root); } catch {} } return; }
+      bool done = false;
+      try{
+        EnumChildWindows(root, (h, l)=>{ if (done) return false; if (TryImeOn(h)) { done = true; if(_diag){ try { Console.WriteLine("[hook] IME ON via child hwnd=" + (long)h); } catch {} } return false; } return true; }, IntPtr.Zero);
+      }catch{}
+      if (!done && _diag){ try { Console.WriteLine("[hook] IME context not available (on)"); } catch {} }
+    }catch{}
+  }
+  // Minimal HTTP notify to Nano API: POST /ime with form state=on/off
+  private static void NotifyImeState(string st){
+    try{
+      string u = _imeNotifyBase + "ime";
+      var req = System.Net.WebRequest.Create(u);
+      req.Method = "POST"; req.ContentType = "application/x-www-form-urlencoded";
+      var body = "state=" + Uri.EscapeDataString(st ?? "");
+      var bytes = System.Text.Encoding.ASCII.GetBytes(body);
+      req.ContentLength = bytes.Length;
+      using (var os = req.GetRequestStream()){ os.Write(bytes,0,bytes.Length); }
+      using (var resp = req.GetResponse()){}
+    }catch{}
+  }
 }
 '@
 
@@ -606,7 +682,7 @@ function Start-WebView2Host([string]$Url){
 
 # 1) Try WebView2 host first
 # WebView2ホスト経路でもフックを有効化するため、まず現在プロセスPIDで許可し起動
-try { [F19EscHookService]::SetAllowPids(@([System.Diagnostics.Process]::GetCurrentProcess().Id)); [F19EscHookService]::Start() } catch {}
+try { [F19EscHookService]::SetAllowPids(@([System.Diagnostics.Process]::GetCurrentProcess().Id)); [F19EscHookService]::SetImeNotifyBase($apiBase); [F19EscHookService]::Start() } catch {}
 if ($Diag) { try { [F19EscHookService]::EnableDiag(); Write-Host "[hook] diag request sent" } catch {} }
 
 $launched = Start-WebView2Host -Url $targetUrl
@@ -627,7 +703,7 @@ if (-not $launched) {
     $global:SixLaunched = $true
     # Start/Update F19->Esc hook limited to this Edge instance profile
     # 初期PID集合（親プロセスのみ）。レンダラ/サブプロセスは後続で追加
-    try { [F19EscHookService]::SetAllowPids(@($p.Id)); [F19EscHookService]::Start() } catch {}
+    try { [F19EscHookService]::SetAllowPids(@($p.Id)); [F19EscHookService]::SetImeNotifyBase($apiBase); [F19EscHookService]::Start() } catch {}
     if ($Diag) { try { [F19EscHookService]::EnableDiag() } catch {} }
     # プロフィールディレクトリ文字列を含む msedge.exe プロセスを数回スキャンして PID を拡張
     try {

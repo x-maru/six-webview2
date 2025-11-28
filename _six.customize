@@ -55,17 +55,21 @@ window.THEME = {
   gutterGradientStart: "rgb(235,239,235)",
   gutterGradientEnd: "rgb(219,227,219)",
 
-  // NORMAL/VISUALのcaretグラデーション(左→右の方向)
+  // NORMAL/VISUALでIME OFFのcaretグラデーション(左→右の方向)
   caretGradStart: "rgba(143,255,143,0.95)",
-  caretGradMid: "rgba(143,255,143,0.4)",
+  caretGradMid: "rgba(143,255,143,0.3)",
+
+  // NORMAL/VISUALでIME ONのcaretグラデーション
+  caretIMEGradStart: "rgba(116,31,0,0.7)",
+  caretIMEGradMid: "rgba(116,31,0,0.6)",
 
   // INSERTでIME OFFのcaretグラデーション
   editCaretGradStart: "rgba(255,79,0,0.95)",
-  editCaretGradMid: "rgba(255,79,0,0.5)",
+  editCaretGradMid: "rgba(255,79,0,0.3)",
 
   // INSERTでIME ONのcaretグラデーション
   editCaretIMEGradStart: "rgba(116,31,0,0.7)",
-  editCaretIMEGradMid: "rgba(116,31,0,0.4)",
+  editCaretIMEGradMid: "rgba(116,31,0,0.6)",
   caretWidthPx: 2,
 
   // タブバー

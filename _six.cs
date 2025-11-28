@@ -35,6 +35,7 @@ public class __CLASSNAME__ {
   private static string lastError = null;
   private static int startAttempts = 0;
   private volatile bool started = false;
+  private volatile string _imeState = null; // "on" or "off"; null=unknown
   public __CLASSNAME__(int port){ this.port = port; }
   public void Start(){ try{ startAttempts++; Console.WriteLine("[nanoapi] Start() attempt="+startAttempts+" port="+port); }catch{} thread = new Thread(Run); thread.IsBackground = true; thread.Start(); }
   public bool IsAlive(){ return started && listener!=null; }
@@ -161,6 +162,33 @@ public class __CLASSNAME__ {
           }catch{}
           string status = "200 OK"; string contentType = "application/json; charset=utf-8"; string body = "{\"entries\":[]}";
           if (path.StartsWith("/ping")){ contentType = "text/plain; charset=utf-8"; body = "ok"; }
+          else if (path.StartsWith("/ime")){
+            string state = null;
+            if (string.Equals(method, "GET", StringComparison.OrdinalIgnoreCase)){
+              // Expose latest IME state observed (set by PUT/POST)
+              var st = _imeState ?? "unknown";
+              contentType = "application/json; charset=utf-8"; status = "200 OK"; body = "{\"state\":\""+st+"\"}";
+            } else if (string.Equals(method, "PUT", StringComparison.OrdinalIgnoreCase) || string.Equals(method, "POST", StringComparison.OrdinalIgnoreCase)){
+              // Parse Content-Length and body (ASCII/form)
+              int headerEnd = req.IndexOf("\r\n\r\n"); if (headerEnd < 0) headerEnd = req.Length;
+              string headerText = (headerEnd > 0 ? req.Substring(0, headerEnd) : req);
+              int contentLength = 0;
+              try{
+                foreach(var line in headerText.Split(new[]{"\r\n"}, StringSplitOptions.None)){
+                  var idx = line.IndexOf(':'); if (idx<=0) continue; var k=line.Substring(0,idx).Trim(); var v=line.Substring(idx+1).Trim();
+                  if (k.Equals("Content-Length", StringComparison.OrdinalIgnoreCase)) { int.TryParse(v, out contentLength); }
+                }
+              }catch{}
+              var bodyStart = headerEnd + 4; if (bodyStart > reqBytesInitial.Length) bodyStart = reqBytesInitial.Length;
+              var receivedBody = new MemoryStream(); if (reqBytesInitial.Length > bodyStart){ receivedBody.Write(reqBytesInitial, bodyStart, reqBytesInitial.Length - bodyStart); }
+              int remaining = Math.Max(0, contentLength - (int)receivedBody.Length);
+              var bufBody = new byte[2048]; while(remaining > 0){ int n; try{ n = sock.Receive(bufBody); } catch { break; } if (n<=0) break; receivedBody.Write(bufBody,0,n); remaining -= n; if (receivedBody.Length > 65536) break; }
+              string bodyTxt = ""; try{ bodyTxt = Encoding.ASCII.GetString(receivedBody.ToArray()); }catch{}
+              string st = null; foreach(var pair in bodyTxt.Split('&')){ if (string.IsNullOrEmpty(pair)) continue; var kv=pair.Split('='); var k=(kv.Length>0? kv[0] : ""); var v=(kv.Length>1? kv[1] : ""); if (k=="state"){ st = UrlDecode(v); break; } }
+              if (st=="on" || st=="off") { _imeState = st; contentType = "application/json; charset=utf-8"; status = "200 OK"; body = "{\"ok\":true}"; }
+              else { contentType = "application/json; charset=utf-8"; status = "400 Bad Request"; body = "{\"ok\":false}"; }
+            } else { contentType = "application/json; charset=utf-8"; status = "405 Method Not Allowed"; body = "{}"; }
+          }
           
           else if (path.StartsWith("/dir")){
             string query=null; int qm = path.IndexOf('?'); if (qm>=0) query = path.Substring(qm+1);

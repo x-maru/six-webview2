@@ -156,6 +156,30 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
       try{ document.documentElement.style.setProperty('--caretGradMid', mid); }catch{}
     }catch{}
   }
+  // 即時IME同期: Nano API /ime を短周期ポーリングして視覚を即時反映
+  let _imePollTimer = null;
+  function _startImePolling(){
+    try{
+      const frag = (location.hash||"").substring(1);
+      const params = new URLSearchParams(frag);
+      const api = params.get('api');
+      if (!api) return;
+      if (_imePollTimer) { clearInterval(_imePollTimer); _imePollTimer=null; }
+      _imePollTimer = setInterval(async ()=>{
+        try{
+          const resp = await fetch(api + 'ime', { cache:'no-store' });
+          if (!resp.ok) return;
+          const js = await resp.json();
+          const st = js && js.state;
+          if (st === 'on' || st === 'off'){
+            const newActive = (st === 'on');
+            if (newActive !== _imeActive){ _imeActive = newActive; _applyCaretGradient(); }
+          }
+        }catch{}
+      }, 200);
+    }catch{}
+  }
+  try{ window.addEventListener('load', _startImePolling); }catch{}
   let _caretGradStartBase = null, _caretGradMidBase = null; // theme baseline to restore
   // IME compositionイベントで状態更新
   try{
