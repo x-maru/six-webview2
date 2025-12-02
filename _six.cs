@@ -16,6 +16,22 @@ public class __CLASSNAME__ {
   [DllImport("user32.dll")] private static extern IntPtr GetForegroundWindow();
   [DllImport("user32.dll")] private static extern IntPtr GetAncestor(IntPtr hWnd, uint gaFlags);
   [DllImport("user32.dll")] private static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
+  // IME control interop
+  [DllImport("user32.dll")] private static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint lpdwProcessId);
+  [DllImport("user32.dll")] private static extern bool AttachThreadInput(uint idAttach, uint idAttachTo, bool fAttach);
+  [DllImport("user32.dll")] private static extern IntPtr GetFocus();
+  [DllImport("user32.dll")] private static extern bool GetGUIThreadInfo(uint idThread, ref GUITHREADINFO lpgui);
+  [DllImport("user32.dll", CharSet=CharSet.Auto)] private static extern IntPtr SendMessage(IntPtr hWnd, uint Msg, IntPtr wParam, IntPtr lParam);
+  [DllImport("user32.dll")] private static extern bool EnumChildWindows(IntPtr hWndParent, EnumWindowsProc lpEnumFunc, IntPtr lParam);
+  [DllImport("imm32.dll")] private static extern IntPtr ImmGetContext(IntPtr hWnd);
+  [DllImport("imm32.dll")] private static extern bool ImmSetOpenStatus(IntPtr hIMC, bool fOpen);
+  [DllImport("imm32.dll")] private static extern bool ImmReleaseContext(IntPtr hWnd, IntPtr hIMC);
+  [DllImport("imm32.dll")] private static extern IntPtr ImmGetDefaultIMEWnd(IntPtr hWnd);
+  [DllImport("kernel32.dll")] private static extern uint GetCurrentThreadId();
+  private const uint WM_IME_CONTROL = 0x0283; private const int IMC_SETOPENSTATUS = 0x0006;
+  [StructLayout(LayoutKind.Sequential)] private struct RECT { public int left; public int top; public int right; public int bottom; }
+  [StructLayout(LayoutKind.Sequential)] private struct GUITHREADINFO { public uint cbSize; public uint flags; public IntPtr hwndActive; public IntPtr hwndFocus; public IntPtr hwndCapture; public IntPtr hwndMenuOwner; public IntPtr hwndMoveSize; public IntPtr hwndCaret; public RECT rcCaret; }
+  public delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
   static __CLASSNAME__(){
     try{
       var providerType = Type.GetType("System.Text.CodePagesEncodingProvider, System.Text.Encoding.CodePages", throwOnError:false);
@@ -36,6 +52,13 @@ public class __CLASSNAME__ {
   private static int startAttempts = 0;
   private volatile bool started = false;
   private volatile string _imeState = null; // "on" or "off"; null=unknown
+  // --- IME control helpers (foreground window heuristic) ---
+  private static void ForceImeOffWithRetry(){ try{ ForceImeOffOnce(); }catch{} try{ var th1=new Thread(()=>{ try{ Thread.Sleep(50); ForceImeOffOnce(); }catch{} }); th1.IsBackground=true; th1.Start(); var th2=new Thread(()=>{ try{ Thread.Sleep(120); ForceImeOffOnce(); }catch{} }); th2.IsBackground=true; th2.Start(); }catch{} }
+  private static void ForceImeOnWithRetry(){ try{ ForceImeOnOnce(); }catch{} try{ var th1=new Thread(()=>{ try{ Thread.Sleep(50); ForceImeOnOnce(); }catch{} }); th1.IsBackground=true; th1.Start(); var th2=new Thread(()=>{ try{ Thread.Sleep(120); ForceImeOnOnce(); }catch{} }); th2.IsBackground=true; th2.Start(); }catch{} }
+  private static bool TryImeOff(IntPtr hwnd){ try{ var hImc=ImmGetContext(hwnd); if(hImc!=IntPtr.Zero){ ImmSetOpenStatus(hImc,false); ImmReleaseContext(hwnd,hImc); return true; } var imeWnd=ImmGetDefaultIMEWnd(hwnd); if(imeWnd!=IntPtr.Zero){ SendMessage(imeWnd, WM_IME_CONTROL, (IntPtr)IMC_SETOPENSTATUS, IntPtr.Zero); return true; } }catch{} return false; }
+  private static bool TryImeOn(IntPtr hwnd){ try{ var hImc=ImmGetContext(hwnd); if(hImc!=IntPtr.Zero){ ImmSetOpenStatus(hImc,true); ImmReleaseContext(hwnd,hImc); return true; } var imeWnd=ImmGetDefaultIMEWnd(hwnd); if(imeWnd!=IntPtr.Zero){ SendMessage(imeWnd, WM_IME_CONTROL, (IntPtr)IMC_SETOPENSTATUS, (IntPtr)1); return true; } }catch{} return false; }
+  private static void ForceImeOffOnce(){ try{ var root=GetForegroundWindow(); if(root==IntPtr.Zero) return; uint pid; var tid=GetWindowThreadProcessId(root, out pid); IntPtr target=IntPtr.Zero; try{ var gti=new GUITHREADINFO(); gti.cbSize=(uint)Marshal.SizeOf(typeof(GUITHREADINFO)); if(GetGUIThreadInfo(tid, ref gti)) target=gti.hwndFocus; }catch{} if(target==IntPtr.Zero){ try{ uint selfTid = GetCurrentThreadId(); bool attached=false; try{ attached=AttachThreadInput(selfTid, tid, true); target=GetFocus(); } finally { try{ if(attached) AttachThreadInput(selfTid, tid, false); }catch{} } }catch{} } if(target!=IntPtr.Zero){ if(TryImeOff(target)) return; } if(TryImeOff(root)) return; bool done=false; try{ EnumChildWindows(root, (h,l)=>{ if(done) return false; if(TryImeOff(h)){ done=true; return false; } return true; }, IntPtr.Zero); }catch{} }catch{} }
+  private static void ForceImeOnOnce(){ try{ var root=GetForegroundWindow(); if(root==IntPtr.Zero) return; uint pid; var tid=GetWindowThreadProcessId(root, out pid); IntPtr target=IntPtr.Zero; try{ var gti=new GUITHREADINFO(); gti.cbSize=(uint)Marshal.SizeOf(typeof(GUITHREADINFO)); if(GetGUIThreadInfo(tid, ref gti)) target=gti.hwndFocus; }catch{} if(target==IntPtr.Zero){ try{ uint selfTid = GetCurrentThreadId(); bool attached=false; try{ attached=AttachThreadInput(selfTid, tid, true); target=GetFocus(); } finally { try{ if(attached) AttachThreadInput(selfTid, tid, false); }catch{} } }catch{} } if(target!=IntPtr.Zero){ if(TryImeOn(target)) return; } if(TryImeOn(root)) return; bool done=false; try{ EnumChildWindows(root, (h,l)=>{ if(done) return false; if(TryImeOn(h)){ done=true; return false; } return true; }, IntPtr.Zero); }catch{} }catch{} }
   public __CLASSNAME__(int port){ this.port = port; }
   public void Start(){ try{ startAttempts++; Console.WriteLine("[nanoapi] Start() attempt="+startAttempts+" port="+port); }catch{} thread = new Thread(Run); thread.IsBackground = true; thread.Start(); }
   public bool IsAlive(){ return started && listener!=null; }
@@ -185,7 +208,12 @@ public class __CLASSNAME__ {
               var bufBody = new byte[2048]; while(remaining > 0){ int n; try{ n = sock.Receive(bufBody); } catch { break; } if (n<=0) break; receivedBody.Write(bufBody,0,n); remaining -= n; if (receivedBody.Length > 65536) break; }
               string bodyTxt = ""; try{ bodyTxt = Encoding.ASCII.GetString(receivedBody.ToArray()); }catch{}
               string st = null; foreach(var pair in bodyTxt.Split('&')){ if (string.IsNullOrEmpty(pair)) continue; var kv=pair.Split('='); var k=(kv.Length>0? kv[0] : ""); var v=(kv.Length>1? kv[1] : ""); if (k=="state"){ st = UrlDecode(v); break; } }
-              if (st=="on" || st=="off") { _imeState = st; contentType = "application/json; charset=utf-8"; status = "200 OK"; body = "{\"ok\":true}"; }
+              if (st=="on" || st=="off") {
+                _imeState = st;
+                // Try to toggle OS IME immediately for current foreground/focus window
+                try{ if (st=="on") ForceImeOnWithRetry(); else ForceImeOffWithRetry(); }catch{}
+                contentType = "application/json; charset=utf-8"; status = "200 OK"; body = "{\"ok\":true}";
+              }
               else { contentType = "application/json; charset=utf-8"; status = "400 Bad Request"; body = "{\"ok\":false}"; }
             } else { contentType = "application/json; charset=utf-8"; status = "405 Method Not Allowed"; body = "{}"; }
           }

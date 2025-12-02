@@ -11,7 +11,9 @@ window.SIX_OPTIONS = {
   tabstop: 8, // TABコードを何桁の空白として表示するか
   visualbell: true, // ヴィジュアルベル。指定しなくてもデフォルトでON
   UNDO_STEPS_IN_SESSION: 5, // 即時終了から復帰した後まで引き継ぐアンドゥバッファの深さ(各バッファ毎に持つバッファに対する共通の深さ)
-  hlsearch: false // 検索ハイライト（:set hlsearch / :set nohlsearch / :set hlsearch!）
+  hlsearch: false, // 検索ハイライト（:set hlsearch / :set nohlsearch / :set hlsearch!）
+  imeSwitchKey: 'direct'
+  //imeSwitchKey: 'toggle'
 };
 
 // Theme definition (色指定。基本的に全項目必須で、未定義時に代替は一切せず一律yellowとする)

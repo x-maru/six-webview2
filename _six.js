@@ -135,8 +135,14 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
       let midStopLen = '0.6rem';
       // EscでINSERT→NORMALへ遷移した直後の短時間はIME視覚状態をOFF固定
       const now = Date.now();
-      const imeActiveUse = (_mode === 'NORMAL' || _mode === 'VISUAL') && (now < _imeVisualLockUntil)
-        ? false : !!_imeActive;
+      // ロック中はモードに関わらずIME視覚をOFF固定。
+      let imeActiveUse = !!_imeActive;
+      if (now < _imeVisualLockUntil){
+        imeActiveUse = false;
+      } else if (_mode === 'NORMAL'){
+        // NORMALでは常にIME OFF視覚（us）で描画
+        imeActiveUse = false;
+      }
 
       if (_mode === 'INSERT'){
         if (imeActiveUse){
@@ -211,13 +217,41 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
           const st = js && js.state;
           if (st === 'on' || st === 'off'){
             const newActive = (st === 'on');
-            if (newActive !== _imeActive){ _imeActive = newActive; _applyCaretGradient(); }
+            // NORMAL→IMEがONになったことを検知したらINSERTへ（⑤→②を保証）
+            if (newActive && _mode === 'NORMAL'){
+              try{
+                _setMode('INSERT');
+                _imeVisualLockUntil = 0;
+                if (editor){ editor.removeAttribute('inputmode'); editor.style.imeMode=''; }
+                _imeActive = true; _applyCaretGradient(); _repositionCaret(); updateGutter();
+              }catch{}
+            } else {
+              if (newActive !== _imeActive){ _imeActive = newActive; _applyCaretGradient(); }
+            }
           }
         }catch{}
       }, 200);
     }catch{}
   }
   try{ window.addEventListener('load', _startImePolling); }catch{}
+  // Nano API helper: POST /ime state=on|off to request host-side IME toggle
+  function _nanoApiBase(){
+    try{
+      const frag = (location.hash||"").substring(1);
+      const params = new URLSearchParams(frag);
+      const api = params.get('api');
+      if (!api || typeof api !== 'string' || api.length===0) return null;
+      return api;
+    }catch{ return null; }
+  }
+  async function _imePost(state){
+    try{
+      const api = _nanoApiBase(); if (!api) return;
+      const st = (state==='on'||state==='off')? state : null; if (!st) return;
+      const body = 'state=' + encodeURIComponent(st);
+      await fetch(api + 'ime', { method:'POST', headers:{ 'Content-Type':'application/x-www-form-urlencoded' }, body });
+    }catch{}
+  }
   let _caretGradStartBase = null, _caretGradMidBase = null; // theme baseline to restore
   // IME compositionイベントで状態更新
   try{
@@ -650,6 +684,31 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
       if (e.ctrlKey && !e.altKey && !e.metaKey && e.key === '[') return true;
       // keyCode (legacy) fallback
       if (e.keyCode === 27) return true;
+      return false;
+    }catch{ return false; }
+  }
+  function _isKanaKey(e){
+    try{
+      if (!e) return false;
+      if (e.key === 'KanjiMode' || e.key === 'ZenkakuHankaku' || e.key === 'KanaMode' || e.key === 'Hiragana') return true;
+      // Windows日本語配列では 'NonConvert' が かな 相当として配信されるケースへの対応
+      if (e.code === 'IntlRo' || e.code === 'NonConvert') return true;
+      // 以前の調査: vk=22（フォールバック）
+      if (typeof e.keyCode === 'number' && e.keyCode === 22) return true;
+      return false;
+    }catch{ return false; }
+  }
+  function _isEisuKey(e){
+    try{
+      if (!e) return false;
+      // 'Eisu' は主にJIS配列で報告され、'Alphanumeric' は一部環境（特にMac系）で使われる
+      if (e.key === 'Eisu' || e.key === 'Alphanumeric') return true;
+      // 互換: Windows環境で英数相当が 'RomanCharacters' になる例への保険
+      if (e.key === 'RomanCharacters') return true;
+      // Windows日本語配列では 'Convert' が 英数 相当として配信されるケースへの対応
+      if (e.code === 'Convert') return true;
+      // 以前の調査: vk=26（フォールバック）
+      if (typeof e.keyCode === 'number' && e.keyCode === 26) return true;
       return false;
     }catch{ return false; }
   }
@@ -6616,7 +6675,11 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
       if (mDump){
         let arr = _debugKeyRing.slice();
         let numStr = (mDump[1]||'').trim();
-        // Normalize full-width digits to ASCII
+      // imeSwitchKey が 'direct' の場合はAPIポーリングによる視覚IME同期を行わない（⑨防止）
+      try{
+        const m = String((window&&window.SIX_OPTIONS&&window.SIX_OPTIONS.imeSwitchKey)||'').toLowerCase();
+        if (m === 'direct') return;
+      }catch{}
         if (numStr){ numStr = numStr.replace(/[０-９]/g, ch=> String.fromCharCode(ch.charCodeAt(0)-0xFF10+0x30)); }
         const nArg = parseInt(numStr||'',10);
         if (Number.isFinite(nArg) && nArg>0 && nArg < arr.length){ arr = arr.slice(arr.length - nArg); }
@@ -7101,7 +7164,15 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
     if (m==='INSERT'){
       // #1023: INSERT移行時は常に IME OFF 初期状態（IME ON色で開始しない）
       // 既存の _imeActive 状態を無視して false に強制し、OFF用グラデを即適用。
-      try { _imeActive = false; _applyCaretGradient(); } catch {}
+      try {
+        _imeActive = false;
+        // 視覚ロック: INSERT直後の短時間はIME視覚をOFF固定（初手のraw入力でもjpに切り替わらない）
+        _imeVisualLockUntil = Date.now() + 900;
+        // IME 自体も短時間無効化（OSの自動未確定開始を抑止）
+        if (editor){ editor.setAttribute('inputmode','none'); editor.style.imeMode='disabled'; }
+        setTimeout(()=>{ try{ if (editor){ editor.removeAttribute('inputmode'); editor.style.imeMode=''; } }catch{} }, 900);
+        _applyCaretGradient();
+      } catch {}
       // Allow IME in INSERT
       try{ if (editor){ editor.removeAttribute('inputmode'); editor.style.imeMode = ''; } }catch{}
       // ユーザー編集を許可（INSERT のみ）
@@ -7124,13 +7195,27 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
       try{ if (cmdfloat) cmdfloat.style.display='none'; }catch{}
   // Caret color remains baseline (IME visualization removed)
     } else {
-      // NORMAL/VISUAL/CMD: IME on/off キーや未確定表示は許容するため、inputmode/imeMode の強制変更はしない。
-      // 内容変更は beforeinput/input で阻止するため readOnly も false のままにする。
-      try{ if (editor){ editor.removeAttribute('inputmode'); editor.style.imeMode=''; editor.readOnly = false; } }catch{}
+      // NORMAL/VISUAL/CMD
+      try{
+        if (editor){
+          editor.readOnly = false;
+          if (m==='NORMAL' || m==='VISUAL'){
+            // NORMAL/VISUAL 中は IME を積極的に無効化し、勝手な未確定開始を防ぐ
+            editor.setAttribute('inputmode','none');
+            editor.style.imeMode = 'disabled';
+          } else {
+            // CMD では制限を外す（コマンド入力は別UIだが安全側）
+            editor.removeAttribute('inputmode');
+            editor.style.imeMode='';
+          }
+        }
+      }catch{}
       // 以前の blur→focus による IME 強制終了は行わない（#522）。
       // INSERT→NORMAL/VISUAL の直後は IME 視覚の一時ロックを入れて競合回避
       try{ if (_prevMode==='INSERT' && (m==='NORMAL' || m==='VISUAL')){ _imeVisualLockUntil = Date.now() + 400; } }catch{}
       _imeActive = false; try{ _applyCaretGradient(); }catch{}
+      // OS IME も確実に閉じる（Esc等でINSERT離脱時）
+      try{ if (_prevMode==='INSERT' && (m==='NORMAL' || m==='VISUAL')){ _imePost('off'); } }catch{}
     }
     // Show/hide floating command bar for CMD mode
     try{
@@ -8725,20 +8810,23 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
     editor.addEventListener('compositionstart', (e)=>{
       _imeComposing = true;
       try{
+        const imeKeyMode = String((window && window.SIX_OPTIONS && window.SIX_OPTIONS.imeSwitchKey) || '').toLowerCase();
         if (_mode !== 'INSERT'){
+          // INSERT以外では未確定表示は許可するが、確定は破棄（既存動作）。フォールバックによるモード変更は行わない。
           _blockedComposition = true;
-          // ロールバック用の基点はオーバーレイ caret 位置に統一（ネイティブ選択が陳腐化している場合があるため）
           try{
             const off = _offsetFromRC(caretRow|0, caretCol|0)|0;
             _preCompSelS = off; _preCompSelE = off;
-            // IME の未確定表示ポップアップ位置が古い選択に引っ張られないよう、
-            // ネイティブ選択も caret に同期（スクロールは即時復元）
             const stHold = editor.scrollTop|0, slHold = editor.scrollLeft|0;
             editor.selectionStart = editor.selectionEnd = off;
             if ((editor.scrollTop|0) !== stHold) editor.scrollTop = stHold;
             if ((editor.scrollLeft|0) !== slHold) editor.scrollLeft = slHold;
           }catch{}
-        } else { _blockedComposition = false; }
+        } else { // 既に INSERT
+          _blockedComposition = false;
+          _imeActive = true; // IME ON視覚
+          try{ _applyCaretGradient(); }catch{}
+        }
         _debugPush({ t:Date.now(), type:'compositionstart', mode:_mode, compData:e.data, ctrl:e.ctrlKey, alt:e.altKey, meta:e.metaKey, isComp:true });
       }catch{}
     });
@@ -8810,7 +8898,67 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
       }
     }catch{}
       if (_mode === 'CMD') return;
+      // imeSwitchKey='direct': かな/英数の直接検知
+      try{
+        const imeKeyMode = String((window && window.SIX_OPTIONS && window.SIX_OPTIONS.imeSwitchKey) || '').toLowerCase();
+        if (imeKeyMode === 'direct'){
+          if (_isKanaKey(e)){
+            e.preventDefault(); e.stopPropagation();
+            // VISUALでは考慮しない
+            if (_mode !== 'VISUAL'){
+              // NORMALならINSERTへ遷移（⑤→②）。INSERT中ならIME ONのみ（①→②）。
+              if (_mode === 'NORMAL'){ _setMode('INSERT'); }
+              // 明示的な「かな」によるONは視覚ロックを解除して即時反映
+              _imeVisualLockUntil = 0;
+              // 直後のIME無効化タイマーを解除し、IMEを許可
+              try{ if (editor){ editor.removeAttribute('inputmode'); editor.style.imeMode=''; } }catch{}
+              _imeActive = true; _applyCaretGradient(); _repositionCaret(); updateGutter();
+              try{ _imePost('on'); }catch{}
+            }
+            return;
+          }
+          if (_isEisuKey(e)){
+            e.preventDefault(); e.stopPropagation();
+            if (_mode !== 'VISUAL'){
+              // IME OFF（②→①）。モードは維持（INSERTのまま）。NORMALでは見た目のみOFF維持。
+              _imeActive = false; _applyCaretGradient(); _repositionCaret(); updateGutter();
+              try{ _imePost('off'); }catch{}
+            }
+            return;
+          }
+          // Lang1/Lang2 追加検知 (一部環境でかな/英数に割り当て) (#1068補強)
+          if (!_isKanaKey(e) && !_isEisuKey(e)){
+            if (e.code === 'Lang1'){
+              e.preventDefault(); e.stopPropagation();
+              if (_mode !== 'VISUAL'){
+                if (_mode === 'NORMAL'){ _setMode('INSERT'); }
+                _imeVisualLockUntil = 0;
+                _imeActive = true; _applyCaretGradient(); _repositionCaret(); updateGutter();
+                try{ _imePost('on'); }catch{}
+              }
+              return;
+            } else if (e.code === 'Lang2'){
+              e.preventDefault(); e.stopPropagation();
+              if (_mode !== 'VISUAL'){
+                _imeActive = false; _applyCaretGradient(); _repositionCaret(); updateGutter();
+                try{ _imePost('off'); }catch{}
+              }
+              return;
+            }
+          }
+        }
+      }catch{}
+      // NORMAL→'i' での INSERT 移行時は常に IME OFF 初期化 (④後 'i' 押下で jp になる現象抑止)
+      if (_mode === 'NORMAL' && !e.ctrlKey && !e.altKey && !e.metaKey && e.key === 'i'){
+        try{ _imeActive = false; _applyCaretGradient(); }catch{}
+        try{ _imePost('off'); }catch{}
+      }
       if (_mode === 'INSERT'){
+        // INSERT中の印字系キーで明示的にIME視覚をOFF維持（raw開始を優先）
+        try{
+          const printable = (e.key && e.key.length===1 && !e.ctrlKey && !e.altKey && !e.metaKey);
+          if (printable && !e.isComposing){ _imeActive=false; _applyCaretGradient(); }
+        }catch{}
         // INSERTモードで Tab または Ctrl+I でタブ文字を挿入 (#459)
         // ブラウザのデフォルト Tab 挙動(フォーカス移動)を抑止し、明示的に '\t' を挿入する。
         try{
@@ -8851,7 +8999,12 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
           e.preventDefault();
           // on leaving INSERT, capture native caret back to overlay state
           try{ const off = editor.selectionStart|0; const rc = _rcFromOffset(off); caretRow = rc.r; caretCol = rc.c; }catch{}
+          // Esc による INSERT→NORMAL 遷移直後は IME を視覚的にも OFF 固定にし、次のキー入力は raw 扱いにする。
+          // これにより「④{I,jp,IME} → Esc → ⑤{N,us,raw}」の期待動作に揃える。
+          try{ _imeActive = false; _imeVisualLockUntil = Date.now() + 600; _applyCaretGradient(); }catch{}
           _setMode('NORMAL');
+          // モード切替後にも caret 視覚を再適用（⑤でus/rawが残ることを保証）
+          try{ _applyCaretGradient(); }catch{}
           return;
         }
         // #603: INSERTモードの下方向移動は最終行以降へ進めない。'j' 文字としての入力以外で改行を合成しない。
