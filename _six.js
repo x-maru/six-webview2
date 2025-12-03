@@ -269,7 +269,18 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
           const data = (e && typeof e.data==='string') ? e.data : '';
           // Detect visible ASCII range (space..tilde); ignore control chars
           const isAscii = /[\x20-\x7E]/.test(data);
-          if (isAscii && _imeActive){ _imeActive = false; try{ _applyCaretGradient(); }catch{} }
+          // #1101: composing中/候補操作中はIME視覚を強制OFFしない（委譲）。
+          const now = Date.now();
+          const candWin = (typeof window._imeCandidateUntil==='number') ? (now < window._imeCandidateUntil) : false;
+          const keepOn = (typeof window._imeKeepOnUntil==='number') ? (now < window._imeKeepOnUntil) : false;
+          if (isAscii){
+            if (_imeComposing || candWin || keepOn){
+              // IMEの未確定表示や候補確定中は視覚変更しない
+              return;
+            }
+            // IMEが明示的にONからASCIIへ切り替わった可能性がある場合のみ視覚OFFへ
+            if (_imeActive){ _imeActive = false; try{ _applyCaretGradient(); }catch{} }
+          }
         }catch{}
       });
     }
@@ -1579,9 +1590,12 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
       const now = Date.now();
       _rawPush({ t:now, type:'raw-keydown', key:e.key, code:e.code, repeat:!!e.repeat, trusted:!!e.isTrusted, ctrl:e.ctrlKey, alt:e.altKey, meta:e.metaKey });
       try{ _lastKeydownForAnom = { key:e.key, code:e.code, t:now }; }catch{}
-      // F19→Esc 変換（最上流キャプチャ段階）。ブラウザがF19を配信する環境ではここでEscapeに置換。
+      // F19→Esc 変換（最上流キャプチャ段階）。
+      // 仕様(#1090): 未確定中は six が介入せず IME/ブラウザへ委譲するため、変換をスキップ。
       try{
         if (e && e.key === 'F19'){
+          // composing 中は何もしない（元イベントをそのまま流す）
+          try{ if (typeof _imeComposing!=='undefined' && _imeComposing){ return; } }catch{}
           e.preventDefault(); e.stopPropagation();
           const evInit = { key:'Escape', code:'Escape', keyCode:27, which:27, bubbles:true, cancelable:true };
           const kd = new KeyboardEvent('keydown', evInit);
@@ -8806,9 +8820,11 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
     // IME composition events — #522: NORMAL/VISUAL では未確定の表示は許可するが、確定は捨てる
     let _imeComposing = false;
     let _blockedComposition = false;
+    let _lastCompStartTs = 0;
+    let _lastCompEndTs = 0;
     let _preCompSelS = 0, _preCompSelE = 0;
     editor.addEventListener('compositionstart', (e)=>{
-      _imeComposing = true;
+      _imeComposing = true; _lastCompStartTs = Date.now();
       try{
         const imeKeyMode = String((window && window.SIX_OPTIONS && window.SIX_OPTIONS.imeSwitchKey) || '').toLowerCase();
         if (_mode !== 'INSERT'){
@@ -8841,7 +8857,7 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
           try{ editor.selectionStart = _preCompSelS; editor.selectionEnd = _preCompSelE; }catch{}
         }
       }catch{}
-      _imeComposing = false; _blockedComposition = false;
+      _imeComposing = false; _blockedComposition = false; _lastCompEndTs = Date.now();
       _repositionCaret(); updateGutter();
       _debugPush({ t:Date.now(), type:'compositionend', mode:_mode, compData:e.data, ctrl:e.ctrlKey, alt:e.altKey, meta:e.metaKey, isComp:false });
     });
@@ -8996,6 +9012,22 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
           }
         }catch{}
         if (_isEsc(e)){
+          // 仕様(#1090): 未確定文字列が存在する間は Esc/F19 を six で消費しない
+          // → IME にスルー（preventDefault/stopPropagation しない・モード遷移もしない）
+          const now = Date.now();
+          // 候補猶予ウィンドウを考慮
+          const candWin = (typeof window._imeCandidateUntil==='number') ? (now < window._imeCandidateUntil) : false;
+          if (_imeComposing || (e && e.isComposing) || candWin || (now - (_lastCompEndTs||0) < 900)){
+            // IMEネイティブ動作に委譲: 第1回Escで変換をキャンセル→未確定に戻す、第2回Escで未確定クリア
+            // IMEがOFFへ落ちる環境向けに短期ON維持ガードを付与
+            try{
+              if (typeof window._imeKeepOnUntil!=='number') window._imeKeepOnUntil = 0;
+              window._imeKeepOnUntil = Date.now() + 1200;
+              _imeActive = true; _applyCaretGradient();
+              _imePost && _imePost('on');
+            }catch{}
+            return;
+          }
           e.preventDefault();
           // on leaving INSERT, capture native caret back to overlay state
           try{ const off = editor.selectionStart|0; const rc = _rcFromOffset(off); caretRow = rc.r; caretCol = rc.c; }catch{}
