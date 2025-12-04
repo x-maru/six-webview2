@@ -967,6 +967,8 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
   }catch{}
   // suppress pushing an extra undo snapshot on the next INSERT mode entry
   let _suppressInsertSnapshotOnce = false;
+  // INSERT内の分割Undo: 直近の入力後にキャレットだけを動かした最初のタイミングで1回だけスナップショットを積む
+  let _insertSegDirty = false;
   // global key routing guard (to avoid recursion when synthesizing events)
   let _globalKeyRouting = false;
   // encoding options (limited set)
@@ -7240,6 +7242,8 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
         _pushUndoSnapshot('insert');
       }
       _suppressInsertSnapshotOnce = false;
+      // 分割Undo状態を初期化（INSERT開幕時は未編集）
+      _insertSegDirty = false;
       // ensure native textarea caret matches overlay caret position
       try{ editor && editor.focus && editor.focus(); }catch{}
       _syncNativeSelectionToCaret();
@@ -8756,6 +8760,8 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
       if (_mode === 'INSERT'){
         // centralize modified tracking (bump change tick on each input)
         _touchBufferModified();
+        // INSERT内での入力（insert/delete/改行など）発生を記録 → 次のキャレットのみ移動で一度だけUndo区切りを積む
+        try{ _insertSegDirty = true; }catch{}
         // sync overlay caret to native insertion point
         try{ const off = editor.selectionStart|0; const rc = _rcFromOffset(off); caretRow = rc.r; caretCol = rc.c; }catch{}
         // _touchBufferModified already hides cursor; redundant call removed
@@ -8809,6 +8815,16 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
     editor.addEventListener('mousedown', ()=>{ setTimeout(syncCaretFromSelection, 0); });
     editor.addEventListener('mouseup', syncCaretFromSelection);
     editor.addEventListener('click', syncCaretFromSelection);
+    // INSERT中の単純クリックによるカーソル再配置でも、直前に入力があればUndoを区切る
+    editor.addEventListener('click', ()=>{
+      try{
+        if (_mode==='INSERT' && _insertSegDirty){
+          const s = editor.selectionStart|0;
+          const t = editor.selectionEnd|0;
+          if (s===t){ _pushUndoSnapshot('insert-seg'); _insertSegDirty=false; }
+        }
+      }catch{}
+    });
     // selection change — keep overlay caret in sync in all modes
     // In VISUAL mode, prefer tracking the moving edge of the selection (the end farther from the anchor)
     editor.addEventListener('select', ()=>{
@@ -9108,6 +9124,15 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
         // Allow native editing behavior, but keep overlays in sync when moving the caret
         if (e.key==='ArrowLeft' || e.key==='ArrowRight' || e.key==='ArrowUp' || e.key==='ArrowDown' ||
             e.key==='Home' || e.key==='End' || e.key==='PageUp' || e.key==='PageDown'){
+          // 入力→キャレットのみ移動の最初のタイミングでUndoスナップショットを積んで区切る
+          try{
+            if (_insertSegDirty){
+              const s = editor.selectionStart|0;
+              const t = editor.selectionEnd|0;
+              // 選択範囲が無い（純粋なカーソル移動）の場合のみ分割Undoを適用
+              if (s === t){ _pushUndoSnapshot('insert-seg'); _insertSegDirty = false; }
+            }
+          }catch{}
           // #603: ArrowDown で末尾LF欠落時に仮改行を挿入する旧処理(#602)を撤廃。
           // 最終行末尾での下方向移動は何も起こさず、そのまま位置維持。
           // #635/#636: 改行文字上 (offset===length-1) からの ArrowDown で仮想最終空行へ移動させる。
