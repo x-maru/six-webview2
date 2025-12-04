@@ -28,12 +28,12 @@ html, body { height: 100%; margin: 0; background: var(--bodyBGColor, #0b0d12); c
 /* Keep global UI (tabbar/cmdbar) unaffected by editor zoom */
 body { font: var(--fontBase, 18px)/20px Consolas, 'Courier New', monospace; overflow: hidden; }
 
-#tabbar { height: 36px; background: var(--tabBarBg, #0f1117); color: var(--tabBarFg, #a6accd); display:flex; align-items:flex-end; padding:0 4px; border-bottom:1px solid #1c2230; overflow:hidden; }
-#tabbar .tabs { height:100%; display:flex; gap:4px; align-items:flex-end; flex:1 1 auto; overflow-x:auto; overflow-y:hidden; scrollbar-width: none; position:relative; }
+#tabbar { height: auto; min-height: 2.25rem; background: var(--tabBarBg, #0f1117); color: var(--tabBarFg, #a6accd); display:flex; align-items:flex-end; padding:0 0.25rem; border-bottom:1px solid #1c2230; overflow:hidden; }
+#tabbar .tabs { height:auto; display:flex; gap:4px; align-items:flex-end; flex:1 1 auto; overflow-x:auto; overflow-y:hidden; scrollbar-width: none; position:relative; }
 #tabbar .tabs::-webkit-scrollbar { display: none; }
 #tabbar #tabtools { flex: 0 0 auto; display:flex; align-items:center; gap:6px; padding-left:6px; }
-#tabbar .tab { flex: 0 0 auto; min-width: 80px; padding:0 10px; height: 90%; line-height: 1; margin: 0; border-radius:4px 4px 0 0; background: var(--tabBg, yellow); color: var(--tabText, yellow); display:flex; align-items:center; border:1px solid #1c2230; border-bottom-color:#0f1117; box-sizing:border-box; cursor:pointer; }
-#tabbar .tabscroll { flex:0 0 1.4rem; display:flex; align-items:center; justify-content:center; width:1.4rem; height:90%; margin:0 4px 0 0; border-radius:4px 4px 0 0; font-weight:600; user-select:none; cursor:pointer; box-sizing:border-box; padding:0; background: var(--tabScrollBtnEnableBG, yellow); color: var(--tabScrollBtnEnableText, yellow); /* align bottom edge & visual with tabs */ border:1px solid #1c2230; border-bottom-color:#0f1117; }
+#tabbar .tab { flex: 0 0 auto; min-width: 80px; padding: 0.15rem 0.6rem 0.05rem; line-height: 1.2; margin: 0; border-radius:4px 4px 0 0; background: var(--tabBg, yellow); color: var(--tabText, yellow); display:flex; align-items:center; border:1px solid #1c2230; border-bottom-color:#0f1117; box-sizing:border-box; cursor:pointer; }
+#tabbar .tabscroll { flex:0 0 1.4rem; display:flex; align-items:center; justify-content:center; align-self:flex-end; width:1.4rem; margin:0 0.25rem 0 0; border-radius:4px; font-weight:600; user-select:none; cursor:pointer; box-sizing:border-box; padding: 0.15rem 0; background: var(--tabScrollBtnEnableBG, yellow); color: var(--tabScrollBtnEnableText, yellow); border:1px solid #1c2230; }
 #tabbar .tabscroll.disabled { cursor:default; opacity:0.9; background: var(--tabScrollBtnDisableBG, yellow); color: var(--tabScrollBtnDisableText, yellow); }
 #tabbar .tabscroll span { pointer-events:none; }
 #tabbar .tab:hover { filter: brightness(1.05); }
@@ -64,7 +64,7 @@ body { font: var(--fontBase, 18px)/20px Consolas, 'Courier New', monospace; over
 #cmdfloat #cmdprefix { opacity: 0.85; }
 #cmdfloat #cmdinput { flex:1; background: var(--cmdInputBg, transparent); color: var(--cmdInputFg, var(--tabBarFg)); border:0; outline:0; font: inherit; height:100%; }
 
-#pane { position: absolute; top: 36px; bottom: 0; left: 0; right: 0; display:flex; }
+#pane { position: absolute; top: 2.25rem; bottom: 0; left: 0; right: 0; display:flex; }
 #editorViewport {
 	position: relative;
 	flex: 1;

@@ -704,11 +704,9 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
   function _isKanaKey(e){
     try{
       if (!e) return false;
-      if (e.key === 'KanjiMode' || e.key === 'ZenkakuHankaku' || e.key === 'KanaMode' || e.key === 'Hiragana') return true;
-      // Windows日本語配列では 'NonConvert' が かな 相当として配信されるケースへの対応
-      if (e.code === 'IntlRo' || e.code === 'NonConvert') return true;
-      // 以前の調査: vk=22（フォールバック）
-      if (typeof e.keyCode === 'number' && e.keyCode === 22) return true;
+      // かなキーのみをIME ONとして認識する
+      if (e.key === 'KanaMode' || e.key === 'Hiragana') return true;
+      // 他キー（KanjiMode/ZenkakuHankaku/IntlRo/NonConvert など）はIME ON扱いしない
       return false;
     }catch{ return false; }
   }
