@@ -629,7 +629,10 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
   let _suppressDesiredOnce = false; // one-shot suppression flag for _setCaret
   function _tabstopVal(){ try{ const v = Number(window && window.SIX_OPTIONS && window.SIX_OPTIONS.tabstop); if (!Number.isFinite(v) || v<1) return 8; return Math.min(64, Math.max(1, v|0)); }catch{ return 8; } }
   const _FULLW_RE = /[\u1100-\u115F\u2E80-\uA4CF\uAC00-\uD7A3\uF900-\uFAFF\uFE10-\uFE19\uFE30-\uFE6F\u3000-\u303F\uFF01-\uFF60\uFFE0-\uFFE6]/;
-  function _isFullW(ch){ try{ return _FULLW_RE.test(ch||''); }catch{ return false; } }
+  // Extra wide symbols to treat as full-width for visual width calculations.
+  // Covers: 「」｛｝【】『』←↑↓→
+  const _FULLW_EXTRA_RE = /[「」｛｝【】『』←↑↓→]/;
+  function _isFullW(ch){ try{ const s=ch||''; return _FULLW_RE.test(s) || _FULLW_EXTRA_RE.test(s); }catch{ return false; } }
   function _visualWidthUpToLine(line, endCol){
     try{
       let w=0; const ts=_tabstopVal(); const n=Math.max(0, Math.min((line||'').length, endCol|0));

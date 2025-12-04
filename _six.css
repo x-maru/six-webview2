@@ -271,7 +271,12 @@ body { font: var(--fontBase, 18px)/20px Consolas, 'Courier New', monospace; over
 	/* Prefer CJK mono if available; broaden fallbacks to common JP fonts */
 	src: local("Source Han Code JP"), local("Sarasa Mono J"), local("MS Gothic"), local("IPAGothic"),
 		 local("Noto Sans CJK JP"), local("Noto Sans JP"), local("Noto Sans Japanese");
-	unicode-range: U+3001, U+3002, U+FF0C, U+FF0E, U+2026, U+2460-2473; /* 、 。 ， ． … + ①–⑳ */
+	/* Include CJK punctuation + circled numbers + brackets + quotes + arrows */
+	unicode-range: U+3001, U+3002, U+FF0C, U+FF0E, U+2026, U+2460-2473,
+		/* added: brackets/quotes */
+		U+300C, U+300D, U+300E, U+300F, U+3010, U+3011, U+FF5B, U+FF5D,
+		/* added: arrows */
+		U+2190-2193, U+2192;
 	font-display: swap;
 }
 /* Use the punctuation face first, then the regular stack so weights map correctly */
