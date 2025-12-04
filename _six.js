@@ -4193,15 +4193,34 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
     const cw = Math.max(1, Math.round(chW * 0.9));
     // 固定幅モードでは再配置時に幅を上書きしない
     if (!_caretWidthFixed){ try{ caret.style.setProperty('--caretWidth', cw + 'px'); }catch{} }
-    // Auto horizontal scroll to keep caret visible in NORMAL/VISUAL (水平ホイール直後ガード中は抑止) (#868)
+    // Auto horizontal scroll to keep caret visible (NORMAL/VISUAL guarded by wheel; INSERT always active)
     try{
       if ((_mode === 'NORMAL' || _mode === 'VISUAL') && (Date.now() > _userHScrollGuardUntil)){
         const gw = (gutter && gutter.clientWidth) ? gutter.clientWidth : 0;
         const visW = Math.max(0, (viewport && viewport.clientWidth ? viewport.clientWidth : 0) - gw);
         let hscroll = (editor && typeof editor.scrollLeft === 'number') ? (editor.scrollLeft|0) : 0;
         const margin = Math.max(4, Math.round(FONT_SIZE * 0.6));
+        const early = Math.max(1, Math.round(2 * _halfRefW));
         const caretXInView = x - hscroll;
-        const rightLimit = visW - Math.max(4, cw) - margin;
+        const rightLimit = visW - Math.max(4, cw) - margin - early;
+        let nextScroll = hscroll;
+        if (caretXInView < margin){
+          nextScroll = Math.max(0, Math.round(x - margin));
+        } else if (caretXInView > rightLimit){
+          nextScroll = Math.max(0, Math.round(x - rightLimit));
+        }
+        if (nextScroll !== hscroll){
+          try{ editor.scrollLeft = nextScroll; }catch{}
+        }
+      }
+      if (_mode === 'INSERT'){
+        const gw = (gutter && gutter.clientWidth) ? gutter.clientWidth : 0;
+        const visW = Math.max(0, (viewport && viewport.clientWidth ? viewport.clientWidth : 0) - gw);
+        let hscroll = (editor && typeof editor.scrollLeft === 'number') ? (editor.scrollLeft|0) : 0;
+        const margin = Math.max(4, Math.round(FONT_SIZE * 0.6));
+        const early = Math.max(1, Math.round(2 * _halfRefW));
+        const caretXInView = x - hscroll;
+        const rightLimit = visW - Math.max(4, cw) - margin - early;
         let nextScroll = hscroll;
         if (caretXInView < margin){
           nextScroll = Math.max(0, Math.round(x - margin));
