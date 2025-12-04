@@ -3042,7 +3042,9 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
           if (!b._checkingExternal){
             if (b._externalDeleteRecoveredAt && (Date.now() - b._externalDeleteRecoveredAt < 2000)) return;
             const metaQuick = await _statFileMeta(b.path);
-            if (!metaQuick && !b._externalDeleteIgnored){
+            // 初回存在実績またはベースラインがない場合は「削除」と判断しない
+            const hasBaseline = (typeof b._extMtime==='number') || (typeof b._extSize==='number') || !!b._everExisted;
+            if (!metaQuick && !b._externalDeleteIgnored && hasBaseline){
               try{
                 const label = b.path ? _prettyFileUrlLabel(b.path) : (b.name||'(untitled)');
                 const id = await choiceModal({ title:'外部削除検出', detail:`このファイルはsixの外部で削除されました。保存しますか？\n${label}`,
@@ -3086,6 +3088,7 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
           if (!meta) return;
         }
         const { mtime, size } = meta;
+        try{ b._everExisted = true; }catch{}
         if (!(typeof b._extMtime === 'number') || !(typeof b._extSize === 'number')){
           // baseline 未設定時: modified=falseなら取得できた数値のみ反映
           if (!b.modified){
