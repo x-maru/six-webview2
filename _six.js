@@ -5015,9 +5015,9 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
     // If paused (e.g., right after '/word' confirm) or a modal is open and
     // we're suppressing scroll adjustments, skip any automatic re-centering/adjustment.
     // This resumes on next explicit caret move or when suppression is cleared.
-    if (_scrolloffPaused) return;
-    if (_suppressScrollDuringModal) return;
     const force = !!(opts && opts.force);
+    if (_scrolloffPaused && !force) return;
+    if (_suppressScrollDuringModal) return;
     // Skip-once guard right after buffer switch: allow bypass when forced (caret move) or explicit centerOnce
     if (_skipEnsureOnceAfterSwitch){
       // clear the flag regardless so it doesn't keep skipping
@@ -10232,8 +10232,8 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
         }
         return;
       }
-  if (e.key==='j' || e.key==='ArrowDown'){ e.preventDefault(); try{ _debugPush({ t:Date.now(), type:'motion-exec', mode:_mode, key:e.key, code:e.code, via:(e.key==='j'?'j':'ArrowDown') }); }catch{} const n=_consumeCount(); _moveCaretLines(n); try{ _flagCaretMotion(); }catch{} _repositionCaret(); updateGutter(); return; }
-  if (e.key==='k' || e.key==='ArrowUp'){ e.preventDefault(); try{ _debugPush({ t:Date.now(), type:'motion-exec', mode:_mode, key:e.key, code:e.code, via:(e.key==='k'?'k':'ArrowUp') }); }catch{} const n=_consumeCount(); _moveCaretLines(-n); try{ _flagCaretMotion(); }catch{} _repositionCaret(); updateGutter(); return; }
+  if (e.key==='j' || e.key==='ArrowDown'){ e.preventDefault(); try{ _debugPush({ t:Date.now(), type:'motion-exec', mode:_mode, key:e.key, code:e.code, via:(e.key==='j'?'j':'ArrowDown') }); }catch{} const n=_consumeCount(); _moveCaretLines(n); try{ _flagCaretMotion(); }catch{} _ensureAfterMotion(); _repositionCaret(); updateGutter(); return; }
+  if (e.key==='k' || e.key==='ArrowUp'){ e.preventDefault(); try{ _debugPush({ t:Date.now(), type:'motion-exec', mode:_mode, key:e.key, code:e.code, via:(e.key==='k'?'k':'ArrowUp') }); }catch{} const n=_consumeCount(); _moveCaretLines(-n); try{ _flagCaretMotion(); }catch{} _ensureAfterMotion(); _repositionCaret(); updateGutter(); return; }
   // Strict IME mode: while composing in NORMAL, ignore letter motions j/k/h/l (arrows still work)
   if (_optStrictNormalIME && _imeComposing){
     if (e.key==='j' || e.key==='k' || e.key==='h' || e.key==='l'){
@@ -10497,6 +10497,8 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
           // gg detected
           _clearPending();
           _countAcc = null;
+          // Clear paused scrolloff state set by recent search/substitute so jump can recenter
+          _scrolloffPaused = false; _scrolloffPauseAnchorR = -1; _scrolloffPauseAnchorC = -1;
           caretRow = 0; _centerScrolloffOnce = true; ensureScrolloff({centerOnce:true}); _repositionCaret(); updateGutter();
         } else {
           _pendingNormal = 'g';
@@ -10508,6 +10510,8 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
       if (e.key === 'G' && !e.ctrlKey && !e.metaKey){
         e.preventDefault(); _clearPending();
         _countAcc = null;
+        // Clear paused scrolloff state set by recent search/substitute so jump can recenter
+        _scrolloffPaused = false; _scrolloffPauseAnchorR = -1; _scrolloffPauseAnchorC = -1;
         caretRow = Math.max(0, _totalLines()-1);
         // clamp caretCol to EOL of last line to avoid stale column causing b to stall
         try{ const len = _lineLen(caretRow); if (caretCol>len) caretCol=len; }catch{}
