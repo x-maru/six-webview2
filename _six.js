@@ -9340,6 +9340,17 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
           else { const a={r:_visualAnchorR,c:_visualAnchorC}; const b={r:caretRow,c:caretCol}; text = _extractRangeText(a,b); }
           if ((String(text||'').length) > 0){
             (async ()=>{ const ok = await _copyToClipboard(text); toast(ok? 'Copied to Windows clipboard.':'Clipboard write failed.', ok? 1000:1500); })();
+            // Flash selection same as 'y' (ephemeral highlight)
+            try{
+              if (_visualLinewise){
+                const rs=Math.min(_visualAnchorR, caretRow); const re=Math.max(_visualAnchorR, caretRow);
+                const lines=_splitLines(); const lastLen=(lines[re]||'').length;
+                _flashYanked({r:rs,c:0},{r:re,c:lastLen});
+              } else {
+                const a={r:_visualAnchorR,c:_visualAnchorC}; const b={r:caretRow,c:caretCol};
+                _flashYanked(a,b);
+              }
+            }catch{}
           }
           _exitVisual(); _repositionCaret(); updateGutter();
           return;
