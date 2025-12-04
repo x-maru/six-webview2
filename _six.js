@@ -5683,6 +5683,40 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
   }
   function _moveWordW(count){ let r=caretRow, c=caretCol; const times=Math.max(1,count|0); for(let i=0;i<times;i++){ const p=_nextWordStart(r,c); r=p.r; c=p.c; } _setCaret(r,c); }
   function _moveWordB(count){ let r=caretRow, c=caretCol; const times=Math.max(1,count|0); for(let i=0;i<times;i++){ const p=_prevWordStart(r,c); r=p.r; c=p.c; } _setCaret(r,c); }
+  // JP-aware end-of-word (for cw behaving like ce): compute end column of current word run within the line.
+  function _wordEndInLine(row, col){
+    const line = (_splitLines()[row]||'');
+    const n = line.length;
+    let c = Math.max(0, Math.min(n, col|0));
+    // If starting on spaces, skip spaces first; cw should eat leading spaces then the next word
+    while (c < n && _wordTypeAtInLine(line, c) === _WT_SPACE){ c = _nextIndex(line, c); }
+    if (c >= n) return { r: row, c: n };
+    const tRun = _wordTypeAtInLine(line, c);
+    if (tRun === _WT_HAN){
+      let seenKana = false;
+      while (c < n){
+        const tCur = _wordTypeAtInLine(line, c);
+        if (!seenKana){
+          if (tCur===_WT_HAN){ c = _nextIndex(line, c); continue; }
+          if (tCur===_WT_HIRA || tCur===_WT_KATA){ seenKana=true; c=_nextIndex(line,c); continue; }
+        } else {
+          if (tCur===_WT_HIRA || tCur===_WT_KATA){ c=_nextIndex(line,c); continue; }
+          if (tCur===_WT_HAN){ break; }
+        }
+        break;
+      }
+      return { r: row, c };
+    } else if (tRun === _WT_KATA){
+      while (c < n){ const tCur=_wordTypeAtInLine(line,c); if (tCur===_WT_KATA){ c=_nextIndex(line,c); continue; } const cpCur=_cpAt(line,c); if (_isKanaLongLikeCp(cpCur)){ c=_nextIndex(line,c); continue; } break; }
+      return { r: row, c };
+    } else if (tRun === _WT_HIRA){
+      while (c < n){ const tCur=_wordTypeAtInLine(line,c); if (tCur===_WT_HIRA){ c=_nextIndex(line,c); continue; } const cpCur=_cpAt(line,c); if (_isKanaLongLikeCp(cpCur)){ c=_nextIndex(line,c); continue; } break; }
+      return { r: row, c };
+    } else {
+      while (c < n && _wordTypeAtInLine(line, c) === tRun){ c = _nextIndex(line, c); }
+      return { r: row, c };
+    }
+  }
   // WORD (capital W/B) motions: treat any non-space run as one WORD
   function _nextWORDStart(row, col){
     const lines = _splitLines();
@@ -9986,25 +10020,25 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
         if (e.key==='w' || e.key==='W'){
           const motionCount = (_countAcc==null?1:_countAcc); _countAcc=null;
           const totalWords = Math.max(1, (_pendingOpCount||1) * motionCount);
-          const line = (_splitLines()[caretRow]||'');
-          const n = line.length;
           let i = caretCol;
-          let j = i;
-          const isSpaceAt = (idx)=>{ const t=_wordTypeAtInLine(line, idx); return t===_WT_SPACE; };
+          let end = { r: caretRow, c: i };
           let consumed = 0;
-          while (consumed < totalWords && j < n){
-            while (j < n && isSpaceAt(j)) j = _nextIndex(line, j);
-            if (j >= n) break;
+          while (consumed < totalWords){
+            // Advance to end of current WORD
             if (e.key==='W'){
-              while (j < n && !isSpaceAt(j)){ j = _nextIndex(line, j); }
+              const line = (_splitLines()[caretRow]||''); const n=line.length; let j=i;
+              while (j < n && _wordTypeAtInLine(line, j) !== _WT_SPACE){ j = _nextIndex(line, j); }
+              end = { r: caretRow, c: j };
             } else {
-              const tRun = _wordTypeAtInLine(line, j);
-              while (j < n && _wordTypeAtInLine(line, j) === tRun){ j = _nextIndex(line, j); }
+              end = _wordEndInLine(caretRow, i);
             }
             consumed++;
+            i = end.c; // next iteration continues from new caret column within same line
+            // If already at EOL, stop (cw does not cross NL)
+            const len = _lineLen(caretRow);
+            if (i >= len) break;
           }
-          const start={ r: caretRow, c: i };
-          const end={ r: caretRow, c: j };
+          const start={ r: caretRow, c: caretCol };
           if (!(start.r===end.r && start.c===end.c)){
             _deleteRangePos(start, end);
           }
