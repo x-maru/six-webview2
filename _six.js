@@ -8604,6 +8604,8 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
         if (b && b.path && /^file:\/\//i.test(b.path)){
           _maybeCheckExternalChangeOnActivate(idx);
         }
+        // Long-idle recovery: reattach IME/keyboard by blurring+refocusing the editor
+        try{ if (editor){ editor.blur(); editor.focus({ preventScroll:true }); } }catch{}
         // 端末/環境により発火順が前後する場合のフォローとして遅延再試行
         setTimeout(()=>{
           try{
@@ -8612,11 +8614,16 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
             if (b2 && b2.path && /^file:\/\//i.test(b2.path)){
               _maybeCheckExternalChangeOnActivate(idx2);
             }
+            try{ if (editor){ editor.blur(); editor.focus({ preventScroll:true }); } }catch{}
           }catch{}
         }, 220);
       }
     }catch{}
   });
+  // Also recover on window focus events
+  try{
+    window.addEventListener('focus', ()=>{ try{ if (editor){ editor.blur(); editor.focus({ preventScroll:true }); } }catch{} });
+  }catch{}
   // Unified scroll handler: snap to line grid and render once per frame
   let _scrollRAF = 0;
   const scheduleScrollRender = ()=>{
