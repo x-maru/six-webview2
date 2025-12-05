@@ -1182,13 +1182,39 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
   function _detectUrlAt(line, col){
     try{
       if (!line) return null;
+      // Detect external URLs (open via OS) and local paths (open via :e)
       const re = /(https?:\/\/[^\s<>"')\]}]+|file:\/\/[^\s<>"')\]}]+|mailto:[^\s<>"')\]}]+)/g;
+      // Windows absolute path like C:/Users/... or with backslashes
+      const reWin = /\b([A-Za-z]:[\/\\][^\s<>"')\]}]+)\b/g;
+      // WSL UNC path //wsl.localhost/Ubuntu/... -> treat as local path to open via :e
+      const reUNC = /(\/\/wsl\.localhost\/[A-Za-z0-9._-]+\/[^^\s<>"')\]}]+)/g;
       let m; re.lastIndex=0;
       while ((m=re.exec(line))){
         const s=m.index|0; const l=(m[0]||'').length|0; if (l<=0) { re.lastIndex++; continue; }
         const e = s + l;
-        if (col>=s && col<e){ return { c1:s, c2:e, url:String(m[0]||'') }; }
+        if (col>=s && col<e){ return { c1:s, c2:e, url:String(m[0]||''), kind:'external' }; }
         if (re.lastIndex === m.index) re.lastIndex++;
+      }
+      // Check Windows-style paths
+      let mw; reWin.lastIndex=0;
+      while ((mw=reWin.exec(line))){
+        const s=mw.index|0; const l=(mw[0]||'').length|0; if (l<=0){ reWin.lastIndex++; continue; }
+        const e = s + l;
+        if (col>=s && col<e){
+          let p = String(mw[1]||'');
+          // Normalize backslashes to forward for :e processing convenience
+          try{ p = p.replace(/\\/g,'/'); }catch{}
+          return { c1:s, c2:e, url:p, kind:'six-open' };
+        }
+        if (reWin.lastIndex === mw.index) reWin.lastIndex++;
+      }
+      // Check WSL UNC paths
+      let mu; reUNC.lastIndex=0;
+      while ((mu=reUNC.exec(line))){
+        const s=mu.index|0; const l=(mu[0]||'').length|0; if (l<=0){ reUNC.lastIndex++; continue; }
+        const e = s + l;
+        if (col>=s && col<e){ return { c1:s, c2:e, url:String(mu[1]||mu[0]||''), kind:'six-open' }; }
+        if (reUNC.lastIndex === mu.index) reUNC.lastIndex++;
       }
     }catch{}
     return null;
@@ -1244,14 +1270,18 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
       if (!_hoverLink) return;
       if (e){ try{ e.preventDefault(); e.stopPropagation(); }catch{} }
       const url = String(_hoverLink.url||'');
-      let opened = false;
-      try{
-        if (window && window.chrome && window.chrome.webview && window.chrome.webview.postMessage){
-          window.chrome.webview.postMessage({ type:'open-url', url }); opened = true;
-        }
-      }catch{}
-      if (!opened){ try{ window.open(url, '_blank'); opened = true; }catch{} }
-      if (!opened){ try{ toast('open failed: ' + url, 1500); }catch{} }
+      if (_hoverLink.kind === 'six-open'){
+        try{ runCommand(':e ' + url); }catch{}
+      } else {
+        let opened = false;
+        try{
+          if (window && window.chrome && window.chrome.webview && window.chrome.webview.postMessage){
+            window.chrome.webview.postMessage({ type:'open-url', url }); opened = true;
+          }
+        }catch{}
+        if (!opened){ try{ window.open(url, '_blank'); opened = true; }catch{} }
+        if (!opened){ try{ toast('open failed: ' + url, 1500); }catch{} }
+      }
     }catch{}
   }
 
