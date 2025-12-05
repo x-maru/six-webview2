@@ -20,10 +20,7 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
         msg.textContent = 'six: already running (multi-instance blocked)';
         msg.style.position='fixed'; msg.style.top='40%'; msg.style.left='50%'; msg.style.transform='translate(-50%,-50%)';
         msg.style.background='rgba(0,0,0,0.8)'; msg.style.color='yellow'; msg.style.padding='16px 24px'; msg.style.font='16px monospace'; msg.style.zIndex='99999'; msg.style.border='1px solid #666';
-                  // raw (WSL host prefix補正後表示) を再取得
-                  let disp2 = String(_fileTypedDirRaw||'');
-                  try{ const b=_ensureSlash(_fileBaseURL); if (b && b.protocol==='file:' && b.host && b.host.toLowerCase()==='wsl.localhost'){ disp2='//'+b.host+'/'+disp2.replace(/^\/+/,''); } }catch{}
-                  cmdinput.value = ':e ' + _collapseDotDotPath(disp2 + '..');
+        try{ document.body.appendChild(msg); }catch{}
       }catch{}
       try{ setTimeout(()=>{ try{ window.close(); }catch{} }, 900); }catch{}
       return; // stop bootstrap; do not restore session
@@ -1182,20 +1179,21 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
   function _detectUrlAt(line, col){
     try{
       if (!line) return null;
-      // Detect external URLs (open via OS) and local paths (open via :e)
+      // Detect explicit URL schemes first (external): http(s), file://, mailto
       const re = /(https?:\/\/[^\s<>"')\]}]+|file:\/\/[^\s<>"')\]}]+|mailto:[^\s<>"')\]}]+)/g;
-      // Windows absolute path like C:/Users/... or with backslashes
+      // Windows absolute path like C:/Users/... or with backslashes (local open via :e)
       const reWin = /\b([A-Za-z]:[\/\\][^\s<>"')\]}]+)\b/g;
-      // WSL UNC path //wsl.localhost/Ubuntu/... -> treat as local path to open via :e
-      const reUNC = /(\/\/wsl\.localhost\/[A-Za-z0-9._-]+\/[^^\s<>"')\]}]+)/g;
+      // WSL UNC path //wsl.localhost/Ubuntu/... (local open via :e)
+      const reUNC = /(\/\/wsl\.localhost\/[^\s<>"')\]}]+)/g;
+      // First check explicit schemes so "file://C:/..." is treated as one external URL
       let m; re.lastIndex=0;
       while ((m=re.exec(line))){
-        const s=m.index|0; const l=(m[0]||'').length|0; if (l<=0) { re.lastIndex++; continue; }
+        const s=m.index|0; const l=(m[0]||'').length|0; if (l<=0){ re.lastIndex++; continue; }
         const e = s + l;
         if (col>=s && col<e){ return { c1:s, c2:e, url:String(m[0]||''), kind:'external' }; }
         if (re.lastIndex === m.index) re.lastIndex++;
       }
-      // Check Windows-style paths
+      // Then check local Windows-style paths
       let mw; reWin.lastIndex=0;
       while ((mw=reWin.exec(line))){
         const s=mw.index|0; const l=(mw[0]||'').length|0; if (l<=0){ reWin.lastIndex++; continue; }
@@ -1208,7 +1206,7 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
         }
         if (reWin.lastIndex === mw.index) reWin.lastIndex++;
       }
-      // Check WSL UNC paths
+      // Finally check WSL UNC paths
       let mu; reUNC.lastIndex=0;
       while ((mu=reUNC.exec(line))){
         const s=mu.index|0; const l=(mu[0]||'').length|0; if (l<=0){ reUNC.lastIndex++; continue; }
@@ -1256,8 +1254,8 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
       }
       const hit = _detectUrlAt(line, c);
       if (hit){
-        const same = _hoverLink && _hoverLink.r===row && _hoverLink.c1===hit.c1 && _hoverLink.c2===hit.c2 && _hoverLink.url===hit.url;
-        _hoverLink = { r:row, c1:hit.c1, c2:hit.c2, url:hit.url };
+        const same = _hoverLink && _hoverLink.r===row && _hoverLink.c1===hit.c1 && _hoverLink.c2===hit.c2 && _hoverLink.url===hit.url && _hoverLink.kind===hit.kind;
+        _hoverLink = { r:row, c1:hit.c1, c2:hit.c2, url:hit.url, kind:hit.kind };
         if (!same) _renderLinkHover();
       } else {
         if (_hoverLink){ _clearLinkHover(); }
@@ -1271,7 +1269,11 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
       if (e){ try{ e.preventDefault(); e.stopPropagation(); }catch{} }
       const url = String(_hoverLink.url||'');
       if (_hoverLink.kind === 'six-open'){
-        try{ runCommand(':e ' + url); }catch{}
+        try{
+          try{ window.__sixOpenFromLinkTs = Date.now(); }catch{}
+          runCommand(':e ' + url);
+          try{ setTimeout(()=>{ try{ if (window.__sixOpenFromLinkTs && Date.now()-window.__sixOpenFromLinkTs>2000){ window.__sixOpenFromLinkTs = 0; } }catch{} }, 1500); }catch{}
+        }catch{}
       } else {
         let opened = false;
         try{
@@ -3820,6 +3822,31 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
   }
 
   function _fetchTextWithTimeout(url, timeoutMs=2500){
+    // Use XHR for http/https to reduce console noise on 404; keep behavior consistent
+    try{
+      const u = new URL(url);
+      if (u.protocol === 'http:' || u.protocol === 'https:'){
+        return new Promise((resolve, reject)=>{
+          try{
+            const xhr = new XMLHttpRequest();
+            xhr.open('GET', url, true);
+            xhr.timeout = timeoutMs|0;
+            xhr.onreadystatechange = ()=>{
+              try{
+                if (xhr.readyState === 4){
+                  if (xhr.status >= 200 && xhr.status < 300){ resolve(xhr.responseText||''); }
+                  else { reject(new Error('HTTP '+xhr.status)); }
+                }
+              }catch{}
+            };
+            xhr.ontimeout = ()=>{ try{ reject(new Error('timeout')); }catch{} };
+            xhr.onerror = ()=>{ try{ reject(new Error('XHR error')); }catch{} };
+            xhr.send();
+          }catch(e){ reject(e); }
+        });
+      }
+    }catch{}
+    // Fallback to fetch for non-http schemes (e.g., file:// handled elsewhere)
     const ac = (window.AbortController ? new AbortController() : null);
     const to = setTimeout(()=>{ try{ ac && ac.abort(); } catch{} }, timeoutMs);
     const opts = ac ? { signal: ac.signal } : {};
@@ -3828,6 +3855,32 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
   }
 
   function _fetchJSONWithTimeout(url, timeoutMs=5000){
+    // Prefer XHR for http/https to minimize console noise on non-200
+    try{
+      const u = new URL(url);
+      if (u.protocol === 'http:' || u.protocol === 'https:'){
+        return new Promise((resolve, reject)=>{
+          try{
+            const xhr = new XMLHttpRequest();
+            xhr.open('GET', url, true);
+            xhr.timeout = timeoutMs|0;
+            xhr.onreadystatechange = ()=>{
+              try{
+                if (xhr.readyState === 4){
+                  if (xhr.status >= 200 && xhr.status < 300){
+                    try{ resolve(JSON.parse(xhr.responseText||'{}')); }catch(e){ reject(e); }
+                  } else { reject(new Error('HTTP '+xhr.status)); }
+                }
+              }catch{}
+            };
+            xhr.ontimeout = ()=>{ try{ reject(new Error('timeout')); }catch{} };
+            xhr.onerror = ()=>{ try{ reject(new Error('XHR error')); }catch{} };
+            xhr.send();
+          }catch(e){ reject(e); }
+        });
+      }
+    }catch{}
+    // Fallback to fetch otherwise
     const ac = (window.AbortController ? new AbortController() : null);
     const to = setTimeout(()=>{ try{ ac && ac.abort(); } catch{} }, timeoutMs);
     const opts = ac ? { signal: ac.signal } : {};
@@ -3841,7 +3894,15 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
   let _apiDisabledUntil = 0;
   let _apiFailCount = 0;
   function _apiIsEnabled(){ return !!_apiBase && Date.now() > _apiDisabledUntil; }
-  function _apiNoteFailure(){ try{ _apiFailCount++; if (_apiFailCount >= 2){ _apiDisabledUntil = Date.now() + 60*1000; try{ console.warn && console.warn('Disabling local API temporarily'); }catch{} } }catch{} }
+  function _apiNoteFailure(){
+    try{
+      _apiFailCount++;
+      if (_apiFailCount >= 2){
+        _apiDisabledUntil = Date.now() + 60*1000;
+        // Suppress noisy console warning; keep breaker internal
+      }
+    }catch{}
+  }
   function _apiNoteSuccess(){ _apiFailCount = 0; _apiDisabledUntil = 0; }
   function _readApiFromHash(){
     try{
@@ -3870,11 +3931,44 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
       const base = baseForRelative || _htmlBaseURL();
       urlStr = _normalizeToURLString(path, base); // Normalize the URL string
       // file:// は常にローカルAPI /read を優先（文字コード自動判定のため）
+      let _probeUrl = null; let _probeHost = '';
       try {
         const uProbe = new URL(urlStr);
+        _probeUrl = uProbe; _probeHost = String(uProbe.host||'');
+        // UNC/WSL: リンク起点の静音モードでは、キャッシュに存在が無ければ一切のネットワーク発行を避ける
+        if (opts && opts.uncSilent && uProbe.protocol==='file:' && _probeHost){
+          try{
+            const parent = _dirnameURL(uProbe.toString());
+            const key = (function(){ try{ return _ensureSlash(parent)?.toString()||null; }catch{ return null; } })();
+            const fname = (function(){ try{ return _basename(uProbe.pathname||''); }catch{ return null; } })();
+            let present = false;
+            if (key && fname && typeof _dirCache!=='undefined' && _dirCache && _dirCache.get){
+              const cached = _dirCache.get(key);
+              if (Array.isArray(cached)){
+                present = !!cached.find(e=> String(e && e.name||'') === String(fname||''));
+              }
+            }
+            if (!present){
+              // キャッシュに無ければ静かに中断（後段のcatchでトーストのみ）
+              throw new Error('unc-silent-skip');
+            }
+          }catch(eSilent){ throw eSilent; }
+        }
         if (_apiIsEnabled() && uProbe.protocol==='file:'){
           const fsPath0 = _fsPathFromFileURL(uProbe);
           if (fsPath0){
+            // Pre-read probe: skip entirely in uncSilent mode to avoid console noise
+            if (!(opts && opts.uncSilent)){
+              try{
+                const info0 = await _fetchJSONWithTimeout(_apiBase + 'probe?fs=' + encodeURIComponent(fsPath0), 3500);
+                if (!info0 || (info0 && info0.exists===false)){
+                  throw new Error('probe-not-found');
+                }
+              }catch(eProbe){
+                // On probe failure (404/network), abort early to avoid read and extra console noise
+                throw eProbe;
+              }
+            }
             const apiRead0 = _apiBase + 'read?fs=' + encodeURIComponent(fsPath0);
             try{ txt = await _fetchTextWithTimeout(apiRead0, 8000); _apiNoteSuccess(); } catch(e){
               _apiNoteFailure();
@@ -3896,13 +3990,27 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
         if (opts && opts.silentOnFail && String(opts.mode||'new')==='new'){
           txt = '';
         } else {
+          // WSL/UNC の file:// (host 付き) はブラウザの XHR/fetch が CORS で必ず失敗するため抑止
+          // API で取得できなかった場合はそのまま失敗扱いとし、空バッファは生成しない（:e 側で制御）
+          if (_probeUrl && _probeUrl.protocol==='file:' && _probeHost){
+            throw new Error('UNC/WSL file read failed via API');
+          }
           try { txt = await _fetchTextSmart(urlStr); }
           catch(eFetch){
             // 最後の手段として API /read（再試行）
             try{
               const u2 = new URL(urlStr);
               if (_apiIsEnabled() && u2.protocol==='file:' && u2.host){
-                const fsPath2 = ('\\\\' + u2.host + decodeURIComponent(u2.pathname).replace(/\//g,'\\'));
+                const fsPath2 = _fsPathFromFileURL(u2);
+                // Probe before retrying read — skip in uncSilent mode
+                if (!(opts && opts.uncSilent)){
+                  try{
+                    const info2 = await _fetchJSONWithTimeout(_apiBase + 'probe?fs=' + encodeURIComponent(fsPath2), 3500);
+                    if (!info2 || (info2 && info2.exists===false)){
+                      throw new Error('probe-not-found');
+                    }
+                  }catch(eProbe2){ throw eFetch; }
+                }
                 const apiRead2 = _apiBase + 'read?fs=' + encodeURIComponent(fsPath2);
                 try{ txt = await _fetchTextWithTimeout(apiRead2, 8000); _apiNoteSuccess(); }catch(e2){ _apiNoteFailure(); throw eFetch; }
               } else {
@@ -3920,25 +4028,28 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
       try{ if (opts && opts.mode==='new'){ b && (b._origHadFinalLF = /\n$/.test(String(t||''))); } }catch{}
       // 可能なら /probe で原本の enc/ff/bom を取得
       let encDetected = 'utf-8';
-      try{
-        const u3 = new URL(urlStr);
-        if (_apiIsEnabled() && u3.protocol==='file:'){
-          const fs3 = _fsPathFromFileURL(u3);
-          if (fs3){
-            const info = await _fetchJSONWithTimeout(_apiBase + 'probe?fs=' + encodeURIComponent(fs3), 5000);
-            if (info){
-              // map encoding
-              const encStr = (info.encoding||'').toLowerCase();
-              if (encStr.includes('cp932') || encStr.includes('shift') || encStr.includes('sjis')) encDetected = 'shift_jis';
-              else encDetected = 'utf-8';
-              // eol
-              if (info.eol === 'dos' || info.eol === 'unix' || info.eol === 'mac') ff = info.eol;
-              // bom (UTF-8のみ考慮)
-              if (encDetected==='utf-8' && info.bom===true) hasBomChar = true;
+      // Skip metadata probe entirely in uncSilent mode to avoid extra network and logs
+      if (!(opts && opts.uncSilent)){
+        try{
+          const u3 = new URL(urlStr);
+          if (_apiIsEnabled() && u3.protocol==='file:'){
+            const fs3 = _fsPathFromFileURL(u3);
+            if (fs3){
+              const info = await _fetchJSONWithTimeout(_apiBase + 'probe?fs=' + encodeURIComponent(fs3), 5000);
+              if (info){
+                // map encoding
+                const encStr = (info.encoding||'').toLowerCase();
+                if (encStr.includes('cp932') || encStr.includes('shift') || encStr.includes('sjis')) encDetected = 'shift_jis';
+                else encDetected = 'utf-8';
+                // eol
+                if (info.eol === 'dos' || info.eol === 'unix' || info.eol === 'mac') ff = info.eol;
+                // bom (UTF-8のみ考慮)
+                if (encDetected==='utf-8' && info.bom===true) hasBomChar = true;
+              }
             }
           }
-        }
-      }catch{}
+        }catch{}
+      }
       const mode = opts.mode || (buffers.length===0 ? 'new' : 'replace');
       if (mode === 'new'){
         const exist = _findBufferByURL(urlStr);
@@ -4000,8 +4111,9 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
       try{ _setTitle(); _renderTabbar(); }catch{}
       return true;
     } catch (e){
-      // silentOnFail のときはコンソール出力を抑止（存在しないファイルの新規作成など正常ケース）
-      try{ if (!(opts && opts.silentOnFail)) console.error('open failed', e); }catch{}
+      // 失敗時のコンソールノイズ抑止（存在しないWSL/UNCなど）
+      // silentOnFail のときは完全に黙る／それ以外でも詳細ログは出さない
+      // try{ if (!(opts && opts.silentOnFail)) console.error('open failed', e); }catch{}
       // 本文は読み込めている → バッファだけ確実に作り、致命的扱いにしない
       if (loadedIntoEditor){
         try{
@@ -6038,6 +6150,16 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
   /*********************************************************
    * runCommand (:N)
    *********************************************************/
+  // Directory hint detector (v0.9 compatible):
+  // returns true when the argument likely denotes a directory,
+  // such as '.' / '..' or strings ending with '/' or '\\'.
+  function _isDirHint(s){
+    try{
+      if (!s) return false;
+      if (s === '.' || s === '..') return true;
+      return /[\\\/]+$/.test(String(s));
+    }catch{ return false; }
+  }
   async function runCommand(cmd){
     // '/' and '?' — regex search with optional trailing flags (e.g., /foo/i)
     // Accept both '/...' and ':/...' (cmdinput may prefix ':')
@@ -7316,6 +7438,13 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
           _cmdHistoryMaybePush(hist);
         }catch{}
 
+        // 既に開いている同一URLのバッファがあれば、読み込みを試す前に即切替
+        try{
+          const targetUrlPre = _normalizeToURLString(arg, base);
+          const existPre = _findBufferByURL(targetUrlPre);
+          if (existPre >= 0){ _switchToBuffer(existPre); return; }
+        }catch{}
+
         // ディレクトリ指定ヒントの場合は、そのディレクトリでポップアップを開く
         if (_isDirHint(arg)){
           try{
@@ -7355,14 +7484,31 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
 
         // まずは直接 file:// 読み込みを試す（XHR + fetch フォールバック）
         // 引数ありは新規バッファとして追加
-        _loadFromPath(arg, base, {silentOnFail:true, mode:'new'}).then(async ok=>{
+        // Try real load; do not silence failures to avoid creating empty buffers for existing files
+        // 静音判定: リンク直後 or 手打ちUNC/WSLパス（host付きfile://）
+        const _uncSilentArg = (function(){
+          try{
+            const u = new URL(new URL(arg, base).toString());
+            return (u.protocol==='file:' && !!u.host);
+          }catch{ return false; }
+        })();
+        const _uncSilentLink = (function(){ try{ const t=Number(window.__sixOpenFromLinkTs); return Number.isFinite(t) && (Date.now()-t < 1200); }catch{ return false; }})();
+        _loadFromPath(arg, base, {silentOnFail:false, mode:'new', uncSilent: (_uncSilentLink || _uncSilentArg) }).then(async ok=>{
           if (ok) return;
-          // 失敗時は新規バッファを作成（ピッカーは開かない）
+          // 失敗時: file:// のホスト付き（UNC 等）は空バッファを作らずに中断（CORS やAPI未対応時に誤作成を避ける）
           let finalURL = null;
           try { finalURL = new URL(arg, base).toString(); } catch {}
           const exist = _findBufferByURL(finalURL);
           if (exist >= 0){ _switchToBuffer(exist); }
-          else { _addBuffer({ name: _basename(arg), path: finalURL, text: '', modified:false }); _switchToBuffer(buffers.length-1); }
+          else {
+            let abortEmpty = false;
+            try{
+              const uTry = new URL(finalURL);
+              if (uTry.protocol==='file:' && uTry.host){ abortEmpty = true; }
+            }catch{}
+            if (abortEmpty){ toast('open failed: ' + arg); return; }
+            _addBuffer({ name: _basename(arg), path: finalURL, text: '', modified:false }); _switchToBuffer(buffers.length-1);
+          }
         });
       }
       return;
@@ -8085,6 +8231,14 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
             ]);
             // 保存・終了
             section('保存・終了', [
+              // Helper present in v0.9; reintroduce here
+              function _isDirHint(s){
+                try{
+                  if (!s) return false;
+                  if (s === '.' || s === '..') return true;
+                  return /[\\\/]+$/.test(s);
+                }catch{ return false; }
+              }
               [K(':w'), sep(' 保存 / '), K(':wa'), sep(' すべて保存 / '), K(':wq'), sep(' 保存して終了 / '), K(':wqa'), sep(' すべて保存して終了')],
               [K(':w!'), sep(' 強制保存（許可されている場合）')],
               [K(':q'), sep(' 終了 / '), K(':q!'), sep(' 変更破棄して終了 / '), K(':qa'), sep(' すべて終了')]
@@ -11416,7 +11570,10 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
                   (async()=>{
                     // 入力直接確定時も共通禁止名判定を適用 (#862)
                     try{ if (_isNtfsProhibitedNameAny(q, null)){ toast('Windows(NTFS)では無効な名前のため開けません',1800); _triggerVisualBell && _triggerVisualBell(); return; } }catch{}
-                    const ok = await _loadFromPath(q, _fileBaseURL, { silentOnFail:true, mode:'new' });
+                    const _uncSilentArg1 = (function(){
+                      try{ const u=new URL(new URL(q, _fileBaseURL).toString()); return (u.protocol==='file:' && !!u.host); }catch{ return false; }
+                    })();
+                    const ok = await _loadFromPath(q, _fileBaseURL, { silentOnFail:true, mode:'new', uncSilent:_uncSilentArg1 });
                     if (!ok){
                       let finalURL = null;
                       try{ finalURL = new URL(q, _fileBaseURL).toString(); }catch{}
@@ -11490,7 +11647,10 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
               (async()=>{
                 // 候補なし確定時も共通禁止名判定 (#862)
                 try{ if (_isNtfsProhibitedNameAny(q, null)){ toast('Windows(NTFS)では無効な名前のため開けません',1800); _triggerVisualBell && _triggerVisualBell(); return; } }catch{}
-                const ok = await _loadFromPath(q, _fileBaseURL, { silentOnFail:true, mode:'new' });
+                const _uncSilentArg2 = (function(){
+                  try{ const u=new URL(new URL(q, _fileBaseURL).toString()); return (u.protocol==='file:' && !!u.host); }catch{ return false; }
+                })();
+                const ok = await _loadFromPath(q, _fileBaseURL, { silentOnFail:true, mode:'new', uncSilent:_uncSilentArg2 });
                 if (!ok){
                   let finalURL = null;
                   try{ finalURL = new URL(q, _fileBaseURL).toString(); }catch{}
@@ -12901,7 +13061,9 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
       const host = u.host || '';
       const path = decodeURIComponent(u.pathname || '');
       if (host){
-        return ('\\\\' + host + path.replace(/\//g,'\\'));
+        // WSL UNC: map wsl.localhost -> wsl$ for Windows UNC access
+        const mappedHost = (host.toLowerCase()==='wsl.localhost') ? 'wsl$' : host;
+        return ('\\\\' + mappedHost + path.replace(/\//g,'\\'));
       }
       const m = path.match(/^\/([A-Za-z]:)(\/.*)?$/);
       if (m){
@@ -13182,11 +13344,12 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
       const winPathFromFileURL = (urlObj)=>{
         try{
           if (!urlObj || urlObj.protocol !== 'file:') return null;
-          const host = urlObj.host; // '' for local drive, 'server' for UNC
+          let host = urlObj.host; // '' for local drive, 'server' for UNC
           const path = decodeURIComponent(urlObj.pathname || '');
           if (host){
-            // UNC: file:////server/share/...
-            const p = ('\\\\' + host + path.replace(/\//g,'\\'));
+            // UNC: file:////server/share/... ; WSL host maps to wsl$
+            const mappedHost = (host && host.toLowerCase()==='wsl.localhost') ? 'wsl$' : host;
+            const p = ('\\\\' + mappedHost + path.replace(/\//g,'\\'));
             return p;
           }
           // local drive: '/C:/Users/...'
