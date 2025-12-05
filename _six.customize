@@ -105,8 +105,8 @@ window.THEME = {
   // yank/clipboardに格納した際の短時間フラッシュ。`n`,`N`でヒットしたときの効果にも流用する
   yankFlashColor: "#ffb020",
 
-  // URLと認識した文字列にマウスホバーしたときの背景の色
-  linkHoverBg: "#fafffa",
+  // URLと認識した文字列にマウスホバーしたときの背景の色(オーバーレイなので半透明にしないと文字が見えない)
+  linkHoverBg: "rgba(15,179,255,0.1)",
 
   // Global <kbd> colors used in tabbar and :b popup (fallbacks to helpKbd*)
   KbdBgColor: "#1c282a",

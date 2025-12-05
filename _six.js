@@ -1110,6 +1110,141 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
     }catch{}
   }
 
+  // ---- URL hover detection and highlight ----
+  let _linkLayer = null;
+  let _hoverLink = null; // { r, c1, c2, url }
+  let _lastLinkMoveAt = 0;
+  function _linkEnsureLayer(){
+    try{
+      if (!_linkLayer){ _linkLayer = document.createElement('div'); _linkLayer.style.position='absolute'; _linkLayer.style.left='0'; _linkLayer.style.top='0'; _linkLayer.style.right='0'; _linkLayer.style.bottom='0'; _linkLayer.style.pointerEvents='none'; _linkLayer.style.zIndex='1'; }
+      if (_linkLayer.parentNode !== caretLayer){ caretLayer.appendChild(_linkLayer); }
+    }catch{}
+  }
+  function _linkClear(){ try{ if(_linkLayer){ while(_linkLayer.firstChild){ _linkLayer.removeChild(_linkLayer.firstChild); } } }catch{} }
+  function _clearLinkHover(){ try{ _hoverLink=null; _linkClear(); if (editor) editor.style.cursor=''; }catch{} }
+  function _renderLinkHover(){
+    try{
+      if (!_optUrlLink || !_hoverLink){ _linkClear(); if (editor) editor.style.cursor=''; return; }
+      _linkEnsureLayer(); _linkClear();
+      const topLine = _topLine();
+      const row1 = (_hoverLink.r|0) + 1;
+      const vis = _visibleLinesExact();
+      const endLine = topLine + vis - 1;
+      if (row1 < topLine || row1 > endLine){ _linkClear(); return; }
+      const lines = _splitLines();
+      const line = String(lines[_hoverLink.r]||'');
+      const c1 = Math.max(0, Math.min(line.length, _hoverLink.c1|0));
+      const c2 = Math.max(c1, Math.min(line.length, _hoverLink.c2|0));
+      const _exp = (s)=>{
+        if (!s || s.indexOf('\t')===-1) return s;
+        let _ts = 8; try{ const tsRaw = (window && window.SIX_OPTIONS && window.SIX_OPTIONS.tabstop); const ts = parseInt(tsRaw,10); if (ts && ts>0) _ts = ts; }catch{}
+        _measureSpan.textContent = ' ';
+        const spaceW = _measureSpan.getBoundingClientRect().width || 1;
+        const _charW = (ch)=>{ _measureSpan.textContent = ch; const w=_measureSpan.getBoundingClientRect().width; return (w && w>0)?w:spaceW; };
+        let out=''; let x=0;
+        for (let i=0;i<s.length;i++){
+          const ch=s[i];
+          if (ch==='\t'){
+            const col = Math.floor((x/spaceW)+1e-6);
+            const spaces = _ts - (col % _ts);
+            out += ' '.repeat(spaces); x += spaces * spaceW;
+          } else { out += ch; x += _charW(ch); }
+        }
+        return out;
+      };
+      _measureSpan.textContent = _exp(line.slice(0, c1));
+      const x1 = _measureSpan.getBoundingClientRect().width;
+      _measureSpan.textContent = _exp(line.slice(0, c2));
+      const x2 = _measureSpan.getBoundingClientRect().width;
+      if (!(x2>x1)){ _linkClear(); return; }
+      const el = document.createElement('div');
+      let _hs=0; try{ _hs=(editor.scrollLeft||0); }catch{}
+      el.style.position='absolute'; el.style.left=(x1-_hs)+'px';
+      el.style.top=((row1 - topLine)*LINE_HEIGHT)+'px';
+      el.style.width=Math.max(1, Math.round(x2-x1))+'px';
+      el.style.height=Math.max(1, Math.round(LINE_HEIGHT))+'px';
+      let col='rgba(80,160,255,0.25)'; try{ if (window && window.THEME && window.THEME.linkHoverBg){ col=String(window.THEME.linkHoverBg); } }catch{}
+      el.style.background=col; el.style.outline='1px solid rgba(80,160,255,0.45)'; el.style.outlineOffset='-1px';
+      _linkLayer.appendChild(el);
+      try{ if (editor) editor.style.cursor='pointer'; }catch{}
+    }catch{}
+  }
+  function _detectUrlAt(line, col){
+    try{
+      if (!line) return null;
+      const re = /(https?:\/\/[^\s<>"')\]}]+|file:\/\/[^\s<>"')\]}]+|mailto:[^\s<>"')\]}]+)/g;
+      let m; re.lastIndex=0;
+      while ((m=re.exec(line))){
+        const s=m.index|0; const l=(m[0]||'').length|0; if (l<=0) { re.lastIndex++; continue; }
+        const e = s + l;
+        if (col>=s && col<e){ return { c1:s, c2:e, url:String(m[0]||'') }; }
+        if (re.lastIndex === m.index) re.lastIndex++;
+      }
+    }catch{}
+    return null;
+  }
+  function _updateLinkHoverFromMouse(e){
+    try{
+      if (!_optUrlLink) return;
+      const now = Date.now(); if (now - _lastLinkMoveAt < 25) return; _lastLinkMoveAt = now;
+      const rect = viewport.getBoundingClientRect();
+      const yAbs = (e.clientY - rect.top) + (editor.scrollTop||0);
+      const row = Math.floor(yAbs / LINE_HEIGHT);
+      const lines = _splitLines();
+      if (row<0 || row>=lines.length){ if (_hoverLink){ _clearLinkHover(); } return; }
+      const line = String(lines[row]||'');
+      const _exp = (s)=>{
+        if (!s || s.indexOf('\t')===-1) return s;
+        let _ts = 8; try{ const tsRaw = (window && window.SIX_OPTIONS && window.SIX_OPTIONS.tabstop); const ts = parseInt(tsRaw,10); if (ts && ts>0) _ts = ts; }catch{}
+        _measureSpan.textContent = ' ';
+        const spaceW = _measureSpan.getBoundingClientRect().width || 1;
+        const _charW = (ch)=>{ _measureSpan.textContent = ch; const w=_measureSpan.getBoundingClientRect().width; return (w && w>0)?w:spaceW; };
+        let out=''; let x=0;
+        for (let i=0;i<s.length;i++){
+          const ch=s[i];
+          if (ch==='\t'){
+            const col = Math.floor((x/spaceW)+1e-6);
+            const spaces = _ts - (col % _ts);
+            out += ' '.repeat(spaces); x += spaces * spaceW;
+          } else { out += ch; x += _charW(ch); }
+        }
+        return out;
+      };
+      const xAbs = (e.clientX - rect.left) + (editor.scrollLeft||0);
+      let c = 0;
+      while (c<line.length){
+        _measureSpan.textContent = _exp(line.slice(0, c+1));
+        const w = _measureSpan.getBoundingClientRect().width;
+        if (w >= xAbs || c===line.length-1){ break; }
+        c++;
+      }
+      const hit = _detectUrlAt(line, c);
+      if (hit){
+        const same = _hoverLink && _hoverLink.r===row && _hoverLink.c1===hit.c1 && _hoverLink.c2===hit.c2 && _hoverLink.url===hit.url;
+        _hoverLink = { r:row, c1:hit.c1, c2:hit.c2, url:hit.url };
+        if (!same) _renderLinkHover();
+      } else {
+        if (_hoverLink){ _clearLinkHover(); }
+      }
+    }catch{}
+  }
+  function _onEditorClickForLink(e){
+    try{
+      if (!_optUrlLink) return;
+      if (!_hoverLink) return;
+      if (e){ try{ e.preventDefault(); e.stopPropagation(); }catch{} }
+      const url = String(_hoverLink.url||'');
+      let opened = false;
+      try{
+        if (window && window.chrome && window.chrome.webview && window.chrome.webview.postMessage){
+          window.chrome.webview.postMessage({ type:'open-url', url }); opened = true;
+        }
+      }catch{}
+      if (!opened){ try{ window.open(url, '_blank'); opened = true; }catch{} }
+      if (!opened){ try{ toast('open failed: ' + url, 1500); }catch{} }
+    }catch{}
+  }
+
   // ---- Case (ignorecase/smartcase) popup helpers ----
   let _caseSel = 0; // 0: always(noignorecase), 1: smart(ignorecase+smartcase), 2: insens(ignorecase+nosmartcase)
   function _casePopupVisible(){ try{ const pop=document.getElementById('casepopup'); return !!(pop && pop.style.display!=='none'); }catch{ return false; } }
@@ -1496,6 +1631,8 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
   let _prevTextBeforeInput = '';
   // --- Visual Bell ---
   let _optVisualBell = (function(){ try{ const o=(window&&window.SIX_OPTIONS)||{}; return (o.visualbell!==false); }catch{} return true; })(); // :set visualbell (default ON)
+  // URL hover/link open
+  let _optUrlLink = (function(){ try{ const o=(window&&window.SIX_OPTIONS)||{}; return !!o.urllink; }catch{} return false; })(); // :set urllink / :set nourllink
   // --- Debug key logging (ring buffer) ---
   // :set debugkeys / :set nodebugkeys / :set debugkeys! / :set debugkeys?
   let _optDebugKeys = false;
@@ -6670,6 +6807,19 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
     if (/^:set\s+list\?\s*$/i.test(cmd)){
       toast('list: ' + (_optList?'on':'off'), 1200); return;
     }
+    // :set urllink / :set nourllink / :set urllink! / :set urllink?
+    if (/^:set\s+urllink\s*$/i.test(cmd)){
+      _optUrlLink = true; toast('urllink: on', 900); try{ if (typeof _renderLinkHover === 'function') _renderLinkHover(); }catch{} return;
+    }
+    if (/^:set\s+nourllink\s*$/i.test(cmd)){
+      _optUrlLink = false; toast('urllink: off', 900); try{ if (typeof _clearLinkHover === 'function') _clearLinkHover(); if (typeof _renderLinkHover === 'function') _renderLinkHover(); }catch{} return;
+    }
+    if (/^:set\s+urllink!\s*$/i.test(cmd)){
+      _optUrlLink = !_optUrlLink; toast('urllink: ' + (_optUrlLink?'on':'off'), 900); try{ if(!_optUrlLink && typeof _clearLinkHover === 'function') _clearLinkHover(); if (typeof _renderLinkHover === 'function') _renderLinkHover(); }catch{} return;
+    }
+    if (/^:set\s+urllink\?\s*$/i.test(cmd)){
+      toast('urllink: ' + (_optUrlLink?'on':'off'), 1200); return;
+    }
     // :set strictnormalime / :set nostrictnormalime / :set strictnormalime! / :set strictnormalime?
     if (/^:set\s+strictnormalime\s*$/i.test(cmd)){ _optStrictNormalIME = true; toast('strictnormalime: on', 900); return; }
     if (/^:set\s+nostrictnormalime\s*$/i.test(cmd)){ _optStrictNormalIME = false; toast('strictnormalime: off', 900); return; }
@@ -8638,7 +8788,7 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
       }catch{}
       // Hide mouse cursor when visible range changes shortly after caret moved
       if ((Date.now() - _lastCaretMovedAt) < 120){ _hideCursor(); }
-      _repositionCaret(); updateGutter(); _renderHlMatchesVisible(); _incPrevRefresh(); _renderVisSelOverlay();
+        _repositionCaret(); updateGutter(); _renderHlMatchesVisible(); _incPrevRefresh(); _renderVisSelOverlay(); try{ _renderLinkHover(); }catch{}
   _updatePosInfo();
       // Persist current buffer's view state (scroll and caret) on every scroll frame
       try{
@@ -8653,6 +8803,10 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
   };
   viewport.addEventListener('scroll', scheduleScrollRender);
   editor.addEventListener('scroll', scheduleScrollRender);
+  // Link hover tracking (mousemove/leave) and click-to-open
+  try{ editor.addEventListener('mousemove', _updateLinkHoverFromMouse, { passive:true }); }catch{ editor.addEventListener('mousemove', _updateLinkHoverFromMouse); }
+  try{ editor.addEventListener('mouseleave', ()=>{ try{ _clearLinkHover(); }catch{} }); }catch{}
+  try{ editor.addEventListener('click', _onEditorClickForLink, true); }catch{}
     // Ctrl + Wheel = editor zoom (only editor/gutter)
     let _lastZoomStepAt = 0;
     const wheelZoom = (e)=>{
