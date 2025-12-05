@@ -666,6 +666,7 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
   function _ensureDesired(){ if (_desiredVisualCol==null) _desiredVisualCol = _currentVisualCol(); }
   // global mouse cursor visibility state
   let _cursorHidden = false;
+  let _cursorForceHiddenUntil = 0; // キーボード操作後に「塗りつぶしcaret」を維持するためのガード時間
   // scrolloff pause control: temporarily suppress ensureScrolloff after search confirm
   let _scrolloffPaused = false;
   let _scrolloffPauseAnchorR = -1;
@@ -675,6 +676,9 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
   const _showCursor = ()=>{ try{ if (_cursorHidden){ document.body.classList.remove('hide-cursor'); _cursorHidden=false; } }catch{} };
   function _flagCaretMotion(){
     _lastCaretMovedAt = Date.now();
+    // caret移動時は塗りつぶしcaretへ復帰し、一定時間維持
+    _cursorForceHiddenUntil = Date.now() + 800;
+    try{ _hideCursor(); }catch{}
     if (!_caretMoving){ _caretMoving = true; try{ document.body.classList.add('moving-caret'); }catch{} }
     if (_caretMovePulseTimer){ try{ clearTimeout(_caretMovePulseTimer); }catch{} }
     _caretMovePulseTimer = setTimeout(()=>{
@@ -8792,8 +8796,12 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
           if (Math.abs(snapped - st) > 0.25){ editor.scrollTop = snapped; }
         }
       }catch{}
-      // Hide mouse cursor when visible range changes shortly after caret moved
-      if ((Date.now() - _lastCaretMovedAt) < 120){ _hideCursor(); }
+      // キーボード操作直後は塗りつぶしcaretを強制維持
+      if (Date.now() < _cursorForceHiddenUntil){ _hideCursor(); }
+      else {
+        // 直近の caret 移動でも塗りつぶしcaret（従来の短時間ルール）
+        if ((Date.now() - _lastCaretMovedAt) < 120){ _hideCursor(); }
+      }
         _repositionCaret(); updateGutter(); _renderHlMatchesVisible(); _incPrevRefresh(); _renderVisSelOverlay(); try{ _renderLinkHover(); }catch{}
   _updatePosInfo();
       // Persist current buffer's view state (scroll and caret) on every scroll frame
@@ -15446,6 +15454,8 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
         ensureScrolloff({centerOnce:false});
         _repositionCaret();
         updateGutter();
+        // 起動直後は塗りつぶしcaretから開始（輪郭のみを避ける）
+        try{ _hideCursor(); }catch{}
         _renderTabbar();
         _initOverlayPalette();
         _wireHelpOpenShortcut();
