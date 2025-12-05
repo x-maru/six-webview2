@@ -1163,8 +1163,14 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
       el.style.top=((row1 - topLine)*LINE_HEIGHT)+'px';
       el.style.width=Math.max(1, Math.round(x2-x1))+'px';
       el.style.height=Math.max(1, Math.round(LINE_HEIGHT))+'px';
-      let col='rgba(80,160,255,0.25)'; try{ if (window && window.THEME && window.THEME.linkHoverBg){ col=String(window.THEME.linkHoverBg); } }catch{}
-      el.style.background=col; el.style.outline='1px solid rgba(80,160,255,0.45)'; el.style.outlineOffset='-1px';
+      // THEME 未定義時は常に yellow を既定値とする (#1133)
+      let col='yellow';
+      try{
+        if (window && window.THEME && (('linkHoverBg' in window.THEME))){
+          col = String(window.THEME.linkHoverBg);
+        }
+      }catch{}
+      el.style.background=col; el.style.outline='1px solid '+col; el.style.outlineOffset='-1px';
       _linkLayer.appendChild(el);
       try{ if (editor) editor.style.cursor='pointer'; }catch{}
     }catch{}
@@ -12541,8 +12547,9 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
         hdr.style.marginTop = '0.2rem';
         hdr.style.marginBottom = '0.1rem';
         // ヘッダ背景（テーマ）
-        const bg = (window && window.THEME && window.THEME.popupHeaderBg) ? window.THEME.popupHeaderBg : null;
-        if (bg) hdr.style.background = String(bg);
+        // THEME 未定義時も yellow で統一 (#1134)
+        let bg = 'yellow'; try{ if (window && window.THEME && window.THEME.popupHeaderBg){ bg = String(window.THEME.popupHeaderBg); } }catch{}
+        hdr.style.background = bg;
       }catch{}
       // 左側: 「[数字], [Fキー] ダイレクト選択」
       const left = document.createElement('div');
