@@ -116,6 +116,8 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
   function _updatePosInfo(){
     try{
       if (!posinfoEl) return;
+      // #1236: Skip posInfo update during continuous scroll
+      if (document.body.classList.contains('is-scrolling')) return;
       // 未確定中はポジション表示更新を遅延（間接的な測定/レイアウトを避ける）
       try{ if (window._imeComposing===true){ return; } }catch{}
       const lines = _splitLines();
@@ -216,13 +218,6 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
           if (T.caretIMEGradStart && T.caretIMEGradMid){
             start = T.caretIMEGradStart; mid = T.caretIMEGradMid;
           }
-          // IME ON → width 2.0rem, mid at 1.2rem
-          widthLen = '2.0rem';
-          midStopLen = '1.2rem';
-        } else {
-          if (T.caretGradStart && T.caretGradMid){
-            start = T.caretGradStart; mid = T.caretGradMid;
-          }
           // IME OFF → width 1.0rem, mid at 0.6rem
           widthLen = '1.0rem';
           midStopLen = '0.6rem';
@@ -233,6 +228,13 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
         widthLen = '1.0rem';
         midStopLen = '0.6rem';
       }
+      // Ensure NORMAL/VISUAL IME-OFF prefers theme caretGrad if present
+      try{
+        if ((_mode === 'NORMAL' || _mode === 'VISUAL') && !imeActiveUse){
+          if (T.caretGradStart && T.caretGradMid){ start = T.caretGradStart; mid = T.caretGradMid; }
+        }
+      }catch{}
+
       _caretWidthFixed = true; // 常に固定幅として扱う（_repositionCaret での上書きを抑止）
       // 現在のcaret要素へ適用（存在しなければ遅延適用）
       try{
@@ -685,7 +687,7 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
                 if ((buffers.indexOf(b)|0) === (currentIdx|0)){
                   const stKeep = (editor && typeof editor.scrollTop==='number') ? (editor.scrollTop|0) : 0;
                   editor.value = norm; _syncModifiedFromTick(); _repositionCaret(); updateGutter();
-                  try{ editor.scrollTop = stKeep; }catch{}
+                  try{ _setEditorScrollTop(stKeep, { immediate:true }); }catch{}
                 }
                 _schedulePersist('reload');
               }catch{}
@@ -2253,6 +2255,11 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
   function _listClear(){ try{ if(_listLayer){ while(_listLayer.firstChild){ _listLayer.removeChild(_listLayer.firstChild); } } }catch{} }
   function _renderListChars(){
     try{
+      // #1234: Skip list chars rendering during continuous scroll
+      if (document.body.classList.contains('is-scrolling')) {
+        _listClear();
+        return;
+      }
       if (!_optList){ _listClear(); return; }
       _listEnsureLayer(); _listClear();
       // Keep native textarea tab-size in sync with SIX_OPTIONS.tabstop
@@ -2781,7 +2788,7 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
   }
   function _visibleLinesExact(){
     if (_cachedVisibleCount) return _cachedVisibleCount;
-    try{ const h = editor.clientHeight || viewport.clientHeight; return Math.max(1, Math.round(h/LINE_HEIGHT)); }catch{ return Math.max(1, Math.floor(viewport.clientHeight/LINE_HEIGHT)); }
+    try{ const h = editor.clientHeight || viewport.clientHeight; return Math.max(1, Math.floor(h/LINE_HEIGHT)); }catch{ return Math.max(1, Math.floor(viewport.clientHeight/LINE_HEIGHT)); }
   }
   function _needsHScrollReserve(){ return false; }
 
@@ -3197,12 +3204,12 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
       // Snap scrollTop to exact line boundary to keep background gradient/gutter aligned
       const vsSnap = (function(){ try{ const n=Math.max(0, vs); return Math.round(n/LINE_HEIGHT)*LINE_HEIGHT; }catch{ return Math.max(0, vs|0); } })();
   // Restore viewport scroll top (validated)
-  try{ editor.scrollTop = Math.max(0, vsSnap); }catch{}
+  try{ _setEditorScrollTop(Math.max(0, vsSnap), { immediate:true }); }catch{}
       // Do NOT recentre on switch; keep exact previous viewport
       _centerScrolloffOnce = false;
   _repositionCaret(); updateGutter();
   // Sync native selection to overlay caret to prevent browser auto-scroll on next key/focus
-  try{ const stKeep0 = (editor && typeof editor.scrollTop==='number') ? editor.scrollTop : 0; _syncNativeSelectionToCaret(); if (editor) editor.scrollTop = stKeep0; }catch{}
+  try{ const stKeep0 = (editor && typeof editor.scrollTop==='number') ? editor.scrollTop : 0; _syncNativeSelectionToCaret(); if (editor) _setEditorScrollTop(stKeep0, { immediate:true }); }catch{}
   _updateEncBtnLabel();
       // Some browsers/layouts may adjust scrollTop after content/overlays settle.
       // Re-apply saved scroll position on the next frame and shortly after to ensure it sticks.
@@ -3213,10 +3220,10 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
           try{ clampViewportExactLines(); }catch{}
           // Re-assert saved caret/viewport to defeat any early-frame overrides (#715)
           try{ _setCaret(vr, vc); }catch{}
-          try{ editor.scrollTop = Math.max(0, vsSnap); }catch{}
+          try{ _setEditorScrollTop(Math.max(0, vsSnap), { immediate:true }); }catch{}
           try{ _repositionCaret(); updateGutter(); }catch{}
           // Keep native selection aligned with caret; do not let this change scroll position
-          try{ const stKeep = (editor && typeof editor.scrollTop==='number') ? editor.scrollTop : 0; _syncNativeSelectionToCaret(); if (editor) editor.scrollTop = stKeep; }catch{}
+          try{ const stKeep = (editor && typeof editor.scrollTop==='number') ? editor.scrollTop : 0; _syncNativeSelectionToCaret(); if (editor) _setEditorScrollTop(stKeep, { immediate:true }); }catch{}
           // Persist the restored viewport to the buffer as the new baseline
           try{
             const st = (editor.scrollTop||0)|0;
@@ -4250,7 +4257,7 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
         }
         // Reflect into editor now since we stay on the same buffer
         editor.value = t; loadedIntoEditor = true;
-        caretRow = 0; caretCol = 0; editor.scrollTop = 0;
+        caretRow = 0; caretCol = 0; try{ _setEditorScrollTop(0, { immediate:true }); }catch{}
         _centerScrolloffOnce = true; ensureScrolloff({centerOnce:true});
         try{ _repositionCaret(); updateGutter(); }catch{}
       }
@@ -4297,7 +4304,7 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
           const ff = (raw.indexOf('\r')>=0) ? 'dos' : 'unix';
           const txt = (hasBomChar ? raw.slice(1) : raw).replace(/\r\n?/g,'\n');
           editor.value = txt;
-          caretRow = 0; caretCol = 0; editor.scrollTop = 0;
+          caretRow = 0; caretCol = 0; try{ _setEditorScrollTop(0, { immediate:true }); }catch{}
           _centerScrolloffOnce = true; ensureScrolloff({centerOnce:true});
           _repositionCaret(); updateGutter();
           const mode = opts.mode || (buffers.length===0 ? 'new' : 'replace');
@@ -4392,10 +4399,10 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
     _setTitle(); _renderTabbar();
     // Ensure initial view is at top (avoid unintended 'G'-like position)
     try{
-      caretRow=0; caretCol=0; editor.scrollTop=0; _centerScrolloffOnce=false;
+      caretRow=0; caretCol=0; try{ _setEditorScrollTop(0, { immediate:true }); }catch{}; _centerScrolloffOnce=false;
       _scrollGuardUntil = Date.now() + 800; // 初期描画直後の再配置を抑止
       _repositionCaret(); updateGutter();
-      setTimeout(()=>{ try{ caretRow=0; caretCol=0; editor.scrollTop=0; _repositionCaret(); updateGutter(); }catch{} }, 0);
+      setTimeout(()=>{ try{ caretRow=0; caretCol=0; try{ _setEditorScrollTop(0, { immediate:true }); }catch{}; _repositionCaret(); updateGutter(); }catch{} }, 0);
     }catch{}
         return Promise.resolve(true);
       } catch { /* fallthrough */ }
@@ -4412,9 +4419,9 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
   else { const b=currentBuffer(); if(name) b.name = name; b.path = doc; b.text = t; b.savedText = t; b._changeTick=0; b._savedTick=0; b.modified=false; b.enc='utf-8'; b.ff=ff; b.bom=hasBomChar; }
     _setTitle(); _renderTabbar();
       try{
-        caretRow=0; caretCol=0; editor.scrollTop=0; _centerScrolloffOnce=false; _scrollGuardUntil = Date.now() + 800;
+        caretRow=0; caretCol=0; try{ _setEditorScrollTop(0, { immediate:true }); }catch{}; _centerScrolloffOnce=false; _scrollGuardUntil = Date.now() + 800;
         _repositionCaret(); updateGutter();
-        setTimeout(()=>{ try{ caretRow=0; caretCol=0; editor.scrollTop=0; _repositionCaret(); updateGutter(); }catch{} }, 0);
+        setTimeout(()=>{ try{ caretRow=0; caretCol=0; try{ _setEditorScrollTop(0, { immediate:true }); }catch{}; _repositionCaret(); updateGutter(); }catch{} }, 0);
       }catch{}
       return true;
     }).catch(()=>{
@@ -4457,6 +4464,7 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
   function _repositionCaret(opts){
     // During IME composition, avoid any layout-affecting measurements and DOM writes
     try{ if (window && window._imeComposing===true){ try{ window.SIX_IME_METRICS && (window.SIX_IME_METRICS.composingCalls.reposition++); }catch{} return; } }catch{}
+    
     opts = opts||{};
     const row1 = caretRow + 1;
     const topLine = _topLine();
@@ -4494,11 +4502,23 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
       edstripe.style.display='none';
       try{ edstripe.style.transform = ''; }catch{}
     }
+
+    // #1228: Optimization to skip caret render (e.g. during fast scroll)
+    if (opts.skipCaret || (document.body.classList.contains('is-scrolling'))) {
+      try{
+        const c = caretLayer.querySelector('.caret');
+        if (c) c.style.display = 'none';
+      }catch{}
+      return;
+    }
+
     // VISUAL linewise 縦移動高速パス (#870 仮説: caret幅計測遅延による見た目ラグ)
     // 縦移動直後は水平位置が大幅に変化しない前提で、幅計測を後段へ遅延し即時 top のみ更新。
     if (opts.fastVertical && _visualActive && _visualLinewise){
       let caret = caretLayer.querySelector('.caret');
       if (!caret){ caret = document.createElement('div'); caret.className='caret'; caretLayer.appendChild(caret); }
+      // Ensure visible if it was hidden
+      caret.style.display = '';
       caret.style.top = topPx + 'px';
       caret.style.height = Math.max(1, Math.round(LINE_HEIGHT)) + 'px';
       // transform remainder 適用（行境界ずれ防止）
@@ -4519,6 +4539,8 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
       caret.className = 'caret';
       caretLayer.appendChild(caret);
     }
+    // Ensure visible if it was hidden
+    caret.style.display = '';
     // 動的caretグラデーション適用 (#1020)
     try{ _applyCaretGradient(); }catch{}
     const lines = _splitLines();
@@ -4740,7 +4762,7 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
                 const st = (editor && typeof editor.scrollTop==='number') ? (editor.scrollTop|0) : 0;
                 const lh = (typeof LINE_HEIGHT==='number' && LINE_HEIGHT>0) ? LINE_HEIGHT : 20;
                 const flo = Math.floor(st / lh) * lh;
-                if (Math.abs(flo - st) > 0.1){ editor.scrollTop = flo; }
+                if (Math.abs(flo - st) > 0.1){ try{ _setEditorScrollTop(flo, { immediate:true }); }catch{} }
                 try{ if (window && window._imeComposing===true) return; }catch{}
                 _repositionCaret(); updateGutter();
               }catch{}
@@ -4923,7 +4945,7 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
     caretRow = Math.max(0, s.caretRow|0);
     caretCol = Math.max(0, s.caretCol|0);
     _clampCaret();
-    try{ editor.scrollTop = Math.max(0, s.scrollTop|0); }catch{}
+    try{ _setEditorScrollTop(Math.max(0, s.scrollTop|0), { immediate:true }); }catch{}
     // restore change tick from snapshot and recompute modified
     try{ const b=currentBuffer(); if (b){ b._changeTick = (s.changeTick|0); } }catch{}
     _syncModifiedFromTick();
@@ -4974,7 +4996,7 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
     // set caret at start of deletion using offset
     try{ const rc = _rcFromOffset(startOff); _setCaret(rc.r, rc.c); }catch{ _setCaret(a.r, a.c); }
     // Keep native selection in sync to avoid later browser-driven scroll/selection surprises (e.g., on save)
-    try{ const stHold=editor.scrollTop|0, slHold=editor.scrollLeft|0; _syncNativeSelectionToCaret(); editor.scrollTop=stHold; editor.scrollLeft=slHold; }catch{}
+    try{ const stHold=editor.scrollTop|0, slHold=editor.scrollLeft|0; _syncNativeSelectionToCaret(); try{ _setEditorScrollTop(stHold, { immediate:true }); }catch{} editor.scrollLeft=slHold; }catch{}
     // Update unnamed register (charwise)
     // #539: allow caller to suppress register update (e.g., 'x' without count)
     const _updReg = !(opts && opts.updateRegister === false);
@@ -5025,7 +5047,7 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
     }
     _setCaret(newRow, newCol);
     // Sync native selection immediately after programmatic mutation
-    try{ const stHold=editor.scrollTop|0, slHold=editor.scrollLeft|0; _syncNativeSelectionToCaret(); editor.scrollTop=stHold; editor.scrollLeft=slHold; }catch{}
+    try{ const stHold=editor.scrollTop|0, slHold=editor.scrollLeft|0; _syncNativeSelectionToCaret(); try{ _setEditorScrollTop(stHold, { immediate:true }); }catch{} editor.scrollLeft=slHold; }catch{}
     try{ _regUnnamed = { text: String(deletedBlock||''), linewise: true }; }catch{}
     _touchBufferModified();
     _afterTextMutation();
@@ -5471,9 +5493,110 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
     }
     ensureScrolloff({ force:true });
   }
+  // Smooth scrolling helper: animate editor.scrollTop per-pixel.
+  let __six_scroll_anim = null;
+  let __six_scroll_target = null;
+  function _setEditorScrollTop(targetPx, opts){
+    try{
+      opts = opts || {};
+      if (!editor) return;
+      const cur = (editor.scrollTop||0);
+      targetPx = Math.max(0, Math.round(targetPx||0));
+      if (Math.abs(targetPx - cur) < 0.5){ 
+        editor.scrollTop = targetPx; 
+        if (__six_scroll_anim) { cancelAnimationFrame(__six_scroll_anim); __six_scroll_anim = null; }
+        __six_scroll_target = null;
+        // 位置が変わらなくても描画更新が必要な場合がある (#1205)
+        try{ _repositionCaret(); updateGutter(); }catch{}
+        return; 
+      }
+      // If immediate requested, cancel any anim and set directly
+      if (opts && opts.immediate){ 
+        try{ if (__six_scroll_anim) { cancelAnimationFrame(__six_scroll_anim); __six_scroll_anim = null; } }catch{} 
+        __six_scroll_target = null;
+        editor.scrollTop = targetPx; 
+        try{ _repositionCaret(); updateGutter(); }catch{}
+        return; 
+      }
+      // If animation is already running towards the same target, let it continue
+      if (__six_scroll_anim && __six_scroll_target === targetPx) {
+        // ターゲットが同じでもキャレット位置が変わっている可能性があるため描画更新 (#1207)
+        try{ _repositionCaret(); updateGutter(); }catch{}
+        return;
+      }
+
+      // Decide whether to animate or set immediately.
+      const lastKey = (typeof _lastKeydownForAnom==='object' && _lastKeydownForAnom && _lastKeydownForAnom.key) ? String(_lastKeydownForAnom.key) : null;
+      const isHJKL = !!(lastKey && (lastKey === 'h' || lastKey === 'j' || lastKey === 'k' || lastKey === 'l'));
+      const vis = (typeof _visibleLinesExact === 'function') ? (_visibleLinesExact()||1) : 1;
+      const deltaPx = Math.abs(targetPx - cur);
+      const deltaLines = Math.max(0, Math.round(deltaPx / (LINE_HEIGHT||1)));
+      // Jump commands that exceed viewport should not animate (except hjkl which always animates)
+      if (!isHJKL && !(opts && opts.forceAnimate) && deltaLines > (vis||1)){
+        editor.scrollTop = targetPx; return;
+      }
+      // Determine duration: proportional but clamped.
+      // Fixed 500ms for HJKL was too slow for small steps and caused "stuck" feel on repeat.
+      let duration = Math.max(40, Math.min(400, Math.round(30 * deltaLines)));
+      
+      // Cancel ongoing anim
+      try{ 
+        if (__six_scroll_anim) { 
+          cancelAnimationFrame(__six_scroll_anim); 
+          __six_scroll_anim = null; 
+          // If we were animating, we might have set is-scrolling.
+          // If we are starting a new animation immediately, we could keep it,
+          // but to be safe/simple, let's remove it and let the new start re-add it.
+          // However, to avoid flicker if we are just replacing one anim with another,
+          // we can check if we are about to start a new one.
+          // But here we are just cancelling.
+          try{ document.body.classList.remove('is-scrolling'); }catch{}
+        } 
+      }catch{}
+      
+      __six_scroll_target = targetPx;
+      const start = (window.performance && performance.now) ? performance.now() : Date.now();
+      const from = cur; const to = targetPx;
+      
+      // Start animation: hide caret/list
+      try{ document.body.classList.add('is-scrolling'); }catch{}
+
+      function step(ts){
+        try{
+          const t = Math.min(1, ((ts||performance.now()) - start) / duration);
+          // easeInOutCubic
+          const tt = (t < 0.5) ? (4 * t * t * t) : (1 - Math.pow(-2 * t + 2, 3) / 2);
+          const v = Math.round(from + (to - from) * tt);
+          if (Math.abs((editor.scrollTop||0) - v) > 0.5) editor.scrollTop = v;
+          // アニメーション中も描画を同期 (#1204)
+          try{ _repositionCaret(); updateGutter(); }catch{}
+
+          if (t < 1){ __six_scroll_anim = requestAnimationFrame(step); } 
+          else { 
+            __six_scroll_anim = null; 
+            __six_scroll_target = null;
+            editor.scrollTop = to; 
+            try{ document.body.classList.remove('is-scrolling'); }catch{}
+            try{ _repositionCaret(); updateGutter(); }catch{}
+          }
+        }catch(e){ 
+          try{ 
+            editor.scrollTop = to; 
+            __six_scroll_anim = null; 
+            __six_scroll_target = null; 
+            try{ document.body.classList.remove('is-scrolling'); }catch{}
+            _repositionCaret(); updateGutter(); 
+          }catch{} 
+        }
+      }
+      __six_scroll_anim = requestAnimationFrame(step);
+    }catch(e){ try{ editor.scrollTop = Math.max(0, Math.round(targetPx||0)); }catch{} }
+  }
   function ensureScrolloff(opts={}){
     // IME composition: skip auto scroll adjustments unless explicitly forced
     try{ if (window && window._imeComposing===true && !(opts && opts.force)){ try{ window.SIX_IME_METRICS && (window.SIX_IME_METRICS.composingCalls.ensure++); }catch{} return; } }catch{}
+    // #1189: Skip during scan-hold scroll mode (RAF is controlling scroll)
+    try{ const sh = (window && window.__sixScanHoldScrollActive); if (sh && !(opts && opts.force)) return; }catch{}
     // If paused (e.g., right after '/word' confirm) or a modal is open and
     // we're suppressing scroll adjustments, skip any automatic re-centering/adjustment.
     // This resumes on next explicit caret move or when suppression is cleared.
@@ -5499,8 +5622,8 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
     const big = scrolloff >= 99999;
     // Allow extra "virtual" page steps so EOF の下に N 行分の余白が見える
     const baseMaxTop = Math.max(1, linesTotal - vis + 1);
-    // 固定余白行数 (#865): カスタマイズ不要のため常に 6 行を許容
-    const _readEofPadLines = ()=>6;
+    // 固定余白行数 (#865): CSS変数と同期して 5 行を許容 (#1258)
+    const _readEofPadLines = ()=>5;
     const _eofPad = _readEofPadLines();
     const maxTopWithPad = Math.min(linesTotal, baseMaxTop + _eofPad);
 
@@ -5512,25 +5635,26 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
       // Bring caret into view only when it would go off-screen; allow EOF pad visibility.
       if (caretLine1 < topLine){
         const newTop = Math.max(1, caretLine1);
-        if (newTop !== topLine) editor.scrollTop = (newTop-1)*LINE_HEIGHT;
+        if (newTop !== topLine) _setEditorScrollTop((newTop-1)*LINE_HEIGHT, {});
       } else if (caretLine1 > (topLine + vis - 1)){
         let newTop = Math.max(1, caretLine1 - (vis - 1));
         if (caretLine1 === linesTotal){ newTop = Math.min(newTop, maxTopWithPad); }
-        if (newTop !== topLine) editor.scrollTop = (newTop-1)*LINE_HEIGHT;
+        if (newTop !== topLine) _setEditorScrollTop((newTop-1)*LINE_HEIGHT, {});
       }
       // Clamp at EOF (with pad) and snap to grid
       try{
         topLine = _topLine();
         const maxTop = maxTopWithPad;
-        if (topLine > maxTop){ editor.scrollTop = (maxTop-1)*LINE_HEIGHT; }
+        if (topLine > maxTop){ _setEditorScrollTop((maxTop-1)*LINE_HEIGHT, {}); }
         const stCur = (editor.scrollTop||0);
         const snapped = Math.floor(stCur/LINE_HEIGHT)*LINE_HEIGHT;
-        if (Math.abs(snapped - stCur) > 0.01){ editor.scrollTop = snapped; }
-        if (window.requestAnimationFrame){ requestAnimationFrame(()=>{ try{ const st1=(editor.scrollTop||0); const flo1=Math.floor(st1/LINE_HEIGHT)*LINE_HEIGHT; if (Math.abs(flo1-st1)>0.01){ editor.scrollTop=flo1; } _repositionCaret(); updateGutter(); }catch{} }); }
+        if (Math.abs(snapped - stCur) > 0.01){ _setEditorScrollTop(snapped, { immediate:true }); }
+        if (window.requestAnimationFrame){ requestAnimationFrame(()=>{ try{ const st1=(editor.scrollTop||0); const flo1=Math.floor(st1/LINE_HEIGHT)*LINE_HEIGHT; if (Math.abs(flo1-st1)>0.01){ _setEditorScrollTop(flo1, { immediate:true }); } _repositionCaret(); updateGutter(); }catch{} }); }
       }catch{}
       return;
     }
 
+    let scrolled = false;
     if (big || centerOnce || scrolloff >= Math.floor(vis/2)){
       let targetTop = Math.max(1, caretLine1 - Math.floor(vis/2));
       // When explicitly requested (e.g., 'G'), prefer showing EOF pad
@@ -5540,7 +5664,8 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
       // clamp within pad range
       targetTop = Math.min(targetTop, maxTopWithPad);
       const prevTopLine = _topLine();
-      editor.scrollTop = (targetTop-1) * LINE_HEIGHT;
+      _setEditorScrollTop((targetTop-1) * LINE_HEIGHT, {});
+      scrolled = true;
       // If caret was already visible and we only scrolled due to centerOnce/preferEOFPad for EOF, avoid introducing visual gap by snapping back when delta is small (#424)
       try{
         const caretVisibleBefore = (caretLine1 >= prevTopLine && caretLine1 <= (prevTopLine + vis - 1));
@@ -5548,7 +5673,7 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
           const newTopLine = _topLine();
           // If we over-scrolled into showing extra pad while caret comfortably inside upper half, revert
           if (newTopLine > prevTopLine && (caretLine1 < prevTopLine + Math.floor(vis*0.65))){
-            editor.scrollTop = (prevTopLine-1) * LINE_HEIGHT;
+            _setEditorScrollTop((prevTopLine-1) * LINE_HEIGHT, {});
           }
         }
       }catch{}
@@ -5556,39 +5681,138 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
     } else {
       if (caretLine1 < topLine + scrolloff){
         const newTop = Math.max(1, caretLine1 - scrolloff);
-        if (newTop !== topLine) editor.scrollTop = (newTop-1)*LINE_HEIGHT;
+        if (newTop !== topLine) {
+           // #1239: If scan-hold is active (caret mode), use smooth scroll instead of jump
+           const sh = window._scanHold;
+           if (window.__sixScanHoldHeld && window.__sixScanHoldHeld.size > 0 && sh && sh.mode === 'caret') {
+               // Switch to scroll mode logic temporarily or just animate here?
+               // Better to let the scroll loop handle it if possible, but we are in caret mode.
+               // We can manually trigger a smooth scroll step.
+               const currentSt = (editor.scrollTop||0);
+               const targetSt = (newTop-1)*LINE_HEIGHT;
+               // Use 3px step (same as scroll mode)
+               const diff = targetSt - currentSt;
+               const step = (diff > 0) ? 3 : -3;
+               // If close enough, snap
+               if (Math.abs(diff) <= 3) {
+                   _setEditorScrollTop(targetSt, {});
+               } else {
+                   _setEditorScrollTop(currentSt + step, {});
+                   // Schedule next frame to continue scrolling if needed?
+                   // Actually, since this is called from _scanHoldCaretMode loop, 
+                   // simply moving 3px per frame (per key repeat) might be enough if key repeat is fast.
+                   // But key repeat is ~30ms. 3px/30ms = 100px/s (slow).
+                   // Scroll mode is 3px/frame (60fps) = 180px/s.
+                   // To match scroll mode smoothness, we should probably switch to scroll mode or use RAF.
+                   
+                   // Let's try switching to scroll mode if we detect we are pushing the boundary.
+                   if (window._scanHoldTriggerScroll) {
+                       // #1250: Prevent reverse scroll if direction contradicts held key
+                       // (e.g. holding J/Down but ensureScrolloff wants to scroll UP due to margin violation at EOF)
+                       const dir = (diff > 0) ? 1 : -1;
+                       let intendedDir = 0;
+                       if (sh.held.has('KeyJ') || sh.held.has('ArrowDown')) intendedDir = 1;
+                       else if (sh.held.has('KeyK') || sh.held.has('ArrowUp')) intendedDir = -1;
+                       
+                       if (intendedDir !== 0 && dir !== intendedDir) {
+                           // Contradiction: do not switch to continuous scroll mode.
+                           // Fall through to normal ensureScrolloff behavior (single adjustment or clamp).
+                       } else if (sh && sh.stuckAt && (Date.now() - sh.stuckAt < 300) && Math.abs((editor.scrollTop||0) - sh.stuckPos) < 2) {
+                           // #1252: Stuck, ignore continuous scroll request to prevent thrashing
+                       } else {
+                           // #1243: Cancel any animation started by _setEditorScrollTop above to prevent conflict
+                           try{ if (__six_scroll_anim) { cancelAnimationFrame(__six_scroll_anim); __six_scroll_anim = null; } }catch{}
+
+                           const idealOffset = scrolloff; // UP: offset = scrolloff
+                           window._scanHoldTriggerScroll(dir, idealOffset);
+                           return;
+                       }
+                   }
+               }
+               scrolled = true; 
+           } else {
+               _setEditorScrollTop((newTop-1)*LINE_HEIGHT, {}); scrolled = true; 
+           }
+        }
       } else if (caretLine1 > topLine + vis - scrolloff - 1){
         let newTop = Math.max(1, caretLine1 - (vis - scrolloff - 1));
-        // If caret is at EOF, prefer letting one-line pad show at the bottom
-        if (caretLine1 === linesTotal){ newTop = Math.min(newTop, maxTopWithPad); }
-        if (newTop !== topLine) editor.scrollTop = (newTop-1)*LINE_HEIGHT;
+        // EOF付近での過剰スクロールを防止 (#1203)
+        newTop = Math.min(newTop, maxTopWithPad);
+        // #1212: If we are near EOF and cannot scroll further to satisfy scrolloff,
+        // we must NOT scroll if we are already at maxTop.
+        // But if we are NOT at maxTop, we should scroll as much as possible.
+        if (newTop !== topLine) {
+           // #1239: Smooth scroll transition for scan-hold
+           const sh = window._scanHold;
+           if (window.__sixScanHoldHeld && window.__sixScanHoldHeld.size > 0 && sh && sh.mode === 'caret') {
+               const currentSt = (editor.scrollTop||0);
+               const targetSt = (newTop-1)*LINE_HEIGHT;
+               const diff = targetSt - currentSt;
+               
+               // Switch to scroll mode for smooth continuous scrolling
+               if (window._scanHoldTriggerScroll) {
+                   // #1250: Prevent reverse scroll if direction contradicts held key
+                   const dir = (diff > 0) ? 1 : -1;
+                   let intendedDir = 0;
+                   if (sh.held.has('KeyJ') || sh.held.has('ArrowDown')) intendedDir = 1;
+                   else if (sh.held.has('KeyK') || sh.held.has('ArrowUp')) intendedDir = -1;
+                   
+                   if (intendedDir !== 0 && dir !== intendedDir) {
+                       // Contradiction: do not switch to continuous scroll mode.
+                   } else if (sh && sh.stuckAt && (Date.now() - sh.stuckAt < 300) && Math.abs((editor.scrollTop||0) - sh.stuckPos) < 2) {
+                       // #1252: Stuck, ignore continuous scroll request to prevent thrashing
+                   } else {
+                       // #1243: Cancel any pending scroll animation to prevent conflict
+                       try{ if (__six_scroll_anim) { cancelAnimationFrame(__six_scroll_anim); __six_scroll_anim = null; } }catch{}
+
+                       const idealOffset = vis - scrolloff - 1; // DOWN: offset = vis - scrolloff - 1
+                       window._scanHoldTriggerScroll(dir, idealOffset);
+                       return;
+                   }
+               }
+           } else {
+               _setEditorScrollTop((newTop-1)*LINE_HEIGHT, {}); scrolled = true;
+           }
+        }
       }
     }
+    // スクロールが発生しなかった場合でも、force指定時（キャレット移動時）は描画更新を保証 (#1206)
+    if (!scrolled && force) {
+       try{ _repositionCaret(); updateGutter(); }catch{}
+    }
+
     topLine = _topLine();
   // 末尾ページの先頭行（maxTop）は「全行数 - 可視行数 + 1」だが、EOF の下に 1 行分の余白を許容
     const maxTop = maxTopWithPad;
     if (topLine > maxTop){
-      editor.scrollTop = (maxTop-1)*LINE_HEIGHT;
+      _setEditorScrollTop((maxTop-1)*LINE_HEIGHT, {});
     }
     // スクロール位置を行境界にスナップして、丸め誤差での1行ズレを防止。
     // EOFジャンプ（preferEOFPad）直後は切り上げよりも切り捨て優先で半行余白を排除 (#424/#429)
     try{
+      // アニメーションスクロール中はスナップによるキャンセルを回避 (#1200)
+      if (__six_scroll_anim) return;
+
       const stCur = (editor.scrollTop||0);
       const atEOFJump = !!(opts && opts.preferEOFPad && caretLine1 === linesTotal);
       // #472 scrolloff=99999（常時センタリング）環境で Math.round により 0.5 行上方へズレ、背景グラデとの不一致が発生。
       // text/gutter/caret は floor ベース remainder へ統一済みなので、ここでも常に floor へ統一して余剰を排除。
       // （EOF ジャンプ特別扱いは不要になったが、将来の拡張のためフラグは保持）
       const snapped = Math.floor(stCur/LINE_HEIGHT)*LINE_HEIGHT;
-      if (Math.abs(snapped - stCur) > 0.01){ editor.scrollTop = snapped; }
+      if (Math.abs(snapped - stCur) > 0.01){ _setEditorScrollTop(snapped, { immediate:true }); }
       // 念のため rAF で再度 floor スナップ（レイアウト遅延対策）。EOF だけでなく常時行うが、差分が出なければ軽微。
       if (window.requestAnimationFrame){
         requestAnimationFrame(()=>{
           try{
             // Skip rAF snapping during IME composition to avoid reflows
             if (window && window._imeComposing===true) return;
-            const st1 = (editor.scrollTop||0);
-            const flo1 = Math.floor(st1/LINE_HEIGHT)*LINE_HEIGHT;
-            if (Math.abs(flo1 - st1) > 0.01){ editor.scrollTop = flo1; }
+            
+            // アニメーション中はスナップ処理のみスキップし、描画更新は行う (#1204)
+            if (!__six_scroll_anim) {
+              const st1 = (editor.scrollTop||0);
+              const flo1 = Math.floor(st1/LINE_HEIGHT)*LINE_HEIGHT;
+              if (Math.abs(flo1 - st1) > 0.01){ _setEditorScrollTop(flo1, { immediate:true }); }
+            }
             _repositionCaret(); updateGutter();
           }catch{}
         });
@@ -5634,7 +5858,7 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
         if (snappedY < 0) snappedY = 0;
       }
 
-      try{ if (snappedY !== st) editor.scrollTop = snappedY; }catch{}
+      try{ if (snappedY !== st) _setEditorScrollTop(snappedY, { immediate:true }); }catch{}
       // Persist and render
       try{ const b = currentBuffer(); if (b){ b.viewScrollTop = (editor.scrollTop||0)|0; b.viewRow = caretRow|0; b.viewCol = caretCol|0; } }catch{}
       _repositionCaret(); updateGutter();
@@ -5675,7 +5899,7 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
         try{
           if (!(opts && opts.forImmediateSwitch)){
             if (!fromVis){ try{ editor.setSelectionRange(selS, selE); }catch{} }
-            caretRow = cr; caretCol = cc; editor.scrollTop = st;
+            caretRow = cr; caretCol = cc; try{ _setEditorScrollTop(st, { immediate:true }); }catch{};
             _repositionCaret(); updateGutter();
           }
         }catch{}
@@ -5702,7 +5926,7 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
   function _keepViewportNoop(preSt){
     try{
       const st = Number.isFinite(preSt) ? (preSt|0) : ((editor && editor.scrollTop)|0);
-      const apply = ()=>{ try{ editor.scrollTop = st; _repositionCaret(); updateGutter(); }catch{} };
+      const apply = ()=>{ try{ try{ _setEditorScrollTop(st, { immediate:true }); }catch{}; _repositionCaret(); updateGutter(); }catch{} };
       apply();
       if (window.requestAnimationFrame){
         requestAnimationFrame(()=>{ apply(); requestAnimationFrame(()=>apply()); });
@@ -5717,18 +5941,29 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
   /*********************************************************
    * updateGutter
    *********************************************************/
-  function updateGutter(){
+  function updateGutter(opts){
     // IME未確定中はガター更新を停止（高さ計算・DOM更新・transformによる再レイアウトを抑止）
     try{ if (window._imeComposing===true){ return; } }catch{}
     const T = (window.THEME || {});
+    // #1189: inactive mode for scroll-hold (render all line numbers as inactive)
+    const inactiveMode = !!(opts && opts.inactive);
     // Ensure scrollTop is on an exact line boundary before computing gutter rows
     try{
-      const st = (editor.scrollTop||0);
-      const snapped = Math.round(st/LINE_HEIGHT)*LINE_HEIGHT;
-      let _changed = false;
-      if (Math.abs(snapped - st) > 0.25){ editor.scrollTop = snapped; _changed = true; }
-      // If snapping just adjusted scrollTop AFTER a prior _repositionCaret, recompute overlays now to avoid stripe/caret remainder mismatch (#423)
-      if (_changed){ try{ _repositionCaret(); }catch{} }
+      // アニメーションスクロール中はスナップによるキャンセルを回避 (#1200)
+      // #1217: scan-hold スクロール中もスナップを回避 (1px単位のスクロールを妨害しないため)
+      const noSnap = (opts && opts.noSnap) || (window && window.__sixScanHoldScrollActive);
+      if (!__six_scroll_anim && !noSnap){
+        const st = (editor.scrollTop||0);
+        // #1262: Disable snapping at EOF in updateGutter too
+        const maxScroll = editor.scrollHeight - editor.clientHeight;
+        if (maxScroll - st > 1.5) {
+            const snapped = Math.round(st/LINE_HEIGHT)*LINE_HEIGHT;
+            let _changed = false;
+            if (Math.abs(snapped - st) > 0.25){ try{ _setEditorScrollTop(snapped, { immediate:true }); }catch{} _changed = true; }
+            // If snapping just adjusted scrollTop AFTER a prior _repositionCaret, recompute overlays now to avoid stripe/caret remainder mismatch (#423)
+            if (_changed){ try{ _repositionCaret(); }catch{} }
+        }
+      }
     }catch{}
     const vis = _visibleLinesExact();
     const top = _topLine();
@@ -5737,11 +5972,16 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
     const end = Math.min(total, top + vis - 1);
     const rows = [];
     for (let ln=top; ln<=end; ln++){
-      const active = ln === active1;
+      // #1235: Keep active gutter gradient even during scroll (inactiveMode only affects logic if needed, but here we want visual persistence)
+      // Previously inactiveMode forced active=false. Now we allow active=true if it matches caretRow.
+      const active = (ln === active1);
       rows.push({ ln, active });
     }
     const drawn = end - top + 1;
-    for (let i=0;i<Math.max(0, vis-drawn); i++) rows.push({ ln:null, eof:true });
+    // #1260: Fail-safe cap for EOF lines to prevent freeze if calculations go wild
+    const eofCount = Math.max(0, vis-drawn);
+    const safeEofCount = Math.min(eofCount, 200);
+    for (let i=0;i<safeEofCount; i++) rows.push({ ln:null, eof:true });
 
     // minimal diff update
     const children = Array.from(gutter.children);
@@ -5777,7 +6017,8 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
           // Inactive rows: transparent to let container's tiled background show (prevents flicker)
           el.style.background = '';
         }
-        el.style.color = r.active ? 'var(--activeLineNumberColor, yellow)' : 'var(--gutterNumberColor, yellow)';
+        // #1228: Abolish active line number color (always use gutterNumberColor) to reduce painting
+        el.style.color = 'var(--gutterNumberColor, yellow)';
       }
     }
     // remove extra children
@@ -5904,14 +6145,14 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
       const vis=_visibleLinesExact();
       const linesTotal=_totalLines();
       const baseMaxTop=Math.max(1, linesTotal - vis + 1);
-      const eofPad=6; // 固定 (#865)
+      const eofPad=5; // 固定 (#865) -> 5 (#1258)
       const maxTopWithPad=Math.min(linesTotal, baseMaxTop + eofPad);
       const curTop=_topLine();
       if (curTop >= maxTopWithPad) return false;
       const nextTop=Math.min(maxTopWithPad, curTop + 1);
-      editor.scrollTop=(nextTop-1)*LINE_HEIGHT;
+      try{ _setEditorScrollTop((nextTop-1)*LINE_HEIGHT, { immediate:true }); }catch{}
       // 行グリッドへスナップ
-      try{ const st=editor.scrollTop||0; const snap=Math.floor(st/LINE_HEIGHT)*LINE_HEIGHT; if (Math.abs(snap-st)>0.01){ editor.scrollTop=snap; } }catch{}
+      try{ const st=(editor.scrollTop||0); const snap=Math.floor(st/LINE_HEIGHT)*LINE_HEIGHT; if (Math.abs(snap-st)>0.01){ try{ _setEditorScrollTop(snap, { immediate:true }); }catch{} } }catch{}
       _repositionCaret(); updateGutter();
       try{ _debugPush({ t:Date.now(), type:'motion', mode:_mode, kind:kind||'eof-pad-scroll', top:nextTop, maxTopWithPad }); }catch{}
       return true;
@@ -6373,7 +6614,7 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
               // to the overlay caret. Setting selection can auto-scroll the textarea.
               const stPrev = (editor.scrollTop||0);
               _syncNativeSelectionToCaret();
-              try{ editor.scrollTop = stPrev; }catch{}
+              try{ _setEditorScrollTop(stPrev, { immediate:true }); }catch{}
               // Do NOT scroll here even if scrolloff would normally re-center.
               // The match is visible thanks to incremental preview; pause once.
               _scrolloffPaused = true; _scrolloffPauseAnchorR = rc.r; _scrolloffPauseAnchorC = rc.c;
@@ -6437,11 +6678,11 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
           try{
             const stKeep = (editor && typeof editor.scrollTop === 'number') ? editor.scrollTop : 0;
             editor.value = textForPreview; // show live text for correct measurement
-            try{ editor.scrollTop = stKeep; }catch{}
+            try{ _setEditorScrollTop(stKeep, { immediate:true }); }catch{}
             const rc = _rcFromOffset(start);
             caretRow = rc.r; caretCol = rc.c;
             // Sync native selection to overlay caret, but immediately restore scrollTop
-            try{ const stSel = editor.scrollTop; _syncNativeSelectionToCaret(); editor.scrollTop = stSel; }catch{}
+            try{ const stSel = editor.scrollTop; _syncNativeSelectionToCaret(); try{ _setEditorScrollTop(stSel, { immediate:true }); }catch{} }catch{}
             // ensureScrolloff() is suppressed during modal by caller, but safe to call
             ensureScrolloff();
             _repositionCaret(); updateGutter();
@@ -6556,7 +6797,7 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
                 else { doReplace=false; }
               } finally {
                 _suppressScrollDuringModal = false;
-                try{ if (editor) editor.scrollTop = stBeforeModal; }catch{}
+                try{ if (editor) try{ _setEditorScrollTop(stBeforeModal, { immediate:true }); }catch{} }catch{}
               }
             }
             if (doReplace){
@@ -6694,7 +6935,7 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
                 else if (ch==='n'){ doReplace=false; }
                 else { doReplace=false; }
               } finally {
-                _suppressScrollDuringModal = false; try{ if (editor) editor.scrollTop = stBeforeModal; }catch{}
+                _suppressScrollDuringModal = false; try{ if (editor) try{ _setEditorScrollTop(stBeforeModal, { immediate:true }); }catch{} }catch{}
               }
             }
             if (doReplace){
@@ -6796,7 +7037,7 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
                 else { doReplace=false; }
               } finally {
                 _suppressScrollDuringModal = false;
-                try{ if (editor) editor.scrollTop = stBeforeModalLine; }catch{}
+                try{ if (editor) try{ _setEditorScrollTop(stBeforeModalLine, { immediate:true }); }catch{} }catch{}
               }
             }
             if (doReplace){
@@ -6831,11 +7072,11 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
               // Keep native selection in sync without moving viewport
               const stKeep = (editor && typeof editor.scrollTop === 'number') ? editor.scrollTop : 0;
               _syncNativeSelectionToCaret();
-              try{ editor.scrollTop = stKeep; }catch{}
+              try{ _setEditorScrollTop(stKeep, { immediate:true }); }catch{}
               // Snap scrollTop to the nearest line boundary to avoid half-line state (#307)
               try{
                 const snapped = Math.round((editor.scrollTop||0)/LINE_HEIGHT)*LINE_HEIGHT;
-                if (Math.abs(snapped - (editor.scrollTop||0)) > 0.1){ editor.scrollTop = snapped; }
+                if (Math.abs(snapped - (editor.scrollTop||0)) > 0.1){ try{ _setEditorScrollTop(snapped, { immediate:true }); }catch{} }
               }catch{}
             }catch{}
             _repositionCaret(); updateGutter(); _renderHlMatchesVisible(); toast('replaced: ' + replaced, 1500);
@@ -6915,7 +7156,7 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
       // 行ジャンプ直後に他の描画でスクロールが揺れるのを抑止
       const targetTop = editor.scrollTop;
       _scrollGuardUntil = Date.now() + 900;
-      const reinforce = ()=>{ try{ editor.scrollTop = targetTop; _repositionCaret(); updateGutter(); }catch{} };
+      const reinforce = ()=>{ try{ try{ _setEditorScrollTop(targetTop, { immediate:true }); }catch{} _repositionCaret(); updateGutter(); }catch{} };
       reinforce();
       try{ if (window.requestAnimationFrame){ requestAnimationFrame(()=>{ if (window && window._imeComposing===true) return; reinforce(); requestAnimationFrame(()=>{ if (window && window._imeComposing===true) return; reinforce(); }); }); } }catch{}
       try{ setTimeout(reinforce, 140); }catch{}
@@ -7397,7 +7638,7 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
                 try{ _selGuardUntil = Date.now() + 800; }catch{}
                 let stKeep=0, slKeep=0; try{ stKeep=editor.scrollTop|0; slKeep=editor.scrollLeft|0; }catch{}
                 editor.value = textDataN;
-                try{ editor.scrollTop = stKeep; editor.scrollLeft = slKeep; }catch{}
+                try{ _setEditorScrollTop(stKeep, { immediate:true }); editor.scrollLeft = slKeep; }catch{}
                 try{ _syncNativeSelectionToCaret(); }catch{}
               }
               b.text=textDataN; b.savedText=textDataN; b._savedTick=(b._changeTick|0); b.modified=false;
@@ -7431,7 +7672,7 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
           try{ caretRow = Math.max(0, Math.min(_totalLines()-1, _w_cr|0)); }catch{ caretRow = (_w_cr|0); }
           try{ caretCol = Math.max(0, _w_cc|0); }catch{ caretCol = (_w_cc|0); }
           try{ _syncNativeSelectionToCaret(); }catch{}
-          try{ editor.scrollTop = _w_st; }catch{}
+          try{ try{ _setEditorScrollTop(_w_st, { immediate:true }); }catch{} }catch{}
           try{ editor.scrollLeft = _w_sl; }catch{}
           _repositionCaret(); updateGutter(); _renderHlMatchesVisible();
           // Reinforce after a frame in case a deferred select event fires post-value assignment
@@ -7452,12 +7693,12 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
         _centerScrolloffOnce = false; // G 相当のセンタリングを抑止
         _clearPending && _clearPending();
         _setMode('NORMAL'); toast('Nothing has been changed.', 1500);
-        const restore = ()=>{
+            const restore = ()=>{
           try{
             // selection を先に戻し、後で scrollTop を上書き（選択復元での自動スクロールを打ち消す）
             try{ if (typeof selS === 'number' && typeof selE === 'number'){ editor.setSelectionRange(selS, selE); } }catch{}
             caretRow = cr; caretCol = cc;
-            editor.scrollTop = st;
+            try{ _setEditorScrollTop(st, { immediate:true }); }catch{}
             _repositionCaret(); updateGutter();
           }catch{}
         };
@@ -7502,7 +7743,7 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
             try{ _selGuardUntil = Date.now() + 800; }catch{}
             let stKeep=0, slKeep=0; try{ stKeep=editor.scrollTop|0; slKeep=editor.scrollLeft|0; }catch{}
             editor.value = _txtForSave3;
-            try{ editor.scrollTop = stKeep; editor.scrollLeft = slKeep; }catch{}
+            try{ _setEditorScrollTop(stKeep, { immediate:true }); editor.scrollLeft = slKeep; }catch{}
             // keep overlay caret authoritative and resync native selection from it
             try{ _syncNativeSelectionToCaret(); }catch{}
             b.text = _txtForSave3; b.savedText = _txtForSave3; b._savedTick = (b._changeTick|0); b.modified = false;
@@ -7535,7 +7776,7 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
                 const t = (typeof b.savedText === 'string') ? b.savedText : (b.text||'');
                 editor.value = String(t||'');
                 // caret/scroll を初期化
-                caretRow = 0; caretCol = 0; editor.scrollTop = 0;
+                caretRow = 0; caretCol = 0; try{ _setEditorScrollTop(0, { immediate:true }); }catch{}
                 _centerScrolloffOnce = true; ensureScrolloff({centerOnce:true});
                 try{ _repositionCaret(); updateGutter(); }catch{}
                 // バッファ状態を saved に戻す
@@ -8816,12 +9057,12 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
           try{ if (_modalButtons) _modalButtons.style.display = prevBtnsDisp; }catch{}
           try{ if (_modalBox) _modalBox.style.background = prevBoxBg; }catch{}
           try{ if (_modalDetail) _modalDetail.style.padding = prevDetailPad; }catch{}
-          try{ if (typeof stKeep === 'number' && editor) editor.scrollTop = stKeep; }catch{}
+          try{ if (typeof stKeep === 'number' && editor) try{ _setEditorScrollTop(stKeep, { immediate:true }); }catch{} }catch{}
           try{ _suppressScrollDuringModal = false; }catch{}
           try{
             // absorb stray keys and reinforce scrollTop to avoid any jump
             _kbdGuardUntil = Date.now() + 350; _clearPending();
-            const reinforce = ()=>{ try{ if (editor && typeof stKeep==='number') editor.scrollTop = stKeep; }catch{} };
+            const reinforce = ()=>{ try{ if (editor && typeof stKeep==='number') try{ _setEditorScrollTop(stKeep, { immediate:true }); }catch{} }catch{} };
             reinforce();
             if (window.requestAnimationFrame){
               requestAnimationFrame(()=>{ reinforce(); requestAnimationFrame(()=>reinforce()); });
@@ -8875,9 +9116,9 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
         document.addEventListener('keydown', onKey, true);
         btnClose.addEventListener('click', ()=> cleanup(), { once:true });
         _showModal();
-        try{ editor && (editor.scrollTop = stKeep); }catch{}
-        try{
-          const reinforce = ()=>{ try{ if (editor) editor.scrollTop = stKeep; }catch{} };
+        try{ if (editor){ try{ _setEditorScrollTop(stKeep, { immediate:true }); }catch{} } }catch{}
+          try{
+          const reinforce = ()=>{ try{ if (editor) try{ _setEditorScrollTop(stKeep, { immediate:true }); }catch{} }catch{} };
           reinforce();
           if (window.requestAnimationFrame){
             requestAnimationFrame(()=>{ reinforce(); requestAnimationFrame(()=>reinforce()); });
@@ -9132,29 +9373,58 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
     try{ if (_scrollRAF) cancelAnimationFrame(_scrollRAF); }catch{}
     _scrollRAF = requestAnimationFrame(()=>{
       try{
-        if (Date.now() >= _zoomGuardUntil){
+        // #1225: Skip scroll snapping during scan-hold smooth scroll to prevent fighting 1px updates
+        const sh = (window && window.__sixScanHoldScrollActive);
+        if (Date.now() >= _zoomGuardUntil && !sh){
           const st = (editor.scrollTop||0);
-          const snapped = Math.round(st/LINE_HEIGHT)*LINE_HEIGHT;
-          if (Math.abs(snapped - st) > 0.25){ editor.scrollTop = snapped; }
+          // #1259: Disable snapping at EOF to prevent fighting with browser clamping
+          // when viewport height is not a multiple of line height.
+          const maxScroll = editor.scrollHeight - editor.clientHeight;
+          if (maxScroll - st > 1.5) {
+            const snapped = Math.round(st/LINE_HEIGHT)*LINE_HEIGHT;
+            if (Math.abs(snapped - st) > 0.25){ editor.scrollTop = snapped; }
+          }
         }
-      }catch{}
-      // キーボード操作直後は塗りつぶしcaretを強制維持
-      if (Date.now() < _cursorForceHiddenUntil){ _hideCursor(); }
-      else {
-        // 直近の caret 移動でも塗りつぶしcaret（従来の短時間ルール）
-        if ((Date.now() - _lastCaretMovedAt) < 120){ _hideCursor(); }
-      }
-        _repositionCaret(); updateGutter(); _renderHlMatchesVisible(); _incPrevRefresh(); _renderVisSelOverlay(); try{ _renderLinkHover(); }catch{}
-  _updatePosInfo();
-      // Persist current buffer's view state (scroll and caret) on every scroll frame
+      }catch(e){ try{ console.error('[scroll-snap] error:', e); }catch{} }
+      
       try{
-        const b = currentBuffer();
-        if (b){
-          b.viewScrollTop = (editor.scrollTop||0)|0;
-          b.viewRow = caretRow|0;
-          b.viewCol = caretCol|0;
+        // キーボード操作直後は塗りつぶしcaretを強制維持
+        if (Date.now() < _cursorForceHiddenUntil){ _hideCursor(); }
+        else {
+          // 直近の caret 移動でも塗りつぶしcaret（従来の短時間ルール）
+          if ((Date.now() - _lastCaretMovedAt) < 120){ _hideCursor(); }
         }
-      }catch{}
+        
+        // #1233: Optimize rendering during continuous scroll
+        const isScrolling = document.body.classList.contains('is-scrolling');
+        const sh = (window && window.__sixScanHoldScrollActive);
+        
+        if (isScrolling) {
+            _repositionCaret({ skipCaret: true });
+            // Skip heavy overlays during fast scroll
+        } else {
+            _repositionCaret(); 
+            _renderHlMatchesVisible(); _incPrevRefresh(); _renderVisSelOverlay(); try{ _renderLinkHover(); }catch{}
+        }
+        
+        // Ensure gutter is updated (inactive during scan-hold)
+        // #1262: Pass noSnap=true if we are at EOF to prevent updateGutter from snapping
+        const st = (editor.scrollTop||0);
+        const maxScroll = editor.scrollHeight - editor.clientHeight;
+        const atEof = (maxScroll - st <= 1.5);
+        updateGutter({ inactive: sh, noSnap: (sh || atEof) });
+
+        _updatePosInfo();
+        // Persist current buffer's view state (scroll and caret) on every scroll frame
+        try{
+          const b = currentBuffer();
+          if (b){
+            b.viewScrollTop = (editor.scrollTop||0)|0;
+            b.viewRow = caretRow|0;
+            b.viewCol = caretCol|0;
+          }
+        }catch{}
+      }catch(err){ try{ console.error('[scroll-render] error:', err); }catch{} }
     });
   };
   viewport.addEventListener('scroll', scheduleScrollRender);
@@ -9503,6 +9773,13 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
   editor.addEventListener('keydown', (e)=>{
       // Short guard: absorb any stray keydown right after modal close
       if (Date.now() < _kbdGuardUntil){ try{ e.preventDefault(); e.stopPropagation(); }catch{} return; }
+      // If a scan-hold is actively handling this physical key, suppress native handlers
+      try{ 
+        if (e && e.code){ 
+          const heldSet = (window && window.__sixScanHoldHeld);
+          if (heldSet && heldSet.has && heldSet.has(e.code)){ try{ e.preventDefault(); e.stopPropagation(); }catch{} return; }
+        }
+      }catch{}
     // Globally consume Ctrl+U to avoid Edge opening view-source window (#447)
     if (e && e.ctrlKey && !e.altKey && !e.metaKey && (e.key==='u' || e.key==='U')){ try{ e.preventDefault(); e.stopPropagation(); }catch{} return; }
     _debugPush({ t:Date.now(), type:'keydown', mode:_mode, key:e.key, code:e.code, keyCode:e.keyCode, which:e.which, ctrl:e.ctrlKey, alt:e.altKey, meta:e.metaKey, isComp:_imeComposing });
@@ -9684,6 +9961,47 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
               if (s === t){ _pushUndoSnapshot('insert-seg'); _insertSegDirty = false; }
             }
           }catch{}
+
+          // PageUp/PageDown smooth scrolling in INSERT mode (#1264)
+          if (e.key==='PageUp' || e.key==='PageDown'){
+            e.preventDefault(); e.stopPropagation();
+            const isDown = (e.key==='PageDown');
+            const vis = _visibleLinesExact();
+            const delta = isDown ? vis : -vis;
+            const lines = _splitLines();
+            const newRow = Math.max(0, Math.min(lines.length-1, caretRow + delta));
+            
+            _ensureDesired();
+            const line = lines[newRow] || '';
+            const newCol = _colForVisual(line, _desiredVisualCol|0);
+            
+            caretRow = newRow;
+            caretCol = newCol;
+            _suppressDesiredOnce = true;
+            _setCaret(newRow, newCol, { suppressDesired: true });
+            
+            // Sync native selection without scrolling (restore scrollTop if browser jumps)
+            try{
+               const hold = editor.scrollTop;
+               _syncNativeSelectionToCaret();
+               if (Math.abs(editor.scrollTop - hold) > 1) editor.scrollTop = hold;
+            }catch{}
+
+            // Calculate target scroll position
+            const currentTop = (editor.scrollTop||0);
+            const scrollDelta = delta * LINE_HEIGHT;
+            let targetTop = currentTop + scrollDelta;
+            const linesTotal = lines.length;
+            const baseMaxTop = Math.max(1, linesTotal - vis + 1);
+            const eofPad = 5;
+            const maxTopWithPad = Math.min(linesTotal, baseMaxTop + eofPad);
+            targetTop = Math.max(0, Math.min((maxTopWithPad-1)*LINE_HEIGHT, targetTop));
+            
+            _setEditorScrollTop(targetTop, { forceAnimate: true });
+            _repositionCaret(); updateGutter();
+            return;
+          }
+
           // #603: ArrowDown で末尾LF欠落時に仮改行を挿入する旧処理(#602)を撤廃。
           // 最終行末尾での下方向移動は何も起こさず、そのまま位置維持。
           // #635/#636: 改行文字上 (offset===length-1) からの ArrowDown で仮想最終空行へ移動させる。
@@ -9948,7 +10266,33 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
           }
         }
         // Accept Process-coded j/k when composing (non-strict): map by code
-        if (e.key==='j' || (e.key==='Process' && e.code==='KeyJ')){ e.preventDefault(); try{ _debugPush({ t:Date.now(), type:'motion-exec', mode:_mode, key:'j', code:e.code, via:(e.key==='Process'?'Process/KeyJ':'j') }); }catch{} const n=_consumeCount(); if (_visualLinewise){ _visualLinewiseMoveLines(n); } else { moveAndUpdate(()=>_moveCaretLines(n)); } return; }
+        if (e.key==='j' || (e.key==='Process' && e.code==='KeyJ')){
+          e.preventDefault();
+          try{ _debugPush({ t:Date.now(), type:'motion-exec', mode:_mode, key:'j', code:e.code, via:(e.key==='Process'?'Process/KeyJ':'j') }); }catch{}
+          const n=_consumeCount();
+          if (_visualLinewise){
+            _visualLinewiseMoveLines(n);
+          } else {
+            moveAndUpdate(()=>_moveCaretLines(n));
+            // If scrolloff is set to center (99999) and user is holding the key (auto-repeat),
+            // animate viewport to keep caret centered during repeat.
+            try{
+              if ((scrolloff||0) >= 99999 && !!e.repeat){
+                const linesTotal = _totalLines();
+                const vis = _visibleLinesExact();
+                const baseMaxTop = Math.max(1, linesTotal - vis + 1);
+                const eofPad = 5;
+                const maxTopWithPad = Math.min(linesTotal, baseMaxTop + eofPad);
+                const caretLine1 = (caretRow|0) + 1;
+                let targetTop = Math.max(1, caretLine1 - Math.floor((vis||1)/2));
+                if (caretLine1 === linesTotal) targetTop = Math.min(targetTop, maxTopWithPad);
+                targetTop = Math.min(targetTop, maxTopWithPad);
+                _setEditorScrollTop((targetTop-1)*LINE_HEIGHT, { forceAnimate:true });
+              }
+            }catch{}
+          }
+          return;
+        }
         if (e.key==='k' || (e.key==='Process' && e.code==='KeyK')){ e.preventDefault(); try{ _debugPush({ t:Date.now(), type:'motion-exec', mode:_mode, key:'k', code:e.code, via:(e.key==='Process'?'Process/KeyK':'k') }); }catch{} const n=_consumeCount(); if (_visualLinewise){ _visualLinewiseMoveLines(-n); } else { moveAndUpdate(()=>_moveCaretLines(-n)); } return; }
   // Guard against anomalous IME mapping (#523): accept 'h' when code is KeyH or Process/KeyH; always accept ArrowLeft
   if ((e.key==='h' && e.code==='KeyH' && (!_optStrictNormalIME || !_imeComposing)) || (e.key==='Process' && e.code==='KeyH' && (!_optStrictNormalIME || !_imeComposing)) || e.key==='ArrowLeft'){
@@ -10853,8 +11197,78 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
         }
         return;
       }
-  if (e.key==='j' || e.key==='ArrowDown'){ e.preventDefault(); try{ _debugPush({ t:Date.now(), type:'motion-exec', mode:_mode, key:e.key, code:e.code, via:(e.key==='j'?'j':'ArrowDown') }); }catch{} const n=_consumeCount(); _moveCaretLines(n); try{ _flagCaretMotion(); }catch{} _ensureAfterMotion(); _repositionCaret(); updateGutter(); return; }
-  if (e.key==='k' || e.key==='ArrowUp'){ e.preventDefault(); try{ _debugPush({ t:Date.now(), type:'motion-exec', mode:_mode, key:e.key, code:e.code, via:(e.key==='k'?'k':'ArrowUp') }); }catch{} const n=_consumeCount(); _moveCaretLines(-n); try{ _flagCaretMotion(); }catch{} _ensureAfterMotion(); _repositionCaret(); updateGutter(); return; }
+  // PageUp/PageDown smooth scrolling (#1263)
+  if (e.key==='PageUp' || e.key==='PageDown'){
+    e.preventDefault();
+    const isDown = (e.key==='PageDown');
+    const vis = _visibleLinesExact();
+    const delta = isDown ? vis : -vis;
+    // Move caret manually to avoid ensureScrolloff snapping
+    const lines = _splitLines();
+    const newRow = Math.max(0, Math.min(lines.length-1, caretRow + delta));
+    _ensureDesired();
+    const line = lines[newRow] || '';
+    const newCol = _colForVisual(line, _desiredVisualCol|0);
+    caretRow = newRow;
+    _suppressDesiredOnce = true;
+    _setCaret(newRow, newCol, { suppressDesired: true });
+    // Calculate target scroll position
+    const currentTop = (editor.scrollTop||0);
+    const scrollDelta = delta * LINE_HEIGHT;
+    let targetTop = currentTop + scrollDelta;
+    // Clamp targetTop
+    const linesTotal = lines.length;
+    const baseMaxTop = Math.max(1, linesTotal - vis + 1);
+    const eofPad = 5;
+    const maxTopWithPad = Math.min(linesTotal, baseMaxTop + eofPad);
+    targetTop = Math.max(0, Math.min((maxTopWithPad-1)*LINE_HEIGHT, targetTop));
+    _setEditorScrollTop(targetTop, { forceAnimate: true });
+    _repositionCaret(); updateGutter();
+    return;
+  }
+  if (e.key==='j' || e.key==='ArrowDown'){
+    // #1253: Suppress default handling if scan-hold is active
+    try{ const h=window.__sixScanHoldHeld; if(h && (h.has('KeyJ') || h.has('ArrowDown'))){ e.preventDefault(); return; } }catch{}
+    e.preventDefault(); try{ _debugPush({ t:Date.now(), type:'motion-exec', mode:_mode, key:e.key, code:e.code, via:(e.key==='j'?'j':'ArrowDown') }); }catch{}
+    const n=_consumeCount(); _moveCaretLines(n);
+    try{ _flagCaretMotion(); }catch{}
+    // If center-scroll mode and auto-repeat, smoothly follow caret during repeat
+    try{
+      if ((scrolloff||0) >= 99999 && !!e.repeat){
+        const linesTotal = _totalLines();
+        const vis = _visibleLinesExact();
+        const baseMaxTop = Math.max(1, linesTotal - vis + 1);
+        const eofPad = 5; const maxTopWithPad = Math.min(linesTotal, baseMaxTop + eofPad);
+        const caretLine1 = (caretRow|0) + 1;
+        let targetTop = Math.max(1, caretLine1 - Math.floor((vis||1)/2));
+        if (caretLine1 === linesTotal) targetTop = Math.min(targetTop, maxTopWithPad);
+        targetTop = Math.min(targetTop, maxTopWithPad);
+        _setEditorScrollTop((targetTop-1)*LINE_HEIGHT, { forceAnimate:true });
+      }
+    }catch{}
+    _ensureAfterMotion(); _repositionCaret(); updateGutter(); return;
+  }
+  if (e.key==='k' || e.key==='ArrowUp'){
+    // #1253: Suppress default handling if scan-hold is active
+    try{ const h=window.__sixScanHoldHeld; if(h && (h.has('KeyK') || h.has('ArrowUp'))){ e.preventDefault(); return; } }catch{}
+    e.preventDefault(); try{ _debugPush({ t:Date.now(), type:'motion-exec', mode:_mode, key:e.key, code:e.code, via:(e.key==='k'?'k':'ArrowUp') }); }catch{}
+    const n=_consumeCount(); _moveCaretLines(-n);
+    try{ _flagCaretMotion(); }catch{}
+    try{
+      if ((scrolloff||0) >= 99999 && !!e.repeat){
+        const linesTotal = _totalLines();
+        const vis = _visibleLinesExact();
+        const baseMaxTop = Math.max(1, linesTotal - vis + 1);
+        const eofPad = 5; const maxTopWithPad = Math.min(linesTotal, baseMaxTop + eofPad);
+        const caretLine1 = (caretRow|0) + 1;
+        let targetTop = Math.max(1, caretLine1 - Math.floor((vis||1)/2));
+        if (caretLine1 === linesTotal) targetTop = Math.min(targetTop, maxTopWithPad);
+        targetTop = Math.min(targetTop, maxTopWithPad);
+        _setEditorScrollTop((targetTop-1)*LINE_HEIGHT, { forceAnimate:true });
+      }
+    }catch{}
+    _ensureAfterMotion(); _repositionCaret(); updateGutter(); return;
+  }
   // Strict IME mode: while composing in NORMAL, ignore letter motions j/k/h/l (arrows still work)
   if (_optStrictNormalIME && _imeComposing){
     if (e.key==='j' || e.key==='k' || e.key==='h' || e.key==='l'){
@@ -11272,11 +11686,518 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
       const isEditKey = ['Enter','Tab','Backspace','Delete','Insert'].includes(e.key);
       if (isPrintable || isEditKey){ e.preventDefault(); return; }
     });
+      // #1189: j/k/↓/↑ motion with scrolloff awareness:
+      // Decision: move caret OR scroll content (decided by scrolloff at keydown).
+      // When scrolling content: render gutter inactive during hold, active on keyup.
+      try{
+        const _scanHold = {
+          codes: new Set(['KeyJ','KeyK','ArrowUp','ArrowDown']),
+          held: new Set(), // codes currently held
+          raf: null,
+          lastTs: 0,
+          speedPxPerMs: 0.5, // continuous scroll speed: 0.5px/ms = 30px/60ms
+          // decision state (set at keydown)
+          mode: null, // 'caret' | 'scroll'
+          // scroll mode state
+          scrollDir: 0, // 1=down, -1=up
+          scrollActive: false,
+          scrollTargetPx: 0, // remaining pixels to scroll for initial move
+          // caret mode state
+          caretDir: 0, // 1=down, -1=up
+          caretLastMove: 0, // timestamp of last caret move
+          caretIntervalMs: 30, // caret move interval (30ms ≈ 33 moves/sec, typical key repeat)
+          // promotion delay
+          promotionDelayMs: 500, // 0.5s delay before starting continuous mode
+          promotionTimer: null,
+          firstKeydownTs: 0,
+          // #1252: Stuck detection
+          stuckAt: 0,
+          stuckPos: -1
+        };
+        // Expose for ensureScrolloff
+        window._scanHold = _scanHold;
+        window._scanHoldTriggerScroll = (dir, idealOffset) => {
+            if (!_scanHold) return;
+            if (_scanHold.mode === 'scroll') return; // already scrolling
+
+            // Revert caret to safe position (undo the move that caused violation)
+            const curTopLine = Math.round((editor.scrollTop||0)/LINE_HEIGHT) + 1;
+            const safeRow = (curTopLine - 1) + idealOffset;
+            caretRow = Math.max(0, Math.min(_totalLines()-1, safeRow));
+            
+            const lines = _splitLines();
+            const line = lines[caretRow] || '';
+            const newCol = _colForVisual(line, _desiredVisualCol|0);
+            _setCaret(caretRow, newCol, { suppressDesired: true });
+
+            _scanHold.initialScreenOffset = idealOffset;
+            _scanHold.mode = 'scroll';
+            _scanHold.scrollActive = true;
+            _scanHold.scrollDir = dir;
+            _scanHold.scrollTargetPx = 0;
+            _scanHold.continuous = true;
+            try{ window.__sixScanHoldScrollActive = true; }catch{}
+            try{ document.body.classList.add('is-scrolling'); }catch{}
+            try{ const c = caretLayer.querySelector('.caret'); if(c) c.style.display='none'; }catch{}
+            
+            if (_scanHold.raf) cancelAnimationFrame(_scanHold.raf);
+            _scanHold.raf = requestAnimationFrame(_scanHoldScrollLoop);
+        };
+
+        // Decide mode: move caret OR scroll content based on scrolloff and caret position.
+        // delta: direction of movement (1=down, -1=up)
+        const _scanHoldDecideMode = (delta)=>{
+          try{
+            const vis = _visibleLinesExact();
+            const topLine = _topLine();
+            const linesTotal = _totalLines();
+            
+            // #1245: Peek at pending count to predict true destination
+            const count = (_countAcc==null?1:_countAcc);
+            
+            // Check AFTER hypothetical move
+            const wouldBeCaretLine1 = (caretRow + (delta * count)) + 1;
+            const scrolloffVal = scrolloff || 0;
+
+            // Check scrollability based on LINES logic (matching ensureScrolloff)
+            // Allow extra "virtual" page steps so EOF pad is visible
+            const baseMaxTop = Math.max(1, linesTotal - vis + 1);
+            const _eofPad = 5; // Fixed pad matching ensureScrolloff
+            const maxTopWithPad = Math.min(linesTotal, baseMaxTop + _eofPad);
+
+            // #1219: Use pixel-based check for scrollability to handle fractional scrollTop
+            // (caused by smooth scrolling) correctly.
+            const curTopPx = (editor && editor.scrollTop) || 0;
+            const maxTopPx = (maxTopWithPad - 1) * LINE_HEIGHT;
+            
+            // Can we scroll down? (Are we already at the bottom?)
+            // Use 0.5px tolerance
+            const canScrollDown = (curTopPx < maxTopPx - 0.5);
+            
+            // Can we scroll up? (Are we already at the top?)
+            const canScrollUp = (curTopPx > 0.5);
+
+            const preferScroll = () => {
+              if (delta > 0 && canScrollDown) return 'scroll';
+              if (delta < 0 && canScrollUp) return 'scroll';
+              return 'caret';
+            };
+
+            // When scrolloff >= 99999, always scroll content (keep caret centered)
+            if (scrolloffVal >= 99999) return preferScroll();
+            // When scrolloff >= vis/2, always scroll (center mode)
+            if (scrolloffVal >= Math.floor(vis/2)) return preferScroll();
+            // Check if caret would violate scrolloff margin AFTER move: if so, scroll content
+            // #1223: Use rounded top line for boundary check to handle fractional scrollTop
+            // (from smooth scrolling) consistently. Floor can cause off-by-one jitter.
+            // #1247: Use floor to match ensureScrolloff strictly, ensuring we predict scroll mode correctly
+            // for prefix-count moves (e.g. 5j).
+            const topLineRound = Math.floor(curTopPx / LINE_HEIGHT) + 1;
+            const margin = scrolloffVal;
+            if (delta > 0){
+              // moving down: check bottom margin
+              const bottomLine = topLineRound + vis - 1;
+              if (wouldBeCaretLine1 > (bottomLine - margin)) return preferScroll();
+            } else {
+              // moving up: check top margin
+              if (wouldBeCaretLine1 < (topLineRound + margin)) return preferScroll();
+            }
+            // otherwise move caret
+            return 'caret';
+          }catch{ return 'caret'; }
+        };
+
+        // Caret mode: traditional motion (consume count, move caret, ensureScrolloff)
+        const _scanHoldCaretMode = (delta)=>{
+          try{
+            const count = _consumeCount();
+            const lines = _splitLines();
+            const newRow = Math.max(0, Math.min(lines.length-1, caretRow + (delta * count)));
+            
+            // #1254: Optimization: if caret doesn't move (e.g. at EOF), skip heavy lifting
+            // to prevent CPU spin/freeze when holding key at boundary.
+            if (newRow === caretRow) {
+                _scanHold.caretLastMove = performance.now();
+                // #1255: Do NOT call _ensureAfterMotion() here.
+                // If we didn't move, we don't need to check scrolloff or force render.
+                // Calling it causes a loop of ensureScrolloff -> scroll mode -> stuck -> caret mode -> ensureScrolloff...
+                // which freezes the browser if scrolloff is large or at EOF.
+                return;
+            }
+
+            _ensureDesired();
+            const line = lines[newRow] || '';
+            const newCol = _colForVisual(line, _desiredVisualCol|0);
+            caretRow = newRow;
+            _suppressDesiredOnce = true;
+            _setCaret(newRow, newCol, { suppressDesired: true });
+            try{ _flagCaretMotion(); }catch{}
+            _ensureAfterMotion();
+            
+            // #1241: If mode switched to scroll during ensureScrolloff, abort rendering here
+            if (_scanHold.mode === 'scroll') return;
+
+            _repositionCaret(); updateGutter(); _updateVisualSelection();
+            _scanHold.caretLastMove = performance.now();
+          }catch{}
+        };
+
+        // Caret mode RAF loop: continuous line-by-line motion while held
+        const _scanHoldCaretLoop = (ts)=>{
+          if (!_scanHold.caretDir) return; // stopped
+          // #1240: If mode switched to scroll (e.g. by ensureScrolloff), stop caret loop
+          if (_scanHold.mode !== 'caret') return;
+          
+          // move at configured interval (default 30ms ≈ typical key repeat rate)
+          const elapsed = ts - _scanHold.caretLastMove;
+          if (elapsed >= _scanHold.caretIntervalMs){
+            _scanHoldCaretMode(_scanHold.caretDir);
+          }
+          // Only reschedule if still in caret mode
+          if (_scanHold.mode === 'caret') {
+             _scanHold.raf = requestAnimationFrame(_scanHoldCaretLoop);
+          }
+        };
+
+        // Scroll mode RAF loop: smooth scrolling
+        const _scanHoldScrollLoop = (ts)=>{
+          try{
+            if (!_scanHold.scrollActive || !_scanHold.raf) return;
+            const dir = _scanHold.scrollDir || 0;
+            if (dir !== 0){
+              try{
+                const cur = (editor && (editor.scrollTop||0)) || 0;
+                
+                // #1215: Use fixed 3px step per frame for smooth scrolling.
+                // No wait, max speed (RAF frequency).
+                let scrollPx = 3;
+
+                // #1226: Pause if initial scroll done but promotion timer not yet fired
+                if (_scanHold.scrollTargetPx <= 0 && !_scanHold.continuous) {
+                   // #1248: Ensure caret is visible during the pause (before promotion)
+                   try{ document.body.classList.remove('is-scrolling'); }catch{}
+
+                   // #1238: If stopping (keyup happened during initial scroll), finish now
+                   if (_scanHold.stopping) {
+                       _scanHold.scrollActive = false;
+                       _scanHold.stopping = false;
+                       try{ window.__sixScanHoldScrollActive = false; }catch{}
+                       // Snap to grid
+                       try{
+                         const st = (editor && (editor.scrollTop||0)) || 0;
+                         const snapped = Math.round(st / LINE_HEIGHT) * LINE_HEIGHT;
+                         editor.scrollTop = snapped;
+                       }catch{}
+                       try{ updateGutter(); }catch{}
+                       try{ document.body.classList.remove('is-scrolling'); }catch{}
+                       try{ _repositionCaret(); }catch{}
+                       // Clear state
+                       _scanHold.mode = null; _scanHold.scrollDir = 0; 
+                       _scanHold.held.clear(); try{ window.__sixScanHoldHeld = null; }catch{}
+                       return;
+                   }
+                   _scanHold.raf = requestAnimationFrame(_scanHoldScrollLoop);
+                   return;
+                }
+                
+                // Consume target if present (for initial move accounting)
+                if (_scanHold.scrollTargetPx > 0){
+                   // #1238: Use consistent speed (scrollPx=3) for initial scroll too
+                   const step = Math.min(_scanHold.scrollTargetPx, scrollPx);
+                   scrollPx = step;
+                   _scanHold.scrollTargetPx = Math.max(0, _scanHold.scrollTargetPx - step);
+                }
+                
+                const newSt = Math.max(0, cur + (dir * scrollPx));
+                editor.scrollTop = newSt;
+
+                // Check if stuck (EOF or Top)
+                if (Math.abs(editor.scrollTop - cur) < 0.1) {
+                  // #1252: Mark stuck state to prevent immediate re-entry to scroll mode
+                  _scanHold.stuckAt = Date.now();
+                  _scanHold.stuckPos = editor.scrollTop;
+
+                  // Switch to caret mode immediately
+                  _scanHold.scrollActive = false;
+                  try{ window.__sixScanHoldScrollActive = false; }catch{}
+                  try{ document.body.classList.remove('is-scrolling'); }catch{}
+                  // #1256: Cancel any pending scroll render to prevent conflict
+                  try{ if (_scrollRAF) cancelAnimationFrame(_scrollRAF); }catch{}
+                  _scanHold.mode = 'caret';
+                  _scanHold.caretDir = dir;
+                  _scanHold.caretLastMove = performance.now();
+                  // #1251: Do NOT force move immediately to prevent infinite loop/blocking
+                  // if ensureScrolloff pushes us back to scroll mode in the same frame.
+                  // Let the next RAF frame handle the caret move.
+                  // _scanHoldCaretMode(dir);
+                  
+                  // Switch RAF loop
+                  _scanHold.raf = requestAnimationFrame(_scanHoldCaretLoop);
+                  return;
+                }
+                
+                // Update gutter (line numbers scroll with content, stay inactive)
+                // #1217: Pass noSnap to prevent fighting with 1px scroll
+                try{ updateGutter({ inactive: true, noSnap: true }); }catch{}
+                
+                // Update caret position to match scrolled content (maintain screen-relative position)
+                try{
+                  // #1218: Use rounded top line to handle fractional scrollTop (from noSnap) correctly.
+                  // _topLine() uses floor, which causes off-by-one in offset calculation when scrollTop is e.g. 25.9px.
+                  const visTopLine = Math.round((editor.scrollTop||0)/LINE_HEIGHT) + 1;
+                  const lines = _splitLines();
+                  
+                  // Use captured offset to determine target caret row
+                  // target = newTop + initialOffset
+                  const targetCaretLine1 = visTopLine + (_scanHold.initialScreenOffset || 0) + 1;
+                  const targetCaretRow = Math.max(0, Math.min(lines.length-1, Math.round(targetCaretLine1 - 1)));
+                  
+                  if (targetCaretRow !== caretRow){
+                    _ensureDesired();
+                    const line = lines[targetCaretRow] || '';
+                    const newCol = _colForVisual(line, _desiredVisualCol|0);
+                    caretRow = targetCaretRow;
+                    _suppressDesiredOnce = true;
+                    _setCaret(targetCaretRow, newCol, { suppressDesired: true });
+                    try{ _flagCaretMotion(); }catch{}
+                    
+                    // #1228: Hide cursor and skip caret render during continuous scroll
+                    if (_scanHold.continuous) {
+                      try{ _hideCursor(); }catch{}
+                      _repositionCaret({ skipCaret: true });
+                    } else {
+                      _repositionCaret();
+                    }
+                    _updateVisualSelection();
+                  }
+                }catch{}
+              }catch(err){ try{ console.error('[scroll-RAF] scroll error:', err); }catch{} }
+            }
+            _scanHold.raf = requestAnimationFrame(_scanHoldScrollLoop);
+          }catch(err){ try{ console.error('[scroll-RAF] loop error:', err); }catch{} }
+        };
+
+        const _scanHoldKeyDown = (e)=>{
+          try{
+            if (!e || !e.code) return;
+            if (!_scanHold.codes.has(e.code)) return;
+            if (e.ctrlKey || e.altKey || e.metaKey) return;
+            
+            // #1249: Allow INSERT mode for Arrow keys (continuous scroll support)
+            if (_mode === 'INSERT') {
+                if (e.code === 'KeyJ' || e.code === 'KeyK') return;
+            } else {
+                if (!(_mode === 'NORMAL' || _mode === 'VISUAL')) return;
+            }
+
+            if (_optStrictNormalIME && window._imeComposing) return;
+            // If already held (repeated keydown), swallow
+            if (_scanHold.held.has(e.code)){
+              try{ e.preventDefault(); e.stopPropagation(); }catch{}
+              return;
+            }
+            
+            // Mark as held BEFORE preventDefault so editor handler sees it
+            _scanHold.held.add(e.code);
+            try{ window.__sixScanHoldHeld = _scanHold.held; }catch{}
+            
+            try{ e.preventDefault(); e.stopPropagation(); }catch{}
+            try{ _showCursor(); _cursorForceHiddenUntil = 0; }catch{}
+
+            // #1246: Reset state to prevent conflict with previous stopping/active action
+            if (_scanHold.raf) { cancelAnimationFrame(_scanHold.raf); _scanHold.raf = null; }
+            if (_scanHold.promotionTimer) { clearTimeout(_scanHold.promotionTimer); _scanHold.promotionTimer = null; }
+            _scanHold.scrollActive = false;
+            _scanHold.continuous = false;
+            _scanHold.stopping = false;
+            _scanHold.scrollTargetPx = 0;
+            try{ window.__sixScanHoldScrollActive = false; }catch{}
+            try{ document.body.classList.remove('is-scrolling'); }catch{}
+            // Force snap if we interrupted a scroll?
+            // Ideally yes, but let's rely on the new action to set position or scroll.
+            // If we were scrolling, scrollTop might be fractional.
+            // The new action (caret or scroll) will handle its own logic.
+            // If caret mode, it moves caret. If scroll mode, it scrolls.
+            // However, if we start caret mode from fractional scrollTop, ensureScrolloff might be slightly off.
+            // But _scanHoldDecideMode handles fractional scrollTop now.
+
+            // Decide mode: caret or scroll (only once, stick to this mode until keyup)
+            const delta = (e.code === 'KeyJ' || e.code === 'ArrowDown') ? 1 : -1;
+            const mode = _scanHoldDecideMode(delta);
+            _scanHold.mode = mode;
+            _scanHold.stopping = false; // #1238: Reset stopping flag on new keydown
+            _scanHold.firstKeydownTs = performance.now();
+            
+            // DEBUG
+            try{ console.log('[scan-hold] keydown', e.code, 'mode='+mode, 'scrolloff='+scrolloff, 'caretRow='+(caretRow+1), 'topLine='+_topLine()); }catch{}
+
+            if (mode === 'caret'){
+              // Caret mode: execute first move immediately
+              _scanHold.caretDir = delta;
+              _scanHoldCaretMode(delta);
+              // Schedule RAF loop to start after 0.5s delay
+              _scanHold.promotionTimer = setTimeout(()=>{
+                try{
+                  if (_scanHold.caretDir && !_scanHold.raf){
+                    _scanHold.caretLastMove = performance.now();
+                    _scanHold.raf = requestAnimationFrame(_scanHoldCaretLoop);
+                    try{ console.log('[scan-hold] caret mode promoted to continuous after 0.5s'); }catch{}
+                  }
+                }catch{}
+              }, _scanHold.promotionDelayMs);
+            } else {
+              // Scroll mode: smooth 1px-per-frame scrolling (max speed)
+              const count = _consumeCount(); // get and consume count
+              const scrollLines = Math.max(1, count);
+              _scanHold.scrollDir = delta;
+              _scanHold.scrollActive = true;
+              _scanHold.scrollTargetPx = scrollLines * LINE_HEIGHT; // total pixels to scroll
+              _scanHold.continuous = false; // #1226: Wait for promotion before continuous scroll
+              try{ window.__sixScanHoldScrollActive = true; }catch{}
+              
+              // #1248: Hide caret/list chars immediately during smooth scroll (even for prefix count)
+              try{ document.body.classList.add('is-scrolling'); }catch{}
+
+              // Capture initial screen offset to maintain caret position relative to viewport
+              // #1218: Use rounded top line for offset calculation too, to match loop logic
+              const currentTopLine = Math.round((editor.scrollTop||0)/LINE_HEIGHT) + 1;
+              _scanHold.initialScreenOffset = (caretRow - currentTopLine);
+
+              // DEBUG: record initial position
+              const initCaretRow = caretRow + 1;
+              try{ console.log('[scan-hold] SCROLL MODE START: caretRow='+ initCaretRow +', scrollDir='+delta+', count='+count+', targetPx='+_scanHold.scrollTargetPx); }catch{}
+              // ① Render gutter with inactive colors during scroll
+              try{ updateGutter({ inactive: true }); }catch{}
+              // Start RAF loop immediately for smooth 1px scrolling (no 0.5s delay for initial move)
+              if (!_scanHold.raf){
+                _scanHold.raf = requestAnimationFrame(_scanHoldScrollLoop);
+              }
+              // After initial scroll (scrollTargetPx consumed), schedule continuous scroll
+              // Note: RAF loop continues immediately, promotion just marks "initial move done"
+              _scanHold.promotionTimer = setTimeout(()=>{
+                try{
+                  if (_scanHold.scrollActive){
+                    _scanHold.continuous = true; // #1226: Enable continuous scroll
+                    _scanHold.scrollTargetPx = 0; // clear any remaining target
+                    
+                    // #1232: Use CSS class to hide caret reliably
+                    try{ document.body.classList.add('is-scrolling'); }catch{}
+
+                    try{ console.log('[scan-hold] scroll mode: initial scroll complete, continuous mode active'); }catch{}
+                  }
+                }catch{}
+              }, _scanHold.promotionDelayMs);
+            }
+          }catch(err){ try{ console.error('[scan-hold] error:', err); }catch{} }
+        };
+
+        const _scanHoldKeyUp = (e)=>{
+          try{
+            if (!e || !e.code) return;
+            if (!_scanHold.codes.has(e.code)) return;
+            const wasHeld = _scanHold.held.has(e.code);
+            if (!wasHeld) return;
+            _scanHold.held.delete(e.code);
+            try{ e.preventDefault(); e.stopPropagation(); }catch{}
+
+            const mode = _scanHold.mode;
+            
+            // #1238: If initial scroll is still animating, let it finish smoothly
+            if (mode === 'scroll' && _scanHold.scrollActive && !_scanHold.continuous && _scanHold.scrollTargetPx > 0) {
+                if (_scanHold.promotionTimer){ clearTimeout(_scanHold.promotionTimer); _scanHold.promotionTimer = null; }
+                _scanHold.stopping = true;
+                // Do NOT cancel RAF or clear scrollActive yet
+                return;
+            }
+
+            // Cancel promotion timer if still pending
+            if (_scanHold.promotionTimer){
+              clearTimeout(_scanHold.promotionTimer);
+              _scanHold.promotionTimer = null;
+            }
+            
+            // Stop RAF loop (both caret and scroll modes use it)
+            if (_scanHold.raf){
+              cancelAnimationFrame(_scanHold.raf);
+              _scanHold.raf = null;
+              _scanHold.lastTs = 0;
+            }
+            // #1256: Also cancel scroll render RAF
+            try{ if (_scrollRAF) cancelAnimationFrame(_scrollRAF); }catch{}
+            
+            if (mode === 'caret'){
+              // Stop caret loop
+              _scanHold.caretDir = 0;
+              _scanHold.caretLastMove = 0;
+              // #1256: Ensure UI is restored even if we ended in caret mode (e.g. at EOF)
+              try{ updateGutter(); }catch{}
+              try{ _repositionCaret(); }catch{}
+            } else if (mode === 'scroll' && _scanHold.scrollActive){
+              // Stop scroll loop
+              _scanHold.scrollActive = false;
+              _scanHold.continuous = false; // #1231: Reset continuous flag
+              try{ window.__sixScanHoldScrollActive = false; }catch{}
+              _scanHold.scrollTargetPx = 0;
+              // DEBUG: log final position
+              try{ console.log('[scan-hold] SCROLL MODE END: caretRow='+(caretRow+1)+', topLine='+_topLine()); }catch{}
+              // Snap to line grid
+              try{
+                const st = (editor && (editor.scrollTop||0)) || 0;
+                const snapped = Math.round(st / LINE_HEIGHT) * LINE_HEIGHT;
+                editor.scrollTop = snapped;
+              }catch{}
+              // ④ Render gutter with active colors on keyup
+              try{ updateGutter(); }catch{}
+              
+              try{ _repositionCaret(); }catch{}
+            }
+            
+            // #1256: Always remove scrolling class on keyup to prevent stuck hidden state
+            try{ document.body.classList.remove('is-scrolling'); }catch{}
+
+            // Clear state
+            _scanHold.mode = null;
+            _scanHold.scrollDir = 0;
+            _scanHold.firstKeydownTs = 0;
+            _scanHold.stuckAt = 0; // Clear stuck state
+            try{ window.__sixScanHoldHeld = (_scanHold.held.size > 0) ? _scanHold.held : null; }catch{}
+          }catch{}
+        };
+
+        try{ window.addEventListener('keydown', _scanHoldKeyDown, true); }catch{}
+        try{ window.addEventListener('keyup', _scanHoldKeyUp, true); }catch{}
+        try{ window.addEventListener('blur', ()=>{ try{
+          if (_scanHold.promotionTimer){ clearTimeout(_scanHold.promotionTimer); _scanHold.promotionTimer = null; }
+          _scanHold.scrollActive = false;
+          try{ document.body.classList.remove('is-scrolling'); }catch{}
+          try{ window.__sixScanHoldScrollActive = false; }catch{}
+          if (_scanHold.raf){ cancelAnimationFrame(_scanHold.raf); _scanHold.raf=null; _scanHold.lastTs=0; }
+          _scanHold.held.clear(); try{ window.__sixScanHoldHeld = null; }catch{}
+          _scanHold.mode = null; _scanHold.scrollDir = 0; _scanHold.caretDir = 0; _scanHold.caretLastMove = 0; _scanHold.firstKeydownTs = 0; _scanHold.scrollTargetPx = 0;
+        }catch{} }, true); }catch{}
+        // If any other key is pressed while holding, finalize
+        try{ window.addEventListener('keydown', (e)=>{
+          try{
+            if (!e || !e.code) return;
+            if (_scanHold.held.size === 0) return;
+            if (_scanHold.codes.has(e.code)) return;
+            // finalize
+            _scanHold.scrollActive = false;
+            try{ window.__sixScanHoldScrollActive = false; }catch{}
+            if (_scanHold.raf){ cancelAnimationFrame(_scanHold.raf); _scanHold.raf=null; _scanHold.lastTs=0; }
+            _scanHold.held.clear(); try{ window.__sixScanHoldHeld = null; }catch{}
+            _scanHold.mode = null; _scanHold.scrollDir = 0;
+            try{ updateGutter(); _repositionCaret(); }catch{}
+          }catch{}
+        }, true); }catch{}
+      }catch{}
+
       // Global fallback: when focus is not on the editor/cmdinput and no modal/popup is open,
       // route keystrokes to the editor so keys work on startup and after stray focus.
-    try{
+      try{
       const _globalKeyRouter = (e)=>{
         try{
+          try{ if (typeof _scanHold === 'object' && _scanHold && _scanHold.held && e && e.code && _scanHold.held.has(e.code)){ try{ e.preventDefault(); e.stopPropagation(); }catch{} return; } }catch{}
           if (_globalKeyRouting) return;
           // If a modal is open, or enc popup is visible, do not steal
           const modalOpen = !!(_modalOverlay && _modalOverlay.style && _modalOverlay.style.display !== 'none');

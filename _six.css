@@ -8,7 +8,7 @@
 	--fontBase: 18px;        /* base font-size for UI (tabbar/cmdbar) */
 	--editorFontBase: 20px;  /* base font-size for editor/gutter at 100% */
 	/* EOF padding (in lines) */
-	--eofPadLines: 10;
+	--eofPadLines: 5;
 	/* Derived (used by editor only) */
 	--lh: calc(var(--lhBase) * var(--edScale) + var(--lhExtraBase) * var(--edScale));
 	/* Effective line-height after JS rounding; falls back to --lh */
@@ -286,3 +286,6 @@ body { font: var(--fontBase, 18px)/20px Consolas, 'Courier New', monospace; over
 		"Sarasa Mono J", "Noto Sans Mono", "Noto Sans CJK JP", "Noto Sans JP", "Noto Sans Japanese",
 		"Yu Gothic", "游ゴシック Light", "Meiryo", "MS Gothic", monospace !important;
 }
+
+/* #1232: Hide caret during continuous scroll */
+body.is-scrolling .caret { display: none !important; }
