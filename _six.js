@@ -73,6 +73,32 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
       tabScrollRightBtn.classList.toggle('disabled', !canR);
     }catch{}
   }
+  // グローバルrAFスケジューラ: キー入力直後の再描画を1フレームに集約
+  let _rafRenderScheduled = false;
+  function _requestCaretRender(){
+    try{
+      if (_rafRenderScheduled) return;
+      _rafRenderScheduled = true;
+      requestAnimationFrame(()=>{
+        _rafRenderScheduled = false;
+        // IME未確定中は重いスクロールオフ・キャレット再配置・行番号更新を一時停止
+        try{ if (window._imeComposing===true){
+          // 合成終了後に1回だけ再描画を補償
+          try{
+            if (window.requestAnimationFrame){ requestAnimationFrame(()=>{ try{ if (window._imeComposing===true) return; ensureScrolloff(); _repositionCaret(); updateGutter(); }catch{} }); }
+          }catch{}
+          return;
+        } }catch{}
+        try{ ensureScrolloff(); }catch{}
+        try{ _repositionCaret(); }catch{}
+        try{ updateGutter(); }catch{}
+      });
+    }catch{}
+  }
+  // タイピング中ガード（重い描画の一時抑止）
+  let _typingGuardUntil = 0;
+  // IMEポーリング一時停止ガード
+  let _imePollPausedUntil = 0;
   // タブバー水平スクロール: delta は方向単位。幅に応じて適度なピクセルへ変換。
   function _scrollTabsBy(delta){
     try{
@@ -90,6 +116,8 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
   function _updatePosInfo(){
     try{
       if (!posinfoEl) return;
+      // 未確定中はポジション表示更新を遅延（間接的な測定/レイアウトを避ける）
+      try{ if (window._imeComposing===true){ return; } }catch{}
       const lines = _splitLines();
       const r = Math.max(0, Math.min(lines.length-1, caretRow|0));
       const line = lines[r] || '';
@@ -100,7 +128,8 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
       posinfoEl.textContent = '行' + (r+1) + ', ' + '列' + (visCol+1) + '/' + (visTotal+1);
       // THEME反映 (#634): window.THEME.posInfoText or fallback 'yellow'
       try{ let col='yellow'; if (window && window.THEME && window.THEME.posInfoText){ col=String(window.THEME.posInfoText); } posinfoEl.style.color=col; }catch{}
-      setTimeout(_updateTabScrollButtons, 120);
+      // 未確定中はタブボタン再計算の遅延呼び出しも抑止
+      if (!(window._imeComposing===true)) setTimeout(_updateTabScrollButtons, 120);
     }catch{}
   }
   try{ tabScrollLeftBtn && tabScrollLeftBtn.addEventListener('click', ()=>{ try{ if (!tabScrollLeftBtn.classList.contains('disabled')) _scrollTabsBy(-1); }catch{} }); }catch{}
@@ -123,6 +152,31 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
   let _imeVisualLockUntil = 0;            // NORMAL/VISUAL直後の一時ロック（Esc遷移時の競合避け）
   // いずれか未定義なら yellow 固定（他へのフォールバック無し）。
   let _imeActive = false; // composition中は true（IME ON とみなす簡易判定）
+  // IME composing 実状態（未確定文字列の編集中）を明示管理
+  // 既存コードで参照される _imeComposing が未定義になる環境を防ぐ
+  if (typeof window._imeComposing === 'undefined') { try{ window._imeComposing = false; }catch{} }
+  // IME簡易計測: 未確定中のイベント頻度・処理時間・レイアウト負荷を把握
+  // 低コストなリングバッファと `performance.mark/measure` を併用（DevToolsで視認可能）
+  try{
+    if (!window.SIX_IME_METRICS){
+      window.SIX_IME_METRICS = {
+        composing: false,
+        startTs: 0,
+        events: { beforeinput:0, input:0, keydown:0 },
+        composingCalls: { ensure:0, reposition:0 },
+        totals: { composingMs:0, sessions:0 },
+        last: { composingMs:0 },
+        ring: [],
+        max: 300,
+        push(entry){
+          try{
+            this.ring.push(entry);
+            if (this.ring.length>this.max){ this.ring.splice(0, this.ring.length - this.max); }
+          }catch{}
+        }
+      };
+    }
+  }catch{}
   function _applyCaretGradient(){
     try{
       const T = (window && window.THEME) ? window.THEME : {};
@@ -208,6 +262,12 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
       if (_imePollTimer) { clearInterval(_imePollTimer); _imePollTimer=null; }
       _imePollTimer = setInterval(async ()=>{
         try{
+          // タイピング直後は一時停止
+          if (Date.now() < _imePollPausedUntil) return;
+          // 未確定文字列編集中はポーリングしない（候補操作の流量優先）
+          try{ if (window._imeComposing === true) { return; } }catch{}
+          // IME未確定中は候補操作優先のためポーリング抑止
+          try{ if (typeof _imeComposing!== 'undefined' && _imeComposing){ return; } }catch{}
           const resp = await fetch(api + 'ime', { cache:'no-store' });
           if (!resp.ok) return;
           const js = await resp.json();
@@ -227,7 +287,7 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
             }
           }
         }catch{}
-      }, 200);
+      }, 500);
     }catch{}
   }
   try{ window.addEventListener('load', _startImePolling); }catch{}
@@ -253,9 +313,38 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
   // IME compositionイベントで状態更新
   try{
     if (editor){
-      editor.addEventListener('compositionstart', ()=>{ _imeActive = true; try{ _applyCaretGradient(); }catch{} });
+      editor.addEventListener('compositionstart', ()=>{
+        try{ window._imeComposing = true; }catch{}
+        try{
+          const M = window.SIX_IME_METRICS; if (M){
+            M.composing = true; M.startTs = performance.now(); M.events.beforeinput = 0; M.events.input = 0; M.events.keydown = 0;
+            performance.mark('six-ime-composition-start');
+          }
+        }catch{}
+        _imeActive = true;
+        // タイピング中の重い再描画を少し長めに抑止（IME候補表示中のフレーム落ち対策）
+        try{ _typingGuardUntil = Date.now() + 200; }catch{}
+        try{ _applyCaretGradient(); }catch{}
+      });
       // 仕様(#1022): 未確定文字の確定瞬間では何もしない（IMEは継続ONとみなす）
-      editor.addEventListener('compositionend',   ()=>{ /* keep _imeActive as-is */ try{ _applyCaretGradient(); }catch{} });
+      editor.addEventListener('compositionend',   ()=>{
+        try{ window._imeComposing = false; }catch{}
+        try{
+          const M = window.SIX_IME_METRICS; if (M){
+            const now = performance.now(); const dur = Math.max(0, now - (M.startTs||now));
+            M.composing = false; M.totals.composingMs += dur; M.totals.sessions += 1; M.last.composingMs = dur;
+            M.push({ t: Date.now(), type:'compositionend', dur, events:{...M.events} });
+            performance.mark('six-ime-composition-end');
+            try{ performance.measure('six-ime-composition', 'six-ime-composition-start', 'six-ime-composition-end'); }catch{}
+            // 直近セッションの要約を控えめに出力（DevToolsのSummary補助）
+            try{ console.info('[six][IME] session', { durMs: Math.round(dur), events: M.events }); }catch{}
+          }
+        }catch{}
+        // composition終了後の再描画はrAFへ集約
+        try{ _requestCaretRender(); }catch{}
+        /* keep _imeActive as-is */
+        try{ _applyCaretGradient(); }catch{}
+      });
       // ASCII入力検知（INSERT中）: 最初のASCII文字で IME OFF グラデへ切替 (#1021)
       editor.addEventListener('beforeinput', (e)=>{
         try{
@@ -469,7 +558,15 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
   function _schedulePersist(reason){
     try{
       if (_persistTimer){ clearTimeout(_persistTimer); _persistTimer=null; }
-      _persistTimer = setTimeout(()=>{ try{ _persistSessionNow(); }catch{} }, 120);
+      // IME未確定中はセッション保存のタイマー発火を遅延（I/OとJSON化で主スレ阻害を避ける）
+      const delay = (window._imeComposing===true) ? 800 : 120;
+      _persistTimer = setTimeout(()=>{
+        try{
+          // まだ未確定ならさらに延期
+          if (window._imeComposing===true){ _schedulePersist('ime-delay'); return; }
+          _persistSessionNow();
+        }catch{}
+      }, delay);
     }catch{}
   }
   function _loadSessionFromStorage(){
@@ -678,6 +775,8 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
     try{ _hideCursor(); }catch{}
     if (!_caretMoving){ _caretMoving = true; try{ document.body.classList.add('moving-caret'); }catch{} }
     if (_caretMovePulseTimer){ try{ clearTimeout(_caretMovePulseTimer); }catch{} }
+    // 未確定中はアイドル監視タイマーの再スケジュールを停止（微小レイアウトを抑制）
+    if (window._imeComposing===true){ return; }
     _caretMovePulseTimer = setTimeout(()=>{
       // if no new motion in idle window, clear moving state
       if (Date.now() - _lastCaretMovedAt >= _caretMoveIdleMs){
@@ -1125,6 +1224,10 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
   function _clearLinkHover(){ try{ _hoverLink=null; _linkClear(); if (editor) editor.style.cursor=''; }catch{} }
   function _renderLinkHover(){
     try{
+      // IME未確定中はホバー描画を抑止
+      try{ if (typeof _imeComposing!== 'undefined' && _imeComposing){ return; } }catch{}
+      // タイピング直後はリンクホバー描画を一時抑止（次フレームへ）
+      if (Date.now() < _typingGuardUntil){ return; }
       if (!_optUrlLink || !_hoverLink){ _linkClear(); if (editor) editor.style.cursor=''; return; }
       _linkEnsureLayer(); _linkClear();
       const topLine = _topLine();
@@ -1220,6 +1323,8 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
   function _updateLinkHoverFromMouse(e){
     try{
       if (!_optUrlLink) return;
+      // IME未確定中はマウスホバー計測を停止（強制リフロー抑制）
+      try{ if (window._imeComposing===true){ return; } }catch{}
       const now = Date.now(); if (now - _lastLinkMoveAt < 25) return; _lastLinkMoveAt = now;
       const rect = viewport.getBoundingClientRect();
       const yAbs = (e.clientY - rect.top) + (editor.scrollTop||0);
@@ -1449,6 +1554,8 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
   }
   function _incPrevShowAt(startOff, len){
     try{
+      // IME未確定中は計測・レイアウト負荷の高いプレビュー描画を停止
+      try{ if (window._imeComposing===true){ _incPrevHide(); return; } }catch{}
       if (!(Number.isFinite(startOff) && startOff>=0)) { _incPrevHide(); return; }
       const nlen = Math.max(0, len|0);
       _incPrevLastStart = (startOff|0);
@@ -1535,6 +1642,8 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
   }
   function _incPrevUpdateForCmdValue(v){
     try{
+      // IME未確定中は :s 等のプレビュー更新を停止（計測・レイアウト負荷を抑制）
+      try{ if (window._imeComposing===true){ _incPrevHide(); return false; } }catch{}
       const s = String(v||'');
       // Accept "/pat" or "?pat" with optional trailing "/i" or "?i" for flags during typing
       // Examples: "/foo", "/foo/i", "?bar", "?bar?i" (case-insensitive)
@@ -1772,6 +1881,27 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
       const now = Date.now();
       _rawPush({ t:now, type:'raw-keydown', key:e.key, code:e.code, repeat:!!e.repeat, trusted:!!e.isTrusted, ctrl:e.ctrlKey, alt:e.altKey, meta:e.metaKey });
       try{ _lastKeydownForAnom = { key:e.key, code:e.code, t:now }; }catch{}
+      try{ const M = window.SIX_IME_METRICS; if (M && window._imeComposing===true){ M.events.keydown++; } }catch{}
+      // タイピング中は重処理を抑止し、rAFでまとめて再描画（NORMAL/INSERTのみ、機能キー除外）
+      try{
+        const mode = (typeof _mode!== 'undefined')? _mode : 'NORMAL';
+        const k = String(e && e.key || '');
+        const isFunctional = (
+          /^F\d+$/.test(k) ||
+          k === 'Escape' || k === 'Enter' || k === 'Tab' ||
+          k === 'Process' || k === 'ContextMenu' ||
+          k === 'ArrowUp' || k === 'ArrowDown' || k === 'ArrowLeft' || k === 'ArrowRight' ||
+          k === 'PageUp' || k === 'PageDown' || k === 'Home' || k === 'End' ||
+          k === 'Insert' || k === 'Delete' || k === 'Backspace'
+        );
+        if ((mode === 'NORMAL' || mode === 'INSERT') && !isFunctional){
+          // IME編集中は rAF にまとめ、やや長めに描画抑止
+          const extra = (window._imeComposing===true) ? 120 : 0;
+          _typingGuardUntil = now + 100 + extra;
+          _imePollPausedUntil = now + 350 + extra;
+          try{ _requestCaretRender(); }catch{}
+        }
+      }catch{}
       // F19→Esc 変換（最上流キャプチャ段階）。
       // 仕様(#1090): 未確定中は six が介入せず IME/ブラウザへ委譲するため、変換をスキップ。
       try{
@@ -1869,6 +1999,8 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
   }
   function _renderVisSelOverlay(){
     try{
+      // IME未確定中はビジュアル選択のオーバーレイ描画を停止（計測抑制）
+      try{ if (window._imeComposing===true){ _visSelClear(); return; } }catch{}
       if (!_visCmdActive){ _visSelClear(); return; }
       _visSelEnsureLayer();
       _visSelClear();
@@ -1942,6 +2074,8 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
   }
   function _recomputeHlMatches(){
     try{
+      // IME未確定中は全体ハイライト再計算・描画を停止
+      try{ if (window._imeComposing===true){ return; } }catch{}
       _hlMatches = null;
       if (!_optHlsearch) return;
       if (!(_lastSearch && _lastSearch.src)) return;
@@ -1979,6 +2113,10 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
   }
   function _renderHlMatchesVisible(){
     try{
+      // IME未確定中は全面ハイライト描画を抑止
+      try{ if (typeof _imeComposing!== 'undefined' && _imeComposing){ return; } }catch{}
+      // タイピング直後は全面ハイライト描画を一時抑止
+      if (Date.now() < _typingGuardUntil){ return; }
       if (!_optHlsearch){ _hlClear(); return; }
       if (!(_lastSearch && _lastSearch.src)){ _hlClear(); return; }
       if (!_hlMatches) return; // no matches or not computed yet
@@ -3070,6 +3208,8 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
       // Re-apply saved scroll position on the next frame and shortly after to ensure it sticks.
       try{
         const applyScroll = ()=>{
+          // IME未確定中はスクロール/再配置の連続適用を停止（強制リフロー回避）
+          try{ if (window._imeComposing===true){ return; } }catch{}
           try{ clampViewportExactLines(); }catch{}
           // Re-assert saved caret/viewport to defeat any early-frame overrides (#715)
           try{ _setCaret(vr, vc); }catch{}
@@ -3091,12 +3231,18 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
             requestAnimationFrame(()=>{ try{ if (vp) vp.style.visibility = prevVis; }catch{} });
           });
         }
-        setTimeout(applyScroll, 0);
-        setTimeout(applyScroll, 80);
-        // Add one more delayed reinforcement to defeat late layout/scroll listeners
-        setTimeout(applyScroll, 180);
-        // Fallback: ensure viewport visibility is restored even if rAF doesn't fire (#715)
-        setTimeout(()=>{ try{ if (vp) vp.style.visibility = prevVis; }catch{} }, 120);
+        // 未確定中はタイマー群を抑止
+        if (!(window._imeComposing===true)){
+          setTimeout(applyScroll, 0);
+          setTimeout(applyScroll, 80);
+          // Add one more delayed reinforcement to defeat late layout/scroll listeners
+          setTimeout(applyScroll, 180);
+          // Fallback: ensure viewport visibility is restored even if rAF doesn't fire (#715)
+          setTimeout(()=>{ try{ if (vp) vp.style.visibility = prevVis; }catch{} }, 120);
+        } else {
+          // 未確定中でも可視復帰だけは即時反映
+          try{ if (vp) vp.style.visibility = prevVis; }catch{}
+        }
         // Suppress any automatic scroll adjustments briefly after switching buffers
         // to prevent ensureScrolloff or other flows from recentering the viewport (#357)
         try{ _scrollGuardUntil = Date.now() + 1400; }catch{}
@@ -4309,6 +4455,8 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
    * Caret / Stripe
    *********************************************************/
   function _repositionCaret(opts){
+    // During IME composition, avoid any layout-affecting measurements and DOM writes
+    try{ if (window && window._imeComposing===true){ try{ window.SIX_IME_METRICS && (window.SIX_IME_METRICS.composingCalls.reposition++); }catch{} return; } }catch{}
     opts = opts||{};
     const row1 = caretRow + 1;
     const topLine = _topLine();
@@ -4357,9 +4505,9 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
       try{ caret.style.transform = (Math.abs(rem) > 0.01) ? `translateY(${-rem}px)` : ''; }catch{}
       // 幅は前回値維持。後で通常パスを rAF で補強。
       if (window.requestAnimationFrame){
-        requestAnimationFrame(()=>{ try{ if (!_visualActive || !_visualLinewise) return; _repositionCaret(); }catch{} });
+        requestAnimationFrame(()=>{ try{ if (window && window._imeComposing===true) return; if (!_visualActive || !_visualLinewise) return; _repositionCaret(); }catch{} });
       } else {
-        setTimeout(()=>{ try{ if (!_visualActive || !_visualLinewise) return; _repositionCaret(); }catch{} },0);
+        setTimeout(()=>{ try{ if (window && window._imeComposing===true) return; if (!_visualActive || !_visualLinewise) return; _repositionCaret(); }catch{} },0);
       }
       return;
     }
@@ -4538,7 +4686,7 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
       }
     }catch{}
     // keep hlsearch overlay in sync with caret/scroll
-    _renderHlMatchesVisible();
+    try{ if (!(window && window._imeComposing===true)) _renderHlMatchesVisible(); }catch{}
     // Persist caret (and current viewport) to the active buffer so its view state
     // survives a tab switch even if no scroll event occurs yet (#358)
     try{
@@ -4550,7 +4698,7 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
       }
     }catch{}
     // Keep position indicator up-to-date for all caret moves
-    try{ _updatePosInfo(); }catch{}
+    try{ if (!(window && window._imeComposing===true)) _updatePosInfo(); }catch{}
     // Floating command bar reposition if visible
     try{ if (cmdfloat && _mode==='CMD' && cmdfloat.style.display!=='none'){ _positionCmdFloat(); } }catch{}
   }
@@ -4593,6 +4741,7 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
                 const lh = (typeof LINE_HEIGHT==='number' && LINE_HEIGHT>0) ? LINE_HEIGHT : 20;
                 const flo = Math.floor(st / lh) * lh;
                 if (Math.abs(flo - st) > 0.1){ editor.scrollTop = flo; }
+                try{ if (window && window._imeComposing===true) return; }catch{}
                 _repositionCaret(); updateGutter();
               }catch{}
             };
@@ -4747,7 +4896,7 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
     try{ _syncNativeSelectionToCaret(); }catch{}
     // 3) スクロール補正と caret overlay 再配置
     try{ ensureScrolloff(); }catch{}
-    try{ _repositionCaret(); }catch{}
+    try{ if (!(window && window._imeComposing===true)) _repositionCaret(); }catch{}
     // 4) ガター更新前に listchars を一度クリアし再描画 (旧末尾行残留対策)
     try{ _renderListChars(); }catch{}
     // 5) ガター更新と二度目の listchars 再描画（caret オーバーレイ位置確定後の最終状態）
@@ -4778,7 +4927,7 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
     // restore change tick from snapshot and recompute modified
     try{ const b=currentBuffer(); if (b){ b._changeTick = (s.changeTick|0); } }catch{}
     _syncModifiedFromTick();
-    ensureScrolloff(); _repositionCaret(); updateGutter();
+    ensureScrolloff(); try{ if (window && window._imeComposing===true) return; }catch{} _repositionCaret(); updateGutter();
     // Undo/redo 後に listchars の再描画を明示的に行い、EOF付近の可視状態を即時反映 (CaseB)
     try{ _renderListChars(); }catch{}
     // restore encoding meta if present
@@ -5323,6 +5472,8 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
     ensureScrolloff({ force:true });
   }
   function ensureScrolloff(opts={}){
+    // IME composition: skip auto scroll adjustments unless explicitly forced
+    try{ if (window && window._imeComposing===true && !(opts && opts.force)){ try{ window.SIX_IME_METRICS && (window.SIX_IME_METRICS.composingCalls.ensure++); }catch{} return; } }catch{}
     // If paused (e.g., right after '/word' confirm) or a modal is open and
     // we're suppressing scroll adjustments, skip any automatic re-centering/adjustment.
     // This resumes on next explicit caret move or when suppression is cleared.
@@ -5356,6 +5507,8 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
     // Special handling during VISUAL linewise selection: do minimal keep-in-view only (#869)
     // Avoid enforcing scrolloff margins so range can extend freely without auto recenters.
     if (_visualActive && _visualLinewise && !force && !centerOnce){
+      // IME composition: keep-in-view is skipped to avoid reflows; rely on post-composition correction
+      try{ if (window && window._imeComposing===true) return; }catch{}
       // Bring caret into view only when it would go off-screen; allow EOF pad visibility.
       if (caretLine1 < topLine){
         const newTop = Math.max(1, caretLine1);
@@ -5431,6 +5584,8 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
       if (window.requestAnimationFrame){
         requestAnimationFrame(()=>{
           try{
+            // Skip rAF snapping during IME composition to avoid reflows
+            if (window && window._imeComposing===true) return;
             const st1 = (editor.scrollTop||0);
             const flo1 = Math.floor(st1/LINE_HEIGHT)*LINE_HEIGHT;
             if (Math.abs(flo1 - st1) > 0.01){ editor.scrollTop = flo1; }
@@ -5563,6 +5718,8 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
    * updateGutter
    *********************************************************/
   function updateGutter(){
+    // IME未確定中はガター更新を停止（高さ計算・DOM更新・transformによる再レイアウトを抑止）
+    try{ if (window._imeComposing===true){ return; } }catch{}
     const T = (window.THEME || {});
     // Ensure scrollTop is on an exact line boundary before computing gutter rows
     try{
@@ -5638,7 +5795,8 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
       if (first){ first.style.marginTop = Math.abs(rem) > 0.01 ? (-rem)+'px' : '0px'; }
     }catch{}
     // Keep listchars overlay refreshed with any gutter/text update
-    try{ _renderListChars(); }catch{}
+    // 未確定中は listchars の再描画も停止
+    try{ if (!(window._imeComposing===true)) { _renderListChars(); } }catch{}
   }
 
   /*********************************************************
@@ -6759,7 +6917,7 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
       _scrollGuardUntil = Date.now() + 900;
       const reinforce = ()=>{ try{ editor.scrollTop = targetTop; _repositionCaret(); updateGutter(); }catch{} };
       reinforce();
-      try{ if (window.requestAnimationFrame){ requestAnimationFrame(()=>{ reinforce(); requestAnimationFrame(()=>reinforce()); }); } }catch{}
+      try{ if (window.requestAnimationFrame){ requestAnimationFrame(()=>{ if (window && window._imeComposing===true) return; reinforce(); requestAnimationFrame(()=>{ if (window && window._imeComposing===true) return; reinforce(); }); }); } }catch{}
       try{ setTimeout(reinforce, 140); }catch{}
       // 直後にタブ切替してもこのジャンプ位置が確実に記憶されるよう、即時にビュー状態を保存 (#359)
       try{
@@ -6773,7 +6931,7 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
       // レイアウト確定後にももう一度保存して、最終的なscrollTopをベースラインにする
       try{
         const persist = ()=>{ try{ const bb=currentBuffer(); if (bb){ bb.viewRow=caretRow|0; bb.viewCol=caretCol|0; bb.viewScrollTop=(editor.scrollTop||0)|0; } }catch{} };
-        if (window.requestAnimationFrame){ requestAnimationFrame(persist); }
+        if (window.requestAnimationFrame){ requestAnimationFrame(()=>{ if (window && window._imeComposing===true) return; persist(); }); }
         setTimeout(persist, 80);
       }catch{}
       _setMode('NORMAL');
@@ -7279,7 +7437,7 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
           // Reinforce after a frame in case a deferred select event fires post-value assignment
           try{
             if (window.requestAnimationFrame){
-              requestAnimationFrame(()=>{ try{ _syncNativeSelectionToCaret(); _repositionCaret(); updateGutter(); }catch{} });
+              requestAnimationFrame(()=>{ try{ if (window && window._imeComposing===true) return; _syncNativeSelectionToCaret(); _repositionCaret(); updateGutter(); }catch{} });
             }
           }catch{}
         }catch{}
@@ -7307,7 +7465,7 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
         restore();
         try{
           if (window.requestAnimationFrame){
-            requestAnimationFrame(()=>{ restore(); requestAnimationFrame(()=>{ restore(); }); });
+            requestAnimationFrame(()=>{ if (window && window._imeComposing===true) return; restore(); requestAnimationFrame(()=>{ if (window && window._imeComposing===true) return; restore(); }); });
           }
         }catch{}
         try{ setTimeout(restore, 160); }catch{}
@@ -9050,6 +9208,7 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
     // IME破棄時のビジュアルベル制御（スパム防止のため軽いスロットリング）
     let _imeBellLastAt = 0;
     editor.addEventListener('beforeinput', (e)=>{
+      try{ const M = window.SIX_IME_METRICS; if (M && window._imeComposing===true){ M.events.beforeinput++; } }catch{}
       // NORMAL/VISUAL/CMD では本文変更を全面禁止（未確定表示 insertCompositionText も含む）
       if (_mode !== 'INSERT'){
         try{ e.preventDefault(); }catch{}
@@ -9102,6 +9261,7 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
     // beforeinput で止めきれない実装差分（特に IME の insertFromComposition/insertCompositionText）に備え、
     // INSERT 以外で発火した input のうち insert*/delete* 系は直ちに巻き戻す。
     editor.addEventListener('input', (e)=>{
+      try{ const M = window.SIX_IME_METRICS; if (M && window._imeComposing===true){ M.events.input++; } }catch{}
       try{
         if (_mode !== 'INSERT'){
           if (!e || !e.isTrusted) return; // 非ユーザー操作は対象外
@@ -9169,7 +9329,12 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
           }
         }catch{}
       }
-      _exactLineLockAdjust(); _repositionCaret(); updateGutter(); _updateHlsearchFull(); _updatePosInfo();
+      // 未確定編集中は重い再配置・ハイライト更新・描画を停止
+      if (window._imeComposing===true){
+        // caret座標のみ軽量更新（上で同期済み）に留める
+      } else {
+        _exactLineLockAdjust(); _repositionCaret(); updateGutter(); _updateHlsearchFull(); _updatePosInfo();
+      }
       // #621: 最終行が改行のみ -> 改行削除で dummy へ移行した直後に色/記号が反映されないケースの強制再描画
       try{
         const b=currentBuffer();
@@ -9179,8 +9344,11 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
           // 空ファイル または 末尾行が空文字列（raw分割末尾が単一要素）かつ LF 欠落時は再描画を二段階で強制
           // #623: 末尾LF欠落の全ケースでダミー記号が即時反映されないことがあるため条件を一般化
           if (noFinalLF){
-            _renderListChars();
-            if (window.requestAnimationFrame){ requestAnimationFrame(()=>{ try{ _renderListChars(); }catch{} }); }
+            if (window._imeComposing===true){ /* skip costly list rendering while composing */ }
+            else {
+              _renderListChars();
+              if (window.requestAnimationFrame){ requestAnimationFrame(()=>{ try{ _renderListChars(); }catch{} }); }
+            }
           }
         }
       }catch{}
@@ -9191,7 +9359,11 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
       _repositionCaret(); updateGutter();
     };
     // Ensure single-click updates after browser updates selection
-    editor.addEventListener('mousedown', ()=>{ setTimeout(syncCaretFromSelection, 0); });
+    // 未確定中は選択同期の遅延呼び出しを抑制（不要なレイアウト測定を避ける）
+    editor.addEventListener('mousedown', ()=>{
+      if (window._imeComposing===true) return;
+      setTimeout(syncCaretFromSelection, 0);
+    });
     editor.addEventListener('mouseup', syncCaretFromSelection);
     editor.addEventListener('click', syncCaretFromSelection);
     // INSERT中の単純クリックによるカーソル再配置でも、直前に入力があればUndoを区切る
