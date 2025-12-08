@@ -8734,6 +8734,7 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
               [K('h'), sep(' / '), K('←'), sep(' 左へ1文字')],
               [K('j'), sep(' / '), K('↓'), sep(' 下へ1行')],
               [K('k'), sep(' / '), K('↑'), sep(' 上へ1行')],
+              [K('Alt+j'), sep(' / '), K('Alt+k'), sep('  スムーズスクロール（上/下）')],
               [K('l'), sep(' / '), K('→'), sep(' 右へ1文字')],
               [K('gg'), sep('  先頭へ')],
               [K('G'), sep('  末尾へ')],
@@ -8815,7 +8816,8 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
               [K('End'), sep('  行末へ移動')],
               [K('Ctrl+←'), sep('  単語の前へ移動')],
               [K('Ctrl+→'), sep('  単語の次へ移動')],
-              [K('PageUp/PageDown'), sep('  複数行を一気に移動（表示環境依存）')]
+              [K('PageUp/PageDown'), sep('  複数行を一気に移動（表示環境依存）')],
+              [K('Alt+j/k'), sep('  スムーズスクロール（上/下）')]
             ]));
 
             // 範囲選択（標準挙動）
@@ -8875,6 +8877,7 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
               [K('h'), sep(' / '), K('←'), sep(' 左へ1文字（選択調整）')],
               [K('j'), sep(' / '), K('↓'), sep(' 下へ1行（選択調整）')],
               [K('k'), sep(' / '), K('↑'), sep(' 上へ1行（選択調整）')],
+              [K('Alt+j'), sep(' / '), K('Alt+k'), sep('  スムーズスクロール（上/下）')],
               [K('l'), sep(' / '), K('→'), sep(' 右へ1文字（選択調整）')],
               [K('gg'), sep('  先頭へ（選択範囲更新）')],
               [K('G'), sep('  末尾へ（選択範囲更新）')],
@@ -9962,6 +9965,18 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
             }
           }catch{}
 
+          // Alt+j/k smooth scroll
+          if (e.altKey && (e.key==='j' || e.key==='k')){
+            e.preventDefault(); e.stopPropagation();
+            if (!_altScroll.active){
+              _altScroll.active = true;
+              _altScroll.key = e.key;
+              _altScroll.dir = (e.key==='j' ? -1 : 1);
+              document.body.classList.add('is-scrolling');
+              _altScroll.raf = requestAnimationFrame(_altScrollLoop);
+            }
+            return;
+          }
           // PageUp/PageDown smooth scrolling in INSERT mode (#1264)
           if (e.key==='PageUp' || e.key==='PageDown'){
             e.preventDefault(); e.stopPropagation();
@@ -10255,6 +10270,52 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
   const moveAndUpdate=(fn)=>{ fn(); try{ _flagCaretMotion(); }catch{} _ensureAfterMotion(); _repositionCaret(); updateGutter(); _updateVisualSelection(); };
         if (e.key==='ArrowDown'){ e.preventDefault(); const n=_consumeCount(); if (_visualLinewise){ _visualLinewiseMoveLines(n); } else { moveAndUpdate(()=>_moveCaretLines(n)); } return; }
         if (e.key==='ArrowUp'){ e.preventDefault(); const n=_consumeCount(); if (_visualLinewise){ _visualLinewiseMoveLines(-n); } else { moveAndUpdate(()=>_moveCaretLines(-n)); } return; }
+
+        // Alt+j/k smooth scroll
+        if (e.altKey && (e.key==='j' || e.key==='k')){
+          e.preventDefault(); e.stopPropagation();
+          if (!_altScroll.active){
+            _altScroll.active = true;
+            _altScroll.key = e.key;
+            _altScroll.dir = (e.key==='j' ? -1 : 1);
+            document.body.classList.add('is-scrolling');
+            _altScroll.raf = requestAnimationFrame(_altScrollLoop);
+          }
+          return;
+        }
+        // PageUp/PageDown smooth scrolling in VISUAL mode (#1266)
+        if (e.key==='PageUp' || e.key==='PageDown'){
+          e.preventDefault(); e.stopPropagation();
+          const isDown = (e.key==='PageDown');
+          const vis = _visibleLinesExact();
+          const delta = isDown ? vis : -vis;
+          const lines = _splitLines();
+          const newRow = Math.max(0, Math.min(lines.length-1, caretRow + delta));
+          
+          _ensureDesired();
+          const line = lines[newRow] || '';
+          const newCol = _colForVisual(line, _desiredVisualCol|0);
+          
+          caretRow = newRow;
+          caretCol = newCol;
+          _suppressDesiredOnce = true;
+          _setCaret(newRow, newCol, { suppressDesired: true });
+          
+          // Calculate target scroll position
+          const currentTop = (editor.scrollTop||0);
+          const scrollDelta = delta * LINE_HEIGHT;
+          let targetTop = currentTop + scrollDelta;
+          const linesTotal = lines.length;
+          const baseMaxTop = Math.max(1, linesTotal - vis + 1);
+          const eofPad = 5;
+          const maxTopWithPad = Math.min(linesTotal, baseMaxTop + eofPad);
+          targetTop = Math.max(0, Math.min((maxTopWithPad-1)*LINE_HEIGHT, targetTop));
+          
+          _setEditorScrollTop(targetTop, { forceAnimate: true });
+          _repositionCaret(); updateGutter(); _updateVisualSelection();
+          return;
+        }
+
         // In strict-normal-ime, ignore letter motions (and their Process-coded variants) while composing; arrows still work
         if (_optStrictNormalIME && _imeComposing){
           const isHJKLCode = (e.code==='KeyH'||e.code==='KeyJ'||e.code==='KeyK'||e.code==='KeyL');
@@ -11197,6 +11258,18 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
         }
         return;
       }
+  // Alt+j/k smooth scroll
+  if (e.altKey && (e.key==='j' || e.key==='k')){
+    e.preventDefault(); e.stopPropagation();
+    if (!_altScroll.active){
+      _altScroll.active = true;
+      _altScroll.key = e.key;
+      _altScroll.dir = (e.key==='j' ? -1 : 1);
+      document.body.classList.add('is-scrolling');
+      _altScroll.raf = requestAnimationFrame(_altScrollLoop);
+    }
+    return;
+  }
   // PageUp/PageDown smooth scrolling (#1263)
   if (e.key==='PageUp' || e.key==='PageDown'){
     e.preventDefault();
@@ -11716,6 +11789,27 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
         };
         // Expose for ensureScrolloff
         window._scanHold = _scanHold;
+
+        // Alt+j/k immediate smooth scroll
+        const _altScroll = {
+          active: false,
+          raf: null,
+          dir: 0,
+          speed: 3,
+          key: null
+        };
+        window._altScroll = _altScroll;
+        const _altScrollLoop = () => {
+          if (!_altScroll.active) return;
+          const cur = editor.scrollTop;
+          const next = cur + (_altScroll.dir * _altScroll.speed);
+          const max = editor.scrollHeight - editor.clientHeight;
+          if (next < 0) editor.scrollTop = 0;
+          else if (next > max) editor.scrollTop = max;
+          else editor.scrollTop = next;
+          if (!document.body.classList.contains('is-scrolling')) document.body.classList.add('is-scrolling');
+          _altScroll.raf = requestAnimationFrame(_altScrollLoop);
+        };
         window._scanHoldTriggerScroll = (dir, idealOffset) => {
             if (!_scanHold) return;
             if (_scanHold.mode === 'scroll') return; // already scrolling
@@ -12166,6 +12260,15 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
 
         try{ window.addEventListener('keydown', _scanHoldKeyDown, true); }catch{}
         try{ window.addEventListener('keyup', _scanHoldKeyUp, true); }catch{}
+        try{ window.addEventListener('keyup', (e)=>{
+          if (_altScroll.active && (e.key === _altScroll.key || e.key === 'Alt')){
+            _altScroll.active = false;
+            if (_altScroll.raf) cancelAnimationFrame(_altScroll.raf);
+            _altScroll.raf = null;
+            document.body.classList.remove('is-scrolling');
+            try{ updateGutter(); _repositionCaret(); _updatePosInfo(); }catch{}
+          }
+        }, true); }catch{}
         try{ window.addEventListener('blur', ()=>{ try{
           if (_scanHold.promotionTimer){ clearTimeout(_scanHold.promotionTimer); _scanHold.promotionTimer = null; }
           _scanHold.scrollActive = false;
