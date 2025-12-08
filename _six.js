@@ -4483,6 +4483,11 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
       // Guard against tiny negative floating residues (e.g., -0.5px at certain zoom ratios)
       if (Math.abs(rem) < 0.01) rem = 0;
     }catch{}
+    
+    // #1275: During View Scroll (Alt+j/k), keep active line background static on screen
+    // Do not apply sub-pixel remainder compensation to avoid jitter against moving text.
+    const isViewScroll = (window && window._altScroll && window._altScroll.active);
+    
     if (topPx >= 0 && topPx < viewport.clientHeight) {
       edstripe.style.display='';
       edstripe.style.top = topPx + 'px';
@@ -4496,12 +4501,41 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
           edstripe.style.background = '';
         }
       }catch{}
-      // apply remainder compensation to stripe
-      try{ edstripe.style.transform = (Math.abs(rem) > 0.01) ? `translateY(${-rem}px)` : ''; }catch{}
+      // apply remainder compensation to stripe (skip if View Scroll)
+      try{ edstripe.style.transform = (!isViewScroll && Math.abs(rem) > 0.01) ? `translateY(${-rem}px)` : ''; }catch{}
     } else {
       edstripe.style.display='none';
       try{ edstripe.style.transform = ''; }catch{}
     }
+
+    // #1277: Gutter active line stripe (static overlay to prevent flicker)
+    try{
+      let gStripe = gutter.querySelector('.gutter-stripe');
+      if (!gStripe){
+        gStripe = document.createElement('div');
+        gStripe.className = 'gutter-stripe';
+        gStripe.style.position = 'absolute';
+        gStripe.style.left = '0';
+        gStripe.style.width = '100%';
+        gStripe.style.zIndex = '0'; // Behind numbers (z-index:1)
+        gStripe.style.pointerEvents = 'none';
+        gutter.appendChild(gStripe);
+      }
+      if (topPx >= 0 && topPx < viewport.clientHeight) {
+        gStripe.style.display = '';
+        gStripe.style.top = topPx + 'px';
+        gStripe.style.height = LINE_HEIGHT + 'px';
+        if (_mode === 'INSERT'){
+          gStripe.style.background = 'linear-gradient(to bottom, var(--activeEditGutterGradStart, yellow), var(--activeEditGutterGradEnd, yellow))';
+        } else {
+          gStripe.style.background = 'linear-gradient(to bottom, var(--activeGutterGradStart, yellow), var(--activeGutterGradEnd, yellow))';
+        }
+        // Apply same compensation logic as edstripe
+        gStripe.style.transform = (!isViewScroll && Math.abs(rem) > 0.01) ? `translateY(${-rem}px)` : '';
+      } else {
+        gStripe.style.display = 'none';
+      }
+    }catch{}
 
     // #1228: Optimization to skip caret render (e.g. during fast scroll)
     if (opts.skipCaret || (document.body.classList.contains('is-scrolling'))) {
@@ -4522,7 +4556,8 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
       caret.style.top = topPx + 'px';
       caret.style.height = Math.max(1, Math.round(LINE_HEIGHT)) + 'px';
       // transform remainder 適用（行境界ずれ防止）
-      try{ caret.style.transform = (Math.abs(rem) > 0.01) ? `translateY(${-rem}px)` : ''; }catch{}
+      // #1279: Disable sub-pixel compensation during View Scroll to match static stripe/gutter
+      try{ caret.style.transform = (!isViewScroll && Math.abs(rem) > 0.01) ? `translateY(${-rem}px)` : ''; }catch{}
       // 幅は前回値維持。後で通常パスを rAF で補強。
       if (window.requestAnimationFrame){
         requestAnimationFrame(()=>{ try{ if (window && window._imeComposing===true) return; if (!_visualActive || !_visualLinewise) return; _repositionCaret(); }catch{} });
@@ -4624,6 +4659,8 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
   // Make caret height match the full line box
   caret.style.top = topPx + 'px';
   caret.style.height = Math.max(1, Math.round(LINE_HEIGHT)) + 'px';
+  // #1279: Disable sub-pixel compensation during View Scroll to match static stripe/gutter
+  try{ caret.style.transform = (!isViewScroll && Math.abs(rem) > 0.01) ? `translateY(${-rem}px)` : ''; }catch{}
     // Determine character box width at caret (full-width aware), then shrink to 90%
     let chW = 0;
     if (caretCol < line.length){
@@ -5984,7 +6021,8 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
     for (let i=0;i<safeEofCount; i++) rows.push({ ln:null, eof:true });
 
     // minimal diff update
-    const children = Array.from(gutter.children);
+    // #1277: Filter out static gutter stripe
+    const children = Array.from(gutter.children).filter(c => !c.classList.contains('gutter-stripe'));
     for (let i=0;i<rows.length; i++){
       const r = rows[i];
       let el = children[i];
@@ -5997,6 +6035,9 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
         el.style.display = 'block';
         el.style.height = LINE_HEIGHT+'px';
         el.style.lineHeight = LINE_HEIGHT+'px';
+        // #1277: Ensure numbers are above the stripe
+        el.style.position = 'relative';
+        el.style.zIndex = '1';
       }catch{}
       if (r.eof){
         el.textContent = '';
@@ -6005,18 +6046,9 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
         el.style.color = 'var(--gutterNumberColor, yellow)';
       } else {
         el.textContent = r.ln;
-        if (r.active){
-          // INSERTモード用のガターグラデ (未定義キーは yellow sentinel) (#441/#442)
-          // CSS変数に委譲し、JS は単一の linear-gradient 定義のみ。テーマキーは _applyTheme() で --activeEditGutterGrad* としてセット済み。
-          if (_mode === 'INSERT'){
-            el.style.background = 'linear-gradient(to bottom, var(--activeEditGutterGradStart, yellow), var(--activeEditGutterGradEnd, yellow))';
-          } else {
-            el.style.background = 'linear-gradient(to bottom, var(--activeGutterGradStart, yellow), var(--activeGutterGradEnd, yellow))';
-          }
-        } else {
-          // Inactive rows: transparent to let container's tiled background show (prevents flicker)
-          el.style.background = '';
-        }
+        // #1277: Active line background is now handled by #gutterStripe (static overlay)
+        // We no longer set background on the number element itself to avoid flicker during View Scroll.
+        el.style.background = '';
         // #1228: Abolish active line number color (always use gutterNumberColor) to reduce painting
         el.style.color = 'var(--gutterNumberColor, yellow)';
       }
@@ -6032,7 +6064,8 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
       const st = (editor.scrollTop||0);
       // Use floor-based remainder consistent with _topLine()/caret stripe to prevent half-line leading gap (#470)
       const rem = st - Math.floor(st/LINE_HEIGHT)*LINE_HEIGHT;
-      const first = gutter.firstElementChild;
+      // #1277: Use filtered first child
+      const first = children[0];
       if (first){ first.style.marginTop = Math.abs(rem) > 0.01 ? (-rem)+'px' : '0px'; }
     }catch{}
     // Keep listchars overlay refreshed with any gutter/text update
@@ -9316,6 +9349,60 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
    * Events
    *********************************************************/
   function bindEvents(){
+    // Alt+j/k immediate smooth scroll state
+    const _altScroll = {
+      active: false,
+      raf: null,
+      dir: 0,
+      speed: 3,
+      key: null,
+      loop: null
+    };
+    window._altScroll = _altScroll;
+    _altScroll.loop = () => {
+      if (!_altScroll.active) return;
+      const cur = editor.scrollTop;
+      const next = cur + (_altScroll.dir * _altScroll.speed);
+      const max = editor.scrollHeight - editor.clientHeight;
+      let nextClamped = next;
+      if (next < 0) nextClamped = 0;
+      else if (next > max) nextClamped = max;
+      
+      if (Math.abs(nextClamped - cur) > 0.1) {
+        const lh = (LINE_HEIGHT || 1);
+        const oldTopLine = Math.floor(cur / lh);
+        
+        editor.scrollTop = nextClamped;
+        
+        // #1281: Robust View Scroll logic (Delta Sync)
+        // Update caretRow ONLY when scrollTop crosses a line boundary (topLine changes).
+        // This ensures offsetLines (caretRow - topLine) remains constant, keeping caret static on screen.
+        const newTopLine = Math.floor(nextClamped / lh);
+        const delta = newTopLine - oldTopLine;
+        
+        if (delta !== 0) {
+           const lines = _splitLines();
+           const newRow = Math.max(0, Math.min(lines.length-1, caretRow + delta));
+           if (newRow !== caretRow) {
+             caretRow = newRow;
+             // Update col for visual stability
+             const line = lines[caretRow] || '';
+             const newCol = _colForVisual(line, _desiredVisualCol|0);
+             _setCaret(caretRow, newCol, { suppressDesired: true });
+           }
+        }
+
+        // Force synchronous update of overlays to prevent flickering
+        try{ _repositionCaret(); updateGutter(); }catch{}
+      }
+
+      if (!document.body.classList.contains('is-scrolling')) document.body.classList.add('is-scrolling');
+      // Reuse scan-hold flag to suppress ensureScrolloff and scroll snapping
+      try{ window.__sixScanHoldScrollActive = true; }catch{}
+      
+      _altScroll.raf = requestAnimationFrame(_altScroll.loop);
+    };
+
   // Show cursor on any mouse move or window blur
   window.addEventListener('mousemove', _showCursor, { passive:true });
   window.addEventListener('blur', _showCursor);
@@ -9401,8 +9488,9 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
         // #1233: Optimize rendering during continuous scroll
         const isScrolling = document.body.classList.contains('is-scrolling');
         const sh = (window && window.__sixScanHoldScrollActive);
+        const as = (window && window._altScroll && window._altScroll.active);
         
-        if (isScrolling) {
+        if (isScrolling && !as) {
             _repositionCaret({ skipCaret: true });
             // Skip heavy overlays during fast scroll
         } else {
@@ -9415,7 +9503,7 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
         const st = (editor.scrollTop||0);
         const maxScroll = editor.scrollHeight - editor.clientHeight;
         const atEof = (maxScroll - st <= 1.5);
-        updateGutter({ inactive: sh, noSnap: (sh || atEof) });
+        updateGutter({ inactive: (sh && !as), noSnap: (sh || atEof) });
 
         _updatePosInfo();
         // Persist current buffer's view state (scroll and caret) on every scroll frame
@@ -9952,31 +10040,34 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
           }catch{}
           return;
         }
-        // Allow native editing behavior, but keep overlays in sync when moving the caret
-        if (e.key==='ArrowLeft' || e.key==='ArrowRight' || e.key==='ArrowUp' || e.key==='ArrowDown' ||
-            e.key==='Home' || e.key==='End' || e.key==='PageUp' || e.key==='PageDown'){
-          // 入力→キャレットのみ移動の最初のタイミングでUndoスナップショットを積んで区切る
-          try{
-            if (_insertSegDirty){
-              const s = editor.selectionStart|0;
-              const t = editor.selectionEnd|0;
-              // 選択範囲が無い（純粋なカーソル移動）の場合のみ分割Undoを適用
-              if (s === t){ _pushUndoSnapshot('insert-seg'); _insertSegDirty = false; }
-            }
-          }catch{}
-
           // Alt+j/k smooth scroll
-          if (e.altKey && (e.key==='j' || e.key==='k')){
+          if (e.altKey && (e.code==='KeyJ' || e.code==='KeyK')){
             e.preventDefault(); e.stopPropagation();
-            if (!_altScroll.active){
-              _altScroll.active = true;
-              _altScroll.key = e.key;
-              _altScroll.dir = (e.key==='j' ? -1 : 1);
+            const as = window._altScroll;
+            if (as && !as.active){
+              as.active = true;
+              as.key = e.key;
+              // #1269: Support jkScrollDirection option
+              const opts = window.SIX_OPTIONS || {};
+              const mode = opts.jkScrollDirection || 'normal'; // 'normal' or 'reverse'
+              // normal: j=Up(-1), k=Down(1)
+              // reverse: j=Down(1), k=Up(-1)
+              let dir = 0;
+              if (e.code === 'KeyJ') dir = (mode === 'reverse') ? 1 : -1;
+              else if (e.code === 'KeyK') dir = (mode === 'reverse') ? -1 : 1;
+              
+              as.dir = dir;
+              as.acc = 0;
               document.body.classList.add('is-scrolling');
-              _altScroll.raf = requestAnimationFrame(_altScrollLoop);
+              try{ window.__sixScanHoldScrollActive = true; }catch{}
+              if (as.loop) as.raf = requestAnimationFrame(as.loop);
             }
             return;
           }
+
+        // Allow native editing behavior, but keep overlays in sync when moving the caret
+        if (e.key==='ArrowLeft' || e.key==='ArrowRight' || e.key==='ArrowUp' || e.key==='ArrowDown' ||
+            e.key==='Home' || e.key==='End' || e.key==='PageUp' || e.key==='PageDown'){
           // PageUp/PageDown smooth scrolling in INSERT mode (#1264)
           if (e.key==='PageUp' || e.key==='PageDown'){
             e.preventDefault(); e.stopPropagation();
@@ -10272,14 +10363,24 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
         if (e.key==='ArrowUp'){ e.preventDefault(); const n=_consumeCount(); if (_visualLinewise){ _visualLinewiseMoveLines(-n); } else { moveAndUpdate(()=>_moveCaretLines(-n)); } return; }
 
         // Alt+j/k smooth scroll
-        if (e.altKey && (e.key==='j' || e.key==='k')){
+        if (e.altKey && (e.code==='KeyJ' || e.code==='KeyK')){
           e.preventDefault(); e.stopPropagation();
-          if (!_altScroll.active){
-            _altScroll.active = true;
-            _altScroll.key = e.key;
-            _altScroll.dir = (e.key==='j' ? -1 : 1);
+          const as = window._altScroll;
+          if (as && !as.active){
+            as.active = true;
+            as.key = e.key;
+            // #1269: Support jkScrollDirection option
+            const opts = window.SIX_OPTIONS || {};
+            const mode = opts.jkScrollDirection || 'normal';
+            let dir = 0;
+            if (e.code === 'KeyJ') dir = (mode === 'reverse') ? 1 : -1;
+            else if (e.code === 'KeyK') dir = (mode === 'reverse') ? -1 : 1;
+            
+            as.dir = dir;
+            as.acc = 0;
             document.body.classList.add('is-scrolling');
-            _altScroll.raf = requestAnimationFrame(_altScrollLoop);
+            try{ window.__sixScanHoldScrollActive = true; }catch{}
+            if (as.loop) as.raf = requestAnimationFrame(as.loop);
           }
           return;
         }
@@ -11259,14 +11360,26 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
         return;
       }
   // Alt+j/k smooth scroll
-  if (e.altKey && (e.key==='j' || e.key==='k')){
+  if (e.altKey && (e.code==='KeyJ' || e.code==='KeyK')){
     e.preventDefault(); e.stopPropagation();
-    if (!_altScroll.active){
-      _altScroll.active = true;
-      _altScroll.key = e.key;
-      _altScroll.dir = (e.key==='j' ? -1 : 1);
+    const as = window._altScroll;
+    if (as && !as.active){
+      as.active = true;
+      as.key = e.key;
+      // #1269: Support jkScrollDirection option
+      const opts = window.SIX_OPTIONS || {};
+      const mode = opts.jkScrollDirection || 'normal';
+      // normal: j=Up(-1), k=Down(1)
+      // reverse: j=Down(1), k=Up(-1)
+      let dir = 0;
+      if (e.code === 'KeyJ') dir = (mode === 'reverse') ? 1 : -1;
+      else if (e.code === 'KeyK') dir = (mode === 'reverse') ? -1 : 1;
+      
+      as.dir = dir;
+      as.acc = 0;
       document.body.classList.add('is-scrolling');
-      _altScroll.raf = requestAnimationFrame(_altScrollLoop);
+      try{ window.__sixScanHoldScrollActive = true; }catch{}
+      if (as.loop) as.raf = requestAnimationFrame(as.loop);
     }
     return;
   }
@@ -11790,26 +11903,6 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
         // Expose for ensureScrolloff
         window._scanHold = _scanHold;
 
-        // Alt+j/k immediate smooth scroll
-        const _altScroll = {
-          active: false,
-          raf: null,
-          dir: 0,
-          speed: 3,
-          key: null
-        };
-        window._altScroll = _altScroll;
-        const _altScrollLoop = () => {
-          if (!_altScroll.active) return;
-          const cur = editor.scrollTop;
-          const next = cur + (_altScroll.dir * _altScroll.speed);
-          const max = editor.scrollHeight - editor.clientHeight;
-          if (next < 0) editor.scrollTop = 0;
-          else if (next > max) editor.scrollTop = max;
-          else editor.scrollTop = next;
-          if (!document.body.classList.contains('is-scrolling')) document.body.classList.add('is-scrolling');
-          _altScroll.raf = requestAnimationFrame(_altScrollLoop);
-        };
         window._scanHoldTriggerScroll = (dir, idealOffset) => {
             if (!_scanHold) return;
             if (_scanHold.mode === 'scroll') return; // already scrolling
@@ -12261,12 +12354,50 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
         try{ window.addEventListener('keydown', _scanHoldKeyDown, true); }catch{}
         try{ window.addEventListener('keyup', _scanHoldKeyUp, true); }catch{}
         try{ window.addEventListener('keyup', (e)=>{
-          if (_altScroll.active && (e.key === _altScroll.key || e.key === 'Alt')){
-            _altScroll.active = false;
-            if (_altScroll.raf) cancelAnimationFrame(_altScroll.raf);
-            _altScroll.raf = null;
+          const as = window._altScroll;
+          if (as && as.active && (e.key === as.key || e.key === 'Alt')){
+            as.active = false;
+            as.acc = 0; // reset accumulator
+            if (as.raf) cancelAnimationFrame(as.raf);
+            as.raf = null;
             document.body.classList.remove('is-scrolling');
+            try{ window.__sixScanHoldScrollActive = false; }catch{}
+            
+            // #1276: Snap to line grid on stop to prevent jumpy behavior
+            try{
+              const st = (editor && (editor.scrollTop||0)) || 0;
+              const lh = (LINE_HEIGHT || 1);
+              const snapped = Math.round(st / lh) * lh;
+              
+              // #1281: Use same Delta Sync logic for snap
+              const oldTopLine = Math.floor(st / lh);
+              const newTopLine = Math.floor(snapped / lh);
+              const delta = newTopLine - oldTopLine;
+              
+              if (Math.abs(snapped - st) > 0.01) {
+                editor.scrollTop = snapped;
+                if (delta !== 0) {
+                   const lines = _splitLines();
+                   const newRow = Math.max(0, Math.min(lines.length-1, caretRow + delta));
+                   if (newRow !== caretRow) {
+                     caretRow = newRow;
+                     const line = lines[caretRow] || '';
+                     const newCol = _colForVisual(line, _desiredVisualCol|0);
+                     _setCaret(caretRow, newCol, { suppressDesired: true });
+                   }
+                }
+              }
+            }catch{}
+
             try{ updateGutter(); _repositionCaret(); _updatePosInfo(); }catch{}
+            
+            // #1282: Sync native selection to updated caret position on stop
+            // This ensures the next typed character is inserted at the correct visual location.
+            try{
+               const hold = editor.scrollTop;
+               _syncNativeSelectionToCaret();
+               if (Math.abs(editor.scrollTop - hold) > 1) editor.scrollTop = hold;
+            }catch{}
           }
         }, true); }catch{}
         try{ window.addEventListener('blur', ()=>{ try{
