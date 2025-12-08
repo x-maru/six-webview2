@@ -4468,7 +4468,13 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
     opts = opts||{};
     const row1 = caretRow + 1;
     const topLine = _topLine();
-    const offsetLines = row1 - topLine;
+    let offsetLines = row1 - topLine;
+
+    // #1284: Use fixed screen offset during continuous scroll to prevent jitter/flicker
+    if (window && window.__sixScanHoldScrollActive && typeof window.__sixScanHoldOffset === 'number') {
+        offsetLines = window.__sixScanHoldOffset + 1;
+    }
+
     if (offsetLines < 0) { edstripe.style.display='none'; return; }
     const topPx = offsetLines * LINE_HEIGHT;
     // Subpixel remainder between scrollTop and line-height (e.g., due to DPI/zoom)
@@ -4484,9 +4490,9 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
       if (Math.abs(rem) < 0.01) rem = 0;
     }catch{}
     
-    // #1275: During View Scroll (Alt+j/k), keep active line background static on screen
+    // #1275: During View Scroll (Alt+j/k) or Continuous Scroll (Hold j/k), keep active line background static on screen
     // Do not apply sub-pixel remainder compensation to avoid jitter against moving text.
-    const isViewScroll = (window && window._altScroll && window._altScroll.active);
+    const isViewScroll = (window && window._altScroll && window._altScroll.active) || (window && window.__sixScanHoldScrollActive);
     
     if (topPx >= 0 && topPx < viewport.clientHeight) {
       edstripe.style.display='';
@@ -12019,8 +12025,31 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
             _suppressDesiredOnce = true;
             _setCaret(newRow, newCol, { suppressDesired: true });
             try{ _flagCaretMotion(); }catch{}
-            _ensureAfterMotion();
             
+            // #1285: Detect if caret motion forces scrolling (scrolloff boundary)
+            // If so, enable static overlay mode to prevent flicker during continuous caret scroll.
+            const preScrollTop = (editor && editor.scrollTop) || 0;
+            _ensureAfterMotion();
+            const postScrollTop = (editor && editor.scrollTop) || 0;
+            
+            if (Math.abs(postScrollTop - preScrollTop) > 0.5) {
+                // Scrolling occurred. Enable static overlay mode if not already active.
+                if (!window.__sixScanHoldScrollActive) {
+                    try{ window.__sixScanHoldScrollActive = true; }catch{}
+                    try{ document.body.classList.add('is-scrolling'); }catch{}
+                }
+            }
+            
+            // #1288: Always update offset if static overlay mode is active,
+            // because caretRow changes even if scrollTop doesn't (or changes slightly).
+            if (window.__sixScanHoldScrollActive) {
+                // Capture offset now (caretRow is already updated)
+                // #1286: Use floor-based top line to match _topLine() and Alt+j behavior.
+                const currentTopLine = Math.floor(postScrollTop/LINE_HEIGHT) + 1;
+                _scanHold.initialScreenOffset = (caretRow - currentTopLine);
+                try{ window.__sixScanHoldOffset = _scanHold.initialScreenOffset; }catch{}
+            }
+
             // #1241: If mode switched to scroll during ensureScrolloff, abort rendering here
             if (_scanHold.mode === 'scroll') return;
 
@@ -12072,7 +12101,14 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
                        // Snap to grid
                        try{
                          const st = (editor && (editor.scrollTop||0)) || 0;
-                         const snapped = Math.round(st / LINE_HEIGHT) * LINE_HEIGHT;
+                         // #1287: Snap in direction of movement (ceil for down, floor for up)
+                         // to prevent snapping back to previous line if we entered the next line even by 1px.
+                         let snapped = st;
+                         const dir = _scanHold.scrollDir || 0;
+                         if (dir > 0) snapped = Math.ceil(st / LINE_HEIGHT) * LINE_HEIGHT;
+                         else if (dir < 0) snapped = Math.floor(st / LINE_HEIGHT) * LINE_HEIGHT;
+                         else snapped = Math.round(st / LINE_HEIGHT) * LINE_HEIGHT;
+                         
                          editor.scrollTop = snapped;
                        }catch{}
                        try{ updateGutter(); }catch{}
@@ -12129,9 +12165,10 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
                 
                 // Update caret position to match scrolled content (maintain screen-relative position)
                 try{
-                  // #1218: Use rounded top line to handle fractional scrollTop (from noSnap) correctly.
-                  // _topLine() uses floor, which causes off-by-one in offset calculation when scrollTop is e.g. 25.9px.
-                  const visTopLine = Math.round((editor.scrollTop||0)/LINE_HEIGHT) + 1;
+                  // #1286: Use floor-based top line to match _topLine() and Alt+j behavior.
+                  // This prevents caret/background bouncing by keeping the caret on the same line
+                  // until it fully scrolls out of the target screen position.
+                  const visTopLine = Math.floor((editor.scrollTop||0)/LINE_HEIGHT) + 1;
                   const lines = _splitLines();
                   
                   // Use captured offset to determine target caret row
@@ -12246,9 +12283,10 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
               try{ document.body.classList.add('is-scrolling'); }catch{}
 
               // Capture initial screen offset to maintain caret position relative to viewport
-              // #1218: Use rounded top line for offset calculation too, to match loop logic
-              const currentTopLine = Math.round((editor.scrollTop||0)/LINE_HEIGHT) + 1;
+              // #1286: Use floor-based top line to match _topLine() and Alt+j behavior.
+              const currentTopLine = Math.floor((editor.scrollTop||0)/LINE_HEIGHT) + 1;
               _scanHold.initialScreenOffset = (caretRow - currentTopLine);
+              try{ window.__sixScanHoldOffset = _scanHold.initialScreenOffset; }catch{}
 
               // DEBUG: record initial position
               const initCaretRow = caretRow + 1;
@@ -12288,7 +12326,8 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
             try{ e.preventDefault(); e.stopPropagation(); }catch{}
 
             const mode = _scanHold.mode;
-            
+            const wasScrolling = window.__sixScanHoldScrollActive; // Check before clearing
+
             // #1238: If initial scroll is still animating, let it finish smoothly
             if (mode === 'scroll' && _scanHold.scrollActive && !_scanHold.continuous && _scanHold.scrollTargetPx > 0) {
                 if (_scanHold.promotionTimer){ clearTimeout(_scanHold.promotionTimer); _scanHold.promotionTimer = null; }
@@ -12316,31 +12355,61 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
               // Stop caret loop
               _scanHold.caretDir = 0;
               _scanHold.caretLastMove = 0;
-              // #1256: Ensure UI is restored even if we ended in caret mode (e.g. at EOF)
-              try{ updateGutter(); }catch{}
-              try{ _repositionCaret(); }catch{}
             } else if (mode === 'scroll' && _scanHold.scrollActive){
               // Stop scroll loop
               _scanHold.scrollActive = false;
               _scanHold.continuous = false; // #1231: Reset continuous flag
-              try{ window.__sixScanHoldScrollActive = false; }catch{}
               _scanHold.scrollTargetPx = 0;
               // DEBUG: log final position
               try{ console.log('[scan-hold] SCROLL MODE END: caretRow='+(caretRow+1)+', topLine='+_topLine()); }catch{}
-              // Snap to line grid
-              try{
-                const st = (editor && (editor.scrollTop||0)) || 0;
-                const snapped = Math.round(st / LINE_HEIGHT) * LINE_HEIGHT;
-                editor.scrollTop = snapped;
-              }catch{}
-              // ④ Render gutter with active colors on keyup
-              try{ updateGutter(); }catch{}
-              
-              try{ _repositionCaret(); }catch{}
             }
-            
-            // #1256: Always remove scrolling class on keyup to prevent stuck hidden state
+
+            // #1288: Snap logic if we were scrolling (in either mode)
+            if (wasScrolling) {
+                 try{
+                     const st = (editor && (editor.scrollTop||0)) || 0;
+                     let snapped = st;
+                     // Determine direction
+                     let dir = 0;
+                     if (mode === 'scroll') dir = _scanHold.scrollDir;
+                     else if (mode === 'caret') dir = _scanHold.caretDir;
+                     
+                     if (dir > 0) snapped = Math.ceil(st / LINE_HEIGHT) * LINE_HEIGHT;
+                     else if (dir < 0) snapped = Math.floor(st / LINE_HEIGHT) * LINE_HEIGHT;
+                     else snapped = Math.round(st / LINE_HEIGHT) * LINE_HEIGHT;
+                     
+                     // #1288: Use small epsilon to ensure we snap even if very close (e.g. 0.05px)
+                     // This prevents "floor" from being off by 1 line when we are visually at the next line.
+                     if (Math.abs(snapped - st) > 0.001) {
+                         editor.scrollTop = snapped;
+                         
+                         // #1288: Update caretRow to match the snapped scrollTop
+                         // so the caret stays at the same visual offset.
+                         if (window.__sixScanHoldOffset != null) {
+                             const newTopLine = Math.floor(snapped / LINE_HEIGHT) + 1;
+                             const newCaretRow = newTopLine + window.__sixScanHoldOffset;
+                             const lines = _splitLines();
+                             const validRow = Math.max(0, Math.min(lines.length-1, newCaretRow));
+                             
+                             if (validRow !== caretRow) {
+                                 caretRow = validRow;
+                                 const line = lines[validRow] || '';
+                                 const newCol = _colForVisual(line, _desiredVisualCol|0);
+                                 _setCaret(validRow, newCol, { suppressDesired: true });
+                             }
+                         }
+                     }
+                 }catch{}
+            }
+
+            // Always clear flags and restore UI
+            try{ window.__sixScanHoldScrollActive = false; }catch{}
+            try{ window.__sixScanHoldOffset = null; }catch{}
             try{ document.body.classList.remove('is-scrolling'); }catch{}
+            
+            // #1256: Ensure UI is restored
+            try{ updateGutter(); }catch{}
+            try{ _repositionCaret(); }catch{}
 
             // Clear state
             _scanHold.mode = null;

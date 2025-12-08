@@ -41,11 +41,11 @@ window.THEME = {
   gutterNumberColor: "#808080",
 
   // 行背景(NORMALカーソル行)グラデーション
-  activeLineGradientStart: "#e4ffe4",
-  activeLineGradientEnd: "#e0fbe0",
+  activeLineGradientStart: "#eafced",
+  activeLineGradientEnd: "#e2f4ee",
   // 行番号背景(NORMALカーソル行)グラデーション
-  activeGutterGradientStart: "#d0ead0",
-  activeGutterGradientEnd: "#c0dac0",
+  activeGutterGradientStart: "#e2f0ed",
+  activeGutterGradientEnd: "#deebea",
   // 行背景(INSERTカーソル行)グラデーション
   activeEditLineGradStart: "#fff0f0",
   activeEditLineGradEnd: "#ffe0e0",
@@ -60,8 +60,8 @@ window.THEME = {
   gutterGradientEnd: "rgb(219,227,219)",
 
   // NORMAL/VISUALでIME OFFのcaretグラデーション(左→右の方向)
-  caretGradStart: "rgba(255,79,0,0.95)",
-  caretGradMid: "rgba(255,79,0,0.05)",
+  caretGradStart: "rgba(0,111,79,0.95)",
+  caretGradMid: "rgba(0,111,79,0.04)",
 
   // NORMAL/VISUALでIME ONのcaretグラデーション
   caretIMEGradStart: "rgba(0,0,0,0.9)",
