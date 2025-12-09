@@ -9722,7 +9722,14 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
     });
     // Mouse selection/click: sync overlay caret with native selection
     const syncCaretFromSelection = ()=>{
-      try{ const off = editor.selectionStart|0; const rc = _rcFromOffset(off); caretRow = rc.r; caretCol = rc.c; }catch{}
+      try{ 
+        const off = editor.selectionStart|0; const rc = _rcFromOffset(off); caretRow = rc.r; caretCol = rc.c; 
+        // #1289: Update desired visual column on manual selection change (click/mouse)
+        // to ensure subsequent vertical moves (PageUp/Down) use the new column.
+        const lines = _splitLines();
+        const line = lines[caretRow] || '';
+        _desiredVisualCol = _visualWidthUpToLine(line, caretCol);
+      }catch{}
       _repositionCaret(); updateGutter();
     };
     // Ensure single-click updates after browser updates selection
@@ -10145,6 +10152,16 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
           // Defer until after the browser updates selection/caret
           setTimeout(()=>{
             try{ const off = editor.selectionStart|0; const rc = _rcFromOffset(off); caretRow = rc.r; caretCol = rc.c; }catch{}
+            
+            // #1289: Update desired visual column for horizontal moves in INSERT mode
+            if (e.key==='ArrowLeft' || e.key==='ArrowRight' || e.key==='Home' || e.key==='End'){
+               try{
+                   const lines = _splitLines();
+                   const line = lines[caretRow] || '';
+                   _desiredVisualCol = _visualWidthUpToLine(line, caretCol);
+               }catch{}
+            }
+
             // Keep scrolloff for vertical moves
             if (e.key==='ArrowUp' || e.key==='ArrowDown' || e.key==='PageUp' || e.key==='PageDown'){
               try{ ensureScrolloff(); }catch{}
