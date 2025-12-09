@@ -327,6 +327,8 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
         // タイピング中の重い再描画を少し長めに抑止（IME候補表示中のフレーム落ち対策）
         try{ _typingGuardUntil = Date.now() + 200; }catch{}
         try{ _applyCaretGradient(); }catch{}
+        // #1319: Force update listchars to hide EOL marker on active line
+        try{ _renderListChars(); }catch{}
       });
       // 仕様(#1022): 未確定文字の確定瞬間では何もしない（IMEは継続ONとみなす）
       editor.addEventListener('compositionend',   ()=>{
@@ -2333,38 +2335,43 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
         }
         // EOL marker (after line width) only for real lines (exclude virtual padding beyond EOF)
         if (isReal){
-          _measureSpan.textContent = _exp(line);
-          const xEnd = _measureSpan.getBoundingClientRect().width;
-          let _hs=0; try{ _hs=(editor.scrollLeft||0); }catch{}
-          const elE = document.createElement('div');
-          elE.className='listchar-eol';
-          // ff-based coloring: THEME via CSS vars for LF/CRLF; legacy CR (mac) stays red-ish as hidden feature
-          let ffColor = 'var(--controlCharColorLF, yellow)';
-          let ffKind = 'unix';
-          try{ const b=currentBuffer(); ffKind=(b&&b.ff)||'unix'; if(ffKind==='dos') ffColor='var(--controlCharColorCRLF, yellow)'; else if(ffKind==='mac') ffColor='rgba(200,80,80,0.65)'; }catch{}
-          // Dummy final newline highlighting (#599): original file lacked final LF and current text still lacks final LF.
-          // We treat the displayed end-of-line marker for the last real line as synthetic and recolor it.
-          // UI記号は常に'↲'で統一（ダミーも同一記号で色のみ差別化）
-          let eolSym = '↲';
-          try{
-            const b = currentBuffer();
-            const isLastReal = (idx === realTotal-1);
-            const bufText = String(b && b.text || '');
-            const stillNoFinalLF = b ? !bufText.endsWith('\n') : false;
-            // シンプルルール: 「現在のテキストが末尾LFを欠く」時のみダミーを表示
-            const dummyActive = !!(b && isLastReal && stillNoFinalLF);
-            if (dummyActive){
-              // Prefer explicit theme colors if provided; fall back to a distinct orange/yellow.
-              // Fallback colors: fixed yellow (#601 request) if theme not provided
-              let dLF = 'yellow'; let dCRLF = 'yellow';
-              try{ if (window && window.THEME){ if (window.THEME.dummyLFColor) dLF = String(window.THEME.dummyLFColor); if (window.THEME.dummyCRLFColor) dCRLF = String(window.THEME.dummyCRLFColor); } }catch{}
-              ffColor = (ffKind === 'dos') ? dCRLF : dLF;
-              elE.dataset.dummyFinal = '1';
-            }
-          }catch{}
-          elE.textContent=eolSym;
-          elE.style.position='absolute'; elE.style.left=(xEnd-_hs)+'px'; elE.style.top=yTop+'px'; elE.style.height=LINE_HEIGHT+'px'; elE.style.lineHeight=LINE_HEIGHT+'px'; elE.style.fontSize='inherit'; elE.style.fontFamily='var(--controlCharFont, "Segoe UI Symbol","Noto Sans Symbols 2","Cascadia Mono","Consolas",monospace)'; /* weight via CSS var on class */ elE.style.color=ffColor; elE.style.margin='0'; elE.style.padding='0';
-          _listLayer.appendChild(elE);
+          // #1319: Skip EOL marker on the active line during IME composition to avoid overlap
+          if (window._imeComposing === true && row === (caretRow + 1)) {
+             // skip
+          } else {
+            _measureSpan.textContent = _exp(line);
+            const xEnd = _measureSpan.getBoundingClientRect().width;
+            let _hs=0; try{ _hs=(editor.scrollLeft||0); }catch{}
+            const elE = document.createElement('div');
+            elE.className='listchar-eol';
+            // ff-based coloring: THEME via CSS vars for LF/CRLF; legacy CR (mac) stays red-ish as hidden feature
+            let ffColor = 'var(--controlCharColorLF, yellow)';
+            let ffKind = 'unix';
+            try{ const b=currentBuffer(); ffKind=(b&&b.ff)||'unix'; if(ffKind==='dos') ffColor='var(--controlCharColorCRLF, yellow)'; else if(ffKind==='mac') ffColor='rgba(200,80,80,0.65)'; }catch{}
+            // Dummy final newline highlighting (#599): original file lacked final LF and current text still lacks final LF.
+            // We treat the displayed end-of-line marker for the last real line as synthetic and recolor it.
+            // UI記号は常に'↲'で統一（ダミーも同一記号で色のみ差別化）
+            let eolSym = '↲';
+            try{
+              const b = currentBuffer();
+              const isLastReal = (idx === realTotal-1);
+              const bufText = String(b && b.text || '');
+              const stillNoFinalLF = b ? !bufText.endsWith('\n') : false;
+              // シンプルルール: 「現在のテキストが末尾LFを欠く」時のみダミーを表示
+              const dummyActive = !!(b && isLastReal && stillNoFinalLF);
+              if (dummyActive){
+                // Prefer explicit theme colors if provided; fall back to a distinct orange/yellow.
+                // Fallback colors: fixed yellow (#601 request) if theme not provided
+                let dLF = 'yellow'; let dCRLF = 'yellow';
+                try{ if (window && window.THEME){ if (window.THEME.dummyLFColor) dLF = String(window.THEME.dummyLFColor); if (window.THEME.dummyCRLFColor) dCRLF = String(window.THEME.dummyCRLFColor); } }catch{}
+                ffColor = (ffKind === 'dos') ? dCRLF : dLF;
+                elE.dataset.dummyFinal = '1';
+              }
+            }catch{}
+            elE.textContent=eolSym;
+            elE.style.position='absolute'; elE.style.left=(xEnd-_hs)+'px'; elE.style.top=yTop+'px'; elE.style.height=LINE_HEIGHT+'px'; elE.style.lineHeight=LINE_HEIGHT+'px'; elE.style.fontSize='inherit'; elE.style.fontFamily='var(--controlCharFont, "Segoe UI Symbol","Noto Sans Symbols 2","Cascadia Mono","Consolas",monospace)'; /* weight via CSS var on class */ elE.style.color=ffColor; elE.style.margin='0'; elE.style.padding='0';
+            _listLayer.appendChild(elE);
+          }
         }
       }
     }catch{}
