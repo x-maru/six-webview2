@@ -9,6 +9,7 @@
 window.SIX_OPTIONS = {
   // scrolloff: 99999, // :set scrolloff=Nで設定した値をセッション情報に含めるのでオプションからは外した。初期値は3
   tabstop: 8, // TABコードを何桁の空白として表示するか
+  // shiftwidth: 'TAB',
   visualbell: true, // ヴィジュアルベル。指定しなくてもデフォルトでON
   UNDO_STEPS_IN_SESSION: 5, // 即時終了から復帰した後まで引き継ぐアンドゥバッファの深さ(各バッファ毎に持つバッファに対する共通の深さ)
   hlsearch: false, // 検索ハイライト（:set hlsearch / :set nohlsearch / :set hlsearch!）

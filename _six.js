@@ -610,7 +610,10 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
         const enc = (it && it.enc) || 'utf-8';
         const ff  = (it && it.ff)  || 'unix';
         const bom = !!(it && it.bom);
-        const shiftwidth = Number.isFinite(it && it.shiftwidth) ? Math.max(1, (it.shiftwidth|0)) : 4;
+        // #1320: Support 'TAB' shiftwidth
+        let shiftwidth = 4;
+        if (it && it.shiftwidth === 'TAB') shiftwidth = 'TAB';
+        else shiftwidth = Number.isFinite(it && it.shiftwidth) ? Math.max(1, (it.shiftwidth|0)) : 4;
         const ignorecase = !!(it && it.ignorecase);
         const smartcase  = !!(it && it.smartcase);
         const edScale = Number.isFinite(it && it.edScale) ? _nearestScale(it.edScale) : 1;
@@ -631,7 +634,10 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
             ? { linewise: !!sv.linewise, anchorR: sv.anchorR|0, anchorC: sv.anchorC|0, caretR: sv.caretR|0, caretC: sv.caretC|0 }
             : null;
           // restore shiftwidth (default 4)
-          try{ b.shiftwidth = Number.isFinite(it && it.shiftwidth) ? Math.max(1, (it.shiftwidth|0)) : (Number.isFinite(b.shiftwidth)?b.shiftwidth:4); }catch{ b.shiftwidth = (Number.isFinite(b.shiftwidth)?b.shiftwidth:4); }
+          try{ 
+              if (it && it.shiftwidth === 'TAB') b.shiftwidth = 'TAB';
+              else b.shiftwidth = Number.isFinite(it && it.shiftwidth) ? Math.max(1, (it.shiftwidth|0)) : (b.shiftwidth === 'TAB' ? 'TAB' : (Number.isFinite(b.shiftwidth)?b.shiftwidth:4)); 
+          }catch{ b.shiftwidth = (b.shiftwidth === 'TAB' ? 'TAB' : (Number.isFinite(b.shiftwidth)?b.shiftwidth:4)); }
           // restore case flags (default false)
           try{ b.ignorecase = !!(it && it.ignorecase); }catch{ b.ignorecase = !!b.ignorecase; }
           try{ b.smartcase  = !!(it && it.smartcase);  }catch{ b.smartcase  = !!b.smartcase;  }
@@ -3105,7 +3111,17 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
         // per-buffer zoom scale (editor-only zoom)
         edScale: (Number.isFinite(b.edScale) ? _nearestScale(b.edScale) : 1),
         // per-buffer shiftwidth (indent width in spaces)
-        shiftwidth: Number.isFinite(b.shiftwidth)? Math.max(1, (b.shiftwidth|0)) : 4,
+        shiftwidth: (function(){
+          if (b.shiftwidth === 'TAB') return 'TAB';
+          if (Number.isFinite(b.shiftwidth)) return Math.max(1, (b.shiftwidth|0));
+          try{
+            const o = window.SIX_OPTIONS && window.SIX_OPTIONS.shiftwidth;
+            if (o === 'TAB') return 'TAB';
+            const v = parseInt(o, 10);
+            if (Number.isFinite(v) && v > 0) return v;
+          }catch{}
+          return 2;
+        })(),
         // per-buffer case sensitivity options (#696)
         ignorecase: !!b.ignorecase,
         smartcase:  !!b.smartcase,
@@ -4861,10 +4877,16 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
     }catch{ return { r:0, c:0 }; }
   }
   function _getShiftWidth(){
-    try{ const b=currentBuffer(); const sw = Number.isFinite(b&&b.shiftwidth)? (b.shiftwidth|0) : 4; return Math.max(1, sw); }catch{ return 4; }
+    try{
+      const b=currentBuffer();
+      if (b && b.shiftwidth === 'TAB') return 'TAB';
+      const sw = Number.isFinite(b&&b.shiftwidth)? (b.shiftwidth|0) : 4;
+      return Math.max(1, sw);
+    }catch{ return 4; }
   }
+  // Check for truncation or syntax errors
   function _applyIndentRange(rs, re, units){
-    // units>0: indent by units*shiftwidth spaces; units<0: outdent by removing up to units*shiftwidth leading spaces
+    // units>0: indent; units<0: outdent
     const s = String(editor.value||'');
     const raw = _splitLinesRaw();
     const last = raw.length - 1;
@@ -4875,29 +4897,59 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
     let r2 = Math.max(0, Math.min(maxIdx, re|0));
     if (r2 < r1){ const t=r1; r1=r2; r2=t; }
     const sw = _getShiftWidth();
-    const add = Math.max(0, (units>0? units:0)|0) * sw;
-    const del = Math.max(0, (units<0? -units:0)|0) * sw;
+    
+    // #1320: Support 'TAB' shiftwidth
+    const isTabMode = (sw === 'TAB');
+    const swVal = isTabMode ? 1 : sw; // multiplier for spaces (unused if TAB)
+
+    const add = Math.max(0, (units>0? units:0)|0) * swVal;
+    const del = Math.max(0, (units<0? -units:0)|0) * swVal;
     const buf = raw.slice();
     let changed = false;
     for (let r=r1; r<=r2; r++){
       const line0 = String(buf[r]||'');
       // 空行は対象に含むが変更は行わない
       if (line0.length === 0) continue;
-      // 行頭の連続TABは保持し、その直後からインデント増減を適用
-      const m = line0.match(/^\t+/);
-      const tabs = m ? m[0] : '';
-      const rest0 = line0.slice(tabs.length);
-      let lineNew = line0;
-      if (add>0){
-        // TAB直後にスペースを挿入
-        lineNew = tabs + ' '.repeat(add) + rest0;
-      } else if (del>0){
-        // TAB直後のスペースを最大 del まで削除（TABは削らない）
-        let k=0; const n=Math.min(del, rest0.length);
-        while (k<n && rest0.charCodeAt(k)===0x20) k++;
-        lineNew = tabs + rest0.slice(k);
+      
+      if (isTabMode) {
+          // TAB mode: insert/delete raw \t characters
+          let lineNew = line0;
+          if (units > 0) {
+              // Insert N tabs
+              lineNew = '\t'.repeat(units) + line0;
+          } else if (units < 0) {
+              // Remove up to N tabs from the beginning
+              let count = -units;
+              let k = 0;
+              while (k < lineNew.length && count > 0) {
+                  if (lineNew[k] === '\t') {
+                      k++;
+                      count--;
+                  } else {
+                      break;
+                  }
+              }
+              if (k > 0) lineNew = lineNew.slice(k);
+          }
+          if (lineNew !== line0){ buf[r] = lineNew; changed = true; }
+      } else {
+          // Space mode (existing logic)
+          // 行頭の連続TABは保持し、その直後からインデント増減を適用
+          const m = line0.match(/^\t+/);
+          const tabs = m ? m[0] : '';
+          const rest0 = line0.slice(tabs.length);
+          let lineNew = line0;
+          if (add>0){
+            // TAB直後にスペースを挿入
+            lineNew = tabs + ' '.repeat(add) + rest0;
+          } else if (del>0){
+            // TAB直後のスペースを最大 del まで削除（TABは削らない）
+            let k=0; const n=Math.min(del, rest0.length);
+            while (k<n && rest0.charCodeAt(k)===0x20) k++;
+            lineNew = tabs + rest0.slice(k);
+          }
+          if (lineNew !== line0){ buf[r] = lineNew; changed = true; }
       }
-      if (lineNew !== line0){ buf[r] = lineNew; changed = true; }
     }
     if (changed){
       // 1回のインデント操作を単一のUndoに
@@ -16719,16 +16771,22 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
       };
       const swP2 = swPillBase('2', 'overlayBtnSw_2');
       const swP4 = swPillBase('4', 'overlayBtnSw_4');
-      const swP8 = swPillBase('8', 'overlayBtnSw_8');
-      swLine.appendChild(swP2); swLine.appendChild(swP4); swLine.appendChild(swP8);
+      const swPTab = swPillBase('TAB', 'overlayBtnSw_TAB');
+      swLine.appendChild(swP2); swLine.appendChild(swP4); swLine.appendChild(swPTab);
       swWrap.appendChild(swTitle); swWrap.appendChild(swLine); swBtn.appendChild(swWrap);
       swBtn.addEventListener('click', (e)=>{
         try{ e.preventDefault(); e.stopPropagation(); }catch{}
         try{
           const b = currentBuffer();
           const cur = _getShiftWidth();
-          const next = (cur===2)?4 : (cur===4)?8 : (cur===8)?2 : 2;
-          if (b){ b.shiftwidth = Math.max(1, next|0); _schedulePersist('shiftwidth'); }
+          // Rotation: 2 -> 4 -> TAB -> 2
+          let next = 2;
+          if (cur === 2) next = 4;
+          else if (cur === 4) next = 'TAB';
+          else if (cur === 'TAB') next = 2;
+          else next = 2; // default reset
+
+          if (b){ b.shiftwidth = (next === 'TAB' ? 'TAB' : Math.max(1, next|0)); _schedulePersist('shiftwidth'); }
           try{ _updateOverlayShiftwidthVisual(); }catch{}
           try{ toast('shiftwidth = ' + next, 900); }catch{}
         }catch{}
@@ -17198,15 +17256,17 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
     try{
       const p2 = document.getElementById('overlayBtnSw_2');
       const p4 = document.getElementById('overlayBtnSw_4');
-      const p8 = document.getElementById('overlayBtnSw_8');
-      if (!p2 || !p4 || !p8) return;
+      const pTab = document.getElementById('overlayBtnSw_TAB');
+      if (!p2 || !p4) return; // pTab might be missing if old DOM? No, we just added it.
       const green = '#49e26f';
       // reset
-      for (const p of [p2,p4,p8]){ p.style.background = 'transparent'; p.style.color = '#e6e6e6'; }
+      for (const p of [p2,p4]){ p.style.background = 'transparent'; p.style.color = '#e6e6e6'; }
+      if (pTab) { pTab.style.background = 'transparent'; pTab.style.color = '#e6e6e6'; }
+      
       const sw = _getShiftWidth();
       if (sw === 2){ p2.style.background = green; p2.style.color = '#000'; }
       else if (sw === 4){ p4.style.background = green; p4.style.color = '#000'; }
-      else if (sw === 8){ p8.style.background = green; p8.style.color = '#000'; }
+      else if (sw === 'TAB' && pTab){ pTab.style.background = green; pTab.style.color = '#000'; }
       // other values: none highlighted
     }catch{}
   }
