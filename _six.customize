@@ -60,8 +60,8 @@ window.THEME = {
   gutterGradientEnd: "rgb(219,227,219)",
 
   // NORMAL/VISUALでIME OFFのcaretグラデーション(左→右の方向)
-  caretGradStart: "rgba(0,111,79,0.95)",
-  caretGradMid: "rgba(0,111,79,0.04)",
+  caretGradStart: "rgba(0,115,79,0.95)",
+  caretGradMid: "rgba(0,115,79,0.04)",
 
   // NORMAL/VISUALでIME ONのcaretグラデーション
   caretIMEGradStart: "rgba(0,0,0,0.9)",

@@ -5528,13 +5528,13 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
     }catch{ return true; }
   }
 
-  function _ensureAfterMotion(){
+  function _ensureAfterMotion(opts){
     // If immediately after a buffer switch and caret is visible, skip the first automatic adjustment
     if (_preferNoScrollOnceAfterSwitch){
       _preferNoScrollOnceAfterSwitch = false;
       if (_isCaretVisible()) return;
     }
-    ensureScrolloff({ force:true });
+    ensureScrolloff(Object.assign({ force:true }, opts||{}));
   }
   // Smooth scrolling helper: animate editor.scrollTop per-pixel.
   let __six_scroll_anim = null;
@@ -5707,7 +5707,7 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
       // clamp within pad range
       targetTop = Math.min(targetTop, maxTopWithPad);
       const prevTopLine = _topLine();
-      _setEditorScrollTop((targetTop-1) * LINE_HEIGHT, {});
+      _setEditorScrollTop((targetTop-1) * LINE_HEIGHT, opts);
       scrolled = true;
       // If caret was already visible and we only scrolled due to centerOnce/preferEOFPad for EOF, avoid introducing visual gap by snapping back when delta is small (#424)
       try{
@@ -5727,7 +5727,7 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
         if (newTop !== topLine) {
            // #1239: If scan-hold is active (caret mode), use smooth scroll instead of jump
            const sh = window._scanHold;
-           if (window.__sixScanHoldHeld && window.__sixScanHoldHeld.size > 0 && sh && sh.mode === 'caret') {
+           if (window.__sixScanHoldHeld && window.__sixScanHoldHeld.size > 0 && sh && sh.mode === 'caret' && !sh.stepAnimation) {
                // Switch to scroll mode logic temporarily or just animate here?
                // Better to let the scroll loop handle it if possible, but we are in caret mode.
                // We can manually trigger a smooth scroll step.
@@ -5774,7 +5774,7 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
                }
                scrolled = true; 
            } else {
-               _setEditorScrollTop((newTop-1)*LINE_HEIGHT, {}); scrolled = true; 
+               _setEditorScrollTop((newTop-1)*LINE_HEIGHT, (sh && sh.stepAnimation) ? { immediate: true } : opts); scrolled = true; 
            }
         }
       } else if (caretLine1 > topLine + vis - scrolloff - 1){
@@ -5787,7 +5787,7 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
         if (newTop !== topLine) {
            // #1239: Smooth scroll transition for scan-hold
            const sh = window._scanHold;
-           if (window.__sixScanHoldHeld && window.__sixScanHoldHeld.size > 0 && sh && sh.mode === 'caret') {
+           if (window.__sixScanHoldHeld && window.__sixScanHoldHeld.size > 0 && sh && sh.mode === 'caret' && !sh.stepAnimation) {
                const currentSt = (editor.scrollTop||0);
                const targetSt = (newTop-1)*LINE_HEIGHT;
                const diff = targetSt - currentSt;
@@ -5814,7 +5814,7 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
                    }
                }
            } else {
-               _setEditorScrollTop((newTop-1)*LINE_HEIGHT, {}); scrolled = true;
+               _setEditorScrollTop((newTop-1)*LINE_HEIGHT, (sh && sh.stepAnimation) ? { immediate: true } : opts); scrolled = true;
            }
         }
       }
@@ -11965,8 +11965,70 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
             // #1245: Peek at pending count to predict true destination
             const count = (_countAcc==null?1:_countAcc);
 
-            // #1292: If count > 20, force caret mode (jump)
-            if (count > 20) return 'caret';
+            // #1292: If count > 30, force jump mode (bypass smooth scroll checks)
+            if (count > 30) return 'jump';
+            
+            // #1297: If count > 1 (and <= 30), force caret mode to enable step-by-step animation
+            // #1313: But if scrolloff is large (centering), we should prefer scroll mode immediately
+            // unless we are at boundary.
+            // Actually, if scrolloff=999, we want to scroll.
+            // If we return 'caret', _scanHoldCaretMode will run.
+            // It will call ensureScrolloff. ensureScrolloff will see scrolloff=999 and scroll.
+            // This is fine for single step.
+            // But for continuous hold, we want smooth scroll.
+            // If we return 'caret', we get step animation.
+            // Step animation switches to scroll mode if boundary hit.
+            // With scrolloff=999, boundary is effectively always hit (caret must be center).
+            // So step animation will switch to scroll mode immediately?
+            // Let's check stepLoop logic.
+            // stepLoop checks: if (nextLine > topLine + vis - 1 - scrolloffVal) needScroll = true;
+            // If scrolloff=999, this condition is almost always true.
+            // So it switches to scroll mode immediately.
+            // This explains why "sometimes" it scrolls immediately.
+            // But why "sometimes" it waits?
+            // If count=1 (continuous hold), we don't enter step animation block.
+            // We go to normal single step block.
+            // Normal single step block schedules promotion timer.
+            // So it waits 0.5s.
+            
+            // If scrolloff=999, we want to return 'scroll' for count=1 too?
+            // If we return 'scroll', we get immediate smooth scroll (1 line), then wait 0.5s.
+            // This matches "1 line advance -> wait -> continuous".
+            
+            // So, if scrolloff is large, we should NOT force 'caret' mode for count > 1?
+            // No, count > 1 is for explicit counts like "5j".
+            // "5j" with scrolloff=999 should probably animate steps?
+            // Or just scroll?
+            // If we return 'caret', stepLoop runs.
+            // stepLoop sees needScroll=true immediately.
+            // It switches to scroll mode.
+            // So "5j" becomes smooth scroll immediately. This is fine.
+            
+            // The issue is "continuous hold" (count=1).
+            // If count=1, we fall through to:
+            // if (scrolloffVal >= 99999) return preferScroll();
+            // preferScroll() returns 'scroll' (unless at EOF).
+            // So for count=1, we return 'scroll'.
+            // This means we scroll 1 line immediately.
+            // Then we wait for promotion.
+            
+            // So why does the user say "sometimes it doesn't wait"?
+            // Maybe 'scroll' mode logic for count=1 is:
+            // _consumeCount() -> 1.
+            // scrollTargetPx = 1 * LINE_HEIGHT.
+            // Loop runs. Consumes targetPx.
+            // Loop pauses.
+            // Timer fires. continuous=true.
+            // Loop resumes.
+            
+            // If it doesn't wait, it means continuous becomes true early?
+            // Or scrollTargetPx was larger?
+            // Or promotionDelayMs is 0? (No, default is 500).
+            
+            // Maybe the "bounce back" issue was confusing the observation.
+            // Let's fix bounce back first (done above).
+            
+            if (count > 1) return 'caret';
             
             // Check AFTER hypothetical move
             const wouldBeCaretLine1 = (caretRow + (delta * count)) + 1;
@@ -12021,7 +12083,7 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
         };
 
         // Caret mode: traditional motion (consume count, move caret, ensureScrolloff)
-        const _scanHoldCaretMode = (delta)=>{
+        const _scanHoldCaretMode = (delta, opts)=>{
           try{
             const count = _consumeCount();
             // #1293: If count > 20, it's a jump. Do not multiply by delta again if count is already signed?
@@ -12054,7 +12116,10 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
             // #1285: Detect if caret motion forces scrolling (scrolloff boundary)
             // If so, enable static overlay mode to prevent flicker during continuous caret scroll.
             const preScrollTop = (editor && editor.scrollTop) || 0;
-            _ensureAfterMotion();
+            // #1297: For large jumps (count > 30), force immediate scroll to avoid animation/snap errors
+            // #1304: Also force immediate scroll during step animation to ensure position is correct for next step
+            const forceImmediate = (count > 30) || (_scanHold && _scanHold.stepAnimation) || (opts && opts.immediate);
+            _ensureAfterMotion(forceImmediate ? { immediate: true } : {});
             const postScrollTop = (editor && editor.scrollTop) || 0;
             
             if (Math.abs(postScrollTop - preScrollTop) > 0.5) {
@@ -12078,8 +12143,8 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
             // #1241: If mode switched to scroll during ensureScrolloff, abort rendering here
             if (_scanHold.mode === 'scroll') return;
             
-            // #1293: If this was a large jump (count > 20), do not enter continuous loop
-            if (count > 20) {
+            // #1293: If this was a large jump (count > 30), do not enter continuous loop
+            if (count > 30) {
                 _scanHold.caretDir = 0; // Stop loop
                 if (_scanHold.promotionTimer) clearTimeout(_scanHold.promotionTimer);
                 _scanHold.promotionTimer = null;
@@ -12120,10 +12185,46 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
                 // No wait, max speed (RAF frequency).
                 // #1290: Increased to 4px for faster scroll feel
                 // #1291: Use 8px if count > 9
-                let scrollPx = (_scanHold.lastCount > 9) ? 8 : 4;
+                // #1298: Use fixed speed if requested (e.g. 6px for step-to-scroll transition)
+                let scrollPx = 4;
+                if (_scanHold.fixedSpeed) {
+                    scrollPx = _scanHold.fixedSpeed;
+                } else if (_scanHold.lastCount > 9) {
+                    scrollPx = 8;
+                }
+                
+                try{ if(_scanHold.commandScroll) console.log('[scan-hold] scroll loop. targetPx='+_scanHold.scrollTargetPx+', scrollPx='+scrollPx+', active='+_scanHold.scrollActive+', stopping='+_scanHold.stopping+', scrollTop='+editor.scrollTop+', scrollHeight='+editor.scrollHeight+', clientHeight='+editor.clientHeight); }catch{}
 
                 // #1226: Pause if initial scroll done but promotion timer not yet fired
                 if (_scanHold.scrollTargetPx <= 0 && !_scanHold.continuous) {
+                   // #1298: If this was a command scroll (from step animation), finish immediately
+                   if (_scanHold.commandScroll) {
+                       _scanHold.scrollActive = false;
+                       _scanHold.stopping = false;
+                       _scanHold.commandScroll = false;
+                       _scanHold.fixedSpeed = 0;
+                       try{ window.__sixScanHoldScrollActive = false; }catch{}
+                       // Snap to grid
+                       try{
+                         const st = (editor && (editor.scrollTop||0)) || 0;
+                         let snapped = st;
+                         const dir = _scanHold.scrollDir || 0;
+                         if (dir > 0) snapped = Math.ceil(st / LINE_HEIGHT) * LINE_HEIGHT;
+                         else if (dir < 0) snapped = Math.floor(st / LINE_HEIGHT) * LINE_HEIGHT;
+                         else snapped = Math.round(st / LINE_HEIGHT) * LINE_HEIGHT;
+                         editor.scrollTop = snapped;
+                       }catch{}
+                       try{ updateGutter(); }catch{}
+                       try{ document.body.classList.remove('is-scrolling'); }catch{}
+                       try{ _repositionCaret(); }catch{}
+                       // Clear state
+                       _scanHold.mode = null; _scanHold.scrollDir = 0; 
+                       // #1302: Do NOT clear held keys here. Let keyup handle it.
+                       // This prevents repeat keys from triggering new commands immediately.
+                       // _scanHold.held.clear(); try{ window.__sixScanHoldHeld = null; }catch{}
+                       return;
+                   }
+
                    // #1248: Ensure caret is visible during the pause (before promotion)
                    try{ document.body.classList.remove('is-scrolling'); }catch{}
 
@@ -12168,8 +12269,81 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
                 const newSt = Math.max(0, cur + (dir * scrollPx));
                 editor.scrollTop = newSt;
 
+                // #1313: Check stopping flag during continuous scroll too
+                if (_scanHold.continuous && _scanHold.stopping) {
+                       _scanHold.scrollActive = false;
+                       _scanHold.stopping = false;
+                       try{ window.__sixScanHoldScrollActive = false; }catch{}
+                       // Snap to grid
+                       try{
+                         const st = (editor && (editor.scrollTop||0)) || 0;
+                         // #1287: Snap in direction of movement (ceil for down, floor for up)
+                         let snapped = st;
+                         const dir = _scanHold.scrollDir || 0;
+                         if (dir > 0) snapped = Math.ceil(st / LINE_HEIGHT) * LINE_HEIGHT;
+                         else if (dir < 0) snapped = Math.floor(st / LINE_HEIGHT) * LINE_HEIGHT;
+                         else snapped = Math.round(st / LINE_HEIGHT) * LINE_HEIGHT;
+                         
+                         editor.scrollTop = snapped;
+                       }catch{}
+                       try{ updateGutter(); }catch{}
+                       try{ document.body.classList.remove('is-scrolling'); }catch{}
+                       try{ _repositionCaret(); }catch{}
+                       // Clear state
+                       _scanHold.mode = null; _scanHold.scrollDir = 0; 
+                       // #1314: Do NOT clear held keys here if we are just stopping scroll.
+                       // The keyup handler will clear held keys.
+                       // If we clear here, rapid direction changes might get lost or confused.
+                       // _scanHold.held.clear(); try{ window.__sixScanHoldHeld = null; }catch{}
+                       return;
+                }
+
                 // Check if stuck (EOF or Top)
-                if (Math.abs(editor.scrollTop - cur) < 0.1) {
+                // #1299: If command scroll, do not switch to caret mode on stuck (just finish)
+                // #1307: Use a slightly larger epsilon (0.5) to detect stuck state.
+                // #1309: Also check inter-frame stuck (if scrollTop reverted or didn't advance)
+                let isStuck = (Math.abs(editor.scrollTop - cur) < 0.5);
+                if (!isStuck && _scanHold.lastCur !== undefined && _scanHold.lastCur !== null) {
+                    const delta = cur - _scanHold.lastCur;
+                    // If we are scrolling down (dir > 0) and didn't move forward enough (or moved back)
+                    if (dir > 0 && delta < 0.5) isStuck = true;
+                    // If we are scrolling up (dir < 0) and didn't move back enough (or moved forward)
+                    else if (dir < 0 && delta > -0.5) isStuck = true;
+                }
+                _scanHold.lastCur = cur;
+
+                if (isStuck) {
+                  if (_scanHold.commandScroll) {
+                       // #1308: If stuck during command scroll, force completion of the move via caret jump.
+                       // This handles cases where scrollTop hits a limit (EOF) but we still have target lines.
+                       if (_scanHold.scrollTargetPx > 0) {
+                           const lh = (typeof LINE_HEIGHT === 'number' && LINE_HEIGHT > 0) ? LINE_HEIGHT : 20;
+                           const linesLeft = Math.round(_scanHold.scrollTargetPx / lh);
+                           if (linesLeft > 0) {
+                               const dir = _scanHold.scrollDir || 0;
+                               const key = dir > 0 ? 'j' : 'k';
+                               try {
+                                   const pos = _computeMotionTarget(caretRow, caretCol, key, linesLeft);
+                                   if (pos && (pos.r !== caretRow || pos.c !== caretCol)) {
+                                       _setCaret(pos.r, pos.c);
+                                       _repositionCaret();
+                                       ensureScrolloff({ immediate: true });
+                                   }
+                               } catch(e) {}
+                           }
+                       }
+
+                       _scanHold.scrollActive = false;
+                       _scanHold.stopping = false;
+                       _scanHold.commandScroll = false;
+                       _scanHold.fixedSpeed = 0;
+                       try{ window.__sixScanHoldScrollActive = false; }catch{}
+                       try{ updateGutter(); }catch{}
+                       try{ document.body.classList.remove('is-scrolling'); }catch{}
+                       try{ _repositionCaret(); }catch{}
+                       _scanHold.mode = null; _scanHold.scrollDir = 0; 
+                       return;
+                  }
                   // #1252: Mark stuck state to prevent immediate re-entry to scroll mode
                   _scanHold.stuckAt = Date.now();
                   _scanHold.stuckPos = editor.scrollTop;
@@ -12220,7 +12394,7 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
                     try{ _flagCaretMotion(); }catch{}
                     
                     // #1228: Hide cursor and skip caret render during continuous scroll
-                    if (_scanHold.continuous) {
+                    if (_scanHold.continuous || _scanHold.commandScroll) {
                       try{ _hideCursor(); }catch{}
                       _repositionCaret({ skipCaret: true });
                     } else {
@@ -12249,6 +12423,13 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
             }
 
             if (_optStrictNormalIME && window._imeComposing) return;
+
+            // #1303: If command scroll is active, swallow all keys to prevent interference
+            if (_scanHold.commandScroll) {
+                try{ e.preventDefault(); e.stopPropagation(); }catch{}
+                return;
+            }
+
             // If already held (repeated keydown), swallow
             if (_scanHold.held.has(e.code)){
               try{ e.preventDefault(); e.stopPropagation(); }catch{}
@@ -12269,6 +12450,7 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
             _scanHold.continuous = false;
             _scanHold.stopping = false;
             _scanHold.scrollTargetPx = 0;
+            _scanHold.lastCur = null; // #1314: Reset stuck detection state on new keydown
             try{ window.__sixScanHoldScrollActive = false; }catch{}
             try{ document.body.classList.remove('is-scrolling'); }catch{}
             // Force snap if we interrupted a scroll?
@@ -12289,20 +12471,127 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
             // DEBUG
             try{ console.log('[scan-hold] keydown', e.code, 'mode='+mode, 'scrolloff='+scrolloff, 'caretRow='+(caretRow+1), 'topLine='+_topLine()); }catch{}
 
-            if (mode === 'caret'){
-              // Caret mode: execute first move immediately
+            if (mode === 'jump') {
+              // Jump mode: execute large jump immediately without smooth scroll checks
               _scanHold.caretDir = delta;
-              _scanHoldCaretMode(delta);
-              // Schedule RAF loop to start after 0.5s delay
+              _scanHoldCaretMode(delta, { immediate: true });
+              
+              // After the jump, switch to caret mode for continuous holding (if key remains held)
+              _scanHold.mode = 'caret';
+              
+              // Schedule RAF loop to start after 0.5s delay (same as caret mode)
               _scanHold.promotionTimer = setTimeout(()=>{
                 try{
                   if (_scanHold.caretDir && !_scanHold.raf){
                     _scanHold.caretLastMove = performance.now();
                     _scanHold.raf = requestAnimationFrame(_scanHoldCaretLoop);
-                    try{ console.log('[scan-hold] caret mode promoted to continuous after 0.5s'); }catch{}
                   }
                 }catch{}
               }, _scanHold.promotionDelayMs);
+            } else if (mode === 'caret'){
+              // Caret mode: execute first move immediately
+              
+              // #1297: Check for step animation (count > 1 and <= 30)
+              const pendingCount = (_countAcc == null ? 1 : _countAcc);
+              if (pendingCount > 1 && pendingCount <= 30) {
+                  _consumeCount(); // Consume it
+                  _scanHold.stepAnimation = true;
+                  _scanHold.caretDir = delta;
+                  
+                  let remaining = pendingCount;
+                  const stepLoop = () => {
+                      // #1298: Continue loop even if key released, unless mode changed externally
+                      if (remaining > 0 && _scanHold.stepAnimation) {
+                          
+                          // Check if next move requires scrolling
+                          const vis = Math.floor(_visibleLinesExact());
+                          const topLine = _topLine();
+                          const nextLine = caretRow + delta + 1; // 1-based
+                          const scrolloffVal = scrolloff || 0;
+                          
+                          let needScroll = false;
+                          if (delta > 0) {
+                              if (nextLine > topLine + vis - 1 - scrolloffVal) needScroll = true;
+                          } else {
+                              if (nextLine < topLine + scrolloffVal) needScroll = true;
+                          }
+
+                          if (needScroll) {
+                              // Switch to scroll mode for remaining steps
+                              try{ console.log('[scan-hold] stepLoop: switching to scroll. remaining='+remaining+', nextLine='+nextLine+', limit='+(topLine + vis - 1 - scrolloffVal)); }catch{}
+                              _scanHold.stepAnimation = false;
+                              _scanHold.mode = 'scroll';
+                              _scanHold.scrollDir = delta;
+                              _scanHold.scrollActive = true;
+                              const lh = (typeof LINE_HEIGHT === 'number' && LINE_HEIGHT > 0) ? LINE_HEIGHT : 20;
+                              _scanHold.scrollTargetPx = remaining * lh;
+                              _scanHold.continuous = false;
+                              _scanHold.commandScroll = true; // Mark as command-based scroll (finish immediately)
+                              _scanHold.fixedSpeed = 6; // #1298: 6px/frame
+                              _scanHold.lastCur = null; // #1309: Reset stuck detection
+                              
+                              // Capture offset
+                              const currentTopLine = Math.floor((editor.scrollTop||0)/lh) + 1;
+                              _scanHold.initialScreenOffset = (caretRow - currentTopLine);
+                              try{ window.__sixScanHoldOffset = _scanHold.initialScreenOffset; }catch{}
+                              
+                              try{ console.log('[scan-hold] Switching to scroll mode. remaining='+remaining+', targetPx='+_scanHold.scrollTargetPx+', offset='+_scanHold.initialScreenOffset+', scrollTop='+editor.scrollTop); }catch{}
+
+                              try{ window.__sixScanHoldScrollActive = true; }catch{}
+                              try{ document.body.classList.add('is-scrolling'); }catch{}
+                              try{ updateGutter({ inactive: true }); }catch{}
+                              
+                              if (_scanHold.raf) cancelAnimationFrame(_scanHold.raf);
+                              _scanHold.raf = requestAnimationFrame(_scanHoldScrollLoop);
+                              return;
+                          }
+
+                          _scanHoldCaretMode(delta);
+                          remaining--;
+                          if (remaining > 0) requestAnimationFrame(stepLoop);
+                          else {
+                              _scanHold.stepAnimation = false;
+                              // If key released, cleanup
+                              if (_scanHold.held.size === 0) {
+                                  _scanHold.mode = null;
+                                  _scanHold.caretDir = 0;
+                                  try{ window.__sixScanHoldScrollActive = false; }catch{}
+                                  try{ document.body.classList.remove('is-scrolling'); }catch{}
+                              }
+                          }
+                      } else {
+                          _scanHold.stepAnimation = false;
+                      }
+                  };
+                  stepLoop();
+                  
+                  // Schedule promotion timer for continuous hold (starts after delay)
+                  _scanHold.promotionTimer = setTimeout(()=>{
+                    try{
+                      // Only promote if key is still held and we are still in caret mode (not switched to scroll)
+                      if (_scanHold.held.size > 0 && _scanHold.mode === 'caret' && !_scanHold.stepAnimation){
+                        _scanHold.caretDir = delta; // Ensure dir is set
+                        _scanHold.caretLastMove = performance.now();
+                        if (!_scanHold.raf) _scanHold.raf = requestAnimationFrame(_scanHoldCaretLoop);
+                        try{ console.log('[scan-hold] caret mode promoted to continuous after 0.5s'); }catch{}
+                      }
+                    }catch{}
+                  }, _scanHold.promotionDelayMs);
+              } else {
+                  // Normal single step
+                  _scanHold.caretDir = delta;
+                  _scanHoldCaretMode(delta);
+                  // Schedule RAF loop to start after 0.5s delay
+                  _scanHold.promotionTimer = setTimeout(()=>{
+                    try{
+                      if (_scanHold.caretDir && !_scanHold.raf){
+                        _scanHold.caretLastMove = performance.now();
+                        _scanHold.raf = requestAnimationFrame(_scanHoldCaretLoop);
+                        try{ console.log('[scan-hold] caret mode promoted to continuous after 0.5s'); }catch{}
+                      }
+                    }catch{}
+                  }, _scanHold.promotionDelayMs);
+              }
             } else {
               // Scroll mode: smooth 1px-per-frame scrolling (max speed)
               const count = _consumeCount(); // get and consume count
@@ -12360,8 +12649,19 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
             _scanHold.held.delete(e.code);
             try{ e.preventDefault(); e.stopPropagation(); }catch{}
 
+            // #1298: If step animation is active, do not interrupt it.
+            // The loop will finish the pending count and then check held status.
+            if (_scanHold.stepAnimation) return;
+
             const mode = _scanHold.mode;
             const wasScrolling = window.__sixScanHoldScrollActive; // Check before clearing
+
+            // #1299: If this is a command scroll (from step animation), ignore keyup and let it finish
+            // #1303: But we MUST clear the held key state so it doesn't get stuck!
+            if (_scanHold.commandScroll) {
+                _scanHold.held.delete(e.code);
+                return;
+            }
 
             // #1238: If initial scroll is still animating, let it finish smoothly
             if (mode === 'scroll' && _scanHold.scrollActive && !_scanHold.continuous && _scanHold.scrollTargetPx > 0) {
