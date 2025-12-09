@@ -11964,6 +11964,9 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
             
             // #1245: Peek at pending count to predict true destination
             const count = (_countAcc==null?1:_countAcc);
+
+            // #1292: If count > 20, force caret mode (jump)
+            if (count > 20) return 'caret';
             
             // Check AFTER hypothetical move
             const wouldBeCaretLine1 = (caretRow + (delta * count)) + 1;
@@ -12021,6 +12024,11 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
         const _scanHoldCaretMode = (delta)=>{
           try{
             const count = _consumeCount();
+            // #1293: If count > 20, it's a jump. Do not multiply by delta again if count is already signed?
+            // Actually _consumeCount returns positive integer.
+            // But wait, if we are in continuous hold loop, count is usually 1.
+            // If we are in initial keydown (jump), count is > 20.
+            
             const lines = _splitLines();
             const newRow = Math.max(0, Math.min(lines.length-1, caretRow + (delta * count)));
             
@@ -12069,6 +12077,13 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
 
             // #1241: If mode switched to scroll during ensureScrolloff, abort rendering here
             if (_scanHold.mode === 'scroll') return;
+            
+            // #1293: If this was a large jump (count > 20), do not enter continuous loop
+            if (count > 20) {
+                _scanHold.caretDir = 0; // Stop loop
+                if (_scanHold.promotionTimer) clearTimeout(_scanHold.promotionTimer);
+                _scanHold.promotionTimer = null;
+            }
 
             _repositionCaret(); updateGutter(); _updateVisualSelection();
             _scanHold.caretLastMove = performance.now();
@@ -12104,7 +12119,8 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
                 // #1215: Use fixed 3px step per frame for smooth scrolling.
                 // No wait, max speed (RAF frequency).
                 // #1290: Increased to 4px for faster scroll feel
-                let scrollPx = 4;
+                // #1291: Use 8px if count > 9
+                let scrollPx = (_scanHold.lastCount > 9) ? 8 : 4;
 
                 // #1226: Pause if initial scroll done but promotion timer not yet fired
                 if (_scanHold.scrollTargetPx <= 0 && !_scanHold.continuous) {
@@ -12290,6 +12306,7 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
             } else {
               // Scroll mode: smooth 1px-per-frame scrolling (max speed)
               const count = _consumeCount(); // get and consume count
+              _scanHold.lastCount = count; // #1291: Store count for speed adjustment
               const scrollLines = Math.max(1, count);
               _scanHold.scrollDir = delta;
               _scanHold.scrollActive = true;
