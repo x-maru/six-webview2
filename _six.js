@@ -12103,7 +12103,8 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
                 
                 // #1215: Use fixed 3px step per frame for smooth scrolling.
                 // No wait, max speed (RAF frequency).
-                let scrollPx = 3;
+                // #1290: Increased to 4px for faster scroll feel
+                let scrollPx = 4;
 
                 // #1226: Pause if initial scroll done but promotion timer not yet fired
                 if (_scanHold.scrollTargetPx <= 0 && !_scanHold.continuous) {
