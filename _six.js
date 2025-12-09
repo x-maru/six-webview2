@@ -7190,8 +7190,12 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
       const n = parseInt(numOnly[1],10);
       const last = _totalLines();
       caretRow = Math.max(0, Math.min(last-1, n-1));
-      _centerScrolloffOnce = true;
-      ensureScrolloff({centerOnce:true});
+
+      // #1318: Jump behavior respecting scrolloff.
+      // If scrolloff is large (>= vis/2), ensureScrolloff automatically centers.
+      // Otherwise, it scrolls just enough to satisfy the margin (placing caret at scrolloff distance from edge).
+      // We use force:true to bypass any guards, and immediate:true to ensure synchronous update for subsequent logic.
+      ensureScrolloff({force:true, immediate:true});
       // 行ジャンプ直後に他の描画でスクロールが揺れるのを抑止
       const targetTop = editor.scrollTop;
       _scrollGuardUntil = Date.now() + 900;
@@ -12059,9 +12063,9 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
             };
 
             // When scrolloff >= 99999, always scroll content (keep caret centered)
-            if (scrolloffVal >= 99999) return preferScroll();
+            // if (scrolloffVal >= 99999) return preferScroll();
             // When scrolloff >= vis/2, always scroll (center mode)
-            if (scrolloffVal >= Math.floor(vis/2)) return preferScroll();
+            // if (scrolloffVal >= Math.floor(vis/2)) return preferScroll();
             // Check if caret would violate scrolloff margin AFTER move: if so, scroll content
             // #1223: Use rounded top line for boundary check to handle fractional scrollTop
             // (from smooth scrolling) consistently. Floor can cause off-by-one jitter.
@@ -12069,13 +12073,20 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
             // for prefix-count moves (e.g. 5j).
             const topLineRound = Math.floor(curTopPx / LINE_HEIGHT) + 1;
             const margin = scrolloffVal;
+
+            // #1315: For large scrolloff (centering), we must only scroll if we are actually
+            // pushing the boundary relative to the center.
+            // If we are above center and moving down, we should move caret, not scroll.
+            // If we are below center and moving up, we should move caret, not scroll.
+            const midLine = topLineRound + (vis - 1) / 2;
+
             if (delta > 0){
               // moving down: check bottom margin
               const bottomLine = topLineRound + vis - 1;
-              if (wouldBeCaretLine1 > (bottomLine - margin)) return preferScroll();
+              if (wouldBeCaretLine1 > (bottomLine - margin) && wouldBeCaretLine1 > midLine) return preferScroll();
             } else {
               // moving up: check top margin
-              if (wouldBeCaretLine1 < (topLineRound + margin)) return preferScroll();
+              if (wouldBeCaretLine1 < (topLineRound + margin) && wouldBeCaretLine1 < midLine) return preferScroll();
             }
             // otherwise move caret
             return 'caret';
