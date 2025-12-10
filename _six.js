@@ -10132,6 +10132,12 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
   editor.addEventListener('keydown', (e)=>{
       // Short guard: absorb any stray keydown right after modal close
       if (Date.now() < _kbdGuardUntil){ try{ e.preventDefault(); e.stopPropagation(); }catch{} return; }
+      // #1339: Block editor interaction if modal is open
+      try{
+        if (_modalOverlay && _modalOverlay.style && _modalOverlay.style.display !== 'none'){
+           e.preventDefault(); e.stopPropagation(); return;
+        }
+      }catch{}
       // If a scan-hold is actively handling this physical key, suppress native handlers
       try{ 
         if (e && e.code){ 
