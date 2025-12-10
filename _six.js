@@ -9125,7 +9125,7 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
         // Key handling (trap inside modal)
         let gPending = false; let gTimer = 0;
         const cleanup = ()=>{
-          try{ document.removeEventListener('keydown', onKey, true); }catch{}
+          try{ window.removeEventListener('keydown', onKey, true); }catch{}
           _hideModal();
           try{
             setTimeout(()=>{
@@ -9197,7 +9197,7 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
         };
         const onKey = (e)=>{
           // Prevent leaking to editor and block browser defaults for function keys while help is open
-          try{ e.stopPropagation(); }catch{}
+          try{ e.stopImmediatePropagation(); e.stopPropagation(); }catch{}
           if (_isEsc(e)){ e.preventDefault(); cleanup(); return; }
           // hidden shortcuts: q/Q/F9 to close
           if (e.key==='q' || e.key==='Q' || e.key==='F9'){ e.preventDefault(); cleanup(); return; }
@@ -9223,7 +9223,7 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
             }
           }
         };
-        document.addEventListener('keydown', onKey, true);
+        window.addEventListener('keydown', onKey, true);
         btnClose.addEventListener('click', ()=> cleanup(), { once:true });
         _showModal();
         try{ if (editor){ try{ _setEditorScrollTop(stKeep, { immediate:true }); }catch{} } }catch{}
@@ -12517,6 +12517,9 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
         const _scanHoldKeyDown = (e)=>{
           try{
             if (!e || !e.code) return;
+            // #1327: If a modal is open, do not intercept keys (let modal handle them)
+            if (_modalOverlay && _modalOverlay.style && _modalOverlay.style.display !== 'none') return;
+
             if (!_scanHold.codes.has(e.code)) return;
             if (e.ctrlKey || e.altKey || e.metaKey) return;
             
