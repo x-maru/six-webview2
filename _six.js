@@ -8868,6 +8868,8 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
               [K('cl'), sep('  1文字変更（'), K('s'), sep(' と同等。前置カウントで複数文字）。1文字のみではunnamedレジスタを更新しない。改行も1文字として扱う')],
               [K('>>'), sep('  インデントを '), K('shiftwidth'), sep(' 分増やす（現在行から）。前置カウント '), K('N'), sep(' で '), K('N'), sep(' 行を対象（例: '), K('3>>'), sep('）')],
               [K('<<'), sep('  インデントを '), K('shiftwidth'), sep(' 分減らす（現在行から）。前置カウント '), K('N'), sep(' で '), K('N'), sep(' 行を対象')],
+              [K('TAB'), sep('  '), K('>>'), sep(' と同等（前置カウント対応）')],
+              [K('Shift+TAB'), sep('  '), K('<<'), sep(' と同等（前置カウント対応）')],
               [sep('※ 空行は変更しません（対象行数には含まれます）。行頭の連続 '), K('TAB'), sep(' は保持し、その直後に空白を挿入/削除します')]
             ]));
 
@@ -8905,6 +8907,7 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
             const mkSec = (title)=>{ const h=mkH(title); try{ h.style.fontSize='1.1em'; h.style.fontWeight='700'; }catch{} return h; };
             wrap.appendChild(mkSec('基本編集'));
             wrap.appendChild(mkList([
+              [K('TAB'), sep('  '), K('shiftwidth'), sep(' 設定に従いインデント（空白またはTAB文字）を挿入')],
               [K('Backspace'), sep('  左の1文字を削除')],
               [K('Delete'), sep('  右の1文字を削除')],
               [K('Enter'), sep('  改行を挿入（Sixの最終改行ポリシー: 視覚のみのダミー最終行あり、保存で自動追加/削除しない）')]
@@ -9004,7 +9007,9 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
               [K('c'), sep('  選択削除 + INSERT へ')],
               [K('o'), sep('  caret を選択の反対端へトグル（anchor/caret 入替）')],
               [K('p'), sep('  選択範囲を unnamed レジスタ内容で置換（終了して NORMAL）')],
-              [K('> / <'), sep('  インデントを '), K('shiftwidth'), sep(' 分 増減。前置カウント '), K('N'), sep(' で '), K('N'), sep(' 倍量。空行は変更しません。行頭の連続 '), K('TAB'), sep(' は保持し、直後に空白を挿入/削除します')]
+              [K('> / <'), sep('  インデントを '), K('shiftwidth'), sep(' 分 増減。前置カウント '), K('N'), sep(' で '), K('N'), sep(' 倍量。空行は変更しません。行頭の連続 '), K('TAB'), sep(' は保持し、直後に空白を挿入/削除します')],
+              [K('TAB'), sep('  '), K('>'), sep(' と同等（前置カウント対応、VISUAL継続）')],
+              [K('Shift+TAB'), sep('  '), K('<'), sep(' と同等（前置カウント対応、VISUAL継続）')]
             ]));
             // VISUAL 中の検索起動 (#683/#684)
             wrap.appendChild(mkSec('検索起動'));
@@ -10029,6 +10034,10 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
           const isCtrlI = (e.ctrlKey && !e.altKey && !e.metaKey && (e.key==='i' || e.key==='I'));
           if (e.key==='Tab' || isCtrlI){
             e.preventDefault(); e.stopPropagation();
+            // #1323: INSERT mode TAB respects shiftwidth
+            const sw = _getShiftWidth();
+            const insStr = (sw === 'TAB') ? '\t' : ' '.repeat(Math.max(1, sw|0));
+
             // 事前にネイティブ selectionStart を caretRow/Col に反映（途中で別操作でズレている可能性に備える）
             try{ const off0 = editor.selectionStart|0; const rc0 = _rcFromOffset(off0); caretRow = rc0.r; caretCol = rc0.c; }catch{}
             const selStart = editor.selectionStart|0;
@@ -10038,8 +10047,8 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
               const v = String(editor.value||'');
               const before = v.slice(0, selStart);
               const after  = v.slice(selEnd);
-              editor.value = before + '\t' + after;
-              const newOff = before.length + 1;
+              editor.value = before + insStr + after;
+              const newOff = before.length + insStr.length;
               try{ const rc = _rcFromOffset(newOff); caretRow = rc.r; caretCol = rc.c; }catch{}
               _setCaret(caretRow, caretCol);
               // ネイティブ選択も同期しないと次入力が末尾に挿入されうる (#506)
@@ -10048,7 +10057,7 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
             } else {
               // 通常ケース（選択なし）: caret位置へ挿入
               try{
-                const pos = _insertTextAt(caretRow, caretCol, '\t');
+                const pos = _insertTextAt(caretRow, caretCol, insStr);
                 caretRow = pos.r; caretCol = pos.c;
                 _setCaret(caretRow, caretCol);
                 // ネイティブ選択も同期 (#506)
@@ -10310,6 +10319,19 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
         return;
       }
       if (_mode === 'VISUAL'){
+        // #1323: VISUAL mode TAB/Shift+TAB/Ctrl+I
+        const isVisCtrlI = (e.ctrlKey && !e.altKey && !e.metaKey && (e.key==='i' || e.key==='I'));
+        if (e.key==='Tab' || isVisCtrlI){
+          e.preventDefault(); e.stopPropagation();
+          const amt = Math.max(1, _consumeCount()|0); // #1324: Support count
+          const rs = Math.min(_visualAnchorR, caretRow);
+          const re = Math.max(_visualAnchorR, caretRow);
+          const units = e.shiftKey ? -amt : amt;
+          _applyIndentRange(rs, re, units);
+          // #1324: Keep VISUAL selection active (match '>' behavior)
+          _updateVisualSelection(); _repositionCaret(); updateGutter();
+          return;
+        }
         // VISUAL mode key handling
         if (e.key===':' && !e.ctrlKey){
           // Open command prompt while keeping VISUAL selection active
@@ -11496,6 +11518,19 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
     targetTop = Math.max(0, Math.min((maxTopWithPad-1)*LINE_HEIGHT, targetTop));
     _setEditorScrollTop(targetTop, { forceAnimate: true });
     _repositionCaret(); updateGutter();
+    return;
+  }
+  // #1323: NORMAL mode TAB/Shift+TAB/Ctrl+I
+  const isNormCtrlI = (e.ctrlKey && !e.altKey && !e.metaKey && (e.key==='i' || e.key==='I'));
+  if ((e.key==='Tab' || isNormCtrlI) && _mode === 'NORMAL'){
+    e.preventDefault(); e.stopPropagation();
+    const count = Math.max(1, _consumeCount()|0); // #1324: Support count
+    const units = e.shiftKey ? -1 : 1;
+    // Apply to N lines starting from caret (match '>>' behavior)
+    const totalLines = _totalLines();
+    const rs = caretRow;
+    const re = Math.max(rs, Math.min(totalLines-1, rs + count - 1));
+    _applyIndentRange(rs, re, units);
     return;
   }
   if (e.key==='j' || e.key==='ArrowDown'){

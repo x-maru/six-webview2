@@ -75,6 +75,8 @@
   - caret移動を伴わない即時スクロールを追加し、`Alt+j`,`Alt+k`に割り当てた。方向はjkScrollDirectionで設定可。
   - IMEの未確定文字列があるときはその行だけ改行等の制御文字を表示しないようにした(被るので)。
   - インデント操作時の幅(shiftwidth)の選択肢に'TAB'を追加した。TABコードを挿入/削除する。SIX_OPTIONSでバッファ生成時の初期値を指定できるようにした。
+  - NORMALのTABが`>>`になるようにした。VISUALのTABは`>`。Shift+TABで逆。
+  - INSERTのTABでshiftwidthの設定値を挿入するようにした。2なら"  ", TABなら\t。
 - 2025.xx.xx v1.0
 
 ## ライセンス / 出典
