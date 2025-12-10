@@ -1327,6 +1327,14 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
         if (col>=s && col<e){ return { c1:s, c2:e, url:String(mu[1]||mu[0]||''), kind:'six-open' }; }
         if (reUNC.lastIndex === mu.index) reUNC.lastIndex++;
       }
+      // Check for Grep result link: 📌BufferName:Line:Col:
+      const mGrep = line.match(/^📌(.+?):(\d+):(\d+):/);
+      if (mGrep){
+        const len = mGrep[0].length - 1; // Exclude trailing colon
+        if (col < len){
+           return { c1:0, c2:len, url:mGrep[0].slice(0, -1), kind:'grep-jump', bName:mGrep[1], line:parseInt(mGrep[2],10), col:parseInt(mGrep[3],10) };
+        }
+      }
     }catch{}
     return null;
   }
@@ -1370,7 +1378,8 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
       const hit = _detectUrlAt(line, c);
       if (hit){
         const same = _hoverLink && _hoverLink.r===row && _hoverLink.c1===hit.c1 && _hoverLink.c2===hit.c2 && _hoverLink.url===hit.url && _hoverLink.kind===hit.kind;
-        _hoverLink = { r:row, c1:hit.c1, c2:hit.c2, url:hit.url, kind:hit.kind };
+        // Copy all properties from hit to support extra fields like bName/line/col
+        _hoverLink = Object.assign({ r:row }, hit);
         if (!same) _renderLinkHover();
       } else {
         if (_hoverLink){ _clearLinkHover(); }
@@ -1382,6 +1391,23 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
       if (!_optUrlLink) return;
       if (!_hoverLink) return;
       if (e){ try{ e.preventDefault(); e.stopPropagation(); }catch{} }
+      
+      if (_hoverLink.kind === 'grep-jump'){
+         const bName = _hoverLink.bName;
+         const lineNum = _hoverLink.line;
+         const colNum = _hoverLink.col;
+         const targetIdx = buffers.findIndex(b => b.name === bName);
+         if (targetIdx >= 0){
+             const r = Math.max(0, lineNum - 1);
+             const c = Math.max(0, colNum - 1);
+             // Use new options parameter to force switch and jump
+             _switchToBuffer(targetIdx, { force: true, jumpTo: { row: r, col: c } });
+         } else {
+             toast('Buffer not found: ' + bName);
+         }
+         return;
+      }
+
       const url = String(_hoverLink.url||'');
       if (_hoverLink.kind === 'six-open'){
         try{
@@ -2127,40 +2153,75 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
       try{ if (typeof _imeComposing!== 'undefined' && _imeComposing){ return; } }catch{}
       // タイピング直後は全面ハイライト描画を一時抑止
       if (Date.now() < _typingGuardUntil){ return; }
-      if (!_optHlsearch){ _hlClear(); return; }
-      if (!(_lastSearch && _lastSearch.src)){ _hlClear(); return; }
-      if (!_hlMatches) return; // no matches or not computed yet
+
       _hlEnsureLayer();
-      // visible row range
+      _hlClear();
+
       const topLine = _topLine();
       const vis = _visibleLinesExact();
       const endLine = topLine + vis - 1;
-      // clear previous children
-      _hlClear();
       const lines = _splitLines();
-      for (const m of _hlMatches){
-        const rc = _rcFromOffset(m.start|0);
-        const r = rc.r|0, c = rc.c|0;
-        const row1 = r + 1;
-        if (row1 < topLine || row1 > endLine) continue;
-        const line = String(lines[r]||'');
-        const endCol = Math.min(line.length, c + (m.len|0));
-        // measure x positions
-        _measureSpan.textContent = line.slice(0, c);
-        const x1 = _measureSpan.getBoundingClientRect().width;
-        _measureSpan.textContent = line.slice(0, endCol);
-        const x2 = _measureSpan.getBoundingClientRect().width;
-        if (!(x2 > x1)) continue;
-        const topPx = (row1 - topLine) * LINE_HEIGHT;
-        const el = document.createElement('div');
-  el.className = 'hlmatch';
-  // Adjust by horizontal scroll
-  let _hs = 0; try{ _hs = (editor.scrollLeft||0); }catch{}
-  el.style.left = (x1 - _hs) + 'px';
-        el.style.top = topPx + 'px';
-        el.style.width = Math.max(1, Math.round(x2 - x1)) + 'px';
-        el.style.height = Math.max(1, Math.round(LINE_HEIGHT)) + 'px';
-        _hlLayer.appendChild(el);
+      let _hs = 0; try{ _hs = (editor.scrollLeft||0); }catch{}
+
+      // 1. Render Grep Matches
+      try {
+        const curB = currentBuffer();
+        if (curB && curB.grepMatches && Array.isArray(curB.grepMatches)) {
+          for (const m of curB.grepMatches) {
+            const r = m.line | 0;
+            const row1 = r + 1;
+            if (row1 < topLine || row1 > endLine) continue;
+            const lineStr = String(lines[r]||'');
+            const c = m.start | 0;
+            const endCol = Math.min(lineStr.length, c + (m.len|0));
+            
+            _measureSpan.textContent = lineStr.slice(0, c);
+            const x1 = _measureSpan.getBoundingClientRect().width;
+            _measureSpan.textContent = lineStr.slice(0, endCol);
+            const x2 = _measureSpan.getBoundingClientRect().width;
+            
+            if (!(x2 > x1)) continue;
+            
+            const topPx = (row1 - topLine) * LINE_HEIGHT;
+            const el = document.createElement('div');
+            el.className = 'grep-match';
+            el.style.backgroundColor = 'rgba(255, 255, 0, 0.4)';
+            el.style.position = 'absolute';
+            el.style.pointerEvents = 'none';
+            el.style.left = (x1 - _hs) + 'px';
+            el.style.top = topPx + 'px';
+            el.style.width = Math.max(1, Math.round(x2 - x1)) + 'px';
+            el.style.height = Math.max(1, Math.round(LINE_HEIGHT)) + 'px';
+            _hlLayer.appendChild(el);
+          }
+        }
+      } catch {}
+
+      // 2. Render Standard Matches
+      if (_optHlsearch && _lastSearch && _lastSearch.src && _hlMatches) {
+        for (const m of _hlMatches){
+          const rc = _rcFromOffset(m.start|0);
+          const r = rc.r|0, c = rc.c|0;
+          const row1 = r + 1;
+          if (row1 < topLine || row1 > endLine) continue;
+          const line = String(lines[r]||'');
+          const endCol = Math.min(line.length, c + (m.len|0));
+          // measure x positions
+          _measureSpan.textContent = line.slice(0, c);
+          const x1 = _measureSpan.getBoundingClientRect().width;
+          _measureSpan.textContent = line.slice(0, endCol);
+          const x2 = _measureSpan.getBoundingClientRect().width;
+          if (!(x2 > x1)) continue;
+          const topPx = (row1 - topLine) * LINE_HEIGHT;
+          const el = document.createElement('div');
+          el.className = 'hlmatch';
+          // Adjust by horizontal scroll
+          el.style.left = (x1 - _hs) + 'px';
+          el.style.top = topPx + 'px';
+          el.style.width = Math.max(1, Math.round(x2 - x1)) + 'px';
+          el.style.height = Math.max(1, Math.round(LINE_HEIGHT)) + 'px';
+          _hlLayer.appendChild(el);
+        }
       }
     }catch{}
   }
@@ -3145,16 +3206,19 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
         _extSize: null,
         _externalChangeIgnored: false,
         _checkingExternal: false,
-        _extLastCheckAt: 0
+        _extLastCheckAt: 0,
+        // Grep matches metadata
+        grepMatches: b.grepMatches || null
       });
       if (currentIdx<0) currentIdx=0;
     }catch{}
   }
-  function _switchToBuffer(i){
+  function _switchToBuffer(i, options){
     try{
       if (!(i>=0 && i<buffers.length)) return;
       // If selecting the same buffer, do nothing to avoid any visual flicker.
-      if (i === currentIdx){
+      // Exception: if options.force is true, proceed (e.g. jump to specific line in same buffer)
+      if (i === currentIdx && !(options && options.force)){
         try{ editor && editor.focus && editor.focus(); }catch{}
         return;
       }
@@ -3203,9 +3267,21 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
         try{ const s = Number.isFinite(b && b.edScale) ? b.edScale : 1; _applyEditorScaleSilent(s); }catch{}
         try{ clampViewportExactLines(); }catch{}
       // 4) Restore caret and scroll position for this buffer
-      const vr = Number.isFinite(b.viewRow) ? (b.viewRow|0) : 0;
-      const vc = Number.isFinite(b.viewCol) ? (b.viewCol|0) : 0;
-  let vs = Number.isFinite(b.viewScrollTop) ? (b.viewScrollTop|0) : 0;
+      // If options.jumpTo is provided, use it instead of saved state
+      let vr = Number.isFinite(b.viewRow) ? (b.viewRow|0) : 0;
+      let vc = Number.isFinite(b.viewCol) ? (b.viewCol|0) : 0;
+      let vs = Number.isFinite(b.viewScrollTop) ? (b.viewScrollTop|0) : 0;
+
+      if (options && options.jumpTo){
+          vr = options.jumpTo.row | 0;
+          vc = options.jumpTo.col | 0;
+          // Recalculate vs to center the target line
+          const vis = Math.max(1, _visibleLinesExact());
+          // #1337: Adjust centering offset (shift down by 1 line) to fix visual misalignment
+          const top1 = Math.max(1, (vr+1) - (Math.floor(vis/2) + 1));
+          vs = (top1-1) * LINE_HEIGHT;
+      }
+
       _setCaret(vr, vc);
       // Validate viewport: if saved scrollTop does not include the caret (e.g., corrupted to EOF),
       // compute a safe fallback that centers the caret within the viewport to avoid "G-like" jumps (#359/#360)
@@ -3254,6 +3330,9 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
             b.viewScrollTop = stSnap; b.viewRow = caretRow|0; b.viewCol = caretCol|0;
           }catch{}
         };
+        // Force immediate apply once more for jumpTo cases to fix 1-line offset glitch
+        if (options && options.jumpTo) { applyScroll(); }
+
         if (window.requestAnimationFrame){
           requestAnimationFrame(()=>{
             applyScroll();
@@ -4654,7 +4733,7 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
     };
     // 食い込み(ハンギング)防止対象: 、。 ， ． … (#938)
     const _isHangablePunct = (ch)=> /[\u3001\u3002\uFF0C\uFF0E\u2026]/.test(ch||'');
-    const _isFullwidth = (ch)=> /[\u1100-\u115F\u2E80-\uA4CF\uAC00-\uD7A3\uF900-\uFAFF\uFE10-\uFE19\uFE30-\uFE6F\u3000-\u303F\uFF01-\uFF60\uFFE0-\uFFE6]/.test(ch||'');
+    const _isFullwidth = (ch)=> /[\u1100-\u115F\u2E80-\uA4CF\uAC00-\uD7A3\uF900-\uFAFF\uFE10-\uFE19\uFE30-\uFE6F\u3000-\u303F\uFF01-\uFF60\uFFE0-\uFFE6\uD800-\uDBFF]/.test(ch||'');
     // Primary width measurement up to caretCol
   // Expand tabs before measurement to avoid mid-tab caret mis-centering
   _measureSpan.textContent = _expandTabs(line.slice(0, Math.max(0, caretCol)));
@@ -4783,6 +4862,19 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
         b.viewRow = caretRow|0; b.viewCol = caretCol|0;
         // Use current scrollTop (snapped by scheduleScrollRender soon after)
         b.viewScrollTop = (editor.scrollTop||0)|0;
+      }
+    }catch{}
+    // Link highlight under caret (NORMAL mode)
+    try{
+      if (_mode === 'NORMAL' && !isViewScroll){
+        const line = (_splitLines()[caretRow] || '');
+        const link = _detectUrlAt(line, caretCol);
+        if (link){
+          _hoverLink = { ...link, r: caretRow };
+          _renderLinkHover();
+        } else {
+          if (_hoverLink) { _linkClear(); if (editor) editor.style.cursor=''; }
+        }
       }
     }catch{}
     // Keep position indicator up-to-date for all caret moves
@@ -6259,7 +6351,14 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
   function _moveCaretCols(delta){
     const line = (_splitLines()[caretRow] || '');
     const fromR = caretRow|0, fromC = caretCol|0;
-    const nc = Math.max(0, Math.min(line.length, caretCol + delta));
+    let nc = caretCol;
+    if (delta > 0) {
+      for (let i=0; i<delta; i++) nc = _nextIndex(line, nc);
+    } else if (delta < 0) {
+      const count = -delta;
+      for (let i=0; i<count; i++) nc = _prevIndex(line, nc);
+    }
+    nc = Math.max(0, Math.min(line.length, nc));
     _setCaret(caretRow, nc);
     // Detect unexpected row change (should not happen here); if it does, tag anomaly
     const wrap = (caretRow!==fromR);
@@ -6731,6 +6830,89 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
           try{ _incSearchAnchorOff = null; }catch{}
           return;
         }
+      }
+    }catch{}
+
+    // :grep /pat/ %
+    try{
+      const mg = cmd && cmd.match(/^:?\s*grep\s+\/(.*?)\/\s*(%?)\s*$/);
+      if (mg){
+        const pat = String(mg[1]||'');
+        const target = String(mg[2]||'');
+        if (!pat){ toast('grep: empty pattern'); return; }
+        if (target !== '%'){ toast('grep: only % (current buffer) supported'); return; }
+
+        const b = currentBuffer();
+        const bName = (b && b.name) || 'buffer';
+
+        // Case sensitivity logic (same as search)
+        let needI = false;
+        let caseLabel = '常に区別';
+        try{
+          const ic = !!(b&&b.ignorecase);
+          const sc = !!(b&&b.smartcase);
+          if (ic){
+            if (sc && /[A-Z]/.test(pat)){ needI = false; caseLabel = '混在時区別'; }
+            else { needI = true; caseLabel = '同一視'; }
+          }
+        }catch{}
+        const flags = 'gm' + (needI ? 'i' : '');
+        
+        let re = null;
+        try{ re = new RegExp(pat, flags); }catch{ toast('grep: invalid regex'); return; }
+
+        const lines = _splitLines();
+        const resultLines = [];
+        const grepHighlights = [];
+        const headerLineCount = 5;
+
+        for (let i=0; i<lines.length; i++){
+          const line = lines[i];
+          re.lastIndex = 0;
+          if (re.test(line)){
+             let m;
+             const lineRe = new RegExp(pat, (needI?'i':'') + 'g');
+             while ((m = lineRe.exec(line)) !== null) {
+                 const prefix = `📌${bName}:${i+1}:${m.index+1}: `;
+                 const resultLine = prefix + line;
+                 resultLines.push(resultLine);
+                 
+                 grepHighlights.push({
+                     line: headerLineCount + resultLines.length - 1,
+                     start: prefix.length + m.index,
+                     len: m[0].length
+                 });
+
+                 if (m.index === lineRe.lastIndex) { lineRe.lastIndex++; }
+             }
+          }
+        }
+
+        if (resultLines.length > 0){
+          // #1329: Create result buffer instead of clipboard
+          const header = 
+`CMD\t\t:grep /${pat}/ %
+対象\t\t【${bName}】
+検索時 A/a\t${caseLabel}
+ヒット行数\t${resultLines.length}
+
+`;
+          const newText = header + resultLines.join('\n');
+          const newBufName = `🔍${bName}`;
+          
+          // Use _addBuffer to create standard buffer object, then move it
+          _addBuffer({ name: newBufName, text: newText, grepMatches: grepHighlights });
+          if (buffers.length > 0){
+            const newBuf = buffers.pop();
+            // Insert after current
+            const insertIdx = currentIdx + 1;
+            buffers.splice(insertIdx, 0, newBuf);
+            _switchToBuffer(insertIdx);
+          }
+        } else {
+          toast('grep: no matches found');
+        }
+        return;
       }
     }catch{}
 
@@ -8784,6 +8966,10 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
               [K(":'\u003c,\u003e s/\\bdog\\b/cat/g"), sep(' 選択範囲で単語 '), K('dog'), sep(' を '), K('cat'), sep(' に')],
               [K(':s/^\\s\u002b//'), sep(' 先頭の空白を1箇所削除（現在行）')]
             ]);
+            // grep
+            section('grep', [
+              [K(':grep /pat/ %'), sep(' カレントバッファを正規表現検索し、結果を別バッファに出力（リンクジャンプ可）')]
+            ]);
             // 検索ハイライト
             section('検索ハイライト', [
               [K(':set hlsearch'), sep(' 有効 / '), K(':set nohlsearch'), sep(' 無効 / '), K(':set hlsearch!'), sep(' トグル')]
@@ -9942,6 +10128,7 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
       }catch{}
     });
   window.addEventListener('resize', ()=>{ _syncEditorMetrics(); clampViewportExactLines(); _exactLineLockAdjust(); ensureScrolloff(); _repositionCaret(); updateGutter(); _renderHlMatchesVisible(); _incPrevRefresh(); _renderVisSelOverlay(); });
+
   editor.addEventListener('keydown', (e)=>{
       // Short guard: absorb any stray keydown right after modal close
       if (Date.now() < _kbdGuardUntil){ try{ e.preventDefault(); e.stopPropagation(); }catch{} return; }
@@ -11533,6 +11720,48 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
     _applyIndentRange(rs, re, units);
     return;
   }
+  // #1335: Enter key in NORMAL mode triggers link jump if caret is on a link
+  if (e.key === 'Enter' && _mode === 'NORMAL' && !e.ctrlKey && !e.altKey && !e.metaKey){
+    try{
+      const lines = _splitLines();
+      const line = lines[caretRow] || '';
+      const hit = _detectUrlAt(line, caretCol);
+      if (hit){
+        e.preventDefault(); e.stopPropagation();
+        if (hit.kind === 'grep-jump'){
+           const bName = hit.bName;
+           const lineNum = hit.line;
+           const colNum = hit.col;
+           const targetIdx = buffers.findIndex(b => b.name === bName);
+           if (targetIdx >= 0){
+               const r = Math.max(0, lineNum - 1);
+               const c = Math.max(0, colNum - 1);
+               _switchToBuffer(targetIdx, { force: true, jumpTo: { row: r, col: c } });
+           } else {
+               toast('Buffer not found: ' + bName);
+           }
+        } else if (hit.kind === 'six-open'){
+           try{
+             try{ window.__sixOpenFromLinkTs = Date.now(); }catch{}
+             runCommand(':e ' + hit.url);
+             try{ setTimeout(()=>{ try{ if (window.__sixOpenFromLinkTs && Date.now()-window.__sixOpenFromLinkTs>2000){ window.__sixOpenFromLinkTs = 0; } }catch{} }, 1500); }catch{}
+           }catch{}
+        } else {
+           // External URL
+           let opened = false;
+           try{
+             if (window && window.chrome && window.chrome.webview && window.chrome.webview.postMessage){
+               window.chrome.webview.postMessage({ type:'open-url', url: hit.url }); opened = true;
+             }
+           }catch{}
+           if (!opened){ try{ window.open(hit.url, '_blank'); opened = true; }catch{} }
+           if (!opened){ try{ toast('open failed: ' + hit.url, 1500); }catch{} }
+        }
+        return;
+      }
+    }catch{}
+  }
+
   if (e.key==='j' || e.key==='ArrowDown'){
     // #1253: Suppress default handling if scan-hold is active
     try{ const h=window.__sixScanHoldHeld; if(h && (h.has('KeyJ') || h.has('ArrowDown'))){ e.preventDefault(); return; } }catch{}
