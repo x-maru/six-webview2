@@ -17658,8 +17658,50 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
       // Title
       const title = document.createElement('div');
       title.textContent = 'grep(検索)';
-      title.style.cssText = 'font-weight:bold; font-size:inherit; color:var(--text-color); margin-bottom:4px; text-align:center;';
+      title.style.cssText = 'font-weight:bold; font-size:inherit; color:var(--text-color); margin-bottom:4px; text-align:center; cursor:move; user-select:none;';
       box.appendChild(title);
+
+      // Drag logic
+      let isDragging = false;
+      let dragStartX = 0;
+      let dragStartY = 0;
+      
+      title.addEventListener('mousedown', (e) => {
+          e.preventDefault();
+          isDragging = true;
+          
+          // Switch to absolute positioning if not already
+          if (box.style.position !== 'absolute') {
+              const rect = box.getBoundingClientRect();
+              box.style.position = 'absolute';
+              box.style.left = rect.left + 'px';
+              box.style.top = rect.top + 'px';
+              box.style.margin = '0';
+          }
+          
+          const rect = box.getBoundingClientRect();
+          dragStartX = e.clientX - rect.left;
+          dragStartY = e.clientY - rect.top;
+          
+          // Capture mouse events globally
+          document.addEventListener('mousemove', onDragMove);
+          document.addEventListener('mouseup', onDragEnd);
+      });
+      
+      function onDragMove(e) {
+          if (!isDragging) return;
+          e.preventDefault();
+          const x = e.clientX - dragStartX;
+          const y = e.clientY - dragStartY;
+          box.style.left = x + 'px';
+          box.style.top = y + 'px';
+      }
+      
+      function onDragEnd() {
+          isDragging = false;
+          document.removeEventListener('mousemove', onDragMove);
+          document.removeEventListener('mouseup', onDragEnd);
+      }
 
       // Input Label
       const inputLabel = document.createElement('div');
