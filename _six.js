@@ -6833,12 +6833,13 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
       }
     }catch{}
 
-    // :grep /pat/ %
+    // :grep /pat/flags %
     try{
-      const mg = cmd && cmd.match(/^:?\s*grep\s+\/(.*?)\/\s*(%?)\s*$/);
+      const mg = cmd && cmd.match(/^:?\s*grep\s+\/(.*?)\/([a-zA-Z]*)\s*(%?)\s*$/);
       if (mg){
         const pat = String(mg[1]||'');
-        const target = String(mg[2]||'');
+        const flagsGiven = String(mg[2]||'');
+        const target = String(mg[3]||'');
         if (!pat){ toast('grep: empty pattern'); return; }
         if (target !== '%'){ toast('grep: only % (current buffer) supported'); return; }
 
@@ -6848,14 +6849,42 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
         // Case sensitivity logic (same as search)
         let needI = false;
         let caseLabel = '常に区別';
-        try{
-          const ic = !!(b&&b.ignorecase);
-          const sc = !!(b&&b.smartcase);
-          if (ic){
-            if (sc && /[A-Z]/.test(pat)){ needI = false; caseLabel = '混在時区別'; }
-            else { needI = true; caseLabel = '同一視'; }
-          }
-        }catch{}
+        
+        // Check explicit flags first
+        let mode = null; // 'i', 'I', 's', or null
+        if (flagsGiven.includes('i')) mode = 'i';
+        else if (flagsGiven.includes('I')) mode = 'I';
+        else if (flagsGiven.includes('s')) mode = 's';
+
+        if (mode === 'i') {
+            needI = true;
+            caseLabel = '同一視';
+        } else if (mode === 'I') {
+            needI = false;
+            caseLabel = '常に区別';
+        } else if (mode === 's') {
+            // smartcase behavior
+            if (/[A-Z]/.test(pat)) { needI = false; } else { needI = true; }
+            caseLabel = '混在時区別';
+        } else {
+            // Fallback to buffer settings
+            try{
+              const ic = !!(b&&b.ignorecase);
+              const sc = !!(b&&b.smartcase);
+              if (ic){
+                if (sc){
+                   if (/[A-Z]/.test(pat)){ needI = false; } else { needI = true; }
+                   caseLabel = '混在時区別';
+                } else {
+                   needI = true;
+                   caseLabel = '同一視';
+                }
+              } else {
+                needI = false;
+                caseLabel = '常に区別';
+              }
+            }catch{}
+        }
         const flags = 'gm' + (needI ? 'i' : '');
         
         let re = null;
@@ -8968,7 +8997,8 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
             ]);
             // grep
             section('grep', [
-              [K(':grep /pat/ %'), sep(' カレントバッファを正規表現検索し、結果を別バッファに出力（リンクジャンプ可）')]
+              [K(':grep /pat/flags %'), sep(' カレントバッファを正規表現検索し、結果を別バッファに出力（リンクジャンプ可）')],
+              [sep('フラグ: '), K('i'), sep(' 同一視 / '), K('I'), sep(' 常に区別 / '), K('s'), sep(' 混在時区別（smartcase）')]
             ]);
             // 検索ハイライト
             section('検索ハイライト', [
