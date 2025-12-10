@@ -1236,6 +1236,8 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
     try{
       // IME未確定中はホバー描画を抑止
       try{ if (typeof _imeComposing!== 'undefined' && _imeComposing){ return; } }catch{}
+      // スムーズスクロール中はホバー描画を抑止
+      try{ if (window.__sixScanHoldScrollActive || (document.body.classList.contains('is-scrolling'))) return; }catch{}
       // タイピング直後はリンクホバー描画を一時抑止（次フレームへ）
       if (Date.now() < _typingGuardUntil){ return; }
       if (!_optUrlLink || !_hoverLink){ _linkClear(); if (editor) editor.style.cursor=''; return; }
@@ -1487,7 +1489,7 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
         pop.style.color='#e6e6e6';
         pop.style.border='1px solid #2a3244';
         pop.style.boxShadow='0 10px 24px rgba(0,0,0,0.4)';
-        pop.style.zIndex='10000';
+        pop.style.zIndex='10001';
         pop.style.borderRadius='6px';
         pop.style.overflow='hidden';
         pop.style.boxSizing='border-box';
@@ -6833,8 +6835,14 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
       }
     }catch{}
 
-    // :grep /pat/flags %
+    // :grep (dialog) or :grep /pat/flags %
     try{
+      // Check for bare :grep (no args)
+      if (/^:?\s*grep\s*$/.test(cmd)){
+        _showGrepDialog();
+        return;
+      }
+
       const mg = cmd && cmd.match(/^:?\s*grep\s+\/(.*?)\/([a-zA-Z]*)\s*(%?)\s*$/);
       if (mg){
         const pat = String(mg[1]||'');
@@ -6843,104 +6851,7 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
         if (!pat){ toast('grep: empty pattern'); return; }
         if (target !== '%'){ toast('grep: only % (current buffer) supported'); return; }
 
-        const b = currentBuffer();
-        const bName = (b && b.name) || 'buffer';
-
-        // Case sensitivity logic (same as search)
-        let needI = false;
-        let caseLabel = '常に区別';
-        
-        // Check explicit flags first
-        let mode = null; // 'i', 'I', 's', or null
-        if (flagsGiven.includes('i')) mode = 'i';
-        else if (flagsGiven.includes('I')) mode = 'I';
-        else if (flagsGiven.includes('s')) mode = 's';
-
-        if (mode === 'i') {
-            needI = true;
-            caseLabel = '同一視';
-        } else if (mode === 'I') {
-            needI = false;
-            caseLabel = '常に区別';
-        } else if (mode === 's') {
-            // smartcase behavior
-            if (/[A-Z]/.test(pat)) { needI = false; } else { needI = true; }
-            caseLabel = '混在時区別';
-        } else {
-            // Fallback to buffer settings
-            try{
-              const ic = !!(b&&b.ignorecase);
-              const sc = !!(b&&b.smartcase);
-              if (ic){
-                if (sc){
-                   if (/[A-Z]/.test(pat)){ needI = false; } else { needI = true; }
-                   caseLabel = '混在時区別';
-                } else {
-                   needI = true;
-                   caseLabel = '同一視';
-                }
-              } else {
-                needI = false;
-                caseLabel = '常に区別';
-              }
-            }catch{}
-        }
-        const flags = 'gm' + (needI ? 'i' : '');
-        
-        let re = null;
-        try{ re = new RegExp(pat, flags); }catch{ toast('grep: invalid regex'); return; }
-
-        const lines = _splitLines();
-        const resultLines = [];
-        const grepHighlights = [];
-        const headerLineCount = 5;
-
-        for (let i=0; i<lines.length; i++){
-          const line = lines[i];
-          re.lastIndex = 0;
-          if (re.test(line)){
-             let m;
-             const lineRe = new RegExp(pat, (needI?'i':'') + 'g');
-             while ((m = lineRe.exec(line)) !== null) {
-                 const prefix = `📌${bName}:${i+1}:${m.index+1}: `;
-                 const resultLine = prefix + line;
-                 resultLines.push(resultLine);
-                 
-                 grepHighlights.push({
-                     line: headerLineCount + resultLines.length - 1,
-                     start: prefix.length + m.index,
-                     len: m[0].length
-                 });
-
-                 if (m.index === lineRe.lastIndex) { lineRe.lastIndex++; }
-             }
-          }
-        }
-
-        if (resultLines.length > 0){
-          // #1329: Create result buffer instead of clipboard
-          const header = 
-`CMD\t\t:grep /${pat}/ %
-対象\t\t【${bName}】
-検索時 A/a\t${caseLabel}
-ヒット行数\t${resultLines.length}
-
-`;
-          const newText = header + resultLines.join('\n');
-          const newBufName = `🔍${bName}`;
-          
-          // Use _addBuffer to create standard buffer object, then move it
-          _addBuffer({ name: newBufName, text: newText, grepMatches: grepHighlights });
-          if (buffers.length > 0){
-            const newBuf = buffers.pop();
-            // Insert after current
-            const insertIdx = currentIdx + 1;
-            buffers.splice(insertIdx, 0, newBuf);
-            _switchToBuffer(insertIdx);
-          }
-        } else {
-          toast('grep: no matches found');
-        }
+        _execGrep(pat, flagsGiven);
         return;
       }
     }catch{}
@@ -10164,7 +10075,8 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
       if (Date.now() < _kbdGuardUntil){ try{ e.preventDefault(); e.stopPropagation(); }catch{} return; }
       // #1339: Block editor interaction if modal is open
       try{
-        if (_modalOverlay && _modalOverlay.style && _modalOverlay.style.display !== 'none'){
+        if ((_modalOverlay && _modalOverlay.style && _modalOverlay.style.display !== 'none') ||
+            document.getElementById('grepDialog')){
            e.preventDefault(); e.stopPropagation(); return;
         }
       }catch{}
@@ -12783,7 +12695,7 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
           try{
             if (!e || !e.code) return;
             // #1327: If a modal is open, do not intercept keys (let modal handle them)
-            if (_modalOverlay && _modalOverlay.style && _modalOverlay.style.display !== 'none') return;
+            if ((_modalOverlay && _modalOverlay.style && _modalOverlay.style.display !== 'none') || (window._grepDialogOpen===true)) return;
 
             if (!_scanHold.codes.has(e.code)) return;
             if (e.ctrlKey || e.altKey || e.metaKey) return;
@@ -13211,7 +13123,7 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
           try{ if (typeof _scanHold === 'object' && _scanHold && _scanHold.held && e && e.code && _scanHold.held.has(e.code)){ try{ e.preventDefault(); e.stopPropagation(); }catch{} return; } }catch{}
           if (_globalKeyRouting) return;
           // If a modal is open, or enc popup is visible, do not steal
-          const modalOpen = !!(_modalOverlay && _modalOverlay.style && _modalOverlay.style.display !== 'none');
+          const modalOpen = !!((_modalOverlay && _modalOverlay.style && _modalOverlay.style.display !== 'none') || document.getElementById('grepDialog') || (window._grepDialogOpen===true));
           if (modalOpen) return;
           try{ if (typeof _encPopupVisible === 'function' && _encPopupVisible()) return; }catch{}
           const ae = document.activeElement;
@@ -17577,14 +17489,17 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
   // Reflect current ignorecase/smartcase state to overlay case button label
   function _updateOverlayCaseVisual(){
     try{
-      const el = document.getElementById('overlayBtnCase_label');
-      if (!el) return;
       const b = currentBuffer();
       const ic = !!(b && b.ignorecase);
       const sc = !!(b && b.smartcase);
       let label = '常に区別';
       if (ic){ label = sc ? '混在時区別' : '同一視'; }
-      el.textContent = label;
+      
+      const el = document.getElementById('overlayBtnCase_label');
+      if (el) el.textContent = label;
+
+      const elDialog = document.getElementById('grepDialogCaseLabel');
+      if (elDialog) elDialog.textContent = label;
     }catch{}
   }
 
@@ -17725,6 +17640,380 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
       window.addEventListener('keydown', handler, true);
       document.addEventListener('keydown', handler, true);
     }catch{}
+  }
+
+  // --- Grep Dialog UI ---
+  function _showGrepDialog(){
+    try{
+      // Create modal container
+      const modal = document.createElement('div');
+      modal.style.cssText = 'position:fixed; top:0; left:0; width:100%; height:100%; background:rgba(0,0,0,0.5); z-index:10000; display:flex; align-items:center; justify-content:center; font-family:var(--font-ui);';
+      
+      const box = document.createElement('div');
+      // Match Help modal style (opaque background, border)
+      // Use var(--font-size) for text size to match body
+      box.style.cssText = 'background:var(--six-modal-bg, #1e1e1e); border:1px solid var(--six-border, #444); color:var(--text-color); padding:16px; width:400px; max-width:90%; box-shadow:0 4px 12px rgba(0,0,0,0.5); display:flex; flex-direction:column; gap:12px; border-radius:4px; font-size:var(--font-size, 16px);';
+      modal.appendChild(box);
+
+      // Title
+      const title = document.createElement('div');
+      title.textContent = 'grep(検索)';
+      title.style.cssText = 'font-weight:bold; font-size:inherit; color:var(--text-color); margin-bottom:4px; text-align:center;';
+      box.appendChild(title);
+
+      // Input Label
+      const inputLabel = document.createElement('div');
+      inputLabel.textContent = '検索語(正規表現)';
+      inputLabel.style.cssText = 'font-size:0.85em; color:var(--text-dim); margin-bottom:-8px;';
+      box.appendChild(inputLabel);
+
+      // Input row
+      const inputRow = document.createElement('div');
+      inputRow.style.cssText = 'display:flex; gap:8px; align-items:center;';
+      
+      const input = document.createElement('input');
+      input.type = 'text';
+      input.placeholder = '';
+      input.style.cssText = 'flex:1; background:var(--bg-color); color:var(--text-color); border:1px solid #ffffff; padding:4px 8px; font-family:var(--font-mono); outline:none; font-size:inherit;';
+      inputRow.appendChild(input);
+      box.appendChild(inputRow);
+
+      // Target Label
+      const targetLabel = document.createElement('div');
+      targetLabel.textContent = '検索対象：このバッファ';
+      targetLabel.style.cssText = 'font-size:0.85em; color:var(--text-dim); margin-top:1rem;';
+      box.appendChild(targetLabel);
+
+      // Case sensitivity row (styled like overlay button)
+      const caseRow = document.createElement('div');
+      caseRow.style.cssText = 'display:flex; justify-content:flex-start; align-items:center; margin-top:4px;';
+      
+      // Clone/Recreate overlayBtnCase structure
+      const caseBtn = document.createElement('button');
+      caseBtn.id = 'grepDialogBtnCase'; // Unique ID
+      caseBtn.style.minWidth = 'auto';
+      caseBtn.style.border = '1px solid #2a3244';
+      caseBtn.style.background = '#1a2030';
+      caseBtn.style.color = '#e6e6e6';
+      caseBtn.style.borderRadius = '6px';
+      caseBtn.style.padding = '4px 8px';
+      caseBtn.style.cursor = 'pointer';
+      caseBtn.style.font = "12px/1.25 system-ui, -apple-system, 'Segoe UI', sans-serif";
+      caseBtn.style.opacity = '0.92';
+      caseBtn.style.userSelect = 'none';
+      caseBtn.style.outline = 'none';
+      
+      const caseWrap = document.createElement('div');
+      caseWrap.style.display = 'flex';
+      caseWrap.style.flexDirection = 'row';
+      caseWrap.style.alignItems = 'center';
+      caseWrap.style.gap = '8px';
+      
+      const caseTitle = document.createElement('div');
+      caseTitle.textContent = '検索時 A/a';
+      caseTitle.style.fontWeight = '500';
+      
+      const caseLine = document.createElement('div');
+      caseLine.id = 'grepDialogCaseLabel'; // ID for updates
+      caseLine.style.display = 'block';
+      caseLine.style.textAlign = 'center';
+      caseLine.style.padding = '2px 8px';
+      caseLine.style.border = '1px solid #2a3244';
+      caseLine.style.borderRadius = '6px';
+      caseLine.style.fontSize = '11px';
+      caseLine.style.lineHeight = '1.5';
+      caseLine.style.background = '#0e2348';
+      caseLine.style.boxShadow = '0 1px 2px rgba(0,0,0,0.6), inset 0 0 0 1px rgba(255,255,255,0.06)';
+      caseLine.style.color = '#e6f0ff';
+      
+      // Initial text
+      const b = currentBuffer();
+      let label = '常に区別';
+      if (b && b.ignorecase){ label = b.smartcase ? '混在時区別' : '同一視'; }
+      caseLine.textContent = label;
+
+      caseWrap.appendChild(caseTitle);
+      caseWrap.appendChild(caseLine);
+      caseBtn.appendChild(caseWrap);
+      
+      caseBtn.onclick = (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        // Use existing popup logic
+        if (typeof _casePopupShow === 'function') _casePopupShow(caseBtn);
+      };
+      caseRow.appendChild(caseBtn);
+      box.appendChild(caseRow);
+
+      // Buttons row
+      const btnRow = document.createElement('div');
+      btnRow.style.cssText = 'display:flex; justify-content:flex-end; gap:8px; margin-top:16px;';
+      
+      const execBtn = document.createElement('button');
+      execBtn.textContent = '実行';
+      // Match Cancel button style
+      execBtn.style.cssText = `
+          min-width: 80px;
+          border: 1px solid var(--six-help-close-border, #2f4064);
+          background: var(--six-help-close-bg, #2a3756);
+          color: var(--six-help-close-fg, #e6e6e6);
+          padding: 6px 10px;
+          border-radius: 6px;
+          cursor: pointer;
+          font-weight: bold;
+      `;
+      execBtn.onclick = () => doGrep();
+
+      const cancelBtn = document.createElement('button');
+      cancelBtn.textContent = 'キャンセル';
+      cancelBtn.style.cssText = `
+          min-width: 80px;
+          border: 1px solid var(--six-help-close-border, #2f4064);
+          background: var(--six-help-close-bg, #2a3756);
+          color: var(--six-help-close-fg, #e6e6e6);
+          padding: 6px 10px;
+          border-radius: 6px;
+          cursor: pointer;
+      `;
+      cancelBtn.onclick = () => close();
+      
+      btnRow.appendChild(execBtn);
+      btnRow.appendChild(cancelBtn);
+      box.appendChild(btnRow);
+
+      // Logic
+      let histIdx = -1; // -1 means current input
+      window._grepDialogOpen = true;
+      
+      function close(){
+        window._grepDialogOpen = false;
+        if (modal.parentNode) modal.parentNode.removeChild(modal);
+        editor.focus();
+      }
+
+      function doGrep(){
+        const pat = input.value;
+        if (!pat) return;
+        
+        // Add to history if new (prefix with / for compatibility with search history)
+        const histVal = '/' + pat;
+        if (_searchHistory.indexOf(histVal) === -1){
+            _searchHistory.push(histVal);
+        }
+        
+        // Determine flags based on current buffer state (since button syncs with buffer)
+        // We don't need to read from button, just read from buffer
+        const b = currentBuffer();
+        let flagChar = 'I';
+        if (b){
+            if (b.ignorecase){
+                if (b.smartcase) flagChar = 's';
+                else flagChar = 'i';
+            }
+        }
+        
+        // Execute grep directly
+        // suppressToast=false (show toast)
+        const count = _execGrep(pat, flagChar, false);
+        
+        if (count > 0){
+            close();
+        }
+        // If count <= 0, toast is shown by _execGrep, dialog stays open.
+      }
+
+      // Key handling
+      const keyHandler = (e)=>{
+        // Block IME switching keys to prevent editor mode change
+        if (e.key === 'KanaMode' || e.key === 'Hiragana' || e.key === 'Eisu' || e.key === 'Alphanumeric' || e.key === 'RomanCharacters' || e.code === 'Convert' || e.code === 'NonConvert' || e.code === 'Lang1' || e.code === 'Lang2'){
+            e.stopPropagation();
+            return;
+        }
+
+        if (e.key === 'Enter'){
+            e.preventDefault();
+            e.stopPropagation();
+            doGrep();
+        } else if (e.key === 'Escape' || e.key === 'Esc'){
+            e.preventDefault();
+            e.stopPropagation();
+            close();
+        } else if (e.key === 'ArrowUp'){
+            if (document.activeElement === input) {
+                e.preventDefault();
+                if (_searchHistory.length > 0){
+                    if (histIdx === -1) histIdx = _searchHistory.length;
+                    histIdx = Math.max(0, histIdx - 1);
+                    let val = _searchHistory[histIdx] || '';
+                    val = val.replace(/^[:\s]*[/?]/, '');
+                    input.value = val;
+                }
+            }
+        } else if (e.key === 'ArrowDown'){
+            if (document.activeElement === input) {
+                e.preventDefault();
+                if (histIdx !== -1){
+                    histIdx = Math.min(_searchHistory.length, histIdx + 1);
+                    if (histIdx === _searchHistory.length){
+                        input.value = ''; 
+                        histIdx = -1;
+                    } else {
+                        let val = _searchHistory[histIdx] || '';
+                        val = val.replace(/^[:\s]*[/?]/, '');
+                        input.value = val;
+                    }
+                }
+            }
+        }
+      };
+      
+      // Attach to modal to capture events even if focus is on buttons
+      // Use capture to ensure we get it before anyone else
+      window.addEventListener('keydown', (e)=>{
+          if (!document.getElementById('grepDialog')) return;
+          keyHandler(e);
+      }, true);
+      
+      // Also attach to input specifically to ensure it works
+      input.addEventListener('keydown', keyHandler);
+
+      // Global keydown for modal to trap Escape/Enter if focus lost (though input has focus)
+      // Also to block editor interaction, we set an ID to be checked by keydown handler
+      modal.id = 'grepDialog';
+
+      document.body.appendChild(modal);
+      input.focus();
+
+    }catch(e){ console.error(e); }
+  }
+
+  function _execGrep(pat, flagsGiven, suppressToast){
+    try{
+        const b = currentBuffer();
+        const bName = (b && b.name) || 'buffer';
+
+        // Case sensitivity logic
+        let needI = false;
+        let caseLabel = '常に区別';
+        
+        // Check explicit flags first
+        let mode = null; // 'i', 'I', 's', or null
+        if (flagsGiven.includes('i')) mode = 'i';
+        else if (flagsGiven.includes('I')) mode = 'I';
+        else if (flagsGiven.includes('s')) mode = 's';
+
+        if (mode === 'i') {
+            needI = true;
+            caseLabel = '同一視';
+        } else if (mode === 'I') {
+            needI = false;
+            caseLabel = '常に区別';
+        } else if (mode === 's') {
+            // smartcase behavior
+            if (/[A-Z]/.test(pat)) { needI = false; } else { needI = true; }
+            caseLabel = '混在時区別';
+        } else {
+            // Fallback to buffer settings
+            try{
+              const ic = !!(b&&b.ignorecase);
+              const sc = !!(b&&b.smartcase);
+              if (ic){
+                if (sc){
+                   if (/[A-Z]/.test(pat)){ needI = false; } else { needI = true; }
+                   caseLabel = '混在時区別';
+                } else {
+                   needI = true;
+                   caseLabel = '同一視';
+                }
+              } else {
+                needI = false;
+                caseLabel = '常に区別';
+              }
+            }catch{}
+        }
+        const flags = 'gm' + (needI ? 'i' : '');
+        
+        let re = null;
+        try{ re = new RegExp(pat, flags); }catch{ 
+            if (!suppressToast) toast('grep: invalid regex'); 
+            return -1; 
+        }
+
+        const lines = _splitLines();
+        const resultLines = [];
+        const grepHighlights = [];
+        const headerLineCount = 5;
+
+        for (let i=0; i<lines.length; i++){
+          const line = lines[i];
+          re.lastIndex = 0;
+          if (re.test(line)){
+             let m;
+             const lineRe = new RegExp(pat, (needI?'i':'') + 'g');
+             while ((m = lineRe.exec(line)) !== null) {
+                 const prefix = `📌${bName}:${i+1}:${m.index+1}: `;
+                 const resultLine = prefix + line;
+                 resultLines.push(resultLine);
+                 
+                 grepHighlights.push({
+                     line: headerLineCount + resultLines.length - 1,
+                     start: prefix.length + m.index,
+                     len: m[0].length
+                 });
+
+                 if (m.index === lineRe.lastIndex) { lineRe.lastIndex++; }
+             }
+          }
+        }
+
+        if (resultLines.length > 0){
+          // Determine flag display string
+          let flagStr = '';
+          // Prioritize explicit intent from flagsGiven
+          if (flagsGiven.includes('s')) flagStr = 's';
+          else if (flagsGiven.includes('I')) flagStr = 'I';
+          else if (flagsGiven.includes('i')) flagStr = 'i';
+          else {
+              // Buffer fallback
+              try{
+                  const ic = !!(b&&b.ignorecase);
+                  const sc = !!(b&&b.smartcase);
+                  if (ic){
+                      if (sc) flagStr = 's';
+                      else flagStr = 'i';
+                  } else {
+                      flagStr = 'I';
+                  }
+              }catch{}
+          }
+          
+          // If flagStr is 'I', we might omit it or show it. Vim usually omits default.
+          // But user asked to reflect flags.
+          // Let's append it if not empty.
+          const cmdFlag = flagStr ? `/${flagStr}` : '';
+
+          const header = 
+`CMD\t\t:grep /${pat}${cmdFlag} %
+対象\t\t【${bName}】
+検索時 A/a\t${caseLabel}
+ヒット行数\t${resultLines.length}
+
+`;
+          const newText = header + resultLines.join('\n');
+          const newBufName = `🔍${bName}`;
+          
+          _addBuffer({ name: newBufName, text: newText, grepMatches: grepHighlights });
+          if (buffers.length > 0){
+            const newBuf = buffers.pop();
+            const insertIdx = currentIdx + 1;
+            buffers.splice(insertIdx, 0, newBuf);
+            _switchToBuffer(insertIdx);
+          }
+        } else {
+          if (!suppressToast) toast('grep: no matches found');
+        }
+        return resultLines.length;
+    }catch(e){ console.error(e); return 0; }
   }
 
   function _bootstrap(){

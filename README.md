@@ -78,6 +78,7 @@
   - インデント操作時の幅(shiftwidth)の選択肢に'TAB'を追加した。TABコードを挿入/削除する。SIX_OPTIONSでバッファ生成時の初期値を指定できるようにした。
   - NORMALのTABが`>>`になるようにした。VISUALのTABは`>`。Shift+TABで逆。
   - INSERTのTABでshiftwidthの設定値を挿入するようにした。2なら"  ", TABなら\t。
+  - grep機能を実装した。まずはカレントバッファ内での検索。
 - 2025.xx.xx v1.0
 
 ## ライセンス / 出典
