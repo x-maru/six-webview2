@@ -12,6 +12,7 @@ window.SIX_OPTIONS = {
   // shiftwidth: 'TAB',
   visualbell: true, // ヴィジュアルベル。指定しなくてもデフォルトでON
   UNDO_STEPS_IN_SESSION: 5, // 即時終了から復帰した後まで引き継ぐアンドゥバッファの深さ(各バッファ毎に持つバッファに対する共通の深さ)
+  SEARCH_TERM_IN_SESSION: 20,
   hlsearch: false, // 検索ハイライト（:set hlsearch / :set nohlsearch / :set hlsearch!）
   urllink: true,
   imeSwitchKey: 'direct',

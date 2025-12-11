@@ -1291,17 +1291,19 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
       try{ if (editor) editor.style.cursor='pointer'; }catch{}
     }catch{}
   }
-  function _detectUrlAt(line, col){
+  function _detectUrlAt(line, col, row){
     try{
       if (!line) return null;
 
-      // Check for Grep result link FIRST: 📌BufferName:Line:Col:
+      // Check for Grep result link FIRST: 📌Line:Col:
       // This must be checked before Windows paths because "C:/..." matches reWin
-      const mGrep = line.match(/^📌(.+?):(\d+):(\d+):/);
+      const mGrep = line.match(/^📌\s*(\d+):\s*(\d+):/);
       if (mGrep){
-        const len = mGrep[0].length - 1; // Exclude trailing colon
+        // Include the full match length (including trailing colon)
+        const len = mGrep[0].length; 
         if (col < len){
-           return { c1:0, c2:len, url:mGrep[0].slice(0, -1), kind:'grep-jump', bName:mGrep[1], line:parseInt(mGrep[2],10), col:parseInt(mGrep[3],10) };
+           // Return static jump kind, path resolution happens in _onEditorClickForLink
+           return { c1:0, c2:len, url:mGrep[0].slice(0, -1), kind:'grep-jump-static', line:parseInt(mGrep[1],10), col:parseInt(mGrep[2],10) };
         }
       }
 
@@ -1309,13 +1311,18 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
       const re = /(https?:\/\/[^\s<>"')\]}]+|file:\/\/[^\s<>"')\]}]+|mailto:[^\s<>"')\]}]+)/g;
       // Windows absolute path like C:/Users/... or with backslashes (local open via :e)
       const reWin = /\b([A-Za-z]:[\/\\][^\s<>"')\]}]+)\b/g;
-      // WSL UNC path //wsl.localhost/Ubuntu/... (local open via :e)
-      const reUNC = /(\/\/wsl\.localhost\/[^\s<>"')\]}]+)/g;
+      // WSL UNC path //wsl.localhost/Ubuntu/... or //wsl$/... (local open via :e)
+      const reUNC = /(\/\/(?:wsl\.localhost|wsl\$)\/[^\s<>"')\]}]+)/g;
       // First check explicit schemes so "file://C:/..." is treated as one external URL
       let m; re.lastIndex=0;
       while ((m=re.exec(line))){
         const s=m.index|0; const l=(m[0]||'').length|0; if (l<=0){ re.lastIndex++; continue; }
         const e = s + l;
+        // #1369: If it's file://wsl$/..., treat as six-open (local) instead of external
+        if (m[0].startsWith('file://wsl$/') || m[0].startsWith('file://wsl.localhost/')) {
+             let p = m[0].slice(7); // remove file://
+             if (col>=s && col<e){ return { c1:s, c2:e, url:p, kind:'six-open' }; }
+        }
         if (col>=s && col<e){ return { c1:s, c2:e, url:String(m[0]||''), kind:'external' }; }
         if (re.lastIndex === m.index) re.lastIndex++;
       }
@@ -1348,6 +1355,11 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
       if (!_optUrlLink) return;
       // IME未確定中はマウスホバー計測を停止（強制リフロー抑制）
       try{ if (window._imeComposing===true){ return; } }catch{}
+      // #1369: Suppress hover update during smooth scroll
+      if (document.body.classList.contains('is-scrolling') || (window._altScroll && window._altScroll.active) || (window.__sixScanHoldScrollActive)) {
+          _clearLinkHover();
+          return;
+      }
       const now = Date.now(); if (now - _lastLinkMoveAt < 25) return; _lastLinkMoveAt = now;
       const rect = viewport.getBoundingClientRect();
       const yAbs = (e.clientY - rect.top) + (editor.scrollTop||0);
@@ -1380,7 +1392,7 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
         if (w >= xAbs || c===line.length-1){ break; }
         c++;
       }
-      const hit = _detectUrlAt(line, c);
+      const hit = _detectUrlAt(line, c, row);
       if (hit){
         const same = _hoverLink && _hoverLink.r===row && _hoverLink.c1===hit.c1 && _hoverLink.c2===hit.c2 && _hoverLink.url===hit.url && _hoverLink.kind===hit.kind;
         // Copy all properties from hit to support extra fields like bName/line/col
@@ -1397,7 +1409,106 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
       if (!_hoverLink) return;
       if (e){ try{ e.preventDefault(); e.stopPropagation(); }catch{} }
       
+      if (_hoverLink.kind === 'grep-jump-static'){
+         const lineNum = _hoverLink.line;
+         const colNum = _hoverLink.col;
+         const row = _hoverLink.r;
+         
+         // Scan upwards for file header: 📄Path  Count
+         const lines = _splitLines();
+         let bName = null;
+         
+         // Scan up from current row
+         for (let i = row; i >= 0; i--) {
+             const l = lines[i];
+             if (!l) continue;
+             // Check for empty line delimiter (paragraph break)
+             if (l.trim() === '') {
+                 // If we hit an empty line before finding a header, we might be lost or in a different block.
+                 // But the header is part of the block.
+                 // The format is:
+                 // (Empty Line)
+                 // 📄Path  Count
+                 // 📌...
+                 // So if we hit empty line, we stop? No, the header is AFTER the empty line.
+                 // We are scanning UP.
+                 // If we hit empty line, it means we passed the start of the current block?
+                 // No, the header is the FIRST line of the block.
+                 // So if we hit empty line, we failed to find header in this block?
+                 // Wait, the header itself is part of the block.
+                 // If we are at line 10 (📌...), header is at line 5.
+                 // Line 4 is empty.
+                 // So if we scan up and hit line 4 (empty), we stop.
+                 // But we should have found line 5 first.
+                 break; 
+             }
+             
+             // Check for header
+             // 📄Path  Count
+             if (l.startsWith('📄')) {
+                 // Extract path. Format: 📄(Path)  (Count)件
+                 // Use regex to be safe about spaces
+                 const m = l.match(/^📄(.+?)\s\s\d+件$/);
+                 if (m) {
+                     bName = m[1];
+                     break;
+                 }
+             }
+         }
+         
+         if (!bName) {
+             toast('grep: cannot determine file path');
+             return;
+         }
+
+         const targetIdx = buffers.findIndex(b => b.name === bName);
+         if (targetIdx >= 0){
+             const r = Math.max(0, lineNum - 1);
+             // #1367: Convert visual column back to char index
+             let charCol = Math.max(0, colNum - 1);
+             try {
+                 const b = buffers[targetIdx];
+                 const txt = String(b.text||'');
+                 const lines = txt.split(/\r?\n/);
+                 const lineContent = lines[r] || '';
+                 charCol = _colForVisual(lineContent, colNum - 1);
+             } catch(e){}
+             _switchToBuffer(targetIdx, { force: true, jumpTo: { row: r, col: charCol } });
+         } else {
+             // Buffer not found, try to open as file
+             if (bName.includes('/') || bName.includes('\\') || /^[a-zA-Z]:/.test(bName)) {
+                 runCommand(':e ' + bName);
+                 
+                 // Attempt to jump after a short delay (polling)
+                 let attempts = 0;
+                 const poller = setInterval(() => {
+                     attempts++;
+                     const idx = buffers.findIndex(b => b.name === bName || b.path === bName || (b.path && b.path.endsWith(bName.replace(/\\/g,'/'))));
+                     if (idx >= 0) {
+                         clearInterval(poller);
+                         const r = Math.max(0, lineNum - 1);
+                         let charCol = Math.max(0, colNum - 1);
+                         try {
+                             const b = buffers[idx];
+                             const txt = String(b.text||'');
+                             const lines = txt.split(/\r?\n/);
+                             const lineContent = lines[r] || '';
+                             charCol = _colForVisual(lineContent, colNum - 1);
+                         } catch(e){}
+                         _switchToBuffer(idx, { force: true, jumpTo: { row: r, col: charCol } });
+                     } else if (attempts > 20) { // 2 seconds
+                         clearInterval(poller);
+                     }
+                 }, 100);
+             } else {
+                 toast('Buffer not found: ' + bName);
+             }
+         }
+         return;
+      }
+
       if (_hoverLink.kind === 'grep-jump'){
+         // Legacy support or fallback
          const bName = _hoverLink.bName;
          const lineNum = _hoverLink.line;
          const colNum = _hoverLink.col;
@@ -1410,21 +1521,6 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
          } else {
              // Buffer not found, try to open as file if it looks like a path
              if (bName.includes('/') || bName.includes('\\') || /^[a-zA-Z]:/.test(bName)) {
-                 // Try to open file and jump
-                 // We use runCommand(':e ...') but we need to jump after load.
-                 // Since runCommand is async-ish for file load, we can't easily chain jump.
-                 // But we can use a one-time hook or just try to open and let user navigate?
-                 // Better: use _loadFromPath directly if possible, or just run :e and toast.
-                 // Actually, runCommand(':e path') will switch to the new buffer.
-                 // If we can hook into "buffer loaded", we can jump.
-                 // For now, let's just open it. The user can click again or scroll.
-                 // Ideally: open and jump.
-                 
-                 // Let's try to use a global "pending jump" state that _switchToBuffer or _addBuffer checks?
-                 // Or just append a jump command to the path? e.g. :e path:line:col (not supported by :e yet)
-                 // Let's support :e path:line:col in runCommand? No, that's a bigger change.
-                 
-                 // Simple approach: run :e, and set a timeout to try to jump if current buffer matches name.
                  runCommand(':e ' + bName);
                  
                  // Attempt to jump after a short delay (polling)
@@ -3280,7 +3376,11 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
       let vp=null, prevVis='';
       try{
         vp = document.getElementById('editorViewport');
-        if (vp){ prevVis = vp.style.visibility || ''; vp.style.visibility = 'hidden'; }
+        if (vp){ 
+          prevVis = vp.style.visibility || ''; 
+          if (prevVis === 'hidden') prevVis = ''; // Prevent propagating hidden state (#1366)
+          vp.style.visibility = 'hidden'; 
+        }
       }catch{}
       // 1) Save current buffer's view state before switching away
       if (currentIdx>=0 && currentIdx<buffers.length){
@@ -4242,22 +4342,26 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
         _probeUrl = uProbe; _probeHost = String(uProbe.host||'');
         // UNC/WSL: リンク起点の静音モードでは、キャッシュに存在が無ければ一切のネットワーク発行を避ける
         if (opts && opts.uncSilent && uProbe.protocol==='file:' && _probeHost){
-          try{
-            const parent = _dirnameURL(uProbe.toString());
-            const key = (function(){ try{ return _ensureSlash(parent)?.toString()||null; }catch{ return null; } })();
-            const fname = (function(){ try{ return _basename(uProbe.pathname||''); }catch{ return null; } })();
-            let present = false;
-            if (key && fname && typeof _dirCache!=='undefined' && _dirCache && _dirCache.get){
-              const cached = _dirCache.get(key);
-              if (Array.isArray(cached)){
-                present = !!cached.find(e=> String(e && e.name||'') === String(fname||''));
+          // #1370: Allow WSL paths to proceed even if not in cache
+          if (_probeHost === 'wsl$' || _probeHost === 'wsl.localhost') { /* allow */ }
+          else {
+            try{
+              const parent = _dirnameURL(uProbe.toString());
+              const key = (function(){ try{ return _ensureSlash(parent)?.toString()||null; }catch{ return null; } })();
+              const fname = (function(){ try{ return _basename(uProbe.pathname||''); }catch{ return null; } })();
+              let present = false;
+              if (key && fname && typeof _dirCache!=='undefined' && _dirCache && _dirCache.get){
+                const cached = _dirCache.get(key);
+                if (Array.isArray(cached)){
+                  present = !!cached.find(e=> String(e && e.name||'') === String(fname||''));
+                }
               }
-            }
-            if (!present){
-              // キャッシュに無ければ静かに中断（後段のcatchでトーストのみ）
-              throw new Error('unc-silent-skip');
-            }
-          }catch(eSilent){ throw eSilent; }
+              if (!present){
+                // キャッシュに無ければ静かに中断（後段のcatchでトーストのみ）
+                throw new Error('unc-silent-skip');
+              }
+            }catch(eSilent){ throw eSilent; }
+          }
         }
         if (_apiIsEnabled() && uProbe.protocol==='file:'){
           const fsPath0 = _fsPathFromFileURL(uProbe);
@@ -4714,8 +4818,8 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
       caret.style.top = topPx + 'px';
       caret.style.height = Math.max(1, Math.round(LINE_HEIGHT)) + 'px';
       // transform remainder 適用（行境界ずれ防止）
-      // #1279: Disable sub-pixel compensation during View Scroll to match static stripe/gutter
-      try{ caret.style.transform = (!isViewScroll && Math.abs(rem) > 0.01) ? `translateY(${-rem}px)` : ''; }catch{}
+      // #1279: Disable sub-pixel compensation on caret element itself (handled by caretLayer)
+      try{ caret.style.transform = ''; }catch{}
       // 幅は前回値維持。後で通常パスを rAF で補強。
       if (window.requestAnimationFrame){
         requestAnimationFrame(()=>{ try{ if (window && window._imeComposing===true) return; if (!_visualActive || !_visualLinewise) return; _repositionCaret(); }catch{} });
@@ -4817,8 +4921,8 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
   // Make caret height match the full line box
   caret.style.top = topPx + 'px';
   caret.style.height = Math.max(1, Math.round(LINE_HEIGHT)) + 'px';
-  // #1279: Disable sub-pixel compensation during View Scroll to match static stripe/gutter
-  try{ caret.style.transform = (!isViewScroll && Math.abs(rem) > 0.01) ? `translateY(${-rem}px)` : ''; }catch{}
+  // #1279: Disable sub-pixel compensation on caret element itself (handled by caretLayer)
+  try{ caret.style.transform = ''; }catch{}
     // Determine character box width at caret (full-width aware), then shrink to 90%
     let chW = 0;
     if (caretCol < line.length){
@@ -10316,6 +10420,9 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
             e.preventDefault(); e.stopPropagation();
             const as = window._altScroll;
             if (as && !as.active){
+              // #1370: Clear hover link highlight immediately before scroll starts
+              try{ _clearLinkHover(); }catch{}
+
               as.active = true;
               as.key = e.key;
               // #1269: Support jkScrollDirection option
@@ -10661,6 +10768,9 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
           e.preventDefault(); e.stopPropagation();
           const as = window._altScroll;
           if (as && !as.active){
+            // #1370: Clear hover link highlight immediately before scroll starts
+            try{ _clearLinkHover(); }catch{}
+
             as.active = true;
             as.key = e.key;
             // #1269: Support jkScrollDirection option
@@ -11658,6 +11768,9 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
     e.preventDefault(); e.stopPropagation();
     const as = window._altScroll;
     if (as && !as.active){
+      // #1370: Clear hover link highlight immediately before scroll starts
+      try{ _clearLinkHover(); }catch{}
+
       as.active = true;
       as.key = e.key;
       // #1269: Support jkScrollDirection option
@@ -11724,10 +11837,69 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
     try{
       const lines = _splitLines();
       const line = lines[caretRow] || '';
-      const hit = _detectUrlAt(line, caretCol);
+      const hit = _detectUrlAt(line, caretCol, caretRow);
       if (hit){
         e.preventDefault(); e.stopPropagation();
-        if (hit.kind === 'grep-jump'){
+        if (hit.kind === 'grep-jump-static'){
+           const lineNum = hit.line;
+           const colNum = hit.col;
+           const row = caretRow;
+           
+           let bName = null;
+           for (let i = row; i >= 0; i--) {
+               const l = lines[i];
+               if (!l) continue;
+               if (l.trim() === '') break; 
+               if (l.startsWith('📄')) {
+                   const m = l.match(/^📄(.+?)\s\s\d+件$/);
+                   if (m) { bName = m[1]; break; }
+               }
+           }
+           
+           if (!bName) {
+               toast('grep: cannot determine file path');
+               return;
+           }
+
+           const targetIdx = buffers.findIndex(b => b.name === bName);
+           if (targetIdx >= 0){
+               const r = Math.max(0, lineNum - 1);
+               // #1367: Convert visual column back to char index
+               let charCol = Math.max(0, colNum - 1);
+               try {
+                   const b = buffers[targetIdx];
+                   const txt = String(b.text||'');
+                   const lines = txt.split(/\r?\n/);
+                   const lineContent = lines[r] || '';
+                   charCol = _colForVisual(lineContent, colNum - 1);
+               } catch(e){}
+               _switchToBuffer(targetIdx, { force: true, jumpTo: { row: r, col: charCol } });
+           } else {
+               if (bName.includes('/') || bName.includes('\\') || /^[a-zA-Z]:/.test(bName)) {
+                   runCommand(':e ' + bName);
+                   let attempts = 0;
+                   const poller = setInterval(() => {
+                       attempts++;
+                       const idx = buffers.findIndex(b => b.name === bName || b.path === bName || (b.path && b.path.endsWith(bName.replace(/\\/g,'/'))));
+                       if (idx >= 0) {
+                           clearInterval(poller);
+                           const r = Math.max(0, lineNum - 1);
+                           let charCol = Math.max(0, colNum - 1);
+                           try {
+                               const b = buffers[idx];
+                               const txt = String(b.text||'');
+                               const lines = txt.split(/\r?\n/);
+                               const lineContent = lines[r] || '';
+                               charCol = _colForVisual(lineContent, colNum - 1);
+                           } catch(e){}
+                           _switchToBuffer(idx, { force: true, jumpTo: { row: r, col: charCol } });
+                       } else if (attempts > 20) { clearInterval(poller); }
+                   }, 100);
+               } else {
+                   toast('Buffer not found: ' + bName);
+               }
+           }
+        } else if (hit.kind === 'grep-jump'){
            const bName = hit.bName;
            const lineNum = hit.line;
            const colNum = hit.col;
@@ -12479,6 +12651,8 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
                 if (!window.__sixScanHoldScrollActive) {
                     try{ window.__sixScanHoldScrollActive = true; }catch{}
                     try{ document.body.classList.add('is-scrolling'); }catch{}
+                    // #1369: Clear hover link highlight on scroll start
+                    try{ if (_hoverLink) _clearLinkHover(); }catch{}
                 }
             }
             
@@ -18007,6 +18181,11 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
     }catch(e){ console.error(e); }
   }
 
+  function _globToRegex(glob) {
+    const escaped = glob.replace(/[.+^${}()|[\]\\*?]/g, '\\$&');
+    return new RegExp('^' + escaped.replace(/\\\*/g, '.*').replace(/\\\?/g, '.') + '$');
+  }
+
   function _execGrep(pat, flagsGiven, suppressToast, targetPath){
     try {
         let bName = '%';
@@ -18020,6 +18199,125 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
             
             return (async () => {
                 try {
+                    // Wildcard support
+                    if (/[*?]/.test(targetPath)) {
+                        const base = _currentDirBase();
+                        const urlStr = _normalizeToURLString(targetPath, base);
+                        
+                        if (_apiIsEnabled() && urlStr.startsWith('file:')) {
+                             try {
+                                 const u = new URL(urlStr);
+                                 let fullFsPath = _fsPathFromFileURL(u);
+                                 if (!fullFsPath) fullFsPath = decodeURIComponent(u.pathname);
+                                 
+                                 if (fullFsPath) {
+                                     // #1368: Normalize wsl$ to wsl.localhost for display
+                                     let displayPath = fullFsPath.replace(/\\/g, '/');
+                                     if (displayPath.startsWith('//wsl$/')) {
+                                         displayPath = displayPath.replace('//wsl$/', '//wsl.localhost/');
+                                     }
+
+                                     const parts = displayPath.split('/');
+                                     const globPattern = parts[parts.length-1];
+                                     const dirPathStr = parts.slice(0, parts.length-1).join('/');
+                                     
+                                     // Check for intermediate wildcards
+                                     if (parts.slice(0, parts.length-1).some(p => /[*?]/.test(p))) {
+                                         if (!suppressToast) toast('grep: wildcards in directories not supported');
+                                         return 0;
+                                     }
+
+                                     const dirApi = _apiBase + 'dir?fs=' + encodeURIComponent(dirPathStr);
+                                     let dirJson = '';
+                                     try {
+                                         dirJson = await _fetchTextWithTimeout(dirApi, 5000);
+                                     } catch(e) {
+                                         if (!suppressToast) toast('grep: failed to list directory');
+                                         return 0;
+                                     }
+                                     
+                                     let dirData = null;
+                                     try { dirData = JSON.parse(dirJson); } catch(e){}
+
+                                     if (dirData && dirData.entries) {
+                                         const regex = _globToRegex(globPattern);
+                                         const files = dirData.entries.filter(e => !e.isDir && regex.test(e.name));
+                                         
+                                         if (files.length === 0) {
+                                             if (!suppressToast) toast('grep: no files match ' + globPattern);
+                                             return 0;
+                                         }
+                                         
+                                         let totalMatches = 0;
+                                         let allResultLines = [];
+                                         let allHighlights = [];
+                                         let finalCaseLabel = '常に区別';
+                                         let finalFlagStr = '';
+                                         
+                                         for (const f of files) {
+                                             const fPath = dirPathStr + '/' + f.name;
+                                             const readApi = _apiBase + 'read?fs=' + encodeURIComponent(fPath);
+                                             let txt = '';
+                                             try {
+                                                 txt = await _fetchTextWithTimeout(readApi, 8000);
+                                             } catch(e) {
+                                                 console.error('grep: failed to read ' + f.name);
+                                                 continue;
+                                             }
+                                             
+                                             // Use full path for link
+                                             const res = _grepScan(pat, flagsGiven, txt);
+                                             if (res.error) continue;
+                                             
+                                             if (res.matches.length > 0) {
+                                                 const formatted = _formatGrepMatches(res.matches, fPath);
+                                                 
+                                                 // Insert file header separator
+                                                 if (allResultLines.length > 0) {
+                                                     allResultLines.push(''); // Empty line
+                                                 }
+                                                 
+                                                 const baseLineIndex = allResultLines.length;
+                                                 const adjustedHighlights = formatted.highlights.map(h => ({
+                                                     lineIndex: baseLineIndex + h.lineIndex,
+                                                     start: h.start,
+                                                     len: h.len
+                                                 }));
+                                                 
+                                                 allResultLines = allResultLines.concat(formatted.lines);
+                                                 allHighlights = allHighlights.concat(adjustedHighlights);
+                                                 totalMatches += res.matches.length;
+                                                 
+                                                 finalCaseLabel = res.caseLabel;
+                                                 finalFlagStr = res.flagStr;
+                                             }
+                                         }
+                                         
+                                         if (totalMatches > 0) {
+                                             // #1369: Show absolute path in header for wildcard search
+                                             // fullFsPath is absolute (e.g. //wsl$/...)
+                                             // Normalize wsl$ to wsl.localhost for display
+                                             let displayPath = fullFsPath.replace(/\\/g, '/');
+                                             if (displayPath.startsWith('//wsl$/')) {
+                                                 displayPath = displayPath.replace('//wsl$/', '//wsl.localhost/');
+                                             }
+                                             // #1370: displayPath already contains the glob pattern if it came from _fsPathFromFileURL(u) where u was constructed from targetPath
+                                             // If targetPath was "*.md", u is "file://.../*.md", fullFsPath is ".../*.md".
+                                             // So we don't need to append globPattern again.
+                                             const headerPath = displayPath;
+                                             
+                                             _showGrepResult(pat, targetPath, headerPath, finalCaseLabel, finalFlagStr, allResultLines, allHighlights);
+                                         } else {
+                                             if (!suppressToast) toast('grep: no matches found');
+                                         }
+                                         return totalMatches;
+                                     }
+                                 }
+                             } catch(e) { console.error(e); }
+                             return 0;
+                        }
+                    }
+
                     let txt = '';
                     
                     // Check if we already have this file open (and potentially modified)
@@ -18057,7 +18355,7 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
                     } else {
                         // Not found in buffers, fetch from disk
                         // Normalize path
-                        const base = _htmlBaseURL();
+                        const base = _currentDirBase();
                         const urlStr = _normalizeToURLString(targetPath, base);
                         
                         // Try API read first if file protocol
@@ -18116,8 +18414,8 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
     }
   }
 
-  function _execGrepCore(pat, flagsGiven, suppressToast, targetText, bName, targetPath){
-    try{
+  function _grepScan(pat, flagsGiven, targetText) {
+    try {
         const b = currentBuffer(); // For settings fallback
         // Case sensitivity logic
         let needI = false;
@@ -18162,14 +18460,11 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
         
         let re = null;
         try{ re = new RegExp(pat, flags); }catch(e){ 
-            if (!suppressToast) toast('grep: invalid regex'); 
-            return -1; 
+            return { error: 'grep: invalid regex' };
         }
 
         const lines = targetText.split(/\r?\n/);
-        const resultLines = [];
-        const grepHighlights = [];
-        const headerLineCount = 5;
+        const matches = [];
 
         for (let i=0; i<lines.length; i++){
           const line = lines[i];
@@ -18178,68 +18473,133 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
              let m;
              const lineRe = new RegExp(pat, (needI?'i':'') + 'g');
              while ((m = lineRe.exec(line)) !== null) {
-                 const prefix = `📌${bName}:${i+1}:${m.index+1}: `;
-                 const resultLine = prefix + line;
-                 resultLines.push(resultLine);
-                 
-                 grepHighlights.push({
-                     line: headerLineCount + resultLines.length - 1,
-                     start: prefix.length + m.index,
-                     len: m[0].length
+                 // #1367: Use visual column for display (matches posInfo)
+                 const visCol = _visualWidthUpToLine(line, m.index) + 1;
+                 matches.push({
+                     lineNum: i+1,
+                     colNum: visCol,
+                     lineContent: line,
+                     matchIndex: m.index,
+                     matchLen: m[0].length
                  });
-
                  if (m.index === lineRe.lastIndex) { lineRe.lastIndex++; }
              }
           }
         }
+        
+        // Determine flag display string
+        let flagStr = '';
+        // Prioritize explicit intent from flagsGiven
+        if (flagsGiven.includes('s')) flagStr = 's';
+        else if (flagsGiven.includes('I')) flagStr = 'I';
+        else if (flagsGiven.includes('i')) flagStr = 'i';
+        else {
+            // Buffer fallback
+            try{
+                const ic = !!(b&&b.ignorecase);
+                const sc = !!(b&&b.smartcase);
+                if (ic){
+                    if (sc) flagStr = 's';
+                    else flagStr = 'i';
+                } else {
+                    flagStr = 'I';
+                }
+            }catch(e){}
+        }
 
-        if (resultLines.length > 0){
-          // Determine flag display string
-          let flagStr = '';
-          // Prioritize explicit intent from flagsGiven
-          if (flagsGiven.includes('s')) flagStr = 's';
-          else if (flagsGiven.includes('I')) flagStr = 'I';
-          else if (flagsGiven.includes('i')) flagStr = 'i';
-          else {
-              // Buffer fallback
-              try{
-                  const ic = !!(b&&b.ignorecase);
-                  const sc = !!(b&&b.smartcase);
-                  if (ic){
-                      if (sc) flagStr = 's';
-                      else flagStr = 'i';
-                  } else {
-                      flagStr = 'I';
-                  }
-              }catch(e){}
-          }
-          
-          // If flagStr is 'I', we might omit it or show it. Vim usually omits default.
-          // But user asked to reflect flags.
-          // Let's append it if not empty.
-          const cmdFlag = flagStr ? `/${flagStr}` : '';
+        return { matches, caseLabel, flagStr, error: null };
+    } catch(e) {
+        console.error(e);
+        return { error: e.message };
+    }
+  }
 
-          const header = 
+  function _formatGrepMatches(matches, filePath) {
+    if (!matches || matches.length === 0) return { lines: [], highlights: [] };
+    
+    const maxLine = Math.max(...matches.map(m => m.lineNum));
+    const maxCol = Math.max(...matches.map(m => m.colNum));
+    const lineDigits = String(maxLine).length;
+    const colDigits = String(maxCol).length;
+    
+    const lines = [];
+    const highlights = [];
+    
+    // Header
+    lines.push(`📄${filePath}  ${matches.length}件`);
+    
+    matches.forEach(m => {
+        const lineStr = String(m.lineNum).padStart(lineDigits, ' ');
+        // Align colons by padding colNum on the left?
+        // User said: "段落内で一番桁数の多い行と列を調べ、小さい桁は半角空白で埋める"
+        // And: "段落内で「列:」の':'が揃うようにしたい"
+        // Format: 📌(Line):(Col):
+        // To align the second colon, (Col) must be padded.
+        // To align the first colon, (Line) must be padded.
+        // My code does exactly this: padStart.
+        
+        const colStr = String(m.colNum).padStart(colDigits, ' ');
+        const prefix = `📌${lineStr}:${colStr}: `;
+        const text = prefix + m.lineContent;
+        
+        lines.push(text);
+        highlights.push({
+            lineIndex: lines.length - 1, // relative to this block start (0 is header)
+            start: prefix.length + m.matchIndex,
+            len: m.matchLen
+        });
+    });
+    
+    return { lines, highlights };
+  }
+
+  function _showGrepResult(pat, targetPath, bName, caseLabel, flagStr, resultLines, grepHighlights) {
+      const cmdFlag = flagStr ? `/${flagStr}` : '';
+      const header = 
 `CMD\t\t:grep /${pat}${cmdFlag} ${targetPath}
 対象\t\t【${bName}】
 検索時 A/a\t${caseLabel}
-ヒット行数\t${resultLines.length}
+ヒット総数\t${resultLines.length}件
 
 `;
-          const newText = header + resultLines.join('\n');
-          const newBufName = `🔍${bName}`;
-          
-          _addBuffer({ name: newBufName, text: newText, grepMatches: grepHighlights });
-          if (buffers.length > 0){
-            const newBuf = buffers.pop();
-            const insertIdx = currentIdx + 1;
-            buffers.splice(insertIdx, 0, newBuf);
-            _switchToBuffer(insertIdx);
-          }
+      const headerLineCount = 5;
+      const newText = header + resultLines.join('\n') + '\n';
+      const newBufName = `🔍/${pat}/`;
+      
+      // Adjust highlight line numbers
+      const adjustedHighlights = grepHighlights.map(h => ({
+          line: headerLineCount + h.lineIndex,
+          start: h.start,
+          len: h.len
+      }));
+      
+      _addBuffer({ name: newBufName, text: newText, grepMatches: adjustedHighlights });
+      if (buffers.length > 0){
+        const newBuf = buffers.pop();
+        const insertIdx = currentIdx + 1;
+        buffers.splice(insertIdx, 0, newBuf);
+        _switchToBuffer(insertIdx);
+      }
+  }
+
+  function _execGrepCore(pat, flagsGiven, suppressToast, targetText, bName, targetPath){
+    try{
+        const res = _grepScan(pat, flagsGiven, targetText);
+        if (res.error) {
+            if (!suppressToast) toast(res.error);
+            return -1;
+        }
+
+        if (res.matches.length > 0){
+            const displayPath = (targetPath === '%' ? bName : targetPath);
+            const formatted = _formatGrepMatches(res.matches, displayPath);
+            
+            _showGrepResult(pat, targetPath, bName, res.caseLabel, res.flagStr, formatted.lines, formatted.highlights);
+            return res.matches.length;
         } else {
           if (!suppressToast) toast('grep: no matches found');
         }
-        return resultLines.length;
+        return 0;
     }catch(e){ console.error(e); return 0; }
   }
 
