@@ -477,6 +477,16 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
         _syncActiveViewStateIntoBuffer();
       // Capture window state (best-effort) for session restore (#513)
       let winState = null; try{ winState = _captureWindowStateForSession(); }catch{}
+
+      // #1373: Persist search history
+      let searchHist = [];
+      try {
+          const limit = (window.SIX_OPTIONS && typeof window.SIX_OPTIONS.SEARCH_TERM_IN_SESSION === 'number') ? window.SIX_OPTIONS.SEARCH_TERM_IN_SESSION : 0;
+          if (limit > 0 && typeof _searchHistory !== 'undefined' && Array.isArray(_searchHistory)) {
+              searchHist = _searchHistory.slice(-limit);
+          }
+      } catch {}
+
       const bufs = buffers.map((b)=>{
         const isFileBacked = !!(b && b.path && /^file:\/\//i.test(b.path));
         const omitText = !!(lite && isFileBacked && !b.modified);
@@ -530,7 +540,8 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
         active: Math.max(0, Math.min((buffers.length?buffers.length-1:0), currentIdx|0)),
         buffers: bufs,
         scrolloff: Number.isFinite(scrolloff) ? (scrolloff|0) : 3,
-        windowState: winState
+        windowState: winState,
+        searchHistory: searchHist
       };
       return payload;
     }catch{ return { version:1, when:Date.now(), active:0, buffers:[] }; }
@@ -599,6 +610,16 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
           scrolloff = 3;
         }
       }catch{ scrolloff = 3; }
+
+      // #1373: Restore search history
+      try {
+          if (Array.isArray(j.searchHistory) && typeof _searchHistory !== 'undefined') {
+              _searchHistory.length = 0;
+              j.searchHistory.forEach(v => _searchHistory.push(String(v)));
+              _searchHistIndex = _searchHistory.length;
+          }
+      } catch {}
+
       // Clear current
       buffers.length = 0; currentIdx = -1;
       // Rehydrate buffers
@@ -2618,6 +2639,16 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
       const last = _searchHistory.length ? _searchHistory[_searchHistory.length-1] : null;
       if (last === v) return; // skip identical consecutive
       _searchHistory.push(v);
+
+      // #1374: Cap history size if configured
+      try {
+          const limit = (window.SIX_OPTIONS && typeof window.SIX_OPTIONS.SEARCH_TERM_IN_SESSION === 'number') ? window.SIX_OPTIONS.SEARCH_TERM_IN_SESSION : 0;
+          if (limit > 0) {
+              while (_searchHistory.length > limit) {
+                  _searchHistory.shift();
+              }
+          }
+      } catch {}
     }catch{}
     // reset browsing state after submit
     _searchHistIndex = _searchHistory.length;
