@@ -1294,6 +1294,17 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
   function _detectUrlAt(line, col){
     try{
       if (!line) return null;
+
+      // Check for Grep result link FIRST: 📌BufferName:Line:Col:
+      // This must be checked before Windows paths because "C:/..." matches reWin
+      const mGrep = line.match(/^📌(.+?):(\d+):(\d+):/);
+      if (mGrep){
+        const len = mGrep[0].length - 1; // Exclude trailing colon
+        if (col < len){
+           return { c1:0, c2:len, url:mGrep[0].slice(0, -1), kind:'grep-jump', bName:mGrep[1], line:parseInt(mGrep[2],10), col:parseInt(mGrep[3],10) };
+        }
+      }
+
       // Detect explicit URL schemes first (external): http(s), file://, mailto
       const re = /(https?:\/\/[^\s<>"')\]}]+|file:\/\/[^\s<>"')\]}]+|mailto:[^\s<>"')\]}]+)/g;
       // Windows absolute path like C:/Users/... or with backslashes (local open via :e)
@@ -1328,14 +1339,6 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
         const e = s + l;
         if (col>=s && col<e){ return { c1:s, c2:e, url:String(mu[1]||mu[0]||''), kind:'six-open' }; }
         if (reUNC.lastIndex === mu.index) reUNC.lastIndex++;
-      }
-      // Check for Grep result link: 📌BufferName:Line:Col:
-      const mGrep = line.match(/^📌(.+?):(\d+):(\d+):/);
-      if (mGrep){
-        const len = mGrep[0].length - 1; // Exclude trailing colon
-        if (col < len){
-           return { c1:0, c2:len, url:mGrep[0].slice(0, -1), kind:'grep-jump', bName:mGrep[1], line:parseInt(mGrep[2],10), col:parseInt(mGrep[3],10) };
-        }
       }
     }catch{}
     return null;
@@ -1405,7 +1408,42 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
              // Use new options parameter to force switch and jump
              _switchToBuffer(targetIdx, { force: true, jumpTo: { row: r, col: c } });
          } else {
-             toast('Buffer not found: ' + bName);
+             // Buffer not found, try to open as file if it looks like a path
+             if (bName.includes('/') || bName.includes('\\') || /^[a-zA-Z]:/.test(bName)) {
+                 // Try to open file and jump
+                 // We use runCommand(':e ...') but we need to jump after load.
+                 // Since runCommand is async-ish for file load, we can't easily chain jump.
+                 // But we can use a one-time hook or just try to open and let user navigate?
+                 // Better: use _loadFromPath directly if possible, or just run :e and toast.
+                 // Actually, runCommand(':e path') will switch to the new buffer.
+                 // If we can hook into "buffer loaded", we can jump.
+                 // For now, let's just open it. The user can click again or scroll.
+                 // Ideally: open and jump.
+                 
+                 // Let's try to use a global "pending jump" state that _switchToBuffer or _addBuffer checks?
+                 // Or just append a jump command to the path? e.g. :e path:line:col (not supported by :e yet)
+                 // Let's support :e path:line:col in runCommand? No, that's a bigger change.
+                 
+                 // Simple approach: run :e, and set a timeout to try to jump if current buffer matches name.
+                 runCommand(':e ' + bName);
+                 
+                 // Attempt to jump after a short delay (polling)
+                 let attempts = 0;
+                 const poller = setInterval(() => {
+                     attempts++;
+                     const idx = buffers.findIndex(b => b.name === bName || b.path === bName || (b.path && b.path.endsWith(bName.replace(/\\/g,'/'))));
+                     if (idx >= 0) {
+                         clearInterval(poller);
+                         const r = Math.max(0, lineNum - 1);
+                         const c = Math.max(0, colNum - 1);
+                         _switchToBuffer(idx, { force: true, jumpTo: { row: r, col: c } });
+                     } else if (attempts > 20) { // 2 seconds
+                         clearInterval(poller);
+                     }
+                 }, 100);
+             } else {
+                 toast('Buffer not found: ' + bName);
+             }
          }
          return;
       }
@@ -2169,10 +2207,20 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
       try {
         const curB = currentBuffer();
         if (curB && curB.grepMatches && Array.isArray(curB.grepMatches)) {
-          for (const m of curB.grepMatches) {
+          // Binary search for start index
+          let low = 0, high = curB.grepMatches.length - 1;
+          const targetLine = topLine - 1;
+          while (low <= high) {
+            const mid = (low + high) >>> 1;
+            if (curB.grepMatches[mid].line < targetLine) low = mid + 1;
+            else high = mid - 1;
+          }
+
+          for (let i = low; i < curB.grepMatches.length; i++) {
+            const m = curB.grepMatches[i];
             const r = m.line | 0;
             const row1 = r + 1;
-            if (row1 < topLine || row1 > endLine) continue;
+            if (row1 > endLine) break;
             const lineStr = String(lines[r]||'');
             const c = m.start | 0;
             const endCol = Math.min(lineStr.length, c + (m.len|0));
@@ -6843,15 +6891,18 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
         return;
       }
 
-      const mg = cmd && cmd.match(/^:?\s*grep\s+\/(.*?)\/([a-zA-Z]*)\s*(%?)\s*$/);
+      const mg = cmd && cmd.match(/^:?\s*grep\s+\/(.*?)\/([a-zA-Z]*)\s*(.*?)\s*$/);
       if (mg){
         const pat = String(mg[1]||'');
         const flagsGiven = String(mg[2]||'');
         const target = String(mg[3]||'');
         if (!pat){ toast('grep: empty pattern'); return; }
-        if (target !== '%'){ toast('grep: only % (current buffer) supported'); return; }
+        // if (target !== '%'){ toast('grep: only % (current buffer) supported'); return; }
 
-        _execGrep(pat, flagsGiven);
+        // Add to search history so it can be recalled with / or ?
+        _searchHistoryMaybePush('/' + pat);
+
+        _execGrep(pat, flagsGiven, false, target);
         return;
       }
     }catch{}
@@ -11686,7 +11737,26 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
                const c = Math.max(0, colNum - 1);
                _switchToBuffer(targetIdx, { force: true, jumpTo: { row: r, col: c } });
            } else {
-               toast('Buffer not found: ' + bName);
+               // Buffer not found, try to open as file if it looks like a path
+               if (bName.includes('/') || bName.includes('\\') || /^[a-zA-Z]:/.test(bName)) {
+                   runCommand(':e ' + bName);
+                   // Attempt to jump after a short delay (polling)
+                   let attempts = 0;
+                   const poller = setInterval(() => {
+                       attempts++;
+                       const idx = buffers.findIndex(b => b.name === bName || b.path === bName || (b.path && b.path.endsWith(bName.replace(/\\/g,'/'))));
+                       if (idx >= 0) {
+                           clearInterval(poller);
+                           const r = Math.max(0, lineNum - 1);
+                           const c = Math.max(0, colNum - 1);
+                           _switchToBuffer(idx, { force: true, jumpTo: { row: r, col: c } });
+                       } else if (attempts > 20) { // 2 seconds
+                           clearInterval(poller);
+                       }
+                   }, 100);
+               } else {
+                   toast('Buffer not found: ' + bName);
+               }
            }
         } else if (hit.kind === 'six-open'){
            try{
@@ -17722,6 +17792,8 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
 
       // Target Label
       const targetLabel = document.createElement('div');
+      // Default to current buffer, but if we support changing it later, this label might need update.
+      // For now, the dialog only supports current buffer search.
       targetLabel.textContent = '検索対象：このバッファ';
       targetLabel.style.cssText = 'font-size:0.85em; color:var(--text-dim); margin-top:1rem;';
       box.appendChild(targetLabel);
@@ -17856,10 +17928,16 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
         
         // Execute grep directly
         // suppressToast=false (show toast)
-        const count = _execGrep(pat, flagChar, false);
+        // _execGrep is now async-capable (returns Promise or count).
+        // We should handle both.
+        const res = _execGrep(pat, flagChar, false, '%');
         
-        if (count > 0){
-            close();
+        if (res instanceof Promise) {
+            res.then(count => {
+                if (count > 0) close();
+            });
+        } else {
+            if (res > 0) close();
         }
         // If count <= 0, toast is shown by _execGrep, dialog stays open.
       }
@@ -17929,11 +18007,118 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
     }catch(e){ console.error(e); }
   }
 
-  function _execGrep(pat, flagsGiven, suppressToast){
-    try{
-        const b = currentBuffer();
-        const bName = (b && b.name) || 'buffer';
+  function _execGrep(pat, flagsGiven, suppressToast, targetPath){
+    try {
+        let bName = '%';
+        let isExternal = false;
+        let targetText = '';
 
+        if (targetPath && targetPath !== '%') {
+            // External file
+            isExternal = true;
+            bName = targetPath;
+            
+            return (async () => {
+                try {
+                    let txt = '';
+                    
+                    // Check if we already have this file open (and potentially modified)
+                    // If so, search the buffer content instead of disk content to avoid line mismatch.
+                    let foundBuf = null;
+                    // Normalize paths for comparison
+                    const tpNorm = targetPath.replace(/\\/g, '/');
+                    
+                    for (let i=0; i<buffers.length; i++) {
+                        const b = buffers[i];
+                        if (b.path) {
+                            const bpNorm = b.path.replace(/\\/g, '/');
+                            // Simple exact match or URL match
+                            if (bpNorm === tpNorm || bpNorm.endsWith('/' + tpNorm)) {
+                                // Verify stricter match if needed, but for now assume user intent
+                                // If targetPath is absolute, bpNorm should match.
+                                if (bpNorm === tpNorm) {
+                                    foundBuf = b;
+                                    break;
+                                }
+                                // If targetPath is relative or filename only, be careful?
+                                // Usually targetPath from dialog is what user typed.
+                                // If user typed full path, it matches.
+                            }
+                        }
+                    }
+
+                    if (foundBuf) {
+                        // Use buffer text
+                        if (foundBuf === buffers[currentIdx]) {
+                            txt = editor.value || '';
+                        } else {
+                            txt = foundBuf.text || '';
+                        }
+                    } else {
+                        // Not found in buffers, fetch from disk
+                        // Normalize path
+                        const base = _htmlBaseURL();
+                        const urlStr = _normalizeToURLString(targetPath, base);
+                        
+                        // Try API read first if file protocol
+                        let readDone = false;
+                        if (_apiIsEnabled() && urlStr.startsWith('file:')) {
+                            try {
+                                const u = new URL(urlStr);
+                                const fsPath = _fsPathFromFileURL(u);
+                                if (fsPath) {
+                                    const apiRead = _apiBase + 'read?fs=' + encodeURIComponent(fsPath);
+                                    txt = await _fetchTextWithTimeout(apiRead, 8000);
+                                    readDone = true;
+                                }
+                            } catch (e) { /* ignore API fail */ }
+                        }
+                        
+                        if (!readDone) {
+                            try {
+                                txt = await _fetchTextSmart(urlStr);
+                            } catch (e) {
+                                if (!suppressToast) toast('grep: failed to read file ' + targetPath);
+                                return 0;
+                            }
+                        }
+                    }
+                    
+                    targetText = txt;
+                    
+                    // Continue with grep logic (refactored to shared function or just continue here)
+                    return _execGrepCore(pat, flagsGiven, suppressToast, targetText, bName, targetPath);
+                } catch (e) {
+                    console.error(e);
+                    return 0;
+                }
+            })();
+        } else {
+            // Current buffer
+            targetText = (editor && editor.value) || '';
+            const curB = currentBuffer();
+            if (curB && curB.name) bName = curB.name;
+            
+            // Synchronous execution for current buffer to maintain existing behavior if possible,
+            // or just wrap in Promise for consistency.
+            // Existing callers expect synchronous return of count?
+            // doGrep: const count = _execGrep(...); if(count>0) close();
+            // If I change to Promise, doGrep breaks.
+            
+            // I will keep _execGrep synchronous for current buffer, and return Promise for external.
+            // But doGrep needs to handle both.
+            
+            return _execGrepCore(pat, flagsGiven, suppressToast, targetText, bName, '%');
+        }
+    } catch (e) {
+        console.error(e);
+        return 0;
+    }
+  }
+
+  function _execGrepCore(pat, flagsGiven, suppressToast, targetText, bName, targetPath){
+    try{
+        const b = currentBuffer(); // For settings fallback
         // Case sensitivity logic
         let needI = false;
         let caseLabel = '常に区別';
@@ -17971,17 +18156,17 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
                 needI = false;
                 caseLabel = '常に区別';
               }
-            }catch{}
+            }catch(e){}
         }
         const flags = 'gm' + (needI ? 'i' : '');
         
         let re = null;
-        try{ re = new RegExp(pat, flags); }catch{ 
+        try{ re = new RegExp(pat, flags); }catch(e){ 
             if (!suppressToast) toast('grep: invalid regex'); 
             return -1; 
         }
 
-        const lines = _splitLines();
+        const lines = targetText.split(/\r?\n/);
         const resultLines = [];
         const grepHighlights = [];
         const headerLineCount = 5;
@@ -18026,7 +18211,7 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
                   } else {
                       flagStr = 'I';
                   }
-              }catch{}
+              }catch(e){}
           }
           
           // If flagStr is 'I', we might omit it or show it. Vim usually omits default.
@@ -18035,7 +18220,7 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
           const cmdFlag = flagStr ? `/${flagStr}` : '';
 
           const header = 
-`CMD\t\t:grep /${pat}${cmdFlag} %
+`CMD\t\t:grep /${pat}${cmdFlag} ${targetPath}
 対象\t\t【${bName}】
 検索時 A/a\t${caseLabel}
 ヒット行数\t${resultLines.length}

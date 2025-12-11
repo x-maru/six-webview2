@@ -60,7 +60,7 @@ public class __CLASSNAME__ {
   private static void ForceImeOffOnce(){ try{ var root=GetForegroundWindow(); if(root==IntPtr.Zero) return; uint pid; var tid=GetWindowThreadProcessId(root, out pid); IntPtr target=IntPtr.Zero; try{ var gti=new GUITHREADINFO(); gti.cbSize=(uint)Marshal.SizeOf(typeof(GUITHREADINFO)); if(GetGUIThreadInfo(tid, ref gti)) target=gti.hwndFocus; }catch{} if(target==IntPtr.Zero){ try{ uint selfTid = GetCurrentThreadId(); bool attached=false; try{ attached=AttachThreadInput(selfTid, tid, true); target=GetFocus(); } finally { try{ if(attached) AttachThreadInput(selfTid, tid, false); }catch{} } }catch{} } if(target!=IntPtr.Zero){ if(TryImeOff(target)) return; } if(TryImeOff(root)) return; bool done=false; try{ EnumChildWindows(root, (h,l)=>{ if(done) return false; if(TryImeOff(h)){ done=true; return false; } return true; }, IntPtr.Zero); }catch{} }catch{} }
   private static void ForceImeOnOnce(){ try{ var root=GetForegroundWindow(); if(root==IntPtr.Zero) return; uint pid; var tid=GetWindowThreadProcessId(root, out pid); IntPtr target=IntPtr.Zero; try{ var gti=new GUITHREADINFO(); gti.cbSize=(uint)Marshal.SizeOf(typeof(GUITHREADINFO)); if(GetGUIThreadInfo(tid, ref gti)) target=gti.hwndFocus; }catch{} if(target==IntPtr.Zero){ try{ uint selfTid = GetCurrentThreadId(); bool attached=false; try{ attached=AttachThreadInput(selfTid, tid, true); target=GetFocus(); } finally { try{ if(attached) AttachThreadInput(selfTid, tid, false); }catch{} } }catch{} } if(target!=IntPtr.Zero){ if(TryImeOn(target)) return; } if(TryImeOn(root)) return; bool done=false; try{ EnumChildWindows(root, (h,l)=>{ if(done) return false; if(TryImeOn(h)){ done=true; return false; } return true; }, IntPtr.Zero); }catch{} }catch{} }
   public __CLASSNAME__(int port){ this.port = port; }
-  public void Start(){ try{ startAttempts++; Console.WriteLine("[nanoapi] Start() attempt="+startAttempts+" port="+port); }catch{} thread = new Thread(Run); thread.IsBackground = true; thread.Start(); }
+  public void Start(){ try{ startAttempts++; /* Console.WriteLine("[nanoapi] Start() attempt="+startAttempts+" port="+port); */ }catch{} thread = new Thread(Run); thread.IsBackground = true; thread.Start(); }
   public bool IsAlive(){ return started && listener!=null; }
   public string LastError(){ return lastError; }
   private static string JsonEscape(string s){ if (s==null) return ""; var sb=new StringBuilder(); foreach(var ch in s){ switch(ch){ case '\\': sb.Append("\\\\"); break; case '"': sb.Append("\\\""); break; case '\n': sb.Append("\\n"); break; case '\r': sb.Append("\\r"); break; case '\t': sb.Append("\\t"); break; default: if (ch < 0x20) { sb.AppendFormat("\\u{0:X4}",(int)ch); } else sb.Append(ch); break; } } return sb.ToString(); }
@@ -160,12 +160,12 @@ public class __CLASSNAME__ {
   }
   private void Run(){
     try{
-      Console.WriteLine("[nanoapi] Run() enter port="+port);
+      /* Console.WriteLine("[nanoapi] Run() enter port="+port); */
       listener = new TcpListener(IPAddress.Loopback, port);
       listener.Start();
-      started = true; Console.WriteLine("[nanoapi] listener started port="+port);
+      started = true; /* Console.WriteLine("[nanoapi] listener started port="+port); */
       while(true){
-        try{ Console.WriteLine("[nanoapi] waiting accept port="+port); }catch{}
+        try{ /* Console.WriteLine("[nanoapi] waiting accept port="+port); */ }catch{}
         var client = listener.AcceptTcpClient();
         client.NoDelay = true; client.ReceiveTimeout = 4000; client.SendTimeout = 4000;
         var sock = client.Client;
@@ -175,7 +175,7 @@ public class __CLASSNAME__ {
           var reqBytesInitial = ms.ToArray();
           var req = Encoding.ASCII.GetString(reqBytesInitial);
           int eolPos = req.IndexOf("\r\n"); var first = (eolPos>=0? req.Substring(0,eolPos).Trim() : req.Trim());
-          try{ Console.WriteLine("[nanoapi req] "+first); }catch{}
+          try{ /* Console.WriteLine("[nanoapi req] "+first); */ }catch{}
           // Parse request line: METHOD SP PATH SP HTTP/...
           string method = "GET"; string path = "/";
           try{
@@ -464,7 +464,7 @@ public class __CLASSNAME__ {
             +"\r\nContent-Length: "+bytes.Length
             +"\r\nConnection: close\r\n\r\n";
           Write(sock, headerJson); sock.Send(bytes);
-          try{ Console.WriteLine("[nanoapi resp] status="+status+" path="+path+" len="+bytes.Length); }catch{}
+          try{ /* Console.WriteLine("[nanoapi resp] status="+status+" path="+path+" len="+bytes.Length); */ }catch{}
         } catch { }
         try{ client.Close(); } catch{}
       }
