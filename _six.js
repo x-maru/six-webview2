@@ -7026,19 +7026,25 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
         return;
       }
 
-      const mg = cmd && cmd.match(/^:?\s*grep\s+\/(.*?)\/([a-zA-Z]*)\s*(.*?)\s*$/);
-      if (mg){
-        const pat = String(mg[1]||'');
-        const flagsGiven = String(mg[2]||'');
-        const target = String(mg[3]||'');
-        if (!pat){ toast('grep: empty pattern'); return; }
-        // if (target !== '%'){ toast('grep: only % (current buffer) supported'); return; }
-
-        // Add to search history so it can be recalled with / or ?
-        _searchHistoryMaybePush('/' + pat);
-
-        _execGrep(pat, flagsGiven, false, target);
-        return;
+      // New parsing logic
+      if (/^:?\s*grep\s+/.test(cmd)) {
+          const args = _parseGrepArgs(cmd);
+          if (args && args.error) {
+            toast(args.error);
+            try{ _triggerVisualBell(); }catch{}
+            return;
+          }
+          if (!args.pat) { toast('grep: empty pattern'); return; }
+          
+          // Add to search history
+          _searchHistoryMaybePush('/' + args.pat);
+          
+          _execGrep(args.pat, args.flags, false, {
+              path: args.path,
+              recursive: args.recursive,
+              depth: args.depth
+          });
+          return;
       }
     }catch{}
 
@@ -9095,6 +9101,7 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
             // grep
             section('grep', [
               [K(':grep /pat/flags %'), sep(' カレントバッファを正規表現検索し、結果を別バッファに出力（リンクジャンプ可）')],
+              [K(':grep -r -maxdepth N /pat/flags DIR/GLOB'), sep(' 再帰grep（例: :grep -r -maxdepth 5 /NORMAL/ C:/Users/ymaru/*ix/*.md）')],
               [sep('フラグ: '), K('i'), sep(' 同一視 / '), K('I'), sep(' 常に区別 / '), K('s'), sep(' 混在時区別（smartcase）')]
             ]);
             // 検索ハイライト
@@ -15613,8 +15620,14 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
     }, delay);
     _dirRetryState.set(key, cur);
   }
-  async function _listDirEntries(dirUrl){
+  async function _listDirEntries(dirUrl, opts){
     try{
+      const quiet = !!(opts && opts.quiet);
+      const fetchTimeoutMs = (opts && Number.isFinite(opts.timeoutMs)) ? Math.max(0, opts.timeoutMs|0) : 3000;
+      const xhrTimeoutMs = (opts && Number.isFinite(opts.timeoutMs)) ? Math.max(0, opts.timeoutMs|0) : 2500;
+      const apiTimeoutMs = (opts && Number.isFinite(opts.timeoutMs)) ? Math.max(0, opts.timeoutMs|0) : null;
+      const noRetrySchedule = !!(opts && opts.noRetrySchedule);
+
       const u = _ensureSlash(dirUrl);
       if (!u) return [];
       // ホスト直下 (file:////host/) は _listDirEntries の対象外: shares は別経路で取得する
@@ -15682,7 +15695,8 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
               const tryFs = async (fsPath)=>{
                 const apiFs = _apiBase + 'dir?fs=' + encodeURIComponent(fsPath);
                 let jf; const timeoutFs = 6000;
-                jf = await _fetchJSONWithTimeout(apiFs, timeoutFs); try{ _apiNoteSuccess(); }catch{}
+                const tmo = (apiTimeoutMs!=null) ? Math.max(timeoutFs, apiTimeoutMs) : timeoutFs;
+                jf = await _fetchJSONWithTimeout(apiFs, tmo); try{ _apiNoteSuccess(); }catch{}
                 if (jf && Array.isArray(jf.entries)){
                   const arrFs = jf.entries.map(e=>{
                     const n = e.name; const d = !!e.isDir; const url = makeEntryUrl(u, n, d, e.url);
@@ -15705,7 +15719,7 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
           const apiUrl = _apiBase + 'dir?cwd=' + encodeURIComponent(key);
           let j;
           const isUnc = isUncPre;
-          const timeout1 = isUnc ? 6000 : 2000;
+          const timeout1 = (apiTimeoutMs!=null) ? Math.max((isUnc ? 6000 : 2000), apiTimeoutMs) : (isUnc ? 6000 : 2000);
           try{ j = await _fetchJSONWithTimeout(apiUrl, timeout1); try{ _apiNoteSuccess(); }catch{} }catch(e){ if (_apiIsEnabled()){ try{ _apiNoteFailure(); }catch{} } throw e; }
           if (j && Array.isArray(j.entries)){
             // API 正常応答: size / mtime も保持して外部変更検出の基礎情報に使う (#477)
@@ -15722,7 +15736,7 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
               if (fsPath){
                 const apiFs = _apiBase + 'dir?fs=' + encodeURIComponent(fsPath);
                 let j2;
-                const timeout2 = isUnc ? 6000 : 2000;
+                const timeout2 = (apiTimeoutMs!=null) ? Math.max((isUnc ? 6000 : 2000), apiTimeoutMs) : (isUnc ? 6000 : 2000);
                 try{ j2 = await _fetchJSONWithTimeout(apiFs, timeout2); try{ _apiNoteSuccess(); }catch{} }catch(e2){ if (_apiIsEnabled()){ try{ _apiNoteFailure(); }catch{} } throw e2; }
                 if (j2 && Array.isArray(j2.entries)){
                   const arr2 = j2.entries.map(e=>{
@@ -15734,10 +15748,10 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
                   if (arr2.length > 0){ _dirCache.set(key, arr2); return arr2; }
                 }
               }
-            } catch (e2){ console.warn('API fs fallback failed', e2); }
+            } catch (e2){ if (!quiet) console.warn('API fs fallback failed', e2); }
           }
         } catch (e) {
-          console.warn('API listing failed, trying fs fallback', e);
+          if (!quiet) console.warn('API listing failed, trying fs fallback', e);
           // タイムアウト等でも fs= を試す
           try{
             const fsPath = winPathFromFileURL(u);
@@ -15746,7 +15760,8 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
               let j2;
               // UNC(\\host\share\...) は遅延しやすいためタイムアウトを延長。isUnc 未定義エラー対策で都度判定 (#850)
               const _isUncFs = (p)=>{ try{ return /^\\\\[^\\]+/.test(p); }catch{ return false; } };
-              const timeout3 = _isUncFs(fsPath) ? 6000 : 2000;
+              const base3 = _isUncFs(fsPath) ? 6000 : 2000;
+              const timeout3 = (apiTimeoutMs!=null) ? Math.max(base3, apiTimeoutMs) : base3;
               try{ j2 = await _fetchJSONWithTimeout(apiFs, timeout3); try{ _apiNoteSuccess(); }catch{} }catch(e3){ if (_apiIsEnabled()){ try{ _apiNoteFailure(); }catch{} } throw e3; }
               if (j2 && Array.isArray(j2.entries)){
                 const arr2 = j2.entries.map(e=>{
@@ -15758,7 +15773,7 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
                 if (arr2.length > 0){ _dirCache.set(key, arr2); return arr2; }
               }
             }
-          } catch (e3){ console.warn('API fs fallback failed after API error', e3); }
+          } catch (e3){ if (!quiet) console.warn('API fs fallback failed after API error', e3); }
           // 最後に file:// 解析へ
         }
       }
@@ -15766,7 +15781,7 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
       // 2) file:// ディレクトリインデックス解析（fetch→XHRフォールバック）
       let html = '';
       try {
-        html = await _fetchTextWithTimeout(key, 3000);
+        html = await _fetchTextWithTimeout(key, fetchTimeoutMs);
       } catch {
         // フォールバックで XHR を試す
         html = await new Promise((resolve, reject)=>{
@@ -15774,7 +15789,7 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
             const xhr = new XMLHttpRequest();
             xhr.open('GET', key, true);
             xhr.responseType = 'text';
-            try { xhr.timeout = 2500; } catch {}
+            try { xhr.timeout = xhrTimeoutMs; } catch {}
             xhr.onload = ()=>{
               // status 0 でも responseText が空の場合は失敗扱い
               if (xhr.responseText && (xhr.status === 0 || (xhr.status>=200 && xhr.status<300))) resolve(xhr.responseText);
@@ -15814,9 +15829,9 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
         return dedup;
       }
       // 空だった場合、API があるなら複数回のバックグラウンド再試行（指数バックオフ）
-  if (_apiIsEnabled()){ _scheduleDirRetry(key); }
+      if (!noRetrySchedule && _apiIsEnabled()){ _scheduleDirRetry(key); }
       return dedup;
-    }catch(e){ console.warn('dir list failed', e); return []; }
+    }catch(e){ if (!(opts && opts.quiet)) console.warn('dir list failed', e); return []; }
   }
 
   function _filePopupComputeList(){
@@ -18214,11 +18229,283 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
 
   function _globToRegex(glob) {
     const escaped = glob.replace(/[.+^${}()|[\]\\*?]/g, '\\$&');
-    return new RegExp('^' + escaped.replace(/\\\*/g, '.*').replace(/\\\?/g, '.') + '$');
+    // Shell-like glob: '*' and '?' do NOT cross directory separators.
+    // We normalize paths to use '/' before matching.
+    return new RegExp('^' + escaped.replace(/\\\*/g, '[^/]*').replace(/\\\?/g, '[^/]') + '$');
   }
 
-  function _execGrep(pat, flagsGiven, suppressToast, targetPath){
+  // Grep: optional exclude list from customize.
+  // window.SIX_OPTIONS.GREP_EXCLUDE_EXTENSIONS: array of extensions (e.g. [".zip","png"]).
+  let _grepExcludeExtCacheKey = null;
+  let _grepExcludeExtCacheSet = null;
+  function _grepGetExcludeExtSet(){
+    try{
+      const opt = (window && window.SIX_OPTIONS) ? window.SIX_OPTIONS : null;
+      const arr = opt && Array.isArray(opt.GREP_EXCLUDE_EXTENSIONS) ? opt.GREP_EXCLUDE_EXTENSIONS : null;
+      if (!arr) return null;
+      const key = arr.map(x=>String(x||'').trim().toLowerCase()).join('|');
+      if (_grepExcludeExtCacheKey === key && _grepExcludeExtCacheSet) return _grepExcludeExtCacheSet;
+      const set = new Set();
+      for (const raw of arr){
+        const s = String(raw||'').trim().toLowerCase();
+        if (!s) continue;
+        const ext = s.startsWith('.') ? s : ('.' + s);
+        // very small sanity: a dot and at least one more char
+        if (ext.length >= 2) set.add(ext);
+      }
+      _grepExcludeExtCacheKey = key;
+      _grepExcludeExtCacheSet = set;
+      return set;
+    }catch{ return null; }
+  }
+  function _grepShouldSkipFile(pathOrName){
+    try{
+      const set = _grepGetExcludeExtSet();
+      if (!set) return false;
+      const s = String(pathOrName||'').toLowerCase();
+      const q = s.split('?')[0].split('#')[0];
+      const dot = q.lastIndexOf('.');
+      if (dot < 0) return false;
+      const ext = q.slice(dot);
+      return set.has(ext);
+    }catch{ return false; }
+  }
+
+  function _parseGrepArgs(cmd) {
+    const rawArgs = cmd.replace(/^:?\s*grep\s+/, '').trim();
+    let pat = '';
+    let flags = '';
+    let recursive = false;
+    let depth = null;
+    let path = '';
+    let error = '';
+    
+    const tokens = [];
+    let current = '';
+    let inQuote = false;
+    for (let i = 0; i < rawArgs.length; i++) {
+        const c = rawArgs[i];
+        if (c === '"') { inQuote = !inQuote; }
+        else if (c === ' ' && !inQuote) {
+            if (current.length > 0) tokens.push(current);
+            current = '';
+        } else { current += c; }
+    }
+    if (current.length > 0) tokens.push(current);
+    
+    let patIndex = -1;
+    for (let i = 0; i < tokens.length; i++) {
+      const t = tokens[i];
+      if (t.startsWith('/') && t.lastIndexOf('/') > 0) {
+         patIndex = i;
+         break;
+      }
+    }
+    
+    if (patIndex !== -1) {
+        const t = tokens[patIndex];
+        const lastSlash = t.lastIndexOf('/');
+        pat = t.substring(1, lastSlash);
+        flags = t.substring(lastSlash + 1);
+        tokens.splice(patIndex, 1);
+    }
+    
+    for (let i = 0; i < tokens.length; i++) {
+      const t = tokens[i];
+      if (t === '-r') { recursive = true; }
+      else if (t === '-maxdepth') {
+        if (i + 1 < tokens.length) {
+          depth = parseInt(tokens[i+1], 10);
+          if (!Number.isFinite(depth)) { error = 'grep: invalid -maxdepth'; break; }
+          i++;
+        } else {
+          error = 'grep: missing -maxdepth value';
+          break;
+        }
+      } else if (/^-/.test(t)) {
+        // Unknown option => error and abort.
+        error = 'grep: unknown option ' + t;
+        break;
+      } else {
+        const val = t.replace(/^"|"$/g, '');
+        if (!path) {
+          path = val;
+        } else {
+          // Allow splitting a path across spaces: join with '/' unless already ends with a separator.
+          if (path.endsWith('/') || path.endsWith('\\')) {
+            path += val;
+          } else {
+            path += '/' + val;
+          }
+        }
+      }
+    }
+    
+    if (recursive && depth === null) depth = 3;
+    if (!recursive && depth === null) depth = 0;
+    
+    return { pat, flags, recursive, depth, path, error };
+  }
+
+    function _buildGrepHeader(pat, targetPath, bName, caseLabel, flagStr, extraInfo, hitTotalOverride) {
+      const cmdFlag = flagStr ? `/${flagStr}` : '';
+      let header = `CMD\t\t:grep /${pat}${cmdFlag} ${targetPath}\n`;
+      if (extraInfo && extraInfo.recursive) {
+        const baseStr = extraInfo.basePath || targetPath;
+        header += `基点\t\t${baseStr}\n`;
+        header += `再帰\t\tYes\n`;
+        header += `最大階層\t${extraInfo.depth}\n`;
+      } else {
+        header += `対象\t\t【${bName}】\n`;
+      }
+      header += `検索時 A/a\t${caseLabel}\n`;
+
+      // hitTotalOverride:
+      // - undefined: derive from highlights length
+      // - null: blank (placeholder)
+      // - number: render number
+      let hitStr = '';
+      if (hitTotalOverride === undefined) {
+        // caller will pass highlights; this builder is also used in update paths.
+        hitStr = '';
+      } else if (hitTotalOverride === null) {
+        hitStr = '';
+      } else if (Number.isFinite(hitTotalOverride)) {
+        hitStr = String(hitTotalOverride|0);
+      }
+      if (hitTotalOverride === null) {
+        header += `ヒット総数\t\n\n`;
+      } else if (Number.isFinite(hitTotalOverride)) {
+        header += `ヒット総数\t${hitStr}件\n\n`;
+      } else {
+        // default placeholder for legacy builder usage: caller should supply a number.
+        header += `ヒット総数\t\n\n`;
+      }
+      return header;
+    }
+
+    function _grepPreviewFileLine(filePath) {
+      return `📄${filePath}  `;
+    }
+
+    function _openExternalGrepResultBuffer(pat, targetPath, bName, caseLabel, flagStr, extraInfo) {
+      try{
+        const header = _buildGrepHeader(pat, targetPath, bName, caseLabel, flagStr, extraInfo, null);
+        const newBufName = `🔍/${pat}/`;
+        const newText = header;
+        _addBuffer({ name: newBufName, text: newText, grepMatches: [] });
+        if (buffers.length > 0){
+        const newBuf = buffers.pop();
+        const insertIdx = currentIdx + 1;
+        buffers.splice(insertIdx, 0, newBuf);
+        _switchToBuffer(insertIdx);
+        return newBuf;
+        }
+      }catch(e){ console.error(e); }
+      return null;
+    }
+
+    function _updateExternalGrepResultBuffer(buf, pat, targetPath, bName, caseLabel, flagStr, resultLines, grepHighlights, extraInfo, hitTotal, messageLineOrNull) {
+      try{
+        if (!buf) return;
+        const headerHit = (hitTotal === null) ? null : (Number.isFinite(hitTotal) ? (hitTotal|0) : 0);
+        const header = _buildGrepHeader(pat, targetPath, bName, caseLabel, flagStr, extraInfo, headerHit);
+        const headerLineCount = header.split('\n').length - 1;
+        let lines = Array.isArray(resultLines) ? resultLines.slice() : [];
+
+        // For error/no-file messages: header already ends with one blank line.
+        // Show the message immediately after that.
+        if (messageLineOrNull) {
+          lines = [String(messageLineOrNull)];
+        }
+
+        const body = lines.length ? (lines.join('\n') + '\n') : '';
+        const newText = header + body;
+
+        const adjustedHighlights = (Array.isArray(grepHighlights)? grepHighlights : []).map(h => ({
+          line: headerLineCount + h.lineIndex,
+          start: h.start,
+          len: h.len
+        }));
+
+        buf.text = newText;
+        buf.grepMatches = adjustedHighlights;
+        // Keep as a special buffer; do not mark modified.
+        buf.modified = false;
+
+        // If this buffer is currently shown, reflect it in the editor.
+        if (currentBuffer && currentBuffer() === buf){
+          try{ editor.value = newText; }catch{}
+          try{ _repositionCaret(); updateGutter(); }catch{}
+        }
+      }catch(e){ console.error(e); }
+    }
+
+    async function _recursiveList(dirUrl, depth, maxDepth, patternRegex, relativePath = '', excludeHidden = true, listOptions = null) {
+      if (depth > maxDepth) return [];
+      let results = [];
+
+      // Optional progress reporting (for long recursive listing).
+      const progress = (listOptions && listOptions.__progress) ? listOptions.__progress : null;
+      const onProgress = (listOptions && typeof listOptions.onProgress === 'function') ? listOptions.onProgress : null;
+      const yieldEveryMs = (listOptions && Number.isFinite(listOptions.progressYieldMs)) ? (listOptions.progressYieldMs|0) : 200;
+
+      const _maybeYield = async ()=>{
+        if (!progress) return;
+        const now = Date.now();
+        if (yieldEveryMs <= 0) return;
+        if ((now - (progress._lastYieldTs||0)) < yieldEveryMs) return;
+        progress._lastYieldTs = now;
+        try{ if (onProgress) onProgress({ ...progress, kind:'listing' }); }catch{}
+        try{
+          if (typeof requestAnimationFrame === 'function'){
+            await new Promise(r=>requestAnimationFrame(()=>r()));
+          }
+          await new Promise(r=>setTimeout(r, 0));
+        }catch{}
+      };
+
+      try {
+        if (progress) progress.dirCount = (progress.dirCount|0) + 1;
+        await _maybeYield();
+
+        const entries = await _listDirEntries(dirUrl, listOptions);
+        for (const e of entries) {
+          if (e.isDir) {
+            if (excludeHidden && e.name.startsWith('.')) continue;
+            if (depth < maxDepth) {
+              const nextRel = relativePath ? (relativePath + '/' + e.name) : e.name;
+              const sub = await _recursiveList(e.url, depth + 1, maxDepth, patternRegex, nextRel, excludeHidden, listOptions);
+              results = results.concat(sub);
+            }
+          } else {
+            if (progress) progress.fileCount = (progress.fileCount|0) + 1;
+            const relPath = relativePath ? (relativePath + '/' + e.name) : e.name;
+            if (patternRegex.test(relPath)) {
+              if (progress) progress.matchedCount = (progress.matchedCount|0) + 1;
+              results.push({ name: e.name, url: e.url, isDir: false });
+            }
+          }
+          await _maybeYield();
+        }
+      } catch (e) {
+        if (!(listOptions && listOptions.quiet)) console.error(e);
+      }
+      return results;
+    }
+
+  function _execGrep(pat, flagsGiven, suppressToast, targetPathOrOptions){
     try {
+        let options = {};
+        if (typeof targetPathOrOptions === 'string') {
+            options = { path: targetPathOrOptions, recursive: false, depth: 0 };
+        } else if (typeof targetPathOrOptions === 'object') {
+            options = targetPathOrOptions;
+        }
+        const targetPath = options.path || '%';
+        const recursive = !!options.recursive;
+        const maxDepth = (typeof options.depth === 'number') ? options.depth : 0;
+
         let bName = '%';
         let isExternal = false;
         let targetText = '';
@@ -18229,9 +18516,23 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
             bName = targetPath;
             
             return (async () => {
+                let extBufRef = null;
+                let extraInfo0 = null;
+                let baseCaseLabel0 = '常に区別';
+                let baseFlagStr0 = '';
                 try {
-                    // Wildcard support
-                    if (/[*?]/.test(targetPath)) {
+                    // External grep: create result buffer immediately (hit count blank), then fill it later.
+                    // Note: for single-file search, we may need the current editor text; capture it before switching.
+                    const metaForHeader0 = _grepScan(pat, flagsGiven, '');
+                    if (metaForHeader0 && metaForHeader0.error) {
+                      if (!suppressToast) toast(metaForHeader0.error);
+                      return -1;
+                    }
+                    baseCaseLabel0 = (metaForHeader0 && metaForHeader0.caseLabel) ? metaForHeader0.caseLabel : '常に区別';
+                    baseFlagStr0 = (metaForHeader0 && metaForHeader0.flagStr) ? metaForHeader0.flagStr : '';
+                    
+                    // Wildcard or Recursive support
+                    if (recursive || /[*?]/.test(targetPath)) {
                         const base = _currentDirBase();
                         const urlStr = _normalizeToURLString(targetPath, base);
                         
@@ -18242,112 +18543,286 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
                                  if (!fullFsPath) fullFsPath = decodeURIComponent(u.pathname);
                                  
                                  if (fullFsPath) {
-                                     // #1368: Normalize wsl$ to wsl.localhost for display
                                      let displayPath = fullFsPath.replace(/\\/g, '/');
                                      if (displayPath.startsWith('//wsl$/')) {
                                          displayPath = displayPath.replace('//wsl$/', '//wsl.localhost/');
                                      }
 
-                                     const parts = displayPath.split('/');
-                                     const globPattern = parts[parts.length-1];
-                                     const dirPathStr = parts.slice(0, parts.length-1).join('/');
-                                     
-                                     // Check for intermediate wildcards
-                                     if (parts.slice(0, parts.length-1).some(p => /[*?]/.test(p))) {
-                                         if (!suppressToast) toast('grep: wildcards in directories not supported');
-                                         return 0;
-                                     }
+                                     let dirPathStr = displayPath;
+                                     let globPattern = '*';
+                                     let basePathForHeader = displayPath;
+                                     let searchRootUrl = new URL(u);
 
-                                     const dirApi = _apiBase + 'dir?fs=' + encodeURIComponent(dirPathStr);
-                                     let dirJson = '';
-                                     try {
-                                         dirJson = await _fetchTextWithTimeout(dirApi, 5000);
-                                     } catch(e) {
-                                         if (!suppressToast) toast('grep: failed to list directory');
-                                         return 0;
-                                     }
-                                     
-                                     let dirData = null;
-                                     try { dirData = JSON.parse(dirJson); } catch(e){}
-
-                                     if (dirData && dirData.entries) {
-                                         const regex = _globToRegex(globPattern);
-                                         const files = dirData.entries.filter(e => !e.isDir && regex.test(e.name));
+                                     // Handle wildcards in directory path
+                                     if (/[*?]/.test(displayPath)) {
+                                         const parts = displayPath.split('/');
+                                         const firstWildcardIdx = parts.findIndex(p => /[*?]/.test(p));
                                          
-                                         if (files.length === 0) {
-                                             if (!suppressToast) toast('grep: no files match ' + globPattern);
-                                             return 0;
-                                         }
-                                         
-                                         let totalMatches = 0;
-                                         let allResultLines = [];
-                                         let allHighlights = [];
-                                         let finalCaseLabel = '常に区別';
-                                         let finalFlagStr = '';
-                                         
-                                         for (const f of files) {
-                                             const fPath = dirPathStr + '/' + f.name;
-                                             const readApi = _apiBase + 'read?fs=' + encodeURIComponent(fPath);
-                                             let txt = '';
+                                         if (firstWildcardIdx !== -1) {
+                                             // Root is everything before the first wildcard
+                                             const rootParts = parts.slice(0, firstWildcardIdx);
+                                             dirPathStr = rootParts.join('/');
+                                             basePathForHeader = dirPathStr;
+                                             
+                                             // Pattern is everything from the first wildcard onwards
+                                             globPattern = parts.slice(firstWildcardIdx).join('/');
+                                             
+                                             // Reconstruct searchRootUrl based on dirPathStr
+                                             // We need to be careful about protocol and drive letters
+                                             // Assuming u was constructed from displayPath (or similar), we can try to adjust u
+                                             // But u might be file:///C:/... and dirPathStr is C:/...
+                                             
+                                             // Simple approach: use _normalizeToURLString again on the root path
+                                             const base = _currentDirBase();
+                                             const rootUrlStr = _normalizeToURLString(dirPathStr, base);
                                              try {
-                                                 txt = await _fetchTextWithTimeout(readApi, 8000);
-                                             } catch(e) {
-                                                 console.error('grep: failed to read ' + f.name);
-                                                 continue;
-                                             }
-                                             
-                                             // Use full path for link
-                                             const res = _grepScan(pat, flagsGiven, txt);
-                                             if (res.error) continue;
-                                             
-                                             if (res.matches.length > 0) {
-                                                 const formatted = _formatGrepMatches(res.matches, fPath);
-                                                 
-                                                 // Insert file header separator
-                                                 if (allResultLines.length > 0) {
-                                                     allResultLines.push(''); // Empty line
+                                                 searchRootUrl = new URL(rootUrlStr);
+                                                 if (!searchRootUrl.pathname.endsWith('/')) {
+                                                     searchRootUrl.pathname += '/';
                                                  }
-                                                 
-                                                 const baseLineIndex = allResultLines.length;
-                                                 const adjustedHighlights = formatted.highlights.map(h => ({
-                                                     lineIndex: baseLineIndex + h.lineIndex,
-                                                     start: h.start,
-                                                     len: h.len
-                                                 }));
-                                                 
-                                                 allResultLines = allResultLines.concat(formatted.lines);
-                                                 allHighlights = allHighlights.concat(adjustedHighlights);
-                                                 totalMatches += res.matches.length;
-                                                 
-                                                 finalCaseLabel = res.caseLabel;
-                                                 finalFlagStr = res.flagStr;
+                                             } catch(e) {
+                                                 console.error('grep: failed to parse root url', e);
                                              }
-                                         }
-                                         
-                                         if (totalMatches > 0) {
-                                             // #1369: Show absolute path in header for wildcard search
-                                             // fullFsPath is absolute (e.g. //wsl$/...)
-                                             // Normalize wsl$ to wsl.localhost for display
-                                             let displayPath = fullFsPath.replace(/\\/g, '/');
-                                             if (displayPath.startsWith('//wsl$/')) {
-                                                 displayPath = displayPath.replace('//wsl$/', '//wsl.localhost/');
-                                             }
-                                             // #1370: displayPath already contains the glob pattern if it came from _fsPathFromFileURL(u) where u was constructed from targetPath
-                                             // If targetPath was "*.md", u is "file://.../*.md", fullFsPath is ".../*.md".
-                                             // So we don't need to append globPattern again.
-                                             const headerPath = displayPath;
-                                             
-                                             _showGrepResult(pat, targetPath, headerPath, finalCaseLabel, finalFlagStr, allResultLines, allHighlights);
                                          } else {
-                                             if (!suppressToast) toast('grep: no matches found');
+                                             // Should not happen given the if condition, but fallback
+                                             const parts = displayPath.split('/');
+                                             globPattern = parts[parts.length-1];
+                                             dirPathStr = parts.slice(0, parts.length-1).join('/');
+                                             basePathForHeader = dirPathStr;
                                          }
-                                         return totalMatches;
+                                     } else {
+                                         if (recursive) {
+                                             // dirPathStr is already the path
+                                             // globPattern is *
+                                         }
+                                         if (!searchRootUrl.pathname.endsWith('/')) {
+                                             searchRootUrl.pathname += '/';
+                                         }
                                      }
+                                     
+                                     const regex = _globToRegex(globPattern);
+                                     extraInfo0 = { recursive: recursive, depth: maxDepth, basePath: basePathForHeader };
+                                     // Open the result buffer now (blank hit total)
+                                     extBufRef = _openExternalGrepResultBuffer(pat, targetPath, basePathForHeader, baseCaseLabel0, baseFlagStr0, extraInfo0);
+                                     // Always show searching line immediately (even during directory listing).
+                                     try{
+                                       _updateExternalGrepResultBuffer(extBufRef, pat, targetPath, basePathForHeader, baseCaseLabel0, baseFlagStr0, [':grep searching...'], [], extraInfo0, null, null);
+                                     }catch(e){ console.error(e); }
+                                     // Grep の列挙は重めになりがちなので、少し長めのタイムアウト＋ログ抑止。
+                                     // Also report progress during long recursive listing.
+                                     const listProgress = { dirCount: 0, fileCount: 0, matchedCount: 0, startedTs: Date.now(), _lastYieldTs: 0 };
+                                     const listOpts = {
+                                       timeoutMs: 8000,
+                                       quiet: true,
+                                       noRetrySchedule: true,
+                                       __progress: listProgress,
+                                       progressYieldMs: 200,
+                                       onProgress: (p)=>{
+                                         try{
+                                           const elapsed = Math.max(0, ((Date.now() - (p.startedTs||Date.now()))/1000));
+                                           const line = `:grep listing...  dirs:${p.dirCount|0}  files:${p.fileCount|0}  matched:${p.matchedCount|0}  (${elapsed.toFixed(1)}s)`;
+                                           _updateExternalGrepResultBuffer(extBufRef, pat, targetPath, basePathForHeader, baseCaseLabel0, baseFlagStr0, [':grep searching...', line], [], extraInfo0, null, null);
+                                         }catch{}
+                                       }
+                                     };
+                                     let files = [];
+                                     
+                                     if (recursive) {
+                                       files = await _recursiveList(searchRootUrl, 0, maxDepth, regex, '', true, listOpts);
+                                     } else {
+                                       const entries = await _listDirEntries(searchRootUrl, listOpts);
+                                         files = entries.filter(e => !e.isDir && regex.test(e.name));
+                                     }
+
+                                     if (files.length === 0) {
+                                       // no files match: write message into the result buffer (no toast)
+                                       _updateExternalGrepResultBuffer(extBufRef, pat, targetPath, basePathForHeader, baseCaseLabel0, baseFlagStr0, [], [], extraInfo0, 0, 'grep: no files match ' + globPattern);
+                                         return 0;
+                                     }
+
+                                     // Prepare candidate list (apply skip filter) and show searching UI.
+                                     const candidates = [];
+                                     for (const f of files) {
+                                       let fPath = '';
+                                       try {
+                                         const fu = new URL(f.url);
+                                         fPath = _fsPathFromFileURL(fu);
+                                         if (!fPath) fPath = decodeURIComponent(fu.pathname);
+                                       } catch { fPath = f.name; }
+                                       fPath = String(fPath||'').replace(/\\/g, '/');
+                                       if (fPath.startsWith('//wsl$/')) fPath = fPath.replace('//wsl$/', '//wsl.localhost/');
+                                       try{ if (_grepShouldSkipFile(fPath || f.name)) continue; }catch{}
+                                       candidates.push({ fPath, url: f.url });
+                                     }
+
+                                     if (candidates.length === 0) {
+                                       _updateExternalGrepResultBuffer(extBufRef, pat, targetPath, basePathForHeader, baseCaseLabel0, baseFlagStr0, [], [], extraInfo0, 0, 'grep: no files match ' + globPattern);
+                                       return 0;
+                                     }
+
+                                     const entries = candidates.map(c => ({
+                                       state: 'pending',
+                                       fPath: c.fPath,
+                                       lines: null,
+                                       highlights: null,
+                                       matchCount: 0
+                                     }));
+
+                                     // Limit the initial candidate preview list to keep UI responsive.
+                                     const previewLimit = 200;
+                                     const previewLines = [];
+                                     for (let pi=0; pi<Math.min(previewLimit, candidates.length); pi++){
+                                       previewLines.push(_grepPreviewFileLine(candidates[pi].fPath));
+                                     }
+                                     const previewOmitted = Math.max(0, candidates.length - previewLines.length);
+
+                                     const progressInfo = {
+                                       totalFiles: candidates.length,
+                                       scannedFiles: 0,
+                                       matchedFiles: 0,
+                                       totalMatches: 0,
+                                       currentFile: ''
+                                     };
+
+                                     const renderProgress = (includeSearching)=>{
+                                       const lines = includeSearching ? [':grep searching...'] : [];
+                                       if (includeSearching){
+                                         const p = progressInfo;
+                                         const progLine = `:grep progress...  scanned:${p.scannedFiles}/${p.totalFiles}  matchedFiles:${p.matchedFiles}  hits:${p.totalMatches}`;
+                                         lines.push(progLine);
+                                         if (p.currentFile) lines.push(`:grep now...  ${p.currentFile}`);
+                                         if (previewLines.length){
+                                           lines.push('');
+                                           lines.push(':grep candidates (preview):');
+                                           for (const pl of previewLines) lines.push(pl);
+                                           if (previewOmitted > 0) lines.push(`...(${previewOmitted} more)`);
+                                           lines.push('');
+                                         }
+                                       }
+                                       const highlights = [];
+                                       let prevWasResult = false;
+                                       for (const e of entries) {
+                                         if (e.state === 'result') {
+                                           if (prevWasResult) lines.push('');
+                                           const base = lines.length;
+                                           const chunkLines = Array.isArray(e.lines) ? e.lines : [];
+                                           for (const ln of chunkLines) lines.push(ln);
+                                           const chunkHl = Array.isArray(e.highlights) ? e.highlights : [];
+                                           for (const h of chunkHl) {
+                                             highlights.push({
+                                               lineIndex: base + h.lineIndex,
+                                               start: h.start,
+                                               len: h.len
+                                             });
+                                           }
+                                           prevWasResult = true;
+                                         } else {
+                                           // nomatch: show nothing
+                                         }
+                                       }
+                                       return { lines, highlights };
+                                     };
+
+                                     const updateSearchingView = ()=>{
+                                       try{
+                                         const { lines, highlights } = renderProgress(true);
+                                         _updateExternalGrepResultBuffer(extBufRef, pat, targetPath, basePathForHeader, baseCaseLabel0, baseFlagStr0, lines, highlights, extraInfo0, null, null);
+                                       }catch(e){ console.error(e); }
+                                     };
+
+                                     // Initial searching display
+                                     updateSearchingView();
+
+                                     // Yield once to make sure the file list paints before searching starts.
+                                     const _yieldToUI = async ()=>{
+                                       try{
+                                         if (typeof requestAnimationFrame === 'function'){
+                                           await new Promise(r=>requestAnimationFrame(()=>r()));
+                                         }
+                                         await new Promise(r=>setTimeout(r, 0));
+                                       }catch{}
+                                     };
+
+                                     await _yieldToUI();
+
+                                     let totalMatches = 0;
+                                     let matchedFiles = 0;
+
+                                     // Read/scan files in parallel with a small concurrency limit.
+                                     // Preserve output order by storing per-file results and merging sequentially.
+                                     const runOneAt = async (idx)=>{
+                                       const c = candidates[idx];
+                                       const fPath = c.fPath;
+                                       const readApi = _apiBase + 'read?fs=' + encodeURIComponent(fPath);
+                                       let txt = '';
+                                       try {
+                                         txt = await _fetchTextWithTimeout(readApi, 8000);
+                                       } catch {
+                                         return { idx, state: 'nomatch', matchCount: 0, lines: null, highlights: null };
+                                       }
+
+                                       const res = _grepScan(pat, flagsGiven, txt);
+                                       if (!res || res.error || !res.matches || res.matches.length === 0) {
+                                         return { idx, state: 'nomatch', matchCount: 0, lines: null, highlights: null };
+                                       }
+                                       const formatted = _formatGrepMatches(res.matches, fPath);
+                                       return { idx, state: 'result', matchCount: res.matches.length, lines: formatted.lines, highlights: formatted.highlights };
+                                     };
+
+                                     // Search sequentially, after printing full 📄 list, so progress is visible and ordered.
+                                     let _lastPaint = 0;
+                                     for (let i=0; i<candidates.length; i++){
+                                       let r = null;
+                                       try{ r = await runOneAt(i); }catch{ r = { idx:i, state:'nomatch', matchCount:0, lines:null, highlights:null }; }
+                                       try{
+                                         progressInfo.scannedFiles = i + 1;
+                                         progressInfo.currentFile = (candidates[i] && candidates[i].fPath) ? candidates[i].fPath : '';
+                                         if (r && Number.isFinite(r.matchCount) && r.matchCount > 0) totalMatches += (r.matchCount|0);
+                                         if (r && Number.isFinite(r.matchCount) && r.matchCount > 0) matchedFiles++;
+                                         progressInfo.totalMatches = totalMatches;
+                                         progressInfo.matchedFiles = matchedFiles;
+                                         if (entries[r.idx]){
+                                           entries[r.idx].state = r.state;
+                                           entries[r.idx].matchCount = r.matchCount|0;
+                                           entries[r.idx].lines = r.lines;
+                                           entries[r.idx].highlights = r.highlights;
+                                         }
+                                         const now = Date.now();
+                                         if (i === candidates.length - 1 || (now - _lastPaint) > 100) {
+                                           updateSearchingView();
+                                           _lastPaint = now;
+                                           await _yieldToUI();
+                                         }
+                                       }catch(e){ console.error(e); }
+                                     }
+
+                                     // Finalize: remove searching line, fill hit total.
+                                     if (totalMatches > 0) {
+                                       const { lines, highlights } = (function(){
+                                         const rendered = renderProgress(false);
+                                         return rendered;
+                                       })();
+                                       _updateExternalGrepResultBuffer(extBufRef, pat, targetPath, basePathForHeader, baseCaseLabel0, baseFlagStr0, lines, highlights, extraInfo0, totalMatches, null);
+                                     } else {
+                                       _updateExternalGrepResultBuffer(extBufRef, pat, targetPath, basePathForHeader, baseCaseLabel0, baseFlagStr0, [], [], extraInfo0, 0, 'grep: no matches found');
+                                     }
+                                     return totalMatches;
                                  }
                              } catch(e) { console.error(e); }
                              return 0;
                         }
                     }
+
+                    // Single file (no wildcard/recursive)
+                    // Open the placeholder buffer first so UX is consistent.
+                    extBufRef = _openExternalGrepResultBuffer(pat, targetPath, bName, baseCaseLabel0, baseFlagStr0, null);
+
+                    // Searching UI for single file
+                    try{
+                      const previewPath = String(targetPath||'');
+                      const searchingLines = [':grep searching...', _grepPreviewFileLine(previewPath)];
+                      _updateExternalGrepResultBuffer(extBufRef, pat, targetPath, bName, baseCaseLabel0, baseFlagStr0, searchingLines, [], null, null, null);
+                    }catch(e){ console.error(e); }
 
                     let txt = '';
                     
@@ -18376,10 +18851,13 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
                         }
                     }
 
+                    let preActiveText = '';
+                    const prevActiveIdx = currentIdx;
                     if (foundBuf) {
                         // Use buffer text
-                        if (foundBuf === buffers[currentIdx]) {
-                            txt = editor.value || '';
+                      if (foundBuf === buffers[prevActiveIdx]) {
+                        preActiveText = (editor && typeof editor.value === 'string') ? (editor.value || '') : '';
+                        txt = preActiveText;
                         } else {
                             txt = foundBuf.text || '';
                         }
@@ -18407,18 +18885,44 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
                             try {
                                 txt = await _fetchTextSmart(urlStr);
                             } catch (e) {
-                                if (!suppressToast) toast('grep: failed to read file ' + targetPath);
-                                return 0;
+                              _updateExternalGrepResultBuffer(extBufRef, pat, targetPath, bName, baseCaseLabel0, baseFlagStr0, [], [], null, 0, 'grep: failed to read file ' + targetPath);
+                              return 0;
                             }
                         }
                     }
-                    
+
                     targetText = txt;
-                    
-                    // Continue with grep logic (refactored to shared function or just continue here)
-                    return _execGrepCore(pat, flagsGiven, suppressToast, targetText, bName, targetPath);
+
+                    // Run scan directly here to fill extBufRef deterministically.
+                    const resOne = _grepScan(pat, flagsGiven, targetText);
+                    if (resOne && resOne.error) {
+                      _updateExternalGrepResultBuffer(extBufRef, pat, targetPath, bName, baseCaseLabel0, baseFlagStr0, [], [], null, 0, String(resOne.error));
+                      return -1;
+                    }
+                    const useCaseLabel1 = (resOne && resOne.caseLabel) ? resOne.caseLabel : baseCaseLabel0;
+                    const useFlagStr1 = (resOne && resOne.flagStr) ? resOne.flagStr : baseFlagStr0;
+                    if (resOne && Array.isArray(resOne.matches) && resOne.matches.length > 0) {
+                      const displayPath = targetPath;
+                      const formatted = _formatGrepMatches(resOne.matches, displayPath);
+                      // Remove searching line and fill hit total.
+                      const bodyLines = formatted.lines;
+                      const bodyHighlights = (formatted.highlights||[]).map(h => ({
+                        lineIndex: h.lineIndex,
+                        start: h.start,
+                        len: h.len
+                      }));
+                      _updateExternalGrepResultBuffer(extBufRef, pat, targetPath, bName, useCaseLabel1, useFlagStr1, bodyLines, bodyHighlights, null, resOne.matches.length, null);
+                      return resOne.matches.length;
+                    } else {
+                      _updateExternalGrepResultBuffer(extBufRef, pat, targetPath, bName, useCaseLabel1, useFlagStr1, [], [], null, 0, 'grep: no matches found');
+                      return 0;
+                    }
                 } catch (e) {
                     console.error(e);
+                    try{
+                      const eb = extBufRef || _openExternalGrepResultBuffer(pat, targetPath, bName, baseCaseLabel0, baseFlagStr0, extraInfo0);
+                      _updateExternalGrepResultBuffer(eb, pat, targetPath, bName, baseCaseLabel0, baseFlagStr0, [], [], extraInfo0, 0, 'grep: ' + (e && e.message ? e.message : 'error'));
+                    }catch{}
                     return 0;
                 }
             })();
@@ -18584,16 +19088,24 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
     return { lines, highlights };
   }
 
-  function _showGrepResult(pat, targetPath, bName, caseLabel, flagStr, resultLines, grepHighlights) {
+  function _showGrepResult(pat, targetPath, bName, caseLabel, flagStr, resultLines, grepHighlights, extraInfo) {
       const cmdFlag = flagStr ? `/${flagStr}` : '';
-      const header = 
-`CMD\t\t:grep /${pat}${cmdFlag} ${targetPath}
-対象\t\t【${bName}】
-検索時 A/a\t${caseLabel}
-ヒット総数\t${resultLines.length}件
+      let header = `CMD\t\t:grep /${pat}${cmdFlag} ${targetPath}\n`;
+      
+      if (extraInfo && extraInfo.recursive) {
+          const baseStr = extraInfo.basePath || targetPath;
+          header += `基点\t\t${baseStr}\n`;
+          header += `再帰\t\tYes\n`;
+          header += `最大階層\t${extraInfo.depth}\n`;
+      } else {
+          header += `対象\t\t【${bName}】\n`;
+      }
+      
+      header += `検索時 A/a\t${caseLabel}\n`;
+      const hitTotal = (Array.isArray(grepHighlights) ? grepHighlights.length : 0);
+      header += `ヒット総数\t${hitTotal}件\n\n`;
 
-`;
-      const headerLineCount = 5;
+      const headerLineCount = header.split('\n').length - 1;
       const newText = header + resultLines.join('\n') + '\n';
       const newBufName = `🔍/${pat}/`;
       
@@ -18628,7 +19140,13 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
             _showGrepResult(pat, targetPath, bName, res.caseLabel, res.flagStr, formatted.lines, formatted.highlights);
             return res.matches.length;
         } else {
-          if (!suppressToast) toast('grep: no matches found');
+          // 外部検索は0件でも結果バッファを生成する。
+          if (targetPath && targetPath !== '%') {
+            // legacy path: keep creating a buffer, but do not toast here.
+            _showGrepResult(pat, targetPath, bName, res.caseLabel, res.flagStr, ['','', 'grep: no matches found'], []);
+          } else {
+            if (!suppressToast) toast('grep: no matches found');
+          }
         }
         return 0;
     }catch(e){ console.error(e); return 0; }

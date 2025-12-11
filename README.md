@@ -79,6 +79,8 @@
   - NORMALのTABが`>>`になるようにした。VISUALのTABは`>`。Shift+TABで逆。
   - INSERTのTABでshiftwidthの設定値を挿入するようにした。2なら"  ", TABなら\t。
   - grep機能を実装した。まずはカレントバッファ内での検索。
+  - 検索語履歴をセッション情報に含めるようにした。上限はSIX_OPTIONS.SEARCH_TERM_IN_SESSIONで決まる。
+    - 検索語履歴は`/`,`?`のほかgrepでの検索とも共有する。
 - 2025.xx.xx v1.0
 
 ## ライセンス / 出典
