@@ -255,23 +255,72 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
   }
   // 即時IME同期: Nano API /ime を短周期ポーリングして視覚を即時反映
   let _imePollTimer = null;
+  let _imePollFailCount = 0;
+  let _imePollDelayMs = 500;
+  let _imePollStopped = false;
+  function _stopImePolling(){
+    try{ if (_imePollTimer){ clearTimeout(_imePollTimer); } }catch{}
+    _imePollTimer = null;
+    _imePollStopped = true;
+  }
   function _startImePolling(){
     try{
       const frag = (location.hash||"").substring(1);
       const params = new URLSearchParams(frag);
-      const api = params.get('api');
+      let api = params.get('api');
       if (!api) return;
-      if (_imePollTimer) { clearInterval(_imePollTimer); _imePollTimer=null; }
-      _imePollTimer = setInterval(async ()=>{
+      api = api.endsWith('/') ? api : (api + '/');
+
+      _imePollStopped = false;
+      try{ if (_imePollTimer){ clearTimeout(_imePollTimer); } }catch{}
+      _imePollTimer = null;
+      _imePollFailCount = 0;
+      _imePollDelayMs = 500;
+
+      const _schedule = (ms)=>{
+        try{ if (_imePollStopped) return; }catch{}
+        const delay = Math.max(200, Math.min(30000, (ms|0) || 500));
+        try{ if (_imePollTimer){ clearTimeout(_imePollTimer); } }catch{}
+        _imePollTimer = setTimeout(_tick, delay);
+      };
+
+      const _noteFail = ()=>{
+        _imePollFailCount = Math.min(20, (_imePollFailCount|0) + 1);
+        // Exponential backoff to avoid ERR_CONNECTION_REFUSED spam after sleep.
+        const next = Math.min(30000, 500 * (2 ** Math.min(6, _imePollFailCount)));
+        _imePollDelayMs = next;
+        _schedule(_imePollDelayMs);
+      };
+      const _noteOk = ()=>{
+        _imePollFailCount = 0;
+        _imePollDelayMs = 500;
+        _schedule(_imePollDelayMs);
+      };
+
+      const _tick = async ()=>{
+        try{ if (_imePollStopped) return; }catch{}
+        // When hidden/suspended, reduce background activity.
+        try{ if (document && document.hidden){ _schedule(2000); return; } }catch{}
         try{
           // タイピング直後は一時停止
-          if (Date.now() < _imePollPausedUntil) return;
+          if (Date.now() < _imePollPausedUntil){ _schedule(_imePollDelayMs); return; }
           // 未確定文字列編集中はポーリングしない（候補操作の流量優先）
-          try{ if (window._imeComposing === true) { return; } }catch{}
+          try{ if (window._imeComposing === true) { _schedule(_imePollDelayMs); return; } }catch{}
           // IME未確定中は候補操作優先のためポーリング抑止
-          try{ if (typeof _imeComposing!== 'undefined' && _imeComposing){ return; } }catch{}
-          const resp = await fetch(api + 'ime', { cache:'no-store' });
-          if (!resp.ok) return;
+          try{ if (typeof _imeComposing!== 'undefined' && _imeComposing){ _schedule(_imePollDelayMs); return; } }catch{}
+
+          // If file API breaker is tripped, also pause IME polling (same server).
+          try{ if (typeof _apiIsEnabled==='function' && !_apiIsEnabled()){ _schedule(Math.max(2000, _imePollDelayMs)); return; } }catch{}
+
+          const ac = (window.AbortController ? new AbortController() : null);
+          const to = setTimeout(()=>{ try{ ac && ac.abort(); }catch{} }, 1200);
+          let resp = null;
+          try{
+            resp = await fetch(api + 'ime', { cache:'no-store', signal: ac ? ac.signal : undefined });
+          } finally {
+            try{ clearTimeout(to); }catch{}
+          }
+          if (!resp || !resp.ok){ _noteFail(); return; }
           const js = await resp.json();
           const st = js && js.state;
           if (st === 'on' || st === 'off'){
@@ -288,8 +337,18 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
               if (newActive !== _imeActive){ _imeActive = newActive; _applyCaretGradient(); }
             }
           }
-        }catch{}
-      }, 500);
+          _noteOk();
+        }catch{
+          _noteFail();
+        }
+      };
+
+      // Start immediately.
+      _schedule(0);
+
+      // Resume quickly after focus/visibility restore.
+      try{ window.addEventListener('focus', ()=>{ try{ if (!_imePollStopped) _schedule(0); }catch{} }); }catch{}
+      try{ document.addEventListener('visibilitychange', ()=>{ try{ if (!document.hidden && !_imePollStopped) _schedule(0); }catch{} }); }catch{}
     }catch{}
   }
   try{ window.addEventListener('load', _startImePolling); }catch{}
@@ -305,10 +364,33 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
   }
   async function _imePost(state){
     try{
-      const api = _nanoApiBase(); if (!api) return;
+      let api = _nanoApiBase(); if (!api) return;
+      api = api.endsWith('/') ? api : (api + '/');
       const st = (state==='on'||state==='off')? state : null; if (!st) return;
       const body = 'state=' + encodeURIComponent(st);
-      await fetch(api + 'ime', { method:'POST', headers:{ 'Content-Type':'application/x-www-form-urlencoded' }, body });
+      // If API breaker is tripped, do not spam requests; just prompt user once.
+      try{ if (typeof _apiIsEnabled==='function' && !_apiIsEnabled()){ try{ _apiPromptRestartOnce && _apiPromptRestartOnce('IME'); }catch{} return; } }catch{}
+      // POST via XHR with timeout to reduce console noise; still may show a single network error.
+      await new Promise((resolve, reject)=>{
+        try{
+          const xhr = new XMLHttpRequest();
+          xhr.open('POST', api + 'ime', true);
+          xhr.timeout = 1200;
+          xhr.setRequestHeader('Content-Type','application/x-www-form-urlencoded');
+          xhr.onreadystatechange = ()=>{
+            try{
+              if (xhr.readyState === 4){
+                if (xhr.status >= 200 && xhr.status < 300){ resolve(true); }
+                else { reject(new Error('HTTP '+xhr.status)); }
+              }
+            }catch{}
+          };
+          xhr.ontimeout = ()=>{ try{ reject(new Error('timeout')); }catch{} };
+          xhr.onerror = ()=>{ try{ reject(new Error('XHR error')); }catch{} };
+          xhr.send(body);
+        }catch(e){ reject(e); }
+      });
+      try{ _apiNoteSuccess && _apiNoteSuccess(); }catch{}
     }catch{}
   }
   let _caretGradStartBase = null, _caretGradMidBase = null; // theme baseline to restore
@@ -340,8 +422,12 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
             M.push({ t: Date.now(), type:'compositionend', dur, events:{...M.events} });
             performance.mark('six-ime-composition-end');
             try{ performance.measure('six-ime-composition', 'six-ime-composition-start', 'six-ime-composition-end'); }catch{}
-            // 直近セッションの要約を控えめに出力（DevToolsのSummary補助）
-            try{ console.info('[six][IME] session', { durMs: Math.round(dur), events: M.events }); }catch{}
+            // 直近セッションの要約（デバッグ時のみ）
+            try{
+              const o = (window && window.SIX_OPTIONS) ? window.SIX_OPTIONS : null;
+              const dbg = !!(o && (o.DEBUG_IME || o.debugime));
+              if (dbg){ console.info('[six][IME] session', { durMs: Math.round(dur), events: M.events }); }
+            }catch{}
           }
         }catch{}
         // composition終了後の再描画はrAFへ集約
@@ -4336,6 +4422,7 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
       if (_apiFailCount >= 2){
         _apiDisabledUntil = Date.now() + 60*1000;
         // Suppress noisy console warning; keep breaker internal
+        try{ _apiPromptRestartOnce && _apiPromptRestartOnce('API'); }catch{}
       }
     }catch{}
   }
@@ -4356,6 +4443,42 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
   function _apiQuickReconnect(){
     try{ _readApiFromHash(); }catch{}
     try{ _apiDisabledUntil = 0; _apiFailCount = 0; }catch{}
+  }
+
+  // One-shot (cooldown) dialog to encourage restart when local API seems dead after sleep.
+  let _apiRestartPromptLastTs = 0;
+  async function _apiPromptRestartOnce(reason){
+    try{
+      const now = Date.now();
+      // Cooldown: avoid repeatedly interrupting the user.
+      if (_apiRestartPromptLastTs && (now - _apiRestartPromptLastTs) < 10*60*1000) return;
+      // Don't stack dialogs.
+      try{ if (_modalOverlay && _modalOverlay.style && _modalOverlay.style.display !== 'none') return; }catch{}
+      try{ if (document.getElementById('grepDialog')) return; }catch{}
+      _apiRestartPromptLastTs = now;
+
+      const r = String(reason||'');
+      const title = 'ローカルAPIに接続できません';
+      const detail =
+        'スリープ復帰後にホスト側が停止した可能性があります。\n' +
+        'この状態では F19 / かな / 英数 やファイル操作が効かないことがあります。\n\n' +
+        'F10でSixを即時終了して再起動してください。' + (r ? ('\n(検知: ' + r + ')') : '');
+
+      const choice = await choiceModal({
+        title,
+        detail,
+        buttons: [
+          { id:'exit',  label:'終了', primary:true, danger:true },
+          { id:'later', label:'後で', primary:false }
+        ]
+      });
+      if (choice === 'exit'){
+        // Mirror close-request behavior: persist and close.
+        try{ _persistSessionNow && _persistSessionNow(); }catch{}
+        try{ _suppressPersistOnQuit = false; _skipPersistOnUnloadOnce = true; _quittingAll = true; _allowUnloadOnce = true; }catch{}
+        try{ window.close(); }catch{}
+      }
+    }catch{}
   }
 
   async function _loadFromPath(path, baseForRelative, opts={}){
@@ -12757,7 +12880,13 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
                     scrollPx = 8;
                 }
                 
-                try{ if(_scanHold.commandScroll) console.log('[scan-hold] scroll loop. targetPx='+_scanHold.scrollTargetPx+', scrollPx='+scrollPx+', active='+_scanHold.scrollActive+', stopping='+_scanHold.stopping+', scrollTop='+editor.scrollTop+', scrollHeight='+editor.scrollHeight+', clientHeight='+editor.clientHeight); }catch{}
+                try{
+                  const o = (window && window.SIX_OPTIONS) ? window.SIX_OPTIONS : null;
+                  const dbg = !!(o && (o.DEBUG_SCAN_HOLD || o.debugscanhold));
+                  if (dbg && _scanHold.commandScroll){
+                    console.log('[scan-hold] scroll loop. targetPx='+_scanHold.scrollTargetPx+', scrollPx='+scrollPx+', active='+_scanHold.scrollActive+', stopping='+_scanHold.stopping+', scrollTop='+editor.scrollTop+', scrollHeight='+editor.scrollHeight+', clientHeight='+editor.clientHeight);
+                  }
+                }catch{}
 
                 // #1226: Pause if initial scroll done but promotion timer not yet fired
                 if (_scanHold.scrollTargetPx <= 0 && !_scanHold.continuous) {
@@ -13036,7 +13165,11 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
             _scanHold.firstKeydownTs = performance.now();
             
             // DEBUG
-            try{ console.log('[scan-hold] keydown', e.code, 'mode='+mode, 'scrolloff='+scrolloff, 'caretRow='+(caretRow+1), 'topLine='+_topLine()); }catch{}
+            try{
+              const o = (window && window.SIX_OPTIONS) ? window.SIX_OPTIONS : null;
+              const dbg = !!(o && (o.DEBUG_SCAN_HOLD || o.debugscanhold));
+              if (dbg){ console.log('[scan-hold] keydown', e.code, 'mode='+mode, 'scrolloff='+scrolloff, 'caretRow='+(caretRow+1), 'topLine='+_topLine()); }
+            }catch{}
 
             if (mode === 'jump') {
               // Jump mode: execute large jump immediately without smooth scroll checks
@@ -13085,7 +13218,11 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
 
                           if (needScroll) {
                               // Switch to scroll mode for remaining steps
-                              try{ console.log('[scan-hold] stepLoop: switching to scroll. remaining='+remaining+', nextLine='+nextLine+', limit='+(topLine + vis - 1 - scrolloffVal)); }catch{}
+                              try{
+                                const o = (window && window.SIX_OPTIONS) ? window.SIX_OPTIONS : null;
+                                const dbg = !!(o && (o.DEBUG_SCAN_HOLD || o.debugscanhold));
+                                if (dbg){ console.log('[scan-hold] stepLoop: switching to scroll. remaining='+remaining+', nextLine='+nextLine+', limit='+(topLine + vis - 1 - scrolloffVal)); }
+                              }catch{}
                               _scanHold.stepAnimation = false;
                               _scanHold.mode = 'scroll';
                               _scanHold.scrollDir = delta;
@@ -13102,7 +13239,11 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
                               _scanHold.initialScreenOffset = (caretRow - currentTopLine);
                               try{ window.__sixScanHoldOffset = _scanHold.initialScreenOffset; }catch{}
                               
-                              try{ console.log('[scan-hold] Switching to scroll mode. remaining='+remaining+', targetPx='+_scanHold.scrollTargetPx+', offset='+_scanHold.initialScreenOffset+', scrollTop='+editor.scrollTop); }catch{}
+                              try{
+                                const o = (window && window.SIX_OPTIONS) ? window.SIX_OPTIONS : null;
+                                const dbg = !!(o && (o.DEBUG_SCAN_HOLD || o.debugscanhold));
+                                if (dbg){ console.log('[scan-hold] Switching to scroll mode. remaining='+remaining+', targetPx='+_scanHold.scrollTargetPx+', offset='+_scanHold.initialScreenOffset+', scrollTop='+editor.scrollTop); }
+                              }catch{}
 
                               try{ window.__sixScanHoldScrollActive = true; }catch{}
                               try{ document.body.classList.add('is-scrolling'); }catch{}
@@ -13140,7 +13281,11 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
                         _scanHold.caretDir = delta; // Ensure dir is set
                         _scanHold.caretLastMove = performance.now();
                         if (!_scanHold.raf) _scanHold.raf = requestAnimationFrame(_scanHoldCaretLoop);
-                        try{ console.log('[scan-hold] caret mode promoted to continuous after 0.5s'); }catch{}
+                        try{
+                          const o = (window && window.SIX_OPTIONS) ? window.SIX_OPTIONS : null;
+                          const dbg = !!(o && (o.DEBUG_SCAN_HOLD || o.debugscanhold));
+                          if (dbg){ console.log('[scan-hold] caret mode promoted to continuous after 0.5s'); }
+                        }catch{}
                       }
                     }catch{}
                   }, _scanHold.promotionDelayMs);
@@ -13154,7 +13299,11 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
                       if (_scanHold.caretDir && !_scanHold.raf){
                         _scanHold.caretLastMove = performance.now();
                         _scanHold.raf = requestAnimationFrame(_scanHoldCaretLoop);
-                        try{ console.log('[scan-hold] caret mode promoted to continuous after 0.5s'); }catch{}
+                        try{
+                          const o = (window && window.SIX_OPTIONS) ? window.SIX_OPTIONS : null;
+                          const dbg = !!(o && (o.DEBUG_SCAN_HOLD || o.debugscanhold));
+                          if (dbg){ console.log('[scan-hold] caret mode promoted to continuous after 0.5s'); }
+                        }catch{}
                       }
                     }catch{}
                   }, _scanHold.promotionDelayMs);
@@ -13181,7 +13330,11 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
 
               // DEBUG: record initial position
               const initCaretRow = caretRow + 1;
-              try{ console.log('[scan-hold] SCROLL MODE START: caretRow='+ initCaretRow +', scrollDir='+delta+', count='+count+', targetPx='+_scanHold.scrollTargetPx); }catch{}
+              try{
+                const o = (window && window.SIX_OPTIONS) ? window.SIX_OPTIONS : null;
+                const dbg = !!(o && (o.DEBUG_SCAN_HOLD || o.debugscanhold));
+                if (dbg){ console.log('[scan-hold] SCROLL MODE START: caretRow='+ initCaretRow +', scrollDir='+delta+', count='+count+', targetPx='+_scanHold.scrollTargetPx); }
+              }catch{}
               // ① Render gutter with inactive colors during scroll
               try{ updateGutter({ inactive: true }); }catch{}
               // Start RAF loop immediately for smooth 1px scrolling (no 0.5s delay for initial move)
@@ -13199,7 +13352,11 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
                     // #1232: Use CSS class to hide caret reliably
                     try{ document.body.classList.add('is-scrolling'); }catch{}
 
-                    try{ console.log('[scan-hold] scroll mode: initial scroll complete, continuous mode active'); }catch{}
+                    try{
+                      const o = (window && window.SIX_OPTIONS) ? window.SIX_OPTIONS : null;
+                      const dbg = !!(o && (o.DEBUG_SCAN_HOLD || o.debugscanhold));
+                      if (dbg){ console.log('[scan-hold] scroll mode: initial scroll complete, continuous mode active'); }
+                    }catch{}
                   }
                 }catch{}
               }, _scanHold.promotionDelayMs);
@@ -13263,7 +13420,11 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
               _scanHold.continuous = false; // #1231: Reset continuous flag
               _scanHold.scrollTargetPx = 0;
               // DEBUG: log final position
-              try{ console.log('[scan-hold] SCROLL MODE END: caretRow='+(caretRow+1)+', topLine='+_topLine()); }catch{}
+              try{
+                const o = (window && window.SIX_OPTIONS) ? window.SIX_OPTIONS : null;
+                const dbg = !!(o && (o.DEBUG_SCAN_HOLD || o.debugscanhold));
+                if (dbg){ console.log('[scan-hold] SCROLL MODE END: caretRow='+(caretRow+1)+', topLine='+_topLine()); }
+              }catch{}
             }
 
             // #1288: Snap logic if we were scrolling (in either mode)
@@ -15593,6 +15754,8 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
   const _dirRetryState = new Map();
   function _scheduleDirRetry(key){
     if (!_apiBase) return;
+    // If API is currently unavailable (e.g. after long sleep), do not schedule noisy retries.
+    if (!_apiIsEnabled()) return;
     const cur = _dirRetryState.get(key) || { tries: 0, timer: null };
     if (cur.tries >= 3) return; // 最大3回まで
     const delays = [1000, 2000, 4000];
@@ -15601,8 +15764,10 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
     if (cur.timer) { try{ clearTimeout(cur.timer); }catch{} }
     cur.timer = setTimeout(async ()=>{
       try{
+        if (!_apiIsEnabled()) return;
         const apiUrl2 = _apiBase + 'dir?cwd=' + encodeURIComponent(key);
         const jx = await _fetchJSONWithTimeout(apiUrl2, 7000);
+        try{ _apiNoteSuccess(); }catch{}
         if (jx && Array.isArray(jx.entries) && jx.entries.length){
           const arrx = jx.entries.map(e=>({ name: e.name, isDir: !!e.isDir, url: String(e.url||''), size: (typeof e.size==='number'?e.size:null), mtime: (typeof e.mtime==='number'?e.mtime:null) }));
           _dirCache.set(key, arrx);
@@ -15614,9 +15779,11 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
           _dirRetryState.delete(key);
           return;
         }
-      } catch {}
-      // 失敗 → 次の遅延で再試行
-      _scheduleDirRetry(key);
+      } catch {
+        try{ _apiNoteFailure(); }catch{}
+      }
+      // 失敗 → APIが有効な範囲でのみ次の遅延で再試行
+      if (_apiIsEnabled()) _scheduleDirRetry(key);
     }, delay);
     _dirRetryState.set(key, cur);
   }
@@ -15630,6 +15797,13 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
 
       const u = _ensureSlash(dirUrl);
       if (!u) return [];
+      // UNC/WSL の file:// はブラウザの file fetch/XHR で CORS 失敗しやすい。
+      // ここは「API が取れるなら API のみ」「取れないなら空」を原則として CORS スパムを避ける。
+      const isHostFile = (function(){ try{ return (u.protocol==='file:' && !!u.host); }catch{ return false; } })();
+      if (isHostFile && !_apiIsEnabled()){
+        try{ _apiPromptRestartOnce && _apiPromptRestartOnce('dir'); }catch{}
+        return [];
+      }
       // ホスト直下 (file:////host/) は _listDirEntries の対象外: shares は別経路で取得する
       try{ if (_isHostRoot(u)) return []; }catch{}
       const key = u.toString();
@@ -15669,7 +15843,7 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
 
       // 1) ループバック API 優先（cwd=）。UNC は一時的無効化中でも試す。
       const isUncPre = (function(){ try{ return (u.protocol==='file:' && !!u.host); }catch{ return false; } })();
-      const apiCanTry = _apiIsEnabled() || isUncPre;
+      const apiCanTry = _apiIsEnabled();
       if (apiCanTry){
         try{
           // UNC の場合は fs= 優先で列挙（Uri.LocalPath 解決の揺れを回避）
@@ -15751,7 +15925,13 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
             } catch (e2){ if (!quiet) console.warn('API fs fallback failed', e2); }
           }
         } catch (e) {
-          if (!quiet) console.warn('API listing failed, trying fs fallback', e);
+          // For UNC/WSL, do not fall back to file:// listing (will CORS-fail). Return quietly.
+          if (isHostFile){
+            try{ _apiNoteFailure(); }catch{}
+            try{ _apiPromptRestartOnce && _apiPromptRestartOnce('dir'); }catch{}
+            return [];
+          }
+          if (!quiet && _apiIsEnabled()) console.warn('API listing failed, trying fs fallback', e);
           // タイムアウト等でも fs= を試す
           try{
             const fsPath = winPathFromFileURL(u);
@@ -15773,10 +15953,13 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
                 if (arr2.length > 0){ _dirCache.set(key, arr2); return arr2; }
               }
             }
-          } catch (e3){ if (!quiet) console.warn('API fs fallback failed after API error', e3); }
+          } catch (e3){ if (!quiet && _apiIsEnabled()) console.warn('API fs fallback failed after API error', e3); }
           // 最後に file:// 解析へ
         }
       }
+
+      // UNC/WSL host file: do not attempt browser fallback.
+      if (isHostFile) return [];
 
       // 2) file:// ディレクトリインデックス解析（fetch→XHRフォールバック）
       let html = '';

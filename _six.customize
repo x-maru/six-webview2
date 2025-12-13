@@ -21,6 +21,8 @@ window.SIX_OPTIONS = {
     '.woff','.woff2','.ttf','.otf',
     '.mp3','.wav','.flac','.mp4','.mkv','.avi',
     '.xls','xlsx','xlsm','doc','docx','ppt','pptx', ],
+  DEBUG_IME: false,
+  DEBUG_SCAN_HOLD: false,
   hlsearch: false, // 検索ハイライト（:set hlsearch / :set nohlsearch / :set hlsearch!）
   urllink: true,
   imeSwitchKey: 'direct',
