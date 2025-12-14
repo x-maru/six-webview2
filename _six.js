@@ -99,6 +99,8 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
   let _typingGuardUntil = 0;
   // IMEポーリング一時停止ガード
   let _imePollPausedUntil = 0;
+  // IME未確定中の大量inputで重い処理が走るのを避ける（compositionendで一括反映）
+  let _imeDeferredModifyPending = false;
   // タブバー水平スクロール: delta は方向単位。幅に応じて適度なピクセルへ変換。
   function _scrollTabsBy(delta){
     try{
@@ -432,6 +434,8 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
         }catch{}
         // composition終了後の再描画はrAFへ集約
         try{ _requestCaretRender(); }catch{}
+        // IME未確定中に抑止したUI/セッション更新をここで一括反映
+        try{ if (_imeDeferredModifyPending){ _imeDeferredModifyPending = false; _flushImeDeferredModify && _flushImeDeferredModify('compositionend'); } }catch{}
         /* keep _imeActive as-is */
         try{ _applyCaretGradient(); }catch{}
       });
@@ -4357,12 +4361,16 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
               try{
                 if (xhr.readyState === 4){
                   if (xhr.status >= 200 && xhr.status < 300){ resolve(xhr.responseText||''); }
-                  else { reject(new Error('HTTP '+xhr.status)); }
+                  else {
+                    const e = new Error('HTTP ' + xhr.status);
+                    try{ e.status = xhr.status|0; e.url = url; e.kind = 'http'; }catch{}
+                    reject(e);
+                  }
                 }
               }catch{}
             };
-            xhr.ontimeout = ()=>{ try{ reject(new Error('timeout')); }catch{} };
-            xhr.onerror = ()=>{ try{ reject(new Error('XHR error')); }catch{} };
+            xhr.ontimeout = ()=>{ try{ const e=new Error('timeout'); try{ e.kind='timeout'; e.url=url; }catch{} reject(e); }catch{} };
+            xhr.onerror = ()=>{ try{ const e=new Error('XHR error'); try{ e.kind='network'; e.url=url; }catch{} reject(e); }catch{} };
             xhr.send();
           }catch(e){ reject(e); }
         });
@@ -4372,7 +4380,10 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
     const ac = (window.AbortController ? new AbortController() : null);
     const to = setTimeout(()=>{ try{ ac && ac.abort(); } catch{} }, timeoutMs);
     const opts = ac ? { signal: ac.signal } : {};
-    return fetch(url, opts).then(r=>{ if(!r.ok) throw new Error('fetch fail'); return r.text(); })
+    return fetch(url, opts).then(r=>{
+        if(!r.ok){ const e=new Error('HTTP '+r.status); try{ e.status=r.status|0; e.url=url; e.kind='http'; }catch{} throw e; }
+        return r.text();
+      })
       .finally(()=>{ try{ clearTimeout(to); }catch{} });
   }
 
@@ -4391,12 +4402,16 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
                 if (xhr.readyState === 4){
                   if (xhr.status >= 200 && xhr.status < 300){
                     try{ resolve(JSON.parse(xhr.responseText||'{}')); }catch(e){ reject(e); }
-                  } else { reject(new Error('HTTP '+xhr.status)); }
+                  } else {
+                    const e = new Error('HTTP ' + xhr.status);
+                    try{ e.status = xhr.status|0; e.url = url; e.kind = 'http'; }catch{}
+                    reject(e);
+                  }
                 }
               }catch{}
             };
-            xhr.ontimeout = ()=>{ try{ reject(new Error('timeout')); }catch{} };
-            xhr.onerror = ()=>{ try{ reject(new Error('XHR error')); }catch{} };
+            xhr.ontimeout = ()=>{ try{ const e=new Error('timeout'); try{ e.kind='timeout'; e.url=url; }catch{} reject(e); }catch{} };
+            xhr.onerror = ()=>{ try{ const e=new Error('XHR error'); try{ e.kind='network'; e.url=url; }catch{} reject(e); }catch{} };
             xhr.send();
           }catch(e){ reject(e); }
         });
@@ -4406,7 +4421,10 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
     const ac = (window.AbortController ? new AbortController() : null);
     const to = setTimeout(()=>{ try{ ac && ac.abort(); } catch{} }, timeoutMs);
     const opts = ac ? { signal: ac.signal } : {};
-    return fetch(url, opts).then(r=>{ if(!r.ok) throw new Error('fetch fail'); return r.json(); })
+    return fetch(url, opts).then(r=>{
+        if(!r.ok){ const e=new Error('HTTP '+r.status); try{ e.status=r.status|0; e.url=url; e.kind='http'; }catch{} throw e; }
+        return r.json();
+      })
       .finally(()=>{ try{ clearTimeout(to); }catch{} });
   }
 
@@ -4416,8 +4434,25 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
   let _apiDisabledUntil = 0;
   let _apiFailCount = 0;
   function _apiIsEnabled(){ return !!_apiBase && Date.now() > _apiDisabledUntil; }
-  function _apiNoteFailure(){
+  function _apiShouldTripBreaker(err){
     try{
+      if (!err) return true;
+      // HTTP 4xx/5xx means API is reachable; do NOT treat as connection failure.
+      const st = Number.isFinite(err.status) ? (err.status|0) : null;
+      if (st && st >= 400) return false;
+      const k = String(err.kind||'');
+      if (k === 'http') return false;
+      // network / timeout / abort etc.
+      if (k === 'timeout' || k === 'network') return true;
+      const msg = String(err.message||'');
+      if (/timeout/i.test(msg)) return true;
+      if (/ERR_CONNECTION_REFUSED|ECONNREFUSED|Failed to fetch|NetworkError/i.test(msg)) return true;
+      return true;
+    }catch{ return true; }
+  }
+  function _apiNoteFailure(err){
+    try{
+      if (!_apiShouldTripBreaker(err)) return;
       _apiFailCount++;
       if (_apiFailCount >= 2){
         _apiDisabledUntil = Date.now() + 60*1000;
@@ -5202,6 +5237,16 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
         b._changeTick = ((b._changeTick|0) + 1)|0;
         b.modified = ((b._changeTick|0) !== (b._savedTick|0));
       }
+
+      // During IME composition, avoid heavy UI work on every input event.
+      // We'll flush once at compositionend.
+      try{
+        if (window && window._imeComposing===true){
+          _imeDeferredModifyPending = true;
+          return;
+        }
+      }catch{}
+
       // Any text edit (including programmatic via commands) hides mouse cursor
       _hideCursor();
       _setTitle(); _renderTabbar();
@@ -5238,6 +5283,17 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
           }
         }
       }catch{}
+    }catch{}
+  }
+
+  // Flush deferred UI/session work after IME composition ends.
+  function _flushImeDeferredModify(reason){
+    try{
+      // Ensure buffer text matches editor value (no tick bump here).
+      try{ _syncModifiedFromTick(); }catch{}
+      // Hide cursor and persist session once (debounced).
+      try{ _hideCursor(); }catch{}
+      try{ _schedulePersist('ime-flush' + (reason?(':'+reason):'')); }catch{}
     }catch{}
   }
   function _syncModifiedFromTick(){
@@ -7165,7 +7221,8 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
           _execGrep(args.pat, args.flags, false, {
               path: args.path,
               recursive: args.recursive,
-              depth: args.depth
+              depth: args.depth,
+              fileGlob: args.fileGlob
           });
           return;
       }
@@ -9224,7 +9281,9 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
             // grep
             section('grep', [
               [K(':grep /pat/flags %'), sep(' カレントバッファを正規表現検索し、結果を別バッファに出力（リンクジャンプ可）')],
-              [K(':grep -r -maxdepth N /pat/flags DIR/GLOB'), sep(' 再帰grep（例: :grep -r -maxdepth 5 /NORMAL/ C:/Users/ymaru/*ix/*.md）')],
+              [K(':grep [-r [-maxdepth N]] /pat/flags -basedir DIR[/] [FILEGLOB]'), sep(' DIR を基点に検索（FILEGLOB 省略時は *。FILEGLOB に / や \\ は不可）')],
+              [K(':grep [-r [-maxdepth N]] /pat/flags PATH[/]'), sep(' 直接パス/グロブ指定（末尾 / は * を補完）')],
+              [sep('注意: '), K('-maxdepth'), sep(' は '), K('-r'), sep(' が必須。オプション重複指定はエラー')],
               [sep('フラグ: '), K('i'), sep(' 同一視 / '), K('I'), sep(' 常に区別 / '), K('s'), sep(' 混在時区別（smartcase）')]
             ]);
             // 検索ハイライト
@@ -10180,7 +10239,14 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
         // INSERT内での入力（insert/delete/改行など）発生を記録 → 次のキャレットのみ移動で一度だけUndo区切りを積む
         try{ _insertSegDirty = true; }catch{}
         // sync overlay caret to native insertion point
-        try{ const off = editor.selectionStart|0; const rc = _rcFromOffset(off); caretRow = rc.r; caretCol = rc.c; }catch{}
+        // During IME composition, avoid costly offset->(row,col) mapping on every keystroke.
+        try{
+          if (!(window && window._imeComposing===true)){
+            const off = editor.selectionStart|0;
+            const rc = _rcFromOffset(off);
+            caretRow = rc.r; caretCol = rc.c;
+          }
+        }catch{}
         // _touchBufferModified already hides cursor; redundant call removed
         // #624: 差分検出用に直前テキストを参照（末尾状態の変化トレース）
         try{
@@ -15779,8 +15845,11 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
           _dirRetryState.delete(key);
           return;
         }
-      } catch {
-        try{ _apiNoteFailure(); }catch{}
+      } catch (e) {
+        // Only count true connectivity problems; HTTP 4xx/5xx means API is reachable.
+        try{ _apiNoteFailure(e); }catch{}
+        // Do not keep retrying on client errors.
+        try{ if (e && Number.isFinite(e.status) && (e.status|0) >= 400) { _dirRetryState.delete(key); return; } }catch{}
       }
       // 失敗 → APIが有効な範囲でのみ次の遅延で再試行
       if (_apiIsEnabled()) _scheduleDirRetry(key);
@@ -15825,9 +15894,10 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
           let host = urlObj.host; // '' for local drive, 'server' for UNC
           const path = decodeURIComponent(urlObj.pathname || '');
           if (host){
-            // UNC: file:////server/share/... ; WSL host maps to wsl$
-            const mappedHost = (host && host.toLowerCase()==='wsl.localhost') ? 'wsl$' : host;
-            const p = ('\\\\' + mappedHost + path.replace(/\//g,'\\'));
+            // UNC: file:////server/share/... ; keep host as-is (wsl.localhost works on modern Windows).
+            let p = ('\\\\' + host + path.replace(/\//g,'\\'));
+            // Avoid trailing backslash; some hosts reject it (400).
+            try{ p = p.replace(/\\+$/,''); }catch{}
             return p;
           }
           // local drive: '/C:/Users/...'
@@ -15835,7 +15905,9 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
           if (m){
             const drive = m[1];
             const rest  = (m[2]||'');
-            return drive + rest.replace(/\//g,'\\');
+            let p = drive + rest.replace(/\//g,'\\');
+            try{ p = p.replace(/\\+$/,''); }catch{}
+            return p;
           }
           return null;
         }catch{ return null; }
@@ -15850,7 +15922,7 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
           if (isUncPre){
             try{
               const fsPath0 = winPathFromFileURL(u);
-              // 追加: WSL 用に "\\wsl$" 形式も試す（環境により wsl.localhost と相互に可/不可があるため）
+              // 追加: WSL 用に "\\wsl.localhost" と "\\wsl$" を相互に試す
               let fsPathWslAlt = null;
               try{
                 const host = u.host;
@@ -15860,9 +15932,7 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
                   if (segs.length>=1){
                     const distro = segs[0];
                     const rest = segs.slice(1).join('\\');
-                    fsPathWslAlt = rest ? (`\\\\wsl$\\${distro}\\${rest}`) : (`\\\\wsl$\\${distro}\\`);
-                    // URL がディレクトリを指している場合は末尾に'\\'を付与
-                    try{ if ((u.pathname||'').endsWith('/') && !fsPathWslAlt.endsWith('\\')) fsPathWslAlt += '\\'; }catch{}
+                    fsPathWslAlt = rest ? (`\\\\wsl$\\${distro}\\${rest}`) : (`\\\\wsl$\\${distro}`);
                   }
                 }
               }catch{}
@@ -15880,13 +15950,12 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
                 }
                 return null;
               };
-              // まず wsl$ を優先、その後 wsl.localhost を試す
-              if (fsPathWslAlt){
-                try{ const r = await tryFs(fsPathWslAlt); if (r) return r; }catch(ea){ if (_apiIsEnabled()){ try{ _apiNoteFailure(); }catch{} } }
-              }
+              // Prefer \\wsl.localhost\... first, then fallback to \\wsl$\...
               if (fsPath0){
-                try{ if ((u.pathname||'').endsWith('/') && !/\\$/.test(fsPath0)) fsPath0 += '\\'; }catch{}
-                try{ const r0 = await tryFs(fsPath0); if (r0) return r0; }catch(e0){ if (_apiIsEnabled()){ try{ _apiNoteFailure(); }catch{} } }
+                try{ const r0 = await tryFs(fsPath0); if (r0) return r0; }catch(e0){ if (_apiIsEnabled()){ try{ _apiNoteFailure(e0); }catch{} } }
+              }
+              if (fsPathWslAlt){
+                try{ const r = await tryFs(fsPathWslAlt); if (r) return r; }catch(ea){ if (_apiIsEnabled()){ try{ _apiNoteFailure(ea); }catch{} } }
               }
             }catch{}
           }
@@ -15894,7 +15963,7 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
           let j;
           const isUnc = isUncPre;
           const timeout1 = (apiTimeoutMs!=null) ? Math.max((isUnc ? 6000 : 2000), apiTimeoutMs) : (isUnc ? 6000 : 2000);
-          try{ j = await _fetchJSONWithTimeout(apiUrl, timeout1); try{ _apiNoteSuccess(); }catch{} }catch(e){ if (_apiIsEnabled()){ try{ _apiNoteFailure(); }catch{} } throw e; }
+          try{ j = await _fetchJSONWithTimeout(apiUrl, timeout1); try{ _apiNoteSuccess(); }catch{} }catch(e){ if (_apiIsEnabled()){ try{ _apiNoteFailure(e); }catch{} } throw e; }
           if (j && Array.isArray(j.entries)){
             // API 正常応答: size / mtime も保持して外部変更検出の基礎情報に使う (#477)
             const arr = j.entries.map(e=>{
@@ -15911,7 +15980,7 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
                 const apiFs = _apiBase + 'dir?fs=' + encodeURIComponent(fsPath);
                 let j2;
                 const timeout2 = (apiTimeoutMs!=null) ? Math.max((isUnc ? 6000 : 2000), apiTimeoutMs) : (isUnc ? 6000 : 2000);
-                try{ j2 = await _fetchJSONWithTimeout(apiFs, timeout2); try{ _apiNoteSuccess(); }catch{} }catch(e2){ if (_apiIsEnabled()){ try{ _apiNoteFailure(); }catch{} } throw e2; }
+                try{ j2 = await _fetchJSONWithTimeout(apiFs, timeout2); try{ _apiNoteSuccess(); }catch{} }catch(e2){ if (_apiIsEnabled()){ try{ _apiNoteFailure(e2); }catch{} } throw e2; }
                 if (j2 && Array.isArray(j2.entries)){
                   const arr2 = j2.entries.map(e=>{
                     const n = e.name; const d = !!e.isDir; const url = makeEntryUrl(u, n, d, e.url);
@@ -15927,8 +15996,9 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
         } catch (e) {
           // For UNC/WSL, do not fall back to file:// listing (will CORS-fail). Return quietly.
           if (isHostFile){
-            try{ _apiNoteFailure(); }catch{}
-            try{ _apiPromptRestartOnce && _apiPromptRestartOnce('dir'); }catch{}
+            // HTTP 400 etc means API is reachable but path is invalid for host; don't prompt restart.
+            try{ _apiNoteFailure(e); }catch{}
+            try{ if (_apiShouldTripBreaker(e)) _apiPromptRestartOnce && _apiPromptRestartOnce('dir'); }catch{}
             return [];
           }
           if (!quiet && _apiIsEnabled()) console.warn('API listing failed, trying fs fallback', e);
@@ -15942,7 +16012,7 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
               const _isUncFs = (p)=>{ try{ return /^\\\\[^\\]+/.test(p); }catch{ return false; } };
               const base3 = _isUncFs(fsPath) ? 6000 : 2000;
               const timeout3 = (apiTimeoutMs!=null) ? Math.max(base3, apiTimeoutMs) : base3;
-              try{ j2 = await _fetchJSONWithTimeout(apiFs, timeout3); try{ _apiNoteSuccess(); }catch{} }catch(e3){ if (_apiIsEnabled()){ try{ _apiNoteFailure(); }catch{} } throw e3; }
+              try{ j2 = await _fetchJSONWithTimeout(apiFs, timeout3); try{ _apiNoteSuccess(); }catch{} }catch(e3){ if (_apiIsEnabled()){ try{ _apiNoteFailure(e3); }catch{} } throw e3; }
               if (j2 && Array.isArray(j2.entries)){
                 const arr2 = j2.entries.map(e=>{
                   const n = e.name; const d = !!e.isDir; const url = makeEntryUrl(u, n, d, e.url);
@@ -18461,87 +18531,149 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
     let recursive = false;
     let depth = null;
     let path = '';
+    let basedir = '';
+    let fileGlob = '';
     let error = '';
-    
+
     const tokens = [];
     let current = '';
     let inQuote = false;
     for (let i = 0; i < rawArgs.length; i++) {
-        const c = rawArgs[i];
-        if (c === '"') { inQuote = !inQuote; }
-        else if (c === ' ' && !inQuote) {
-            if (current.length > 0) tokens.push(current);
-            current = '';
-        } else { current += c; }
+      const c = rawArgs[i];
+      if (c === '"') { inQuote = !inQuote; }
+      else if (c === ' ' && !inQuote) {
+        if (current.length > 0) tokens.push(current);
+        current = '';
+      } else {
+        current += c;
+      }
     }
     if (current.length > 0) tokens.push(current);
-    
+
     let patIndex = -1;
     for (let i = 0; i < tokens.length; i++) {
       const t = tokens[i];
       if (t.startsWith('/') && t.lastIndexOf('/') > 0) {
-         patIndex = i;
-         break;
+        patIndex = i;
+        break;
       }
     }
-    
+
     if (patIndex !== -1) {
-        const t = tokens[patIndex];
-        const lastSlash = t.lastIndexOf('/');
-        pat = t.substring(1, lastSlash);
-        flags = t.substring(lastSlash + 1);
-        tokens.splice(patIndex, 1);
+      const t = tokens[patIndex];
+      const lastSlash = t.lastIndexOf('/');
+      pat = t.substring(1, lastSlash);
+      flags = t.substring(lastSlash + 1);
+      tokens.splice(patIndex, 1);
     }
-    
+
+    const pos = [];
     for (let i = 0; i < tokens.length; i++) {
       const t = tokens[i];
-      if (t === '-r') { recursive = true; }
-      else if (t === '-maxdepth') {
+      if (t === '-r') {
+        if (recursive) { error = 'grep: duplicate -r'; break; }
+        recursive = true;
+      } else if (t === '-maxdepth') {
+        if (depth !== null) { error = 'grep: duplicate -maxdepth'; break; }
         if (i + 1 < tokens.length) {
-          depth = parseInt(tokens[i+1], 10);
-          if (!Number.isFinite(depth)) { error = 'grep: invalid -maxdepth'; break; }
+          depth = parseInt(tokens[i + 1], 10);
+          if (!Number.isFinite(depth) || depth < 0) { error = 'grep: invalid -maxdepth'; break; }
           i++;
         } else {
           error = 'grep: missing -maxdepth value';
           break;
         }
+      } else if (t === '-basedir') {
+        if (basedir) { error = 'grep: duplicate -basedir'; break; }
+        if (i + 1 < tokens.length) {
+          basedir = String(tokens[i + 1] || '').replace(/^"|"$/g, '');
+          i++;
+        } else {
+          error = 'grep: missing -basedir value';
+          break;
+        }
       } else if (/^-/.test(t)) {
-        // Unknown option => error and abort.
         error = 'grep: unknown option ' + t;
         break;
       } else {
-        const val = t.replace(/^"|"$/g, '');
-        if (!path) {
-          path = val;
-        } else {
-          // Allow splitting a path across spaces: join with '/' unless already ends with a separator.
-          if (path.endsWith('/') || path.endsWith('\\')) {
-            path += val;
-          } else {
-            path += '/' + val;
-          }
-        }
+        pos.push(t.replace(/^"|"$/g, ''));
       }
     }
-    
-    if (recursive && depth === null) depth = 3;
+
+    const joinPos = () => {
+      if (!pos.length) return '';
+      if (pos.length === 1) return pos[0];
+      // Legacy: join segments when user forgot to quote.
+      let s = pos[0];
+      for (let i = 1; i < pos.length; i++) {
+        const part = pos[i];
+        if (s.endsWith('/') || s.endsWith('\\')) s += part;
+        else s += '/' + part;
+      }
+      return s;
+    };
+
+    if (!error) {
+      if (basedir) {
+        // Mode ①: -basedir DIR[/] [FILEGLOB]
+        if (!basedir) { error = 'grep: missing -basedir value'; }
+        else if (/[*?]/.test(basedir)) { error = 'grep: -basedir must not contain wildcard'; }
+
+        // FILEGLOB is a single token (no path separators). Multiple leftover tokens are almost always
+        // user mistakes like `maxdepth 2` (missing '-') or unquoted whitespace.
+        if (pos.length >= 2) {
+          const p0 = String(pos[0] || '');
+          const p1 = String(pos[1] || '');
+          if (!depth && (p0 === 'maxdepth' || p0 === 'MAXDEPTH') && /^\d+$/.test(p1)) {
+            error = 'grep: unknown option maxdepth (did you mean -maxdepth ?)';
+          } else if (!recursive && (p0 === 'r' || p0 === 'R')) {
+            error = 'grep: unknown option r (did you mean -r ?)';
+          } else {
+            error = 'grep: too many args for FILEGLOB (FILEGLOB must be one token; quote if needed)';
+          }
+        } else {
+          fileGlob = (pos.length === 1) ? String(pos[0] || '') : '';
+          if (!fileGlob) fileGlob = '*';
+          if (/[\\/]/.test(fileGlob)) { error = 'grep: FILEGLOB must not contain / or \\'; }
+        }
+
+        if (!recursive && depth !== null) { error = 'grep: -maxdepth requires -r'; }
+
+        // Use basedir for target path; fileGlob is passed separately.
+        path = basedir;
+      } else {
+        // Mode ②: /REGEXP/[flags] TARGET
+        path = joinPos();
+        if (path && (path.endsWith('/') || path.endsWith('\\'))) path = path + '*';
+        if (!recursive && depth !== null) { error = 'grep: -maxdepth requires -r'; }
+      }
+    }
+
+    if (recursive && depth === null) depth = Infinity; // unlimited
     if (!recursive && depth === null) depth = 0;
-    
-    return { pat, flags, recursive, depth, path, error };
+
+    return { pat, flags, recursive, depth, path, basedir, fileGlob, error };
   }
 
     function _buildGrepHeader(pat, targetPath, bName, caseLabel, flagStr, extraInfo, hitTotalOverride) {
       const cmdFlag = flagStr ? `/${flagStr}` : '';
-      let header = `CMD\t\t:grep /${pat}${cmdFlag} ${targetPath}\n`;
-      if (extraInfo && extraInfo.recursive) {
+      const cmdLine = (extraInfo && extraInfo.cmdLine) ? String(extraInfo.cmdLine) : `:grep /${pat}${cmdFlag} ${targetPath}`;
+      let header = `CMD\t\t${cmdLine}\n`;
+      const hasExtra = !!(extraInfo && (extraInfo.basePath || extraInfo.fileGlob || extraInfo.recursive));
+      if (hasExtra) {
         const baseStr = extraInfo.basePath || targetPath;
         header += `基点\t\t${baseStr}\n`;
-        header += `再帰\t\tYes\n`;
-        header += `最大階層\t${extraInfo.depth}\n`;
+        if (extraInfo.fileGlob) header += `ファイル\t\t${extraInfo.fileGlob}\n`;
+        header += `再帰\t\t${extraInfo.recursive ? 'Yes' : 'No'}\n`;
+        if (extraInfo.recursive) {
+          const d = extraInfo.depth;
+          const dStr = (d === Infinity) ? '無制限' : (Number.isFinite(d) ? String(d) : String(d));
+          header += `最大階層\t\t${dStr}\n`;
+        }
       } else {
         header += `対象\t\t【${bName}】\n`;
       }
-      header += `検索時 A/a\t${caseLabel}\n`;
+      header += `検索時 A/a\t\t${caseLabel}\n`;
 
       // hitTotalOverride:
       // - undefined: derive from highlights length
@@ -18557,12 +18689,12 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
         hitStr = String(hitTotalOverride|0);
       }
       if (hitTotalOverride === null) {
-        header += `ヒット総数\t\n\n`;
+        header += `ヒット総数\t\t\n\n`;
       } else if (Number.isFinite(hitTotalOverride)) {
-        header += `ヒット総数\t${hitStr}件\n\n`;
+        header += `ヒット総数\t\t${hitStr}件\n\n`;
       } else {
         // default placeholder for legacy builder usage: caller should supply a number.
-        header += `ヒット総数\t\n\n`;
+        header += `ヒット総数\t\t\n\n`;
       }
       return header;
     }
@@ -18628,6 +18760,8 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
       if (depth > maxDepth) return [];
       let results = [];
 
+      const matchNameOnly = !!(listOptions && listOptions.matchNameOnly);
+
       // Optional progress reporting (for long recursive listing).
       const progress = (listOptions && listOptions.__progress) ? listOptions.__progress : null;
       const onProgress = (listOptions && typeof listOptions.onProgress === 'function') ? listOptions.onProgress : null;
@@ -18656,7 +18790,10 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
         for (const e of entries) {
           if (e.isDir) {
             if (excludeHidden && e.name.startsWith('.')) continue;
-            if (depth < maxDepth) {
+            // Depth counts path components from the basedir. To match common "find -maxdepth" semantics,
+            // we do not descend into a subdir when that would make its children exceed maxDepth.
+            // (Files are considered depth+1.)
+            if ((depth + 1) < maxDepth) {
               const nextRel = relativePath ? (relativePath + '/' + e.name) : e.name;
               const sub = await _recursiveList(e.url, depth + 1, maxDepth, patternRegex, nextRel, excludeHidden, listOptions);
               results = results.concat(sub);
@@ -18664,7 +18801,10 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
           } else {
             if (progress) progress.fileCount = (progress.fileCount|0) + 1;
             const relPath = relativePath ? (relativePath + '/' + e.name) : e.name;
-            if (patternRegex.test(relPath)) {
+            const fileDepth = depth + 1;
+            if (fileDepth > maxDepth) { await _maybeYield(); continue; }
+            const testStr = matchNameOnly ? e.name : relPath;
+            if (patternRegex.test(testStr)) {
               if (progress) progress.matchedCount = (progress.matchedCount|0) + 1;
               results.push({ name: e.name, url: e.url, isDir: false });
             }
@@ -18688,6 +18828,28 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
         const targetPath = options.path || '%';
         const recursive = !!options.recursive;
         const maxDepth = (typeof options.depth === 'number') ? options.depth : 0;
+      const fileGlobOpt = (options && options.fileGlob) ? String(options.fileGlob) : '';
+      const hasExplicitFileGlob = !!fileGlobOpt;
+
+        const _grepQuoteArg = (s)=>{
+          const v = String(s ?? '');
+          if (!v) return '""';
+          if (/\s/.test(v) || /"/.test(v)) return '"' + v.replace(/"/g, '\\"') + '"';
+          return v;
+        };
+        const _buildReproCmd = (flagStrForCmd, targetExpr, baseDirForCmd, fileGlobForCmd)=>{
+          const parts = [':grep'];
+          if (recursive) parts.push('-r');
+          if (recursive && Number.isFinite(maxDepth)) parts.push('-maxdepth', String(maxDepth|0));
+          const cmdFlag = flagStrForCmd ? `/${flagStrForCmd}` : '';
+          parts.push(`/${pat}${cmdFlag}`);
+          if (hasExplicitFileGlob) {
+            parts.push('-basedir', _grepQuoteArg(baseDirForCmd), _grepQuoteArg(fileGlobForCmd || '*'));
+          } else {
+            parts.push(_grepQuoteArg(targetExpr));
+          }
+          return parts.join(' ');
+        };
 
         let bName = '%';
         let isExternal = false;
@@ -18714,8 +18876,8 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
                     baseCaseLabel0 = (metaForHeader0 && metaForHeader0.caseLabel) ? metaForHeader0.caseLabel : '常に区別';
                     baseFlagStr0 = (metaForHeader0 && metaForHeader0.flagStr) ? metaForHeader0.flagStr : '';
                     
-                    // Wildcard or Recursive support
-                    if (recursive || /[*?]/.test(targetPath)) {
+                    // Wildcard / directory / recursive support
+                    if (recursive || /[*?]/.test(targetPath) || hasExplicitFileGlob || /[\\/]$/.test(targetPath)) {
                         const base = _currentDirBase();
                         const urlStr = _normalizeToURLString(targetPath, base);
                         
@@ -18736,8 +18898,25 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
                                      let basePathForHeader = displayPath;
                                      let searchRootUrl = new URL(u);
 
+                                     // -basedir mode: use provided file glob and treat displayPath as directory root.
+                                     if (hasExplicitFileGlob) {
+                                       globPattern = fileGlobOpt || '*';
+                                       dirPathStr = displayPath;
+                                       basePathForHeader = displayPath;
+                                       const base = _currentDirBase();
+                                       const rootUrlStr = _normalizeToURLString(dirPathStr, base);
+                                       try {
+                                         searchRootUrl = new URL(rootUrlStr);
+                                         if (!searchRootUrl.pathname.endsWith('/')) {
+                                           searchRootUrl.pathname += '/';
+                                         }
+                                       } catch(e) {
+                                         console.error('grep: failed to parse root url', e);
+                                       }
+                                     }
+
                                      // Handle wildcards in directory path
-                                     if (/[*?]/.test(displayPath)) {
+                                     if (!hasExplicitFileGlob && /[*?]/.test(displayPath)) {
                                          const parts = displayPath.split('/');
                                          const firstWildcardIdx = parts.findIndex(p => /[*?]/.test(p));
                                          
@@ -18773,7 +18952,7 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
                                              dirPathStr = parts.slice(0, parts.length-1).join('/');
                                              basePathForHeader = dirPathStr;
                                          }
-                                     } else {
+                                     } else if (!hasExplicitFileGlob) {
                                          if (recursive) {
                                              // dirPathStr is already the path
                                              // globPattern is *
@@ -18784,7 +18963,8 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
                                      }
                                      
                                      const regex = _globToRegex(globPattern);
-                                     extraInfo0 = { recursive: recursive, depth: maxDepth, basePath: basePathForHeader };
+                                     extraInfo0 = { recursive: recursive, depth: maxDepth, basePath: basePathForHeader, fileGlob: globPattern };
+                                     try{ extraInfo0.cmdLine = _buildReproCmd(baseFlagStr0, targetPath, basePathForHeader, globPattern); }catch{}
                                      // Open the result buffer now (blank hit total)
                                      extBufRef = _openExternalGrepResultBuffer(pat, targetPath, basePathForHeader, baseCaseLabel0, baseFlagStr0, extraInfo0);
                                      // Always show searching line immediately (even during directory listing).
@@ -18798,6 +18978,7 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
                                        timeoutMs: 8000,
                                        quiet: true,
                                        noRetrySchedule: true,
+                                       matchNameOnly: hasExplicitFileGlob,
                                        __progress: listProgress,
                                        progressYieldMs: 200,
                                        onProgress: (p)=>{
@@ -18809,12 +18990,20 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
                                        }
                                      };
                                      let files = [];
-                                     
+
                                      if (recursive) {
                                        files = await _recursiveList(searchRootUrl, 0, maxDepth, regex, '', true, listOpts);
                                      } else {
-                                       const entries = await _listDirEntries(searchRootUrl, listOpts);
+                                       // If the glob pattern spans subdirectories (contains '/'), we must traverse
+                                       // to evaluate patterns like '*/*.md' (otherwise we'd only see immediate children).
+                                       if (globPattern.includes('/')) {
+                                         const segs = globPattern.split('/').filter(s => s.length > 0);
+                                         const needDepth = Math.max(1, segs.length);
+                                         files = await _recursiveList(searchRootUrl, 0, needDepth, regex, '', true, listOpts);
+                                       } else {
+                                         const entries = await _listDirEntries(searchRootUrl, listOpts);
                                          files = entries.filter(e => !e.isDir && regex.test(e.name));
+                                       }
                                      }
 
                                      if (files.length === 0) {
