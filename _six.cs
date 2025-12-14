@@ -67,6 +67,36 @@ public class __CLASSNAME__ {
   private static void Write(Socket s, string txt){ var b=Encoding.ASCII.GetBytes(txt); s.Send(b); }
   private static string UrlDecode(string s){ try{ return Uri.UnescapeDataString(s); } catch{ return s; } }
   private static string FileUriFromPath(string path){ try{ return new Uri(path).AbsoluteUri; } catch { return path; } }
+
+  private static string NormalizeDirPath(string p){
+    try{
+      if (string.IsNullOrEmpty(p)) return p;
+      // Normalize separators
+      p = p.Replace('/', '\\');
+      // Preserve drive root like "C:\\"
+      if (p.Length==3 && char.IsLetter(p[0]) && p[1]==':' && p[2]=='\\') return p;
+      // Trim trailing backslashes (Directory.Exists is fine, but this prevents edge-case mismatches)
+      while (p.Length>0 && p.EndsWith("\\", StringComparison.Ordinal)){
+        // Stop at UNC root "\\host\\share" (no trailing slash at this point) or drive root handled above
+        p = p.Substring(0, p.Length-1);
+      }
+      // Translate WSL UNC hostname to the stable \\wsl$ share.
+      // Example: \\wsl.localhost\\Ubuntu\\home\\me  -> \\wsl$\\Ubuntu\\home\\me
+      const string wslPrefix = "\\\\wsl.localhost\\";
+      if (p.StartsWith(wslPrefix, StringComparison.OrdinalIgnoreCase)){
+        var rest = p.Substring(wslPrefix.Length);
+        var idx = rest.IndexOf('\\');
+        if (idx > 0){
+          var distro = rest.Substring(0, idx);
+          var sub = rest.Substring(idx+1);
+          p = "\\\\wsl$\\" + distro + "\\" + sub;
+        } else {
+          p = "\\\\wsl$\\" + rest;
+        }
+      }
+      return p;
+    } catch { return p; }
+  }
   private static Encoding GetEncodingFromQuery(string enc){
     if (string.IsNullOrEmpty(enc)) return Encoding.UTF8;
     enc = enc.Trim().ToLowerInvariant();
@@ -222,7 +252,9 @@ public class __CLASSNAME__ {
             string query=null; int qm = path.IndexOf('?'); if (qm>=0) query = path.Substring(qm+1);
             string cwdUrl=null, fsPath=null; if (query!=null){ foreach(var pair in query.Split('&')){ if (pair.Length==0) continue; var kv=pair.Split('='); var k=UrlDecode(kv[0]); var v=(kv.Length>1? UrlDecode(kv[1]) : ""); if (k=="cwd"||k=="url") cwdUrl=v; if (k=="fs") fsPath=v; } }
             string basePath=null; try{
-              if (!string.IsNullOrEmpty(fsPath)) basePath = fsPath; else if (!string.IsNullOrEmpty(cwdUrl)) { var uri=new Uri(cwdUrl); if (uri.Scheme!="file") throw new Exception("bad scheme"); basePath = uri.LocalPath; }
+              if (!string.IsNullOrEmpty(fsPath)) basePath = fsPath;
+              else if (!string.IsNullOrEmpty(cwdUrl)) { var uri=new Uri(cwdUrl); if (uri.Scheme!="file") throw new Exception("bad scheme"); basePath = uri.LocalPath; }
+              basePath = NormalizeDirPath(basePath);
               if (string.IsNullOrEmpty(basePath) || !Directory.Exists(basePath)) throw new Exception("not found");
               var entries=new StringBuilder(); entries.Append("{\"entries\":["); bool firstE=true;
               try{
@@ -246,7 +278,11 @@ public class __CLASSNAME__ {
                 }
               } catch{}
               entries.Append("]}"); body = entries.ToString();
-            } catch { status = "400 Bad Request"; body = "{\"entries\":[]}"; }
+            } catch (Exception ex) {
+              // Return 200 with an error field to avoid noisy DevTools "Failed to load resource" logs.
+              status = "200 OK";
+              body = "{\"entries\":[],\"error\":\"" + JsonEscape(ex.Message) + "\"}";
+            }
           } else if (path.StartsWith("/read")){
             // /read?fs=\\\\host\\path[&enc=utf8|sjis|cp932|auto]
             string query=null; int qm = path.IndexOf('?'); if (qm>=0) query = path.Substring(qm+1);

@@ -95,12 +95,61 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
       });
     }catch{}
   }
+
+  // Native caret mode: show textarea's own caret (and hide overlay caret) during IME composition.
+  // This keeps the caret visually in sync even when overlay rendering is intentionally throttled.
+  let _nativeCaretEnabled = false;
+  let _nativeCaretForceUntil = 0;
+  function _editorTextLen(){
+    try{
+      if (!editor) return 0;
+      // textarea.textLength returns a number without materializing the full value string.
+      if (typeof editor.textLength === 'number') return (editor.textLength|0);
+      const v = editor.value;
+      return v ? (v.length|0) : 0;
+    }catch{ return 0; }
+  }
+  function _setNativeCaretMode(enabled){
+    try{
+      const on = !!enabled;
+      if (on === _nativeCaretEnabled) return;
+      _nativeCaretEnabled = on;
+      try{ document.body.classList.toggle('use-native-caret', on); }catch{}
+      try{
+        if (editor){
+          if (on){
+            let col = 'yellow';
+            try{
+              const T = (window && window.THEME) ? window.THEME : {};
+              col = String((T && (T.editCaretIMEColor || T.editCaretColor || T.caretColor)) || 'yellow');
+            }catch{}
+            try{ editor.style.setProperty('--nativeCaretColor', col); }catch{}
+            try{ editor.style.caretColor = col; }catch{}
+          } else {
+            try{ editor.style.caretColor = 'transparent'; }catch{}
+          }
+        }
+      }catch{}
+    }catch{}
+  }
+  function _refreshCaretMode(_reason){
+    try{
+      const now = Date.now();
+      const forced = now < (_nativeCaretForceUntil|0);
+      const composing = !!(window && window._imeComposing===true);
+      const large = (_editorTextLen() > 200000);
+      // For huge buffers, prefer native caret throughout INSERT to avoid expensive overlay caret work.
+      const want = forced || composing || (_mode==='INSERT' && large);
+      _setNativeCaretMode(want);
+    }catch{}
+  }
   // タイピング中ガード（重い描画の一時抑止）
   let _typingGuardUntil = 0;
   // IMEポーリング一時停止ガード
   let _imePollPausedUntil = 0;
   // IME未確定中の大量inputで重い処理が走るのを避ける（compositionendで一括反映）
   let _imeDeferredModifyPending = false;
+  let _imeDeferredTickBumped = false;
   // タブバー水平スクロール: delta は方向単位。幅に応じて適度なピクセルへ変換。
   function _scrollTabsBy(delta){
     try{
@@ -122,6 +171,8 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
       if (document.body.classList.contains('is-scrolling')) return;
       // 未確定中はポジション表示更新を遅延（間接的な測定/レイアウトを避ける）
       try{ if (window._imeComposing===true){ return; } }catch{}
+      // Large buffer throttle: avoid splitting/metrics during active typing.
+      try{ if (_mode==='INSERT' && _editorTextLen() > 200000){ return; } }catch{}
       const lines = _splitLines();
       const r = Math.max(0, Math.min(lines.length-1, caretRow|0));
       const line = lines[r] || '';
@@ -401,6 +452,8 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
     if (editor){
       editor.addEventListener('compositionstart', ()=>{
         try{ window._imeComposing = true; }catch{}
+        try{ _nativeCaretForceUntil = Date.now() + 1200; _refreshCaretMode(); }catch{}
+        try{ _imeDeferredTickBumped = false; _imeDeferredModifyPending = false; }catch{}
         try{
           const M = window.SIX_IME_METRICS; if (M){
             M.composing = true; M.startTs = performance.now(); M.events.beforeinput = 0; M.events.input = 0; M.events.keydown = 0;
@@ -411,12 +464,29 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
         // タイピング中の重い再描画を少し長めに抑止（IME候補表示中のフレーム落ち対策）
         try{ _typingGuardUntil = Date.now() + 200; }catch{}
         try{ _applyCaretGradient(); }catch{}
-        // #1319: Force update listchars to hide EOL marker on active line
-        try{ _renderListChars(); }catch{}
+        // #1319: Hide listchars on the active line during IME composition (cheap: avoid full rerender here)
+        try{
+          if (_optList && _listLayer){
+            const r = String((caretRow|0) + 1);
+            const nodes = _listLayer.querySelectorAll('[data-row="' + r.replace(/"/g,'') + '"]');
+            for (const el of nodes){ try{ if (el) el.style.visibility = 'hidden'; }catch{} }
+          }
+        }catch{}
       });
       // 仕様(#1022): 未確定文字の確定瞬間では何もしない（IMEは継続ONとみなす）
       editor.addEventListener('compositionend',   ()=>{
         try{ window._imeComposing = false; }catch{}
+        // Keep native caret briefly after commit to avoid overlay lag when a new composition starts immediately.
+        try{ _nativeCaretForceUntil = Date.now() + 220; _refreshCaretMode(); }catch{}
+
+        // Sync overlay caret position once at commit time (skip for huge buffers).
+        try{
+          if (_editorTextLen() <= 200000){
+            const off = (editor && typeof editor.selectionStart==='number') ? (editor.selectionStart|0) : 0;
+            const rc = _rcFromOffset(off);
+            caretRow = rc.r; caretCol = rc.c;
+          }
+        }catch{}
         try{
           const M = window.SIX_IME_METRICS; if (M){
             const now = performance.now(); const dur = Math.max(0, now - (M.startTs||now));
@@ -434,10 +504,14 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
         }catch{}
         // composition終了後の再描画はrAFへ集約
         try{ _requestCaretRender(); }catch{}
+        // #1319: Restore listchars (EOL markers) after commit
+        try{ _scheduleListCharsRender && _scheduleListCharsRender('compositionend'); }catch{}
         // IME未確定中に抑止したUI/セッション更新をここで一括反映
         try{ if (_imeDeferredModifyPending){ _imeDeferredModifyPending = false; _flushImeDeferredModify && _flushImeDeferredModify('compositionend'); } }catch{}
+        try{ _imeDeferredTickBumped = false; }catch{}
         /* keep _imeActive as-is */
         try{ _applyCaretGradient(); }catch{}
+        try{ setTimeout(()=>{ try{ _refreshCaretMode(); }catch{} }, 260); }catch{}
       });
       // ASCII入力検知（INSERT中）: 最初のASCII文字で IME OFF グラデへ切替 (#1021)
       editor.addEventListener('beforeinput', (e)=>{
@@ -580,23 +654,30 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
       const bufs = buffers.map((b)=>{
         const isFileBacked = !!(b && b.path && /^file:\/\//i.test(b.path));
         const omitText = !!(lite && isFileBacked && !b.modified);
+        const textLen = (b && typeof b.text === 'string') ? b.text.length : 0;
+        // Persisting full undo snapshots for very large buffers can freeze the UI during JSON.stringify/localStorage.
+        const omitUndoForLarge = (textLen > 200000);
         // Persist limited undo history to improve post-restart UX
         let undoArr = [];
         try{
           const u = Array.isArray(b._undo) ? b._undo : [];
           const k = Math.max(0, UNDO_STEPS_IN_SESSION|0);
           const slice = (k>0 ? u.slice(-k) : []);
-          undoArr = slice.map(s=>({
-            text: String(s.text||''),
-            caretRow: s.caretRow|0,
-            caretCol: s.caretCol|0,
-            scrollTop: s.scrollTop|0,
-            changeTick: s.changeTick|0,
-            enc: s.enc||'utf-8',
-            ff: s.ff||'unix',
-            bom: !!s.bom,
-            kind: s.kind||null
-          }));
+          if (!omitUndoForLarge){
+            undoArr = slice.map(s=>({
+              text: String(s.text||''),
+              caretRow: s.caretRow|0,
+              caretCol: s.caretCol|0,
+              scrollTop: s.scrollTop|0,
+              changeTick: s.changeTick|0,
+              enc: s.enc||'utf-8',
+              ff: s.ff||'unix',
+              bom: !!s.bom,
+              kind: s.kind||null
+            }));
+          } else {
+            undoArr = [];
+          }
         }catch{ undoArr = []; }
         return {
           name: b.name||null,
@@ -644,12 +725,14 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
   }
   function _persistSessionNow(){
     try{
-      const p = _collectSessionPayload({ lite:false });
+      // Default to lite payload to keep IME / typing responsive even with many open files.
+      // Full text is still persisted for modified buffers; unmodified file-backed buffers reload on restore.
+      const p = _collectSessionPayload({ lite:true });
           try {
               localStorage.setItem(_SESSION_KEY, JSON.stringify(p));
             return true;
         } catch (e) {
-            // quota fallback: retry with lite payload
+        // fallback: retry with lite payload (already lite) to handle transient failures
             try {
                 const p2 = _collectSessionPayload({ lite: true });
                 localStorage.setItem(_SESSION_KEY, JSON.stringify(p2));
@@ -664,12 +747,38 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
     try{
       if (_persistTimer){ clearTimeout(_persistTimer); _persistTimer=null; }
       // IME未確定中はセッション保存のタイマー発火を遅延（I/OとJSON化で主スレ阻害を避ける）
-      const delay = (window._imeComposing===true) ? 800 : 120;
+      const r = String(reason||'');
+      // IME確定直後(ime-flush)も少し遅らせ、変換確定後の固まりを避ける。
+      let delay = (window._imeComposing===true || r.startsWith('ime-flush')) ? 800 : 120;
+      // Large buffer throttle: avoid JSON.stringify/localStorage during active typing.
+      try{
+        const b = currentBuffer && currentBuffer();
+        const len = (b && typeof b.text === 'string') ? (b.text.length|0) : 0;
+        const isLarge = (len > 200000);
+        if (isLarge){
+          // While editing a large modified buffer, persist only after a longer idle.
+          if (b && b.modified){
+            delay = Math.max(delay, 3500);
+          } else {
+            delay = Math.max(delay, 1200);
+          }
+          // In INSERT, give even more room so keystroke gaps don't trigger persist.
+          try{ if (typeof _mode !== 'undefined' && _mode === 'INSERT') delay = Math.max(delay, 4500); }catch{}
+        }
+      }catch{}
       _persistTimer = setTimeout(()=>{
         try{
           // まだ未確定ならさらに延期
           if (window._imeComposing===true){ _schedulePersist('ime-delay'); return; }
-          _persistSessionNow();
+          const run = ()=>{ try{ _persistSessionNow(); }catch{} };
+          // Allow input/layout to settle; run persistence in idle time when possible.
+          try{
+            if (window.requestIdleCallback){
+              window.requestIdleCallback(()=>{ run(); }, { timeout: 5000 });
+            } else {
+              setTimeout(run, 0);
+            }
+          }catch{ run(); }
         }catch{}
       }, delay);
     }catch{}
@@ -797,11 +906,49 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
           if (needReload){
             (async()=>{
               try{
-                const t2 = await _fetchTextSmart(path);
-                const ff2 = (t2.indexOf('\r')>=0) ? 'dos' : 'unix';
+                // Avoid direct file:// fetch (CORS on WSL/UNC). Prefer local API /read.
+                const u2 = new URL(path);
+                if (u2.protocol !== 'file:') return;
+                // If the user edited the buffer while we were waiting, do not overwrite.
+                try{ if (b.modified || (b._changeTick|0) !== 0) return; }catch{}
+                // If API is unavailable, do not fall back to direct fetch for UNC/WSL (would spam console).
+                if (!_apiIsEnabled()){
+                  if (u2.host) return;
+                }
+                let t2;
+                let encDetected = 'utf-8';
+                let ff2 = 'unix';
+                let bom2 = false;
+                if (_apiIsEnabled()){
+                  const fsPath2 = _fsPathFromFileURL(u2);
+                  if (!fsPath2) return;
+                  const readApi = _apiBase + 'read?fs=' + encodeURIComponent(fsPath2);
+                  try{ t2 = await _fetchTextWithTimeout(readApi, 8000); _apiNoteSuccess(); }
+                  catch(eRead){ try{ _apiNoteFailure(eRead); }catch{} return; }
+                  // Best-effort metadata
+                  try{
+                    const info2 = await _fetchJSONWithTimeout(_apiBase + 'probe?fs=' + encodeURIComponent(fsPath2), 3500);
+                    if (info2){
+                      const encStr2 = String(info2.encoding||'').toLowerCase();
+                      if (encStr2.includes('cp932') || encStr2.includes('shift') || encStr2.includes('sjis')) encDetected = 'shift_jis';
+                      else encDetected = 'utf-8';
+                      if (info2.eol === 'dos' || info2.eol === 'unix' || info2.eol === 'mac') ff2 = info2.eol;
+                      if (encDetected==='utf-8' && info2.bom===true) bom2 = true;
+                    }
+                  }catch{}
+                } else {
+                  // Non-UNC local file URL: allow direct fetch as a last resort.
+                  try{ t2 = await _fetchTextSmart(path); }catch{ return; }
+                }
+
+                ff2 = (t2.indexOf('\r')>=0) ? 'dos' : ff2;
                 const hasBomChar = (t2.length>0 && t2.charCodeAt(0)===0xFEFF);
                 const norm = (hasBomChar ? t2.slice(1) : t2).replace(/\r\n?/g,'\n');
-                b.text = norm; b.savedText = norm; b._changeTick=0; b._savedTick=0; b.modified=false; b.enc='utf-8'; b.ff=ff2; b.bom=hasBomChar;
+                bom2 = bom2 || hasBomChar;
+
+                // Re-check: don't clobber if modified during read.
+                try{ if (b.modified || (b._changeTick|0) !== 0) return; }catch{}
+                b.text = norm; b.savedText = norm; b._changeTick=0; b._savedTick=0; b.modified=false; b.enc=encDetected; b.ff=ff2; b.bom=!!bom2;
                 // If current, reflect into editor without disturbing view state
                 if ((buffers.indexOf(b)|0) === (currentIdx|0)){
                   const stKeep = (editor && typeof editor.scrollTop==='number') ? (editor.scrollTop|0) : 0;
@@ -2162,9 +2309,24 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
   try{
     window.addEventListener('keydown', (e)=>{
       const now = Date.now();
-      _rawPush({ t:now, type:'raw-keydown', key:e.key, code:e.code, repeat:!!e.repeat, trusted:!!e.isTrusted, ctrl:e.ctrlKey, alt:e.altKey, meta:e.metaKey });
-      try{ _lastKeydownForAnom = { key:e.key, code:e.code, t:now }; }catch{}
+      // Avoid allocating raw log objects unless rawkeys is enabled.
+      try{
+        if (_optRawKeys){
+          _rawPush({ t:now, type:'raw-keydown', key:e.key, code:e.code, repeat:!!e.repeat, trusted:!!e.isTrusted, ctrl:e.ctrlKey, alt:e.altKey, meta:e.metaKey });
+        }
+      }catch{}
+      // Reuse anomaly tracking object to avoid per-key allocations.
+      try{
+        if (!_lastKeydownForAnom) _lastKeydownForAnom = { key:'', code:'', t:0 };
+        _lastKeydownForAnom.key = e.key;
+        _lastKeydownForAnom.code = e.code;
+        _lastKeydownForAnom.t = now;
+      }catch{}
       try{ const M = window.SIX_IME_METRICS; if (M && window._imeComposing===true){ M.events.keydown++; } }catch{}
+
+      // During IME composition, do not run typing-guard/rAF scheduling here.
+      try{ if (window._imeComposing===true || e.isComposing===true){ return; } }catch{}
+
       // タイピング中は重処理を抑止し、rAFでまとめて再描画（NORMAL/INSERTのみ、機能キー除外）
       try{
         const mode = (typeof _mode!== 'undefined')? _mode : 'NORMAL';
@@ -2205,7 +2367,12 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
       }catch{}
     }, true);
     window.addEventListener('keyup', (e)=>{
-      _rawPush({ t:Date.now(), type:'raw-keyup', key:e.key, code:e.code, repeat:!!e.repeat, trusted:!!e.isTrusted, ctrl:e.ctrlKey, alt:e.altKey, meta:e.metaKey });
+      // Avoid allocating raw log objects unless rawkeys is enabled.
+      try{
+        if (_optRawKeys){
+          _rawPush({ t:Date.now(), type:'raw-keyup', key:e.key, code:e.code, repeat:!!e.repeat, trusted:!!e.isTrusted, ctrl:e.ctrlKey, alt:e.altKey, meta:e.metaKey });
+        }
+      }catch{}
     }, true);
   }catch{}
   function _vbEnsureLayer(){
@@ -2570,8 +2737,25 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
     _renderListChars();
   }
 
+  // Debounced hlsearch update (typing can otherwise trigger full recompute per keystroke).
+  let _hlsearchUpdateTimer = null;
+  function _scheduleHlsearchUpdate(reason){
+    try{
+      if (!_optHlsearch || !(_lastSearch && _lastSearch.src)) return;
+      // Large buffer throttle: hlsearch recompute can be expensive on huge docs.
+      try{ if (_mode==='INSERT' && editor && (editor.value||'').length > 200000){ return; } }catch{}
+      if (_hlsearchUpdateTimer){ clearTimeout(_hlsearchUpdateTimer); _hlsearchUpdateTimer=null; }
+      _hlsearchUpdateTimer = setTimeout(()=>{
+        try{ _updateHlsearchFull(); }catch{}
+      }, 120);
+    }catch{}
+  }
+
   // ---- listchars rendering (minimal overlay layer) ----
   let _listLayer = null;
+  let _listRenderRaf = 0;
+  let _listScrollRetryTimer = 0;
+  let _listLastBeforeInput = null;
   function _listEnsureLayer(){
     try{
       if (!_listLayer){ _listLayer = document.createElement('div'); _listLayer.className='listchars-layer'; _listLayer.style.position='absolute'; _listLayer.style.left='0'; _listLayer.style.top='0'; _listLayer.style.right='0'; _listLayer.style.bottom='0'; _listLayer.style.pointerEvents='none'; _listLayer.style.zIndex='1'; }
@@ -2579,13 +2763,212 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
     }catch{}
   }
   function _listClear(){ try{ if(_listLayer){ while(_listLayer.firstChild){ _listLayer.removeChild(_listLayer.firstChild); } } }catch{} }
+  function _listRemoveRow(row1){
+    try{
+      if (!_listLayer) return;
+      const r = String(row1|0);
+      const nodes = _listLayer.querySelectorAll('[data-row]');
+      for (const el of nodes){
+        try{ if (el && el.dataset && el.dataset.row === r){ _listLayer.removeChild(el); } }catch{}
+      }
+    }catch{}
+  }
+  function _renderListCharsRow(row1, lines, topLine, realTotal){
+    try{
+      // outside viewport
+      const vis = _visibleLinesExact();
+      const endLine = topLine + vis - 1;
+      if (row1 < topLine || row1 > endLine) return;
+      const idx = (row1|0) - 1;
+      const isReal = idx >= 0 && idx < (realTotal|0);
+      if (!isReal) return;
+
+      const line = String(lines[idx]||'');
+      const yTop = (row1 - topLine) * LINE_HEIGHT;
+
+      // tab expander (same logic as full render)
+      const _exp = (s)=>{
+        if (!s || s.indexOf('\t')===-1) return s;
+        let _ts = 8; try{ const tsRaw = (window && window.SIX_OPTIONS && window.SIX_OPTIONS.tabstop); const ts = parseInt(tsRaw,10); if (ts && ts>0) _ts = ts; }catch{}
+        _measureSpan.textContent = ' ';
+        const spaceW = _measureSpan.getBoundingClientRect().width || 1;
+        const _charW = (ch)=>{ _measureSpan.textContent = ch; const w=_measureSpan.getBoundingClientRect().width; return (w && w>0)?w:spaceW; };
+        let out=''; let x=0;
+        for (let i=0;i<s.length;i++){
+          const ch=s[i];
+          if (ch==='\t'){
+            const col = Math.floor((x/spaceW)+1e-6);
+            const spaces = _ts - (col % _ts);
+            out += ' '.repeat(spaces);
+            x += spaces * spaceW;
+          } else {
+            out += ch;
+            x += _charW(ch);
+          }
+        }
+        return out;
+      };
+
+      // trailing run
+      let trailStart = line.length;
+      while (trailStart>0){
+        const cht = line.charAt(trailStart-1);
+        if (cht===' ' || cht==='\t' || cht==='\u3000') trailStart--; else break;
+      }
+      for (let c=0;c<line.length;c++){
+        const ch = line.charAt(c);
+        if (ch==='\t' || ch==='\u3000' || (c>=trailStart && ch===' ')){
+          _measureSpan.textContent = _exp(line.slice(0,c));
+          const x1 = _measureSpan.getBoundingClientRect().width;
+          _measureSpan.textContent = _exp(line.slice(0,c+1));
+          const x2 = _measureSpan.getBoundingClientRect().width;
+          const el = document.createElement('div');
+          el.className='listchar';
+          let sym = '';
+          if (ch==='\t') sym='▸';
+          else if (ch==='\u3000'){ sym='□'; el.className+=' listchar-ideospc'; }
+          else sym='·';
+          el.textContent = sym;
+          try{ el.dataset.row = String(row1); }catch{}
+          let _hs=0; try{ _hs=(editor.scrollLeft||0); }catch{}
+          el.style.position='absolute'; el.style.left=(x1-_hs)+'px'; el.style.top=yTop+'px'; el.style.height=LINE_HEIGHT+'px'; el.style.lineHeight=LINE_HEIGHT+'px'; el.style.fontSize='inherit'; el.style.fontFamily='var(--controlCharFont, "Segoe UI Symbol","Noto Sans Symbols 2","Cascadia Mono","Consolas",monospace)'; el.style.padding='0'; el.style.margin='0'; el.style.color='var(--controlCharColor, yellow)';
+          _listLayer.appendChild(el);
+        }
+      }
+
+      // EOL marker
+      if (!(window._imeComposing === true && row1 === (caretRow + 1))) {
+        _measureSpan.textContent = _exp(line);
+        const xEnd = _measureSpan.getBoundingClientRect().width;
+        let _hs=0; try{ _hs=(editor.scrollLeft||0); }catch{}
+        const elE = document.createElement('div');
+        elE.className='listchar-eol';
+        let ffColor = 'var(--controlCharColorLF, yellow)';
+        let ffKind = 'unix';
+        try{ const b=currentBuffer(); ffKind=(b&&b.ff)||'unix'; if(ffKind==='dos') ffColor='var(--controlCharColorCRLF, yellow)'; else if(ffKind==='mac') ffColor='rgba(200,80,80,0.65)'; }catch{}
+        let eolSym = '↲';
+        try{
+          const b = currentBuffer();
+          const isLastReal = (idx === realTotal-1);
+          const bufText = String(b && b.text || '');
+          const stillNoFinalLF = b ? !bufText.endsWith('\n') : false;
+          const dummyActive = !!(b && isLastReal && stillNoFinalLF);
+          if (dummyActive){
+            let dLF = 'yellow'; let dCRLF = 'yellow';
+            try{ if (window && window.THEME){ if (window.THEME.dummyLFColor) dLF = String(window.THEME.dummyLFColor); if (window.THEME.dummyCRLFColor) dCRLF = String(window.THEME.dummyCRLFColor); } }catch{}
+            ffColor = (ffKind === 'dos') ? dCRLF : dLF;
+            elE.dataset.dummyFinal = '1';
+          }
+        }catch{}
+        elE.textContent=eolSym;
+        try{ elE.dataset.row = String(row1); }catch{}
+        elE.style.position='absolute'; elE.style.left=(xEnd-_hs)+'px'; elE.style.top=yTop+'px'; elE.style.height=LINE_HEIGHT+'px'; elE.style.lineHeight=LINE_HEIGHT+'px'; elE.style.fontSize='inherit'; elE.style.fontFamily='var(--controlCharFont, "Segoe UI Symbol","Noto Sans Symbols 2","Cascadia Mono","Consolas",monospace)'; elE.style.color=ffColor; elE.style.margin='0'; elE.style.padding='0';
+        _listLayer.appendChild(elE);
+      }
+    }catch{}
+  }
+  function _tryListCharsFastPathAfterInput(e){
+    try{
+      if (!_optList) return false;
+      if (!_listLayer) return false;
+      if (window && window._imeComposing===true) return false;
+      if (document.body.classList.contains('is-scrolling')) return false;
+      try{ if (_editorTextLen() > 200000){ _listClear(); return true; } }catch{}
+      const it = String((e && e.inputType) || '');
+
+      // Enter: shift existing nodes down by one line (cheap) and re-render only the affected 2 rows.
+      if (it==='insertLineBreak' || it==='insertParagraph'){
+        const snap = _listLastBeforeInput;
+        _listLastBeforeInput = null;
+        if (!snap) return false;
+        // Only when scroll position is stable (no scroll) so topLine mapping is unchanged.
+        const beforeTop = snap.topLine|0;
+        const afterTop = _topLine()|0;
+        const beforeSt = snap.scrollTop|0;
+        const afterSt = (editor.scrollTop|0);
+        if (beforeTop !== afterTop) return false;
+        if (Math.abs(afterSt - beforeSt) > 1) return false;
+        const baseRow0 = snap.caretRow|0;
+        const insertRow1 = baseRow0 + 1; // 1-based
+        const topLine = afterTop;
+        const vis = _visibleLinesExact();
+        const endLine = topLine + vis - 1;
+        const nodes = Array.from(_listLayer.querySelectorAll('[data-row]'));
+        for (const el of nodes){
+          try{
+            const r = parseInt((el && el.dataset && el.dataset.row) ? el.dataset.row : '0', 10) || 0;
+            if (r > insertRow1){
+              const nr = r + 1;
+              try{ el.dataset.row = String(nr); }catch{}
+              try{ const t = parseFloat(el.style.top||'0')||0; el.style.top = (t + LINE_HEIGHT) + 'px'; }catch{}
+              if (nr < topLine || nr > endLine){ try{ _listLayer.removeChild(el); }catch{} }
+            }
+          }catch{}
+        }
+        // Re-render the split line and the new line.
+        _listRemoveRow(insertRow1);
+        _listRemoveRow(insertRow1 + 1);
+        const lines = _splitLines();
+        const realTotal = lines.length;
+        _renderListCharsRow(insertRow1, lines, topLine, realTotal);
+        _renderListCharsRow(insertRow1 + 1, lines, topLine, realTotal);
+        return true;
+      }
+
+      // Cheap path for typical typing within a line: update only the active row.
+      if (it==='insertText' || it==='insertFromPaste' || it==='deleteContentBackward' || it==='deleteContentForward'){
+        const row1 = (caretRow|0) + 1;
+        const topLine = _topLine()|0;
+        const lines = _splitLines();
+        const realTotal = lines.length;
+        _listRemoveRow(row1);
+        _renderListCharsRow(row1, lines, topLine, realTotal);
+        return true;
+      }
+    }catch{}
+    return false;
+  }
+  function _scheduleListCharsRender(reason){
+    try{
+      if (!_optList){ _listClear(); return; }
+      // Large buffer throttle: listchars depends on splitLines() + many DOM nodes; skip for big docs.
+      try{ if (_editorTextLen() > 200000){ _listClear(); return; } }catch{}
+      if (_listRenderRaf) return;
+      if (window && window.requestAnimationFrame){
+        _listRenderRaf = requestAnimationFrame(()=>{
+          _listRenderRaf = 0;
+          try{ _renderListChars(); }catch{}
+        });
+      } else {
+        try{ _renderListChars(); }catch{}
+      }
+    }catch{}
+  }
   function _renderListChars(){
     try{
       // #1234: Skip list chars rendering during continuous scroll
       if (document.body.classList.contains('is-scrolling')) {
         _listClear();
+        // Ensure we re-render once scrolling settles; otherwise the layer can stay blank.
+        try{
+          if (!_listScrollRetryTimer){
+            _listScrollRetryTimer = setTimeout(()=>{
+              _listScrollRetryTimer = 0;
+              try{
+                if (!_optList) return;
+                if (document.body.classList.contains('is-scrolling')){
+                  _scheduleListCharsRender('scrolling');
+                } else {
+                  _scheduleListCharsRender('scrollend');
+                }
+              }catch{}
+            }, 90);
+          }
+        }catch{}
         return;
       }
+      // Large buffer throttle: listchars depends on splitLines() + many DOM nodes; skip for big docs regardless of mode.
+      try{ if (_editorTextLen() > 200000){ _listClear(); return; } }catch{}
       if (!_optList){ _listClear(); return; }
       _listEnsureLayer(); _listClear();
       // Keep native textarea tab-size in sync with SIX_OPTIONS.tabstop
@@ -2652,6 +3035,7 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
             else if (ch==='\u3000'){ sym='□'; el.className+=' listchar-ideospc'; } // render ideographic space visibly (#462)
             else sym='·';
             el.textContent = sym;
+            try{ el.dataset.row = String(row); }catch{}
             let _hs=0; try{ _hs=(editor.scrollLeft||0); }catch{}
             el.style.position='absolute'; el.style.left=(x1-_hs)+'px'; el.style.top=yTop+'px'; el.style.height=LINE_HEIGHT+'px'; el.style.lineHeight=LINE_HEIGHT+'px'; el.style.fontSize='inherit'; el.style.fontFamily='var(--controlCharFont, "Segoe UI Symbol","Noto Sans Symbols 2","Cascadia Mono","Consolas",monospace)'; /* weight via CSS var on class */ el.style.padding='0'; el.style.margin='0'; el.style.color='var(--controlCharColor, yellow)';
             _listLayer.appendChild(el);
@@ -2693,6 +3077,7 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
               }
             }catch{}
             elE.textContent=eolSym;
+            try{ elE.dataset.row = String(row); }catch{}
             elE.style.position='absolute'; elE.style.left=(xEnd-_hs)+'px'; elE.style.top=yTop+'px'; elE.style.height=LINE_HEIGHT+'px'; elE.style.lineHeight=LINE_HEIGHT+'px'; elE.style.fontSize='inherit'; elE.style.fontFamily='var(--controlCharFont, "Segoe UI Symbol","Noto Sans Symbols 2","Cascadia Mono","Consolas",monospace)'; /* weight via CSS var on class */ elE.style.color=ffColor; elE.style.margin='0'; elE.style.padding='0';
             _listLayer.appendChild(elE);
           }
@@ -4909,6 +5294,9 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
   function _repositionCaret(opts){
     // During IME composition, avoid any layout-affecting measurements and DOM writes
     try{ if (window && window._imeComposing===true){ try{ window.SIX_IME_METRICS && (window.SIX_IME_METRICS.composingCalls.reposition++); }catch{} return; } }catch{}
+
+    // If native caret mode is active (typically for IME/huge buffers), skip overlay caret work.
+    try{ if (_nativeCaretEnabled && _mode==='INSERT' && !(opts && opts.force)){ return; } }catch{}
     
     opts = opts||{};
     const row1 = caretRow + 1;
@@ -5231,21 +5619,32 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
   function _touchBufferModified(){
     try{
       const b=currentBuffer();
+      // During IME composition, avoid copying huge editor.value and avoid per-keystroke tick bumps.
+      // We bump the change tick only once per composition session so modified state is visible,
+      // and then we flush b.text/UI once at compositionend.
+      try{
+        if (window && window._imeComposing===true){
+          if (b){
+            if (!_imeDeferredTickBumped){
+              b._changeTick = ((b._changeTick|0) + 1)|0;
+              b.modified = ((b._changeTick|0) !== (b._savedTick|0));
+              _imeDeferredTickBumped = true;
+            } else {
+              // Keep modified visible even if ticks are unchanged.
+              b.modified = true;
+            }
+          }
+          _imeDeferredModifyPending = true;
+          return;
+        }
+      }catch{}
+
       if (b){
         const now = String(editor.value||'');
         b.text = now;
         b._changeTick = ((b._changeTick|0) + 1)|0;
         b.modified = ((b._changeTick|0) !== (b._savedTick|0));
       }
-
-      // During IME composition, avoid heavy UI work on every input event.
-      // We'll flush once at compositionend.
-      try{
-        if (window && window._imeComposing===true){
-          _imeDeferredModifyPending = true;
-          return;
-        }
-      }catch{}
 
       // Any text edit (including programmatic via commands) hides mouse cursor
       _hideCursor();
@@ -5289,11 +5688,22 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
   // Flush deferred UI/session work after IME composition ends.
   function _flushImeDeferredModify(reason){
     try{
-      // Ensure buffer text matches editor value (no tick bump here).
-      try{ _syncModifiedFromTick(); }catch{}
-      // Hide cursor and persist session once (debounced).
-      try{ _hideCursor(); }catch{}
-      try{ _schedulePersist('ime-flush' + (reason?(':'+reason):'')); }catch{}
+      // Defer the heavy full-text sync to idle to reduce perceived IME lag.
+      const doFlush = ()=>{
+        try{ if (window && window._imeComposing===true) return; }catch{}
+        // Ensure buffer text matches editor value (no tick bump here).
+        try{ _syncModifiedFromTick(); }catch{}
+        // Hide cursor and persist session once (debounced).
+        try{ _hideCursor(); }catch{}
+        try{ _schedulePersist('ime-flush' + (reason?(':'+reason):'')); }catch{}
+      };
+      try{
+        if (window && typeof window.requestIdleCallback === 'function'){
+          window.requestIdleCallback(()=>{ try{ doFlush(); }catch{} }, { timeout: 350 });
+          return;
+        }
+      }catch{}
+      setTimeout(()=>{ try{ doFlush(); }catch{} }, 0);
     }catch{}
   }
   function _syncModifiedFromTick(){
@@ -5477,11 +5887,11 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
     // 3) スクロール補正と caret overlay 再配置
     try{ ensureScrolloff(); }catch{}
     try{ if (!(window && window._imeComposing===true)) _repositionCaret(); }catch{}
-    // 4) ガター更新前に listchars を一度クリアし再描画 (旧末尾行残留対策)
-    try{ _renderListChars(); }catch{}
-    // 5) ガター更新と二度目の listchars 再描画（caret オーバーレイ位置確定後の最終状態）
+    // 4) ガター更新前に listchars を一度クリア (旧末尾行残留対策)
+    try{ _listClear && _listClear(); }catch{}
+    // 5) ガター更新と listchars 再描画（caret オーバーレイ位置確定後の最終状態）
     try{ updateGutter(); }catch{}
-    try{ _renderListChars(); }catch{}
+    try{ if (_optList && _editorTextLen() <= 200000){ _renderListChars(); } }catch{}
   }
   function _makeSnapshot(){
     const b=currentBuffer();
@@ -5756,10 +6166,9 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
     } else {
       pos = { r: caretRow, c: caretCol };
     }
-    let final = pos;
-    for (let i=0;i<n;i++){
-      final = _insertTextAt(final.r, final.c, clip);
-    }
+    // Apply count in one shot to avoid O(n^2) behavior on large n.
+    const block = (n===1) ? clip : String(clip).repeat(n);
+    const final = _insertTextAt(pos.r, pos.c, block);
     _setCaret(final.r, final.c);
     _touchBufferModified(); ensureScrolloff(); _repositionCaret(); updateGutter();
   }
@@ -5771,15 +6180,22 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
     const beforeAll = String(editor.value||'');
     const lines = _splitLines();
     const insertAt = Math.max(0, Math.min(lines.length, (below ? (caretRow+1) : caretRow)));
-    const block = clip.split('\n');
-    const toInsert = [];
-    for (let i=0;i<n;i++) toInsert.push(...block);
-    const newLines = lines.slice(0, insertAt).concat(toInsert).concat(lines.slice(insertAt));
-    let out = newLines.join('\n');
+    // Build the inserted text without allocating huge intermediate arrays.
+    // Linewise repeat inserts a '\n' between blocks (equivalent to concatenating line arrays).
+    const insertText = (n===1) ? clip : (String(clip) + '\n').repeat(n-1) + String(clip);
+
+    const head = lines.slice(0, insertAt).join('\n');
+    const tail = lines.slice(insertAt).join('\n');
+    let out = '';
+    if (head){ out += head + '\n'; }
+    out += insertText;
+    if (tail){ out += '\n' + tail; }
     if (beforeAll.endsWith('\n') && !out.endsWith('\n')) out += '\n';
     editor.value = out;
     const newR = insertAt; // first inserted line
-    const col = _firstNonBlankColOf(newLines[newR]||'');
+    // Compute target line for caret without materializing the full newLines array.
+    const firstInsertedLine = String(clip).split(/\n/,1)[0] || '';
+    const col = _firstNonBlankColOf(firstInsertedLine);
     _setCaret(newR, col);
     _touchBufferModified(); ensureScrolloff(); _repositionCaret(); updateGutter();
   }
@@ -6237,8 +6653,14 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
       }catch{}
       _centerScrolloffOnce = false;
     } else {
-      if (caretLine1 < topLine + scrolloff){
-        const newTop = Math.max(1, caretLine1 - scrolloff);
+      // Near BOF/EOF, it may be impossible to satisfy full scrolloff.
+      // Reduce the effective margin based on available lines (EOF also includes virtual pad).
+      const so = Math.max(0, (scrolloff|0));
+      const soUp = Math.min(so, Math.max(0, caretLine1 - 1));
+      const soDown = Math.min(so, Math.max(0, (linesTotal - caretLine1) + (_eofPad|0)));
+
+      if (caretLine1 < topLine + soUp){
+        const newTop = Math.max(1, caretLine1 - soUp);
         if (newTop !== topLine) {
            // #1239: If scan-hold is active (caret mode), use smooth scroll instead of jump
            const sh = window._scanHold;
@@ -6281,7 +6703,7 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
                            // #1243: Cancel any animation started by _setEditorScrollTop above to prevent conflict
                            try{ if (__six_scroll_anim) { cancelAnimationFrame(__six_scroll_anim); __six_scroll_anim = null; } }catch{}
 
-                           const idealOffset = scrolloff; // UP: offset = scrolloff
+                           const idealOffset = soUp; // UP: offset = scrolloff (effective)
                            window._scanHoldTriggerScroll(dir, idealOffset);
                            return;
                        }
@@ -6292,8 +6714,8 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
                _setEditorScrollTop((newTop-1)*LINE_HEIGHT, (sh && sh.stepAnimation) ? { immediate: true } : opts); scrolled = true; 
            }
         }
-      } else if (caretLine1 > topLine + vis - scrolloff - 1){
-        let newTop = Math.max(1, caretLine1 - (vis - scrolloff - 1));
+      } else if (caretLine1 > topLine + vis - soDown - 1){
+        let newTop = Math.max(1, caretLine1 - (vis - soDown - 1));
         // EOF付近での過剰スクロールを防止 (#1203)
         newTop = Math.min(newTop, maxTopWithPad);
         // #1212: If we are near EOF and cannot scroll further to satisfy scrolloff,
@@ -6323,7 +6745,7 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
                        // #1243: Cancel any pending scroll animation to prevent conflict
                        try{ if (__six_scroll_anim) { cancelAnimationFrame(__six_scroll_anim); __six_scroll_anim = null; } }catch{}
 
-                       const idealOffset = vis - scrolloff - 1; // DOWN: offset = vis - scrolloff - 1
+                         const idealOffset = vis - soDown - 1; // DOWN: offset = vis - scrolloff - 1 (effective)
                        window._scanHoldTriggerScroll(dir, idealOffset);
                        return;
                    }
@@ -6334,10 +6756,11 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
         }
       }
     }
-    // スクロールが発生しなかった場合でも、force指定時（キャレット移動時）は描画更新を保証 (#1206)
-    if (!scrolled && force) {
-       try{ _repositionCaret(); updateGutter(); }catch{}
-    }
+     // スクロールが発生しなかった場合でも、force指定時（キャレット移動時）は caret の描画だけ保証。
+     // gutter/listchars は呼び出し側（キー処理等）で更新されるため、ここで二重更新しない (#1406)
+     if (!scrolled && force) {
+       try{ _repositionCaret(); }catch{}
+     }
 
     topLine = _topLine();
   // 末尾ページの先頭行（maxTop）は「全行数 - 可視行数 + 1」だが、EOF の下に 1 行分の余白を許容
@@ -6358,20 +6781,19 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
       // （EOF ジャンプ特別扱いは不要になったが、将来の拡張のためフラグは保持）
       const snapped = Math.floor(stCur/LINE_HEIGHT)*LINE_HEIGHT;
       if (Math.abs(snapped - stCur) > 0.01){ _setEditorScrollTop(snapped, { immediate:true }); }
-      // 念のため rAF で再度 floor スナップ（レイアウト遅延対策）。EOF だけでなく常時行うが、差分が出なければ軽微。
+      // 念のため rAF で再度 floor スナップ（レイアウト遅延対策）。差分がある時だけ補正し、
+      // それ以外は呼び出し側の描画に任せて不要な再描画を避ける (#1406)
       if (window.requestAnimationFrame){
         requestAnimationFrame(()=>{
           try{
-            // Skip rAF snapping during IME composition to avoid reflows
             if (window && window._imeComposing===true) return;
-            
-            // アニメーション中はスナップ処理のみスキップし、描画更新は行う (#1204)
-            if (!__six_scroll_anim) {
-              const st1 = (editor.scrollTop||0);
-              const flo1 = Math.floor(st1/LINE_HEIGHT)*LINE_HEIGHT;
-              if (Math.abs(flo1 - st1) > 0.01){ _setEditorScrollTop(flo1, { immediate:true }); }
+            if (__six_scroll_anim) return;
+            const st1 = (editor.scrollTop||0);
+            const flo1 = Math.floor(st1/LINE_HEIGHT)*LINE_HEIGHT;
+            if (Math.abs(flo1 - st1) > 0.01){
+              // _setEditorScrollTop(immediate) already triggers _repositionCaret()+updateGutter.
+              _setEditorScrollTop(flo1, { immediate:true });
             }
-            _repositionCaret(); updateGutter();
           }catch{}
         });
       }
@@ -6502,6 +6924,8 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
   function updateGutter(opts){
     // IME未確定中はガター更新を停止（高さ計算・DOM更新・transformによる再レイアウトを抑止）
     try{ if (window._imeComposing===true){ return; } }catch{}
+    // Large buffer throttle: avoid full splitLines/totalLines while actively typing.
+    try{ if (_mode==='INSERT' && !(opts && opts.force) && _editorTextLen() > 200000){ return; } }catch{}
     const T = (window.THEME || {});
     // #1189: inactive mode for scroll-hold (render all line numbers as inactive)
     const inactiveMode = !!(opts && opts.inactive);
@@ -6589,9 +7013,8 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
       const first = children[0];
       if (first){ first.style.marginTop = Math.abs(rem) > 0.01 ? (-rem)+'px' : '0px'; }
     }catch{}
-    // Keep listchars overlay refreshed with any gutter/text update
-    // 未確定中は listchars の再描画も停止
-    try{ if (!(window._imeComposing===true)) { _renderListChars(); } }catch{}
+    // listchars overlay is rendered on scroll frames and explicit text mutations.
+    // Avoid re-rendering here (caret moves call updateGutter frequently) to prevent flicker (#1406).
   }
 
   /*********************************************************
@@ -8579,6 +9002,8 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
       } catch {}
       // Allow IME in INSERT
       try{ if (editor){ editor.removeAttribute('inputmode'); editor.style.imeMode = ''; } }catch{}
+      // Default to overlay caret; native caret may be enabled dynamically during composition.
+      try{ _nativeCaretForceUntil = 0; _refreshCaretMode(); }catch{}
       // ユーザー編集を許可（INSERT のみ）
       try{ if (editor) editor.readOnly = false; }catch{}
       // If we previously hinted IME off by focus juggling, restore focus cleanly once here
@@ -8620,6 +9045,8 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
       // INSERT→NORMAL/VISUAL の直後は IME 視覚の一時ロックを入れて競合回避
       try{ if (_prevMode==='INSERT' && (m==='NORMAL' || m==='VISUAL')){ _imeVisualLockUntil = Date.now() + 400; } }catch{}
       _imeActive = false; try{ _applyCaretGradient(); }catch{}
+      // Leaving INSERT: always disable native caret mode.
+      try{ _nativeCaretForceUntil = 0; _setNativeCaretMode(false); }catch{}
       // OS IME も確実に閉じる（Esc等でINSERT離脱時）
       try{ if (_prevMode==='INSERT' && (m==='NORMAL' || m==='VISUAL')){ _imePost('off'); } }catch{}
     }
@@ -10036,9 +10463,15 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
   // Unified scroll handler: snap to line grid and render once per frame
   let _scrollRAF = 0;
   const scheduleScrollRender = ()=>{
+    // IME composition can fire frequent scroll events (e.g., scrollLeft auto-follow).
+    // Avoid scheduling/cancelling RAF on every event; we don't need overlay syncing while composing.
+    try{ if (window && window._imeComposing===true){ return; } }catch{}
     try{ if (_scrollRAF) cancelAnimationFrame(_scrollRAF); }catch{}
     _scrollRAF = requestAnimationFrame(()=>{
       try{
+        // During IME composition, keep this RAF handler lightweight to avoid IME lag on larger buffers.
+        try{ if (window && window._imeComposing===true){ return; } }catch{}
+
         // #1225: Skip scroll snapping during scan-hold smooth scroll to prevent fighting 1px updates
         const sh = (window && window.__sixScanHoldScrollActive);
         if (Date.now() >= _zoomGuardUntil && !sh){
@@ -10080,6 +10513,10 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
         const maxScroll = editor.scrollHeight - editor.clientHeight;
         const atEof = (maxScroll - st <= 1.5);
         updateGutter({ inactive: (sh && !as), noSnap: (sh || atEof) });
+
+        // listchars overlay: update on scroll frames only.
+        // Avoid re-rendering on mere caret moves to prevent flicker (#1406).
+        try{ if (_optList && !(window && window._imeComposing===true)) { _renderListChars(); } }catch{}
 
         _updatePosInfo();
         // Persist current buffer's view state (scroll and caret) on every scroll frame
@@ -10146,6 +10583,17 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
     let _imeBellLastAt = 0;
     editor.addEventListener('beforeinput', (e)=>{
       try{ const M = window.SIX_IME_METRICS; if (M && window._imeComposing===true){ M.events.beforeinput++; } }catch{}
+      // listchars fast-path: capture the pre-edit position for operations that shift line numbers (Enter)
+      try{
+        if (_mode === 'INSERT'){
+          const it = String((e && e.inputType) || '');
+          if (it==='insertLineBreak' || it==='insertParagraph'){
+            _listLastBeforeInput = { it, caretRow:(caretRow|0), scrollTop:(editor.scrollTop|0), topLine:(_topLine()|0) };
+          } else {
+            _listLastBeforeInput = null;
+          }
+        }
+      }catch{}
       // NORMAL/VISUAL/CMD では本文変更を全面禁止（未確定表示 insertCompositionText も含む）
       if (_mode !== 'INSERT'){
         try{ e.preventDefault(); }catch{}
@@ -10158,14 +10606,35 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
             if (now - _imeBellLastAt > 120){ _imeBellLastAt = now; try{ _triggerVisualBell && _triggerVisualBell(); }catch{} }
           }
         }catch{}
-        _debugPush({ t:Date.now(), type:'beforeinput-block', mode:_mode, inputType:e.inputType, data:e.data, ctrl:e.ctrlKey, alt:e.altKey, meta:e.metaKey, isComp:false });
+        try{ if (_optDebugKeys) _debugPush({ t:Date.now(), type:'beforeinput-block', mode:_mode, inputType:e.inputType, data:e.data, ctrl:e.ctrlKey, alt:e.altKey, meta:e.metaKey, isComp:false }); }catch{}
         return;
       }
+
+      // IME未確定中の insertCompositionText はブラウザに任せ、追加処理を極力避ける。
+      // (大きいテキストで editor.value を触ると高コストになりやすい)
+      try{
+        if (window && window._imeComposing===true){
+          const itIme = String((e && e.inputType) || '');
+          if (itIme === 'insertCompositionText' || itIme === 'insertFromComposition'){
+            try{ if (_optDebugKeys) _debugPush({ t:Date.now(), type:'beforeinput-ime', mode:_mode, inputType:itIme, isComp:true }); }catch{}
+            return;
+          }
+        }
+      }catch{}
+
       // #624: INSERTモードで削除/改行操作前のテキストを保持（直後差分判定用）
       try{
         const itCap = String(e.inputType||'');
         if (itCap && (itCap.startsWith('delete') || itCap==='insertLineBreak' || itCap==='insertParagraph')){
-          _prevTextBeforeInput = String(editor.value||'');
+          // Prefer buffer text to avoid expensive textarea.value materialization.
+          // During IME composition, do not capture large text snapshots.
+          if (window && window._imeComposing===true){
+            _prevTextBeforeInput = '';
+          } else {
+            const b0 = currentBuffer();
+            if (b0 && typeof b0.text === 'string') _prevTextBeforeInput = b0.text;
+            else _prevTextBeforeInput = String(editor.value||'');
+          }
         }
       }catch{}
       // #600: ダミーEOF改行位置での Enter は「ダミー→通常改行」置換にする（空行を作らない）
@@ -10173,7 +10642,8 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
         const it = String(e.inputType||'');
         if (it==='insertLineBreak' || it==='insertParagraph'){
           const b = currentBuffer();
-          const v = String(editor.value||'');
+          // Avoid reading editor.value (can be costly on huge/multi-line buffers).
+          const v = (b && typeof b.text === 'string') ? b.text : String(editor.value||'');
           const atEnd = (editor.selectionStart|0) === (editor.selectionEnd|0) && (editor.selectionStart|0) === v.length;
           // (#606) ダミー判定は「現在末尾LFが欠落しているか」のみ
           const dummyActive = !!(b && !v.endsWith('\n'));
@@ -10187,12 +10657,12 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
             try{ editor.selectionStart = editor.selectionEnd = newOff; }catch{}
             try{ const rc = _rcFromOffset(newOff); caretRow = rc.r; caretCol = rc.c; }catch{}
             _touchBufferModified(); ensureScrolloff(); _repositionCaret(); updateGutter();
-            try{ _renderListChars(); }catch{}
+            try{ _scheduleListCharsRender && _scheduleListCharsRender('dummy-eof-enter'); }catch{}
             return; // 処理済み
           }
         }
       }catch{}
-      _debugPush({ t:Date.now(), type:'beforeinput', mode:_mode, inputType:e.inputType, data:e.data, ctrl:e.ctrlKey, alt:e.altKey, meta:e.metaKey, isComp:false });
+      try{ if (_optDebugKeys) _debugPush({ t:Date.now(), type:'beforeinput', mode:_mode, inputType:e.inputType, data:e.data, ctrl:e.ctrlKey, alt:e.altKey, meta:e.metaKey, isComp:false }); }catch{}
     });
     // NORMAL/VISUAL/CMD 時の入力フォールバックガード (#491, #492, #522)
     // beforeinput で止めきれない実装差分（特に IME の insertFromComposition/insertCompositionText）に備え、
@@ -10225,12 +10695,12 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
               // オーバーレイ caret も復元オフセットへ同期して、行ジャンプ風の見え方を抑止（#530）
               try{ const rc = _rcFromOffset(off); caretRow = rc.r; caretCol = rc.c; _repositionCaret(); updateGutter(); }catch{}
             }
-            _debugPush({ t:Date.now(), type:'input-rollback', mode:_mode, inputType:it, data:e.data, ctrl:e.ctrlKey, alt:e.altKey, meta:e.metaKey, isComp:false });
+            try{ if (_optDebugKeys) _debugPush({ t:Date.now(), type:'input-rollback', mode:_mode, inputType:it, data:e.data, ctrl:e.ctrlKey, alt:e.altKey, meta:e.metaKey, isComp:false }); }catch{}
           }
           return;
         }
       }catch{}
-      _debugPush({ t:Date.now(), type:'input', mode:_mode, inputType:e.inputType, data:e.data, ctrl:e.ctrlKey, alt:e.altKey, meta:e.metaKey, isComp:false });
+      try{ if (_optDebugKeys) _debugPush({ t:Date.now(), type:'input', mode:_mode, inputType:e.inputType, data:e.data, ctrl:e.ctrlKey, alt:e.altKey, meta:e.metaKey, isComp:false }); }catch{}
     });
     editor.addEventListener('input', (e)=>{
       if (_mode === 'INSERT'){
@@ -10238,6 +10708,12 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
         _touchBufferModified();
         // INSERT内での入力（insert/delete/改行など）発生を記録 → 次のキャレットのみ移動で一度だけUndo区切りを積む
         try{ _insertSegDirty = true; }catch{}
+
+        // IME未確定中は追加処理を極力避ける（textarea/DOM/分割処理が行数依存で重くなりやすい）
+        if (window && window._imeComposing===true){
+          return;
+        }
+
         // sync overlay caret to native insertion point
         // During IME composition, avoid costly offset->(row,col) mapping on every keystroke.
         try{
@@ -10258,18 +10734,24 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
         // #637/#638: caret がダミー位置（末尾LF欠落 かつ EOF）での「文字挿入」では
         // 直ちに通常LFへ昇格: 末尾に\nを追加し caret を改行直前へ戻す（保存時LF無しを回避）。
         try{
-          const txt = String(editor.value||'');
-          const noFinalLF = !txt.endsWith('\n');
-          const caretAtEOF = (editor.selectionStart|0) === txt.length && (editor.selectionEnd|0) === txt.length;
-          const it = String(e && e.inputType || '');
-          const isInsertChar = it.startsWith('insert') && it!=='insertLineBreak' && it!=='insertParagraph';
-          if (noFinalLF && caretAtEOF && isInsertChar){
-            const withLF = txt + '\n';
-            editor.value = withLF;
-            const newOff = withLF.length - 1; // 改行直前
-            try{ editor.selectionStart = editor.selectionEnd = newOff; }catch{}
-            try{ const rc2 = _rcFromOffset(newOff); caretRow = rc2.r; caretCol = rc2.c; }catch{}
-            try{ const b=currentBuffer(); if (b){ b.text = String(editor.value||''); b.modified = true; } }catch{}
+          // NOTE: reading editor.value on every IME update can be O(N) for huge buffers.
+          // Skip this dummy-EOF promotion logic while composing; we only need it for committed text.
+          if (window._imeComposing===true){
+            // noop
+          } else {
+            const txt = String(editor.value||'');
+            const noFinalLF = !txt.endsWith('\n');
+            const caretAtEOF = (editor.selectionStart|0) === txt.length && (editor.selectionEnd|0) === txt.length;
+            const it = String(e && e.inputType || '');
+            const isInsertChar = it.startsWith('insert') && it!=='insertLineBreak' && it!=='insertParagraph';
+            if (noFinalLF && caretAtEOF && isInsertChar){
+              const withLF = txt + '\n';
+              editor.value = withLF;
+              const newOff = withLF.length - 1; // 改行直前
+              try{ editor.selectionStart = editor.selectionEnd = newOff; }catch{}
+              try{ const rc2 = _rcFromOffset(newOff); caretRow = rc2.r; caretCol = rc2.c; }catch{}
+              try{ const b=currentBuffer(); if (b){ b.text = String(editor.value||''); b.modified = true; } }catch{}
+            }
           }
         }catch{}
       }
@@ -10277,7 +10759,12 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
       if (window._imeComposing===true){
         // caret座標のみ軽量更新（上で同期済み）に留める
       } else {
-        _exactLineLockAdjust(); _repositionCaret(); updateGutter(); _updateHlsearchFull(); _updatePosInfo();
+        _exactLineLockAdjust(); _repositionCaret(); updateGutter();
+        try{
+          const fast = _tryListCharsFastPathAfterInput(e);
+          if (!fast){ _scheduleListCharsRender('input'); }
+        }catch{ try{ _scheduleListCharsRender('input'); }catch{} }
+        _scheduleHlsearchUpdate('input'); _updatePosInfo();
       }
       // #621: 最終行が改行のみ -> 改行削除で dummy へ移行した直後に色/記号が反映されないケースの強制再描画
       try{
@@ -10333,6 +10820,8 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
       try{
         // Guard: ignore transient selection changes during protected windows (e.g., right after save)
         try{ if (Date.now() < _selGuardUntil) return; }catch{}
+        // IME composition can cause noisy selection churn; keep this handler light.
+        try{ if (window && window._imeComposing===true) return; }catch{}
         if (_visualActive){
           // In VISUAL mode, keep overlay caret behavior consistent with our model.
           // For linewise VISUAL, preserve the caret column and only track the moving edge's ROW.
@@ -10367,19 +10856,42 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
         }
       }catch{}
       _repositionCaret(); updateGutter(); _updatePosInfo();
-      // #626: caret移動のみでも EOFダミー表示が最新状態になるよう即時再描画
-      try{ _renderListChars(); }catch{}
     });
-  editor.addEventListener('keyup', (e)=>{ _debugPush({ t:Date.now(), type:'keyup', mode:_mode, key:e.key, code:e.code, keyCode:e.keyCode, which:e.which, ctrl:e.ctrlKey, alt:e.altKey, meta:e.metaKey, isComp:_imeComposing }); if(e.key==='Enter') ensureScrolloff(); _repositionCaret(); updateGutter(); _updatePosInfo(); });
-  editor.addEventListener('click', ()=>{ _repositionCaret(); updateGutter(); _updatePosInfo(); });
+  editor.addEventListener('keyup', (e)=>{
+    const isComp = !!(window && window._imeComposing===true);
+    try{ if (_optDebugKeys) _debugPush({ t:Date.now(), type:'keyup', mode:_mode, key:e.key, code:e.code, keyCode:e.keyCode, which:e.which, ctrl:e.ctrlKey, alt:e.altKey, meta:e.metaKey, isComp }); }catch{}
+    // During IME composition, avoid costly caret/gutter recompute on keyup.
+    if (isComp) return;
+    try{ _requestCaretRender && _requestCaretRender(); }catch{}
+    try{ _updatePosInfo && _updatePosInfo(); }catch{}
+  });
+  editor.addEventListener('click', ()=>{
+    // Clicking during composition can be noisy; keep it light.
+    try{ if (window && window._imeComposing===true) return; }catch{}
+    try{ _requestCaretRender && _requestCaretRender(); }catch{}
+    try{ _updatePosInfo && _updatePosInfo(); }catch{}
+  });
     // IME composition events — #522: NORMAL/VISUAL では未確定の表示は許可するが、確定は捨てる
     let _imeComposing = false;
     let _blockedComposition = false;
     let _lastCompStartTs = 0;
     let _lastCompEndTs = 0;
     let _preCompSelS = 0, _preCompSelE = 0;
+    // #1416: Reduce textarea content during composition to lower native IME rendering cost on large buffers.
+    let _imeReducedText = false;
+    let _imeOrigFullText = '';
+    let _imeOrigOffset = 0;
+    let _imeOrigScrollTop = 0;
+    let _imeOrigScrollLeft = 0;
+    let _imeReducedStartLine = 0;
+    let _imeReducedEndLine = 0;
     editor.addEventListener('compositionstart', (e)=>{
       _imeComposing = true; _lastCompStartTs = Date.now();
+      try{ window._imeComposing = true; }catch{}
+      try{ _nativeCaretForceUntil = Date.now() + 1200; _refreshCaretMode('compositionstart#2'); }catch{}
+      // Reset reduced-text visual state at start (safety)
+      try{ document.body.classList.remove('ime-reduced-text'); }catch{}
+      try{ editor && editor.classList && editor.classList.remove('ime-reduced-text'); }catch{}
       try{
         const imeKeyMode = String((window && window.SIX_OPTIONS && window.SIX_OPTIONS.imeSwitchKey) || '').toLowerCase();
         if (_mode !== 'INSERT'){
@@ -10397,8 +10909,53 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
           _blockedComposition = false;
           _imeActive = true; // IME ON視覚
           try{ _applyCaretGradient(); }catch{}
+          // #1416: Reduce textarea to surrounding lines to speed up native IME rendering.
+          try{
+            const lines = _splitLines();
+            if (lines.length > 200){ // only for large buffers
+              const r = caretRow|0;
+              const contextLines = 50;
+              const startLine = Math.max(0, r - contextLines);
+              const endLine = Math.min(lines.length, r + contextLines + 1);
+              _imeOrigFullText = editor.value;
+              _imeOrigOffset = editor.selectionStart|0;
+              _imeOrigScrollTop = editor.scrollTop|0;
+              _imeOrigScrollLeft = editor.scrollLeft|0;
+              _imeReducedStartLine = startLine;
+              _imeReducedEndLine = endLine;
+              const subset = lines.slice(startLine, endLine);
+              const subsetText = subset.join('\n') + (endLine < lines.length || !_imeOrigFullText.endsWith('\n') ? '' : '\n');
+              editor.value = subsetText;
+              // Calculate new caret offset within subset.
+              let newOffset = 0;
+              for (let i = 0; i < r - startLine && i < subset.length; i++) newOffset += subset[i].length + 1;
+              try{
+                const curLine = String(subset[Math.max(0, Math.min(subset.length-1, (r-startLine)|0))] || '');
+                const cc = Math.max(0, Math.min(curLine.length, (caretCol|0)));
+                newOffset += cc;
+              }catch{ newOffset += (caretCol|0); }
+              editor.selectionStart = editor.selectionEnd = newOffset;
+              // Preserve caret's relative row position within the viewport.
+              try{
+                const lh = (typeof LINE_HEIGHT==='number' && LINE_HEIGHT>0) ? LINE_HEIGHT : 20;
+                const origTopLine = Math.floor((_imeOrigScrollTop|0) / lh);
+                const relRow = Math.max(0, (r - origTopLine)|0);
+                const reducedCaretRow = Math.max(0, (r - startLine)|0);
+                const vis = Math.max(1, Math.floor(((editor && editor.clientHeight)||0) / lh));
+                const maxTop = Math.max(0, subset.length - vis);
+                let topLineNew = (reducedCaretRow - relRow)|0;
+                if (topLineNew < 0) topLineNew = 0;
+                if (topLineNew > maxTop) topLineNew = maxTop;
+                editor.scrollTop = (topLineNew * lh)|0;
+              }catch{ editor.scrollTop = 0; }
+              try{ editor.scrollLeft = _imeOrigScrollLeft|0; }catch{}
+              _imeReducedText = true;
+              try{ document.body.classList.add('ime-reduced-text'); }catch{}
+              try{ editor && editor.classList && editor.classList.add('ime-reduced-text'); }catch{}
+            }
+          }catch{}
         }
-        _debugPush({ t:Date.now(), type:'compositionstart', mode:_mode, compData:e.data, ctrl:e.ctrlKey, alt:e.altKey, meta:e.metaKey, isComp:true });
+        try{ if (_optDebugKeys) _debugPush({ t:Date.now(), type:'compositionstart', mode:_mode, compData:e.data, ctrl:e.ctrlKey, alt:e.altKey, meta:e.metaKey, isComp:true }); }catch{}
       }catch{}
     });
     editor.addEventListener('compositionend', (e)=>{
@@ -10410,16 +10967,59 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
             editor.value = String(b.text||'');
           }
           try{ editor.selectionStart = _preCompSelS; editor.selectionEnd = _preCompSelE; }catch{}
+        } else if (_imeReducedText){
+          // #1416: Restore full text after IME commit in reduced mode.
+          try{
+            const committedSubset = editor.value;
+            const caretInSubset = editor.selectionStart|0;
+            // Rebuild full text with committed changes.
+            const origLines = _imeOrigFullText.split('\n');
+            const subsetLines = committedSubset.split('\n');
+            const startLine = _imeReducedStartLine|0;
+            const endLine = Math.max(startLine, Math.min(origLines.length, (_imeReducedEndLine|0)));
+            // Replace the subset range with committed subset.
+            origLines.splice(startLine, endLine - startLine, ...subsetLines);
+            const fullText = origLines.join('\n');
+            editor.value = fullText;
+            // Calculate final caret offset in full text.
+            let finalOffset = 0;
+            for (let i = 0; i < startLine; i++) finalOffset += origLines[i].length + 1;
+            finalOffset += caretInSubset;
+            editor.selectionStart = editor.selectionEnd = finalOffset;
+            editor.scrollTop = _imeOrigScrollTop|0;
+            editor.scrollLeft = _imeOrigScrollLeft|0;
+            // Update buffer text and sync caret.
+            const b = currentBuffer();
+            if (b) b.text = fullText;
+            const rc = _rcFromOffset(finalOffset);
+            caretRow = rc.r; caretCol = rc.c;
+          }catch{}
+          _imeReducedText = false;
+          _imeOrigFullText = '';
         }
       }catch{}
       _imeComposing = false; _blockedComposition = false; _lastCompEndTs = Date.now();
-      _repositionCaret(); updateGutter();
-      _debugPush({ t:Date.now(), type:'compositionend', mode:_mode, compData:e.data, ctrl:e.ctrlKey, alt:e.altKey, meta:e.metaKey, isComp:false });
+      try{ window._imeComposing = false; }catch{}
+      try{ document.body.classList.remove('ime-reduced-text'); }catch{}
+      try{ editor && editor.classList && editor.classList.remove('ime-reduced-text'); }catch{}
+      try{ _nativeCaretForceUntil = Date.now() + 220; _refreshCaretMode('compositionend#2'); }catch{}
+
+      // Sync overlay caret position once at commit time (skip for huge buffers).
+      try{
+        if (_editorTextLen() <= 200000){
+          const off = (editor && typeof editor.selectionStart==='number') ? (editor.selectionStart|0) : 0;
+          const rc = _rcFromOffset(off);
+          caretRow = rc.r; caretCol = rc.c;
+        }
+      }catch{}
+      try{ _requestCaretRender && _requestCaretRender(); }catch{}
+      try{ if (_optDebugKeys) _debugPush({ t:Date.now(), type:'compositionend', mode:_mode, compData:e.data, ctrl:e.ctrlKey, alt:e.altKey, meta:e.metaKey, isComp:false }); }catch{}
+      try{ setTimeout(()=>{ try{ _refreshCaretMode('post-composition#2'); }catch{} }, 260); }catch{}
     });
     editor.addEventListener('compositionupdate', (e)=>{
       try{
         // 未確定表示はブラウザに任せる。INSERT でも特別な処理なし。
-        _debugPush({ t:Date.now(), type:'compositionupdate', mode:_mode, compData:e.data, ctrl:e.ctrlKey, alt:e.altKey, meta:e.metaKey, isComp:true });
+        try{ if (_optDebugKeys) _debugPush({ t:Date.now(), type:'compositionupdate', mode:_mode, compData:e.data, ctrl:e.ctrlKey, alt:e.altKey, meta:e.metaKey, isComp:true }); }catch{}
         return;
       }catch{}
     });
@@ -10430,12 +11030,7 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
       try{
         if (_mode !== 'INSERT') return;
   // IME composition path removed
-        const v = String(editor.value||'');
-  if (!v) { return; }
-        const ch = v[v.length-1];
-        if (!ch){ return; }
-        const cp = ch.codePointAt(0)|0;
-  // Full-width alnum detection removed
+        // NOTE: keep this handler empty; reading editor.value here can be O(N) and hurts IME on huge buffers.
       }catch{}
     });
     // Also watch keydown of direct full-width alnum (rare cases where input fires after key processing with no composition events)
@@ -10462,6 +11057,15 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
            e.preventDefault(); e.stopPropagation(); return;
         }
       }catch{}
+
+      // IME composition (INSERT): let the browser/IME handle keys without running editor logic.
+      // Put this as early as possible to avoid per-key overhead on multi-line buffers.
+      try{
+        if (_mode === 'INSERT' && (window._imeComposing===true || e.isComposing===true)){
+          return;
+        }
+      }catch{}
+
       // If a scan-hold is actively handling this physical key, suppress native handlers
       try{ 
         if (e && e.code){ 
@@ -10471,7 +11075,7 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
       }catch{}
     // Globally consume Ctrl+U to avoid Edge opening view-source window (#447)
     if (e && e.ctrlKey && !e.altKey && !e.metaKey && (e.key==='u' || e.key==='U')){ try{ e.preventDefault(); e.stopPropagation(); }catch{} return; }
-    _debugPush({ t:Date.now(), type:'keydown', mode:_mode, key:e.key, code:e.code, keyCode:e.keyCode, which:e.which, ctrl:e.ctrlKey, alt:e.altKey, meta:e.metaKey, isComp:_imeComposing });
+    try{ if (_optDebugKeys) _debugPush({ t:Date.now(), type:'keydown', mode:_mode, key:e.key, code:e.code, keyCode:e.keyCode, which:e.which, ctrl:e.ctrlKey, alt:e.altKey, meta:e.metaKey, isComp:_imeComposing }); }catch{}
     // DEBUG GUARD (#523): investigate spurious 'l' motions in NORMAL with IME ON.
     // If key is reported as 'l' but original event has a printable key pressed that differs and no modifiers,
     // add lightweight console trace. (Will be removed after root cause isolated.)
@@ -12512,6 +13116,8 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
               const st0 = (editor.scrollTop||0);
               const st1 = Math.round(st0/LINE_HEIGHT)*LINE_HEIGHT;
               if (Math.abs(st1 - st0) > 0.25){ editor.scrollTop = st1; }
+              // If IME composition starts right after the jump, do not keep forcing expensive UI resync.
+              if (window && window._imeComposing===true) return;
               _repositionCaret(); updateGutter();
             }catch{}
           };
@@ -13629,6 +14235,15 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
       try{
       const _globalKeyRouter = (e)=>{
         try{
+          // IME composition (editor focused): do not run global routing logic.
+          // This reduces per-key overhead and avoids stalling composition rendering (SPACE conversion etc.).
+          try{
+            if ((window && window._imeComposing===true) || (e && e.isComposing===true)){
+              const ae0 = document.activeElement;
+              if (ae0 === editor || (e && e.target === editor)) return;
+            }
+          }catch{}
+
           try{ if (typeof _scanHold === 'object' && _scanHold && _scanHold.held && e && e.code && _scanHold.held.has(e.code)){ try{ e.preventDefault(); e.stopPropagation(); }catch{} return; } }catch{}
           if (_globalKeyRouting) return;
           // If a modal is open, or enc popup is visible, do not steal
@@ -15797,12 +16412,28 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
     const u = _ensureSlash(dirUrl);
     let list = await _listDirEntries(u);
     if (Array.isArray(list) && list.length > 0) return list;
+    // If this key recently hard-failed (HTTP 4xx), do not spin quick retries.
+    try{
+      const k0 = _ensureSlash(u)?.toString()||null;
+      const hf0 = (k0 && _dirHardFail) ? _dirHardFail.get(k0) : null;
+      if (hf0 && Number.isFinite(hf0.status) && (hf0.status|0) >= 400 && hf0.ts && (Date.now() - hf0.ts) < 30000){
+        return list;
+      }
+    }catch{}
     // UNC 全般（ホストがある file://）は列挙が揺れやすいので短時間で数回だけ再試行
     const isUnc = (function(){ try{ return (u && u.protocol==='file:' && !!u.host); }catch{ return false; } })();
     if (isUnc){
       // UNC は初回直後に空で返る揺らぎがあるため、再試行回数をやや増やす
       const delays = [250, 450, 800, 1200, 1800];
       for (const d of delays){
+        // If key hard-failed, stop retrying.
+        try{
+          const k1 = _ensureSlash(u)?.toString()||null;
+          const hf1 = (k1 && _dirHardFail) ? _dirHardFail.get(k1) : null;
+          if (hf1 && Number.isFinite(hf1.status) && (hf1.status|0) >= 400 && hf1.ts && (Date.now() - hf1.ts) < 30000){
+            break;
+          }
+        }catch{}
         // ベースが変わっていたら中断
         try{ const curKey = _ensureSlash(_fileBaseURL)?.toString()||null; if (!curKey || curKey !== _ensureSlash(u)?.toString()) break; }catch{}
         await new Promise(r=>setTimeout(r, d));
@@ -15811,13 +16442,21 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
         if (Array.isArray(again) && again.length > 0){ list = again; break; }
       }
       // なお空のままなら、バックグラウンド再試行スケジューラへ委譲
-      try{ const key = _ensureSlash(u)?.toString(); if (key) _scheduleDirRetry(key); }catch{}
+      try{
+        const key = _ensureSlash(u)?.toString();
+        const hf = (key && _dirHardFail) ? _dirHardFail.get(key) : null;
+        const hard = !!(hf && Number.isFinite(hf.status) && (hf.status|0) >= 400 && hf.ts && (Date.now() - hf.ts) < 30000);
+        if (key && !hard) _scheduleDirRetry(key);
+      }catch{}
     }
     return list;
   }
 
   // 空結果時のバックグラウンド再試行を管理（key: dirUrlString → {tries,timer}）
   const _dirRetryState = new Map();
+  // Hard failures (HTTP 4xx etc) should not be retried aggressively.
+  // key: dirUrlString → { ts, status }
+  const _dirHardFail = new Map();
   function _scheduleDirRetry(key){
     if (!_apiBase) return;
     // If API is currently unavailable (e.g. after long sleep), do not schedule noisy retries.
@@ -15831,9 +16470,20 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
     cur.timer = setTimeout(async ()=>{
       try{
         if (!_apiIsEnabled()) return;
-        const apiUrl2 = _apiBase + 'dir?cwd=' + encodeURIComponent(key);
+        // Prefer fs= for UNC/WSL to avoid cwd=file://... 400s.
+        let apiUrl2 = _apiBase + 'dir?cwd=' + encodeURIComponent(key);
+        try{
+          if (/^file:\/\//i.test(String(key||''))){
+            const u2 = new URL(String(key));
+            if (u2 && u2.protocol==='file:' && u2.host){
+              const fs2 = _fsPathFromFileURL(u2);
+              if (fs2){ apiUrl2 = _apiBase + 'dir?fs=' + encodeURIComponent(fs2); }
+            }
+          }
+        }catch{}
         const jx = await _fetchJSONWithTimeout(apiUrl2, 7000);
         try{ _apiNoteSuccess(); }catch{}
+        try{ if (jx && jx.error){ _dirCache.set(key, []); _dirRetryState.delete(key); return; } }catch{}
         if (jx && Array.isArray(jx.entries) && jx.entries.length){
           const arrx = jx.entries.map(e=>({ name: e.name, isDir: !!e.isDir, url: String(e.url||''), size: (typeof e.size==='number'?e.size:null), mtime: (typeof e.mtime==='number'?e.mtime:null) }));
           _dirCache.set(key, arrx);
@@ -15876,6 +16526,7 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
       // ホスト直下 (file:////host/) は _listDirEntries の対象外: shares は別経路で取得する
       try{ if (_isHostRoot(u)) return []; }catch{}
       const key = u.toString();
+      try{ if (_dirHardFail && _dirHardFail.delete) _dirHardFail.delete(key); }catch{}
       if (_dirCache.has(key)) return _dirCache.get(key);
       // URL 正規化ヘルパー（APIのentries.urlが省略/相対/Windowsパスの場合に補う）
       const makeEntryUrl = (baseUrlObj, name, isDir, urlField)=>{
@@ -15894,6 +16545,8 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
           let host = urlObj.host; // '' for local drive, 'server' for UNC
           const path = decodeURIComponent(urlObj.pathname || '');
           if (host){
+            // WSL: map wsl.localhost -> wsl$ for Windows UNC access
+            try{ if (String(host||'').toLowerCase()==='wsl.localhost') host = 'wsl$'; }catch{}
             // UNC: file:////server/share/... ; keep host as-is (wsl.localhost works on modern Windows).
             let p = ('\\\\' + host + path.replace(/\//g,'\\'));
             // Avoid trailing backslash; some hosts reject it (400).
@@ -15915,10 +16568,11 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
 
       // 1) ループバック API 優先（cwd=）。UNC は一時的無効化中でも試す。
       const isUncPre = (function(){ try{ return (u.protocol==='file:' && !!u.host); }catch{ return false; } })();
+      const isWslLocalhost = (function(){ try{ return (u.protocol==='file:' && String(u.host||'').toLowerCase()==='wsl.localhost'); }catch{ return false; } })();
       const apiCanTry = _apiIsEnabled();
       if (apiCanTry){
         try{
-          // UNC の場合は fs= 優先で列挙（Uri.LocalPath 解決の揺れを回避）
+          // UNC/WSL の場合は fs= 優先で列挙（cwd=file://... の 400 を避ける）
           if (isUncPre){
             try{
               const fsPath0 = winPathFromFileURL(u);
@@ -15941,6 +16595,8 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
                 let jf; const timeoutFs = 6000;
                 const tmo = (apiTimeoutMs!=null) ? Math.max(timeoutFs, apiTimeoutMs) : timeoutFs;
                 jf = await _fetchJSONWithTimeout(apiFs, tmo); try{ _apiNoteSuccess(); }catch{}
+                // Server may return 200 + {error:"..."} for invalid/unreachable dirs.
+                try{ if (jf && jf.error){ _dirCache.set(key, []); return []; } }catch{}
                 if (jf && Array.isArray(jf.entries)){
                   const arrFs = jf.entries.map(e=>{
                     const n = e.name; const d = !!e.isDir; const url = makeEntryUrl(u, n, d, e.url);
@@ -15950,10 +16606,11 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
                 }
                 return null;
               };
-              // Prefer \\wsl.localhost\... first, then fallback to \\wsl$\...
+              // Prefer \\host\... (already) first, then optional fallback.
               if (fsPath0){
                 try{ const r0 = await tryFs(fsPath0); if (r0) return r0; }catch(e0){ if (_apiIsEnabled()){ try{ _apiNoteFailure(e0); }catch{} } }
               }
+              try{ if (fsPathWslAlt && fsPath0 && String(fsPathWslAlt).toLowerCase() === String(fsPath0).toLowerCase()) fsPathWslAlt = null; }catch{}
               if (fsPathWslAlt){
                 try{ const r = await tryFs(fsPathWslAlt); if (r) return r; }catch(ea){ if (_apiIsEnabled()){ try{ _apiNoteFailure(ea); }catch{} } }
               }
@@ -15963,8 +16620,50 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
           let j;
           const isUnc = isUncPre;
           const timeout1 = (apiTimeoutMs!=null) ? Math.max((isUnc ? 6000 : 2000), apiTimeoutMs) : (isUnc ? 6000 : 2000);
-          try{ j = await _fetchJSONWithTimeout(apiUrl, timeout1); try{ _apiNoteSuccess(); }catch{} }catch(e){ if (_apiIsEnabled()){ try{ _apiNoteFailure(e); }catch{} } throw e; }
+          try{ 
+            j = await _fetchJSONWithTimeout(apiUrl, timeout1);
+            try{ _apiNoteSuccess(); }catch{}
+          }catch(e){
+            // For WSL file://wsl.localhost/... , try translating to \\wsl$\<distro>\... via fs= before giving up.
+            try{
+              const httpStatus = (e && Number.isFinite(e.status)) ? (e.status|0) : null;
+              if (isWslLocalhost && !(httpStatus && httpStatus >= 400)){
+                let fsPathWslAlt = null;
+                try{
+                  const p = decodeURIComponent(u.pathname||'');
+                  const segs = p.split('/').filter(s=>s.length>0);
+                  if (segs.length>=1){
+                    const distro = segs[0];
+                    const rest = segs.slice(1).join('\\');
+                    fsPathWslAlt = rest ? (`\\\\wsl$\\${distro}\\${rest}`) : (`\\\\wsl$\\${distro}`);
+                  }
+                }catch{}
+                if (fsPathWslAlt){
+                  try{
+                    const apiFs = _apiBase + 'dir?fs=' + encodeURIComponent(fsPathWslAlt);
+                    const tmo = (apiTimeoutMs!=null) ? Math.max(6000, apiTimeoutMs) : 6000;
+                    const jAlt = await _fetchJSONWithTimeout(apiFs, tmo);
+                    try{ _apiNoteSuccess(); }catch{}
+                    if (jAlt && Array.isArray(jAlt.entries)){
+                      const arrAlt = jAlt.entries.map(e=>{
+                        const n = e.name; const d = !!e.isDir; const url = makeEntryUrl(u, n, d, e.url);
+                        const sz = (typeof e.size === 'number') ? e.size : null;
+                        const mt = (typeof e.mtime === 'number') ? e.mtime : null;
+                        return { name: n, isDir: d, url, size: sz, mtime: mt };
+                      });
+                      if (arrAlt.length > 0){ _dirCache.set(key, arrAlt); return arrAlt; }
+                    }
+                  }catch(eAlt){
+                    if (_apiIsEnabled()){ try{ _apiNoteFailure(eAlt); }catch{} }
+                  }
+                }
+              }
+            }catch{}
+            if (_apiIsEnabled()){ try{ _apiNoteFailure(e); }catch{} }
+            throw e;
+          }
           if (j && Array.isArray(j.entries)){
+            try{ if (j && j.error){ _dirCache.set(key, []); return []; } }catch{}
             // API 正常応答: size / mtime も保持して外部変更検出の基礎情報に使う (#477)
             const arr = j.entries.map(e=>{
               const n = e.name; const d = !!e.isDir; const url = makeEntryUrl(u, n, d, e.url);
@@ -15998,6 +16697,11 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
           if (isHostFile){
             // HTTP 400 etc means API is reachable but path is invalid for host; don't prompt restart.
             try{ _apiNoteFailure(e); }catch{}
+            try{
+              if (e && Number.isFinite(e.status) && (e.status|0) >= 400){
+                _dirHardFail.set(key, { ts: Date.now(), status: (e.status|0) });
+              }
+            }catch{}
             try{ if (_apiShouldTripBreaker(e)) _apiPromptRestartOnce && _apiPromptRestartOnce('dir'); }catch{}
             return [];
           }
@@ -17230,6 +17934,14 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
   try{
     const earlyParentKey = (e)=>{
       try{
+        // IME composition (editor focused): do not intercept global parent-nav keys.
+        try{
+          if ((window && window._imeComposing===true) || (e && e.isComposing===true)){
+            const ae0 = document.activeElement;
+            if (ae0 === editor || (e && e.target === editor)) return;
+          }
+        }catch{}
+
         // 直近ログダンプ (Ctrl+Shift+U) — トーストに加えて Console へ詳細配列を出力
         if ((e.key==='u' || e.key==='U') && e.ctrlKey && e.shiftKey && !e.altKey && !e.metaKey){
           try{ const lastArr = _fileParentLogs.slice(-20); console.debug('[parentNav dump]', lastArr); }catch{}
@@ -18065,6 +18777,15 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
     try{
       const handler = (e)=>{
         try{
+          // IME composition (editor focused): let the browser/IME handle keys without running global shortcuts.
+          // This helps avoid main-thread stalls where composition UI updates get delayed.
+          try{
+            if ((window && window._imeComposing===true) || (e && e.isComposing===true)){
+              const ae0 = document.activeElement;
+              if (ae0 === editor || (e && e.target === editor)) return;
+            }
+          }catch{}
+
           const key = e.key;
           // Allow hard reload (Ctrl+F5) to bypass interception so browser can fetch fresh resources (#440)
           if (key === 'F5' && e.ctrlKey && !e.altKey && !e.metaKey){

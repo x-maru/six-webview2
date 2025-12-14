@@ -97,8 +97,32 @@ body { font: var(--fontBase, 18px)/20px Consolas, 'Courier New', monospace; over
 	/* Disable proportional kana/alt spacing if the font supports it (best-effort) */
 	font-feature-settings: "palt" 0, "halt" 0, "pkna" 0, "pwid" 0, "fwid" 0, "kern" 0; }
 #editor { caret-color: transparent; }
+
+/* Use native textarea caret during IME composition (overlay caret may be suppressed for perf). */
+body.use-native-caret #editor { caret-color: var(--nativeCaretColor, yellow) !important; }
+body.use-native-caret #caretLayer .caret { display: none !important; }
 /* Visual selection colors (native selection range) */
 #editor::selection { background: var(--selBg, cyan); color: var(--selFg, white); }
+
+/* #1418: While textarea is reduced during IME composition, hide the scrollbar THUMB only.
+   Track can remain visible to avoid layout/contrast issues. */
+body.ime-reduced-text #editor,
+#editor.ime-reduced-text {
+	/* Best-effort for engines supporting scrollbar-color */
+	scrollbar-color: transparent transparent !important;
+}
+body.ime-reduced-text #editor::-webkit-scrollbar-thumb,
+#editor.ime-reduced-text::-webkit-scrollbar-thumb,
+body.ime-reduced-text #editor::-webkit-scrollbar-thumb:hover,
+#editor.ime-reduced-text::-webkit-scrollbar-thumb:hover,
+body.ime-reduced-text #editor::-webkit-scrollbar-thumb:active,
+#editor.ime-reduced-text::-webkit-scrollbar-thumb:active {
+	background: transparent !important;
+	background-color: rgba(0,0,0,0) !important;
+	border-color: rgba(0,0,0,0) !important;
+	border: none !important;
+	box-shadow: none !important;
+}
 
 /* caret overlay placeholder */
 #caretLayer { position:absolute; top:0; left:var(--gw); right:0; bottom:0; pointer-events:none; z-index: 2; }
