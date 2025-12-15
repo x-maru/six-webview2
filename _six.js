@@ -12989,7 +12989,10 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
         if (wasLastRow && hadFinalLF && !hadBlankEOFLine){ out = prev + '\n'; }
         if (out !== prev){ editor.value = out; _touchBufferModified(); }
         _setCaret(rr+1, 0);
-        ensureScrolloff(); _repositionCaret(); updateGutter(); _setMode('INSERT'); return;
+        ensureScrolloff(); _repositionCaret(); updateGutter();
+        try{ _scheduleListCharsRender && _scheduleListCharsRender('open-below'); }catch{}
+        _setMode('INSERT');
+        return;
       }
       if (e.key==='O' && !e.ctrlKey && !e.metaKey && !e.altKey){
         e.preventDefault();
@@ -13005,7 +13008,10 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
         let out = newLines.join('\n');
         // (#597) EOF 付近の自動改行付与を廃止: ユーザー操作による行挿入のみを反映し末尾LFを強制しない
         if (out !== prev){ editor.value = out; _touchBufferModified(); }
-        _setCaret(rr, 0); ensureScrolloff(); _repositionCaret(); updateGutter(); _setMode('INSERT'); return;
+        _setCaret(rr, 0); ensureScrolloff(); _repositionCaret(); updateGutter();
+        try{ _scheduleListCharsRender && _scheduleListCharsRender('open-above'); }catch{}
+        _setMode('INSERT');
+        return;
       }
       if (e.key==='p' && !e.ctrlKey && !e.metaKey && !e.altKey){
         e.preventDefault();
