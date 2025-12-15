@@ -7643,6 +7643,7 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
           
           _execGrep(args.pat, args.flags, false, {
               path: args.path,
+              basedir: args.basedir,
               recursive: args.recursive,
               depth: args.depth,
               fileGlob: args.fileGlob
@@ -16663,7 +16664,18 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
             throw e;
           }
           if (j && Array.isArray(j.entries)){
-            try{ if (j && j.error){ _dirCache.set(key, []); return []; } }catch{}
+            try{
+              if (j && j.error){
+                try{
+                  if (opts && opts.__errorOut && !opts.__errorOut.message) {
+                    opts.__errorOut.message = String(j.error||'');
+                    opts.__errorOut.url = key;
+                  }
+                }catch{}
+                _dirCache.set(key, []);
+                return [];
+              }
+            }catch{}
             // API 正常応答: size / mtime も保持して外部変更検出の基礎情報に使う (#477)
             const arr = j.entries.map(e=>{
               const n = e.name; const d = !!e.isDir; const url = makeEntryUrl(u, n, d, e.url);
@@ -19394,7 +19406,7 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
       } else {
         header += `対象\t\t【${bName}】\n`;
       }
-      header += `検索時 A/a\t\t${caseLabel}\n`;
+      header += `検索時 A/a\t${caseLabel}\n`;
 
       // hitTotalOverride:
       // - undefined: derive from highlights length
@@ -19410,12 +19422,12 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
         hitStr = String(hitTotalOverride|0);
       }
       if (hitTotalOverride === null) {
-        header += `ヒット総数\t\t\n\n`;
+        header += `ヒット総数\t\n\n`;
       } else if (Number.isFinite(hitTotalOverride)) {
-        header += `ヒット総数\t\t${hitStr}件\n\n`;
+        header += `ヒット総数\t${hitStr}件\n\n`;
       } else {
         // default placeholder for legacy builder usage: caller should supply a number.
-        header += `ヒット総数\t\t\n\n`;
+        header += `ヒット総数\t\n\n`;
       }
       return header;
     }
@@ -19549,6 +19561,7 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
         const targetPath = options.path || '%';
         const recursive = !!options.recursive;
         const maxDepth = (typeof options.depth === 'number') ? options.depth : 0;
+      const basedirRawOpt = (options && options.basedir) ? String(options.basedir) : '';
       const fileGlobOpt = (options && options.fileGlob) ? String(options.fileGlob) : '';
       const hasExplicitFileGlob = !!fileGlobOpt;
 
@@ -19685,7 +19698,8 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
                                      
                                      const regex = _globToRegex(globPattern);
                                      extraInfo0 = { recursive: recursive, depth: maxDepth, basePath: basePathForHeader, fileGlob: globPattern };
-                                     try{ extraInfo0.cmdLine = _buildReproCmd(baseFlagStr0, targetPath, basePathForHeader, globPattern); }catch{}
+                                     // CMD欄の -basedir は入力値のまま表示する（フルパスへ正規化しない） (#1421)
+                                     try{ extraInfo0.cmdLine = _buildReproCmd(baseFlagStr0, targetPath, (basedirRawOpt || targetPath), globPattern); }catch{}
                                      // Open the result buffer now (blank hit total)
                                      extBufRef = _openExternalGrepResultBuffer(pat, targetPath, basePathForHeader, baseCaseLabel0, baseFlagStr0, extraInfo0);
                                      // Always show searching line immediately (even during directory listing).
@@ -19695,11 +19709,13 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
                                      // Grep の列挙は重めになりがちなので、少し長めのタイムアウト＋ログ抑止。
                                      // Also report progress during long recursive listing.
                                      const listProgress = { dirCount: 0, fileCount: 0, matchedCount: 0, startedTs: Date.now(), _lastYieldTs: 0 };
+                                     const listErrorOut = { message: '', url: '' };
                                      const listOpts = {
                                        timeoutMs: 8000,
                                        quiet: true,
                                        noRetrySchedule: true,
                                        matchNameOnly: hasExplicitFileGlob,
+                                       __errorOut: listErrorOut,
                                        __progress: listProgress,
                                        progressYieldMs: 200,
                                        onProgress: (p)=>{
@@ -19729,7 +19745,13 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
 
                                      if (files.length === 0) {
                                        // no files match: write message into the result buffer (no toast)
-                                       _updateExternalGrepResultBuffer(extBufRef, pat, targetPath, basePathForHeader, baseCaseLabel0, baseFlagStr0, [], [], extraInfo0, 0, 'grep: no files match ' + globPattern);
+                                       let msg = 'grep: no files match ' + globPattern;
+                                       try{
+                                         if (hasExplicitFileGlob && listErrorOut && listErrorOut.message) {
+                                           msg = 'grep: basedir not found: ' + (basedirRawOpt || targetPath) + '  (' + basePathForHeader + ')';
+                                         }
+                                       }catch{}
+                                       _updateExternalGrepResultBuffer(extBufRef, pat, targetPath, basePathForHeader, baseCaseLabel0, baseFlagStr0, [], [], extraInfo0, 0, msg);
                                          return 0;
                                      }
 
