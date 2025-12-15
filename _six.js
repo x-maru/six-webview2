@@ -136,10 +136,9 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
     try{
       const now = Date.now();
       const forced = now < (_nativeCaretForceUntil|0);
-      const composing = !!(window && window._imeComposing===true);
       const large = (_editorTextLen() > 200000);
       // For huge buffers, prefer native caret throughout INSERT to avoid expensive overlay caret work.
-      const want = forced || composing || (_mode==='INSERT' && large);
+      const want = forced || (_mode==='INSERT' && large);
       _setNativeCaretMode(want);
     }catch{}
   }
@@ -452,7 +451,6 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
     if (editor){
       editor.addEventListener('compositionstart', ()=>{
         try{ window._imeComposing = true; }catch{}
-        try{ _nativeCaretForceUntil = Date.now() + 1200; _refreshCaretMode(); }catch{}
         try{ _imeDeferredTickBumped = false; _imeDeferredModifyPending = false; }catch{}
         try{
           const M = window.SIX_IME_METRICS; if (M){
@@ -476,8 +474,6 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
       // 仕様(#1022): 未確定文字の確定瞬間では何もしない（IMEは継続ONとみなす）
       editor.addEventListener('compositionend',   ()=>{
         try{ window._imeComposing = false; }catch{}
-        // Keep native caret briefly after commit to avoid overlay lag when a new composition starts immediately.
-        try{ _nativeCaretForceUntil = Date.now() + 220; _refreshCaretMode(); }catch{}
 
         // Sync overlay caret position once at commit time (skip for huge buffers).
         try{
@@ -5292,8 +5288,14 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
    * Caret / Stripe
    *********************************************************/
   function _repositionCaret(opts){
-    // During IME composition, avoid any layout-affecting measurements and DOM writes
-    try{ if (window && window._imeComposing===true){ try{ window.SIX_IME_METRICS && (window.SIX_IME_METRICS.composingCalls.reposition++); }catch{} return; } }catch{}
+    // During IME composition, avoid heavy overlay work by default.
+    // Allow a forced one-shot reposition to keep stripe/caret aligned when we intentionally adjust scrollTop (e.g. reduced-text mode).
+    try{
+      if (window && window._imeComposing===true){
+        try{ window.SIX_IME_METRICS && (window.SIX_IME_METRICS.composingCalls.reposition++); }catch{}
+        if (!(opts && opts.force)) return;
+      }
+    }catch{}
 
     // If native caret mode is active (typically for IME/huge buffers), skip overlay caret work.
     try{ if (_nativeCaretEnabled && _mode==='INSERT' && !(opts && opts.force)){ return; } }catch{}
@@ -10900,7 +10902,6 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
     editor.addEventListener('compositionstart', (e)=>{
       _imeComposing = true; _lastCompStartTs = Date.now();
       try{ window._imeComposing = true; }catch{}
-      try{ _nativeCaretForceUntil = Date.now() + 1200; _refreshCaretMode('compositionstart#2'); }catch{}
       // Reset reduced-text visual state at start (safety)
       try{ document.body.classList.remove('ime-reduced-text'); }catch{}
       try{ editor && editor.classList && editor.classList.remove('ime-reduced-text'); }catch{}
@@ -10921,22 +10922,53 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
           _blockedComposition = false;
           _imeActive = true; // IME ON視覚
           try{ _applyCaretGradient(); }catch{}
+          // #1426: Sync caretRow/caretCol from native selection before reduced-text mode.
+          // This prevents IME insertion point drifting away from overlay caret.
+          let _imeSelOff0 = 0;
+          let _imeLinesRaw0 = null;
+          try{ _imeSelOff0 = (editor && typeof editor.selectionStart==='number') ? (editor.selectionStart|0) : 0; }catch{}
+          try{ _imeLinesRaw0 = _splitLinesRaw && _splitLinesRaw(); }catch{ _imeLinesRaw0 = null; }
+          try{
+            if (_imeLinesRaw0 && Array.isArray(_imeLinesRaw0)){
+              let o = Math.max(0, _imeSelOff0|0);
+              let rr = 0, cc = 0;
+              for (let r=0; r<_imeLinesRaw0.length; r++){
+                const len = String(_imeLinesRaw0[r]||'').length;
+                if (o <= len){ rr = r; cc = o; break; }
+                o -= (len + 1);
+                rr = r+1; cc = 0;
+              }
+              // clamp to EOF
+              if (rr >= _imeLinesRaw0.length){ rr = Math.max(0, _imeLinesRaw0.length-1); cc = String(_imeLinesRaw0[rr]||'').length; }
+              caretRow = rr|0; caretCol = cc|0;
+            } else {
+              const rc = _rcFromOffset(_imeSelOff0|0);
+              caretRow = rc.r|0; caretCol = rc.c|0;
+            }
+          }catch{}
+          try{ _repositionCaret && _repositionCaret(); }catch{}
           // #1416: Reduce textarea to surrounding lines to speed up native IME rendering.
           try{
-            const lines = _splitLines();
-            if (lines.length > 200){ // only for large buffers
-              const r = caretRow|0;
+            const lines = (_imeLinesRaw0 && Array.isArray(_imeLinesRaw0)) ? _imeLinesRaw0 : (_splitLinesRaw && _splitLinesRaw());
+            if (lines && lines.length > 200){ // only for large buffers
+              const r = Math.max(0, Math.min(lines.length-1, caretRow|0));
               const contextLines = 50;
               const startLine = Math.max(0, r - contextLines);
               const endLine = Math.min(lines.length, r + contextLines + 1);
               _imeOrigFullText = editor.value;
-              _imeOrigOffset = editor.selectionStart|0;
+              _imeOrigOffset = (_imeSelOff0|0);
               _imeOrigScrollTop = editor.scrollTop|0;
               _imeOrigScrollLeft = editor.scrollLeft|0;
+              // Preserve "bottom slack" (visible EOF padding) to avoid the caret jumping down when blank lines are visible.
+              let _imeOrigBottomSlackPx = 0;
+              try{
+                const max0 = Math.max(0, ((editor.scrollHeight|0) - (editor.clientHeight|0))|0);
+                _imeOrigBottomSlackPx = Math.max(0, (max0 - (_imeOrigScrollTop|0))|0);
+              }catch{}
               _imeReducedStartLine = startLine;
               _imeReducedEndLine = endLine;
               const subset = lines.slice(startLine, endLine);
-              const subsetText = subset.join('\n') + (endLine < lines.length || !_imeOrigFullText.endsWith('\n') ? '' : '\n');
+              const subsetText = subset.join('\n');
               editor.value = subsetText;
               // Calculate new caret offset within subset.
               let newOffset = 0;
@@ -10947,23 +10979,40 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
                 newOffset += cc;
               }catch{ newOffset += (caretCol|0); }
               editor.selectionStart = editor.selectionEnd = newOffset;
-              // Preserve caret's relative row position within the viewport.
+              // #1427: Now that textarea is reduced, sync caret to reduced coordinates.
+              // This keeps overlay caret aligned with the IME insertion point, especially near EOF padding.
+              try{
+                const off2 = (editor && typeof editor.selectionStart==='number') ? (editor.selectionStart|0) : (newOffset|0);
+                const rc2 = _rcFromOffset(off2|0);
+                caretRow = rc2.r|0; caretCol = rc2.c|0;
+              }catch{}
+              // Preserve scroll position.
+              // If EOF padding/blank lines are visible (bottom slack > 0), preserve that slack.
+              // Otherwise preserve caret's relative row position within the viewport.
               try{
                 const lh = (typeof LINE_HEIGHT==='number' && LINE_HEIGHT>0) ? LINE_HEIGHT : 20;
-                const origTopLine = Math.floor((_imeOrigScrollTop|0) / lh);
-                const relRow = Math.max(0, (r - origTopLine)|0);
-                const reducedCaretRow = Math.max(0, (r - startLine)|0);
-                const vis = Math.max(1, Math.floor(((editor && editor.clientHeight)||0) / lh));
-                const maxTop = Math.max(0, subset.length - vis);
-                let topLineNew = (reducedCaretRow - relRow)|0;
-                if (topLineNew < 0) topLineNew = 0;
-                if (topLineNew > maxTop) topLineNew = maxTop;
-                editor.scrollTop = (topLineNew * lh)|0;
-              }catch{ editor.scrollTop = 0; }
+                const newMax = Math.max(0, ((editor.scrollHeight|0) - (editor.clientHeight|0))|0);
+                if ((_imeOrigBottomSlackPx|0) > 0){
+                  const stNew = Math.max(0, Math.min(newMax, (newMax - (_imeOrigBottomSlackPx|0))|0));
+                  editor.scrollTop = stNew;
+                } else {
+                  const origTopLine = Math.floor((_imeOrigScrollTop|0) / lh);
+                  const relRow = Math.max(0, (r - origTopLine)|0);
+                  const reducedCaretRow = Math.max(0, (r - startLine)|0);
+                  const vis = Math.max(1, Math.floor(((editor && editor.clientHeight)||0) / lh));
+                  const maxTop = Math.max(0, subset.length - vis);
+                  let topLineNew = (reducedCaretRow - relRow)|0;
+                  if (topLineNew < 0) topLineNew = 0;
+                  if (topLineNew > maxTop) topLineNew = maxTop;
+                  editor.scrollTop = (topLineNew * lh)|0;
+                }
+              }catch{ /* keep browser default clamp */ }
               try{ editor.scrollLeft = _imeOrigScrollLeft|0; }catch{}
               _imeReducedText = true;
               try{ document.body.classList.add('ime-reduced-text'); }catch{}
               try{ editor && editor.classList && editor.classList.add('ime-reduced-text'); }catch{}
+              // Ensure overlay caret matches the (preserved) visual position after scrollTop adjustment.
+              try{ _repositionCaret && _repositionCaret({ force:true }); }catch{}
             }
           }catch{}
         }
@@ -11014,7 +11063,6 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
       try{ window._imeComposing = false; }catch{}
       try{ document.body.classList.remove('ime-reduced-text'); }catch{}
       try{ editor && editor.classList && editor.classList.remove('ime-reduced-text'); }catch{}
-      try{ _nativeCaretForceUntil = Date.now() + 220; _refreshCaretMode('compositionend#2'); }catch{}
 
       // Sync overlay caret position once at commit time (skip for huge buffers).
       try{
