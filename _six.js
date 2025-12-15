@@ -5839,10 +5839,13 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
         const re = Math.max(_visualAnchorR, caretRow);
         const sOff = _offsetFromRC(rs, 0);
         const eOff = _offsetFromRC(re, (_splitLines()[re]||'').length);
+        // setSelectionRange triggers a 'select' event; guard against it overriding caretRow.
+        try{ _visSelGuardUntil = Date.now() + 160; }catch{}
         editor.setSelectionRange(sOff, eOff);
       } else {
         const sOff = _offsetFromRC(_visualAnchorR, _visualAnchorC);
         const eOff = _offsetFromRC(caretRow, caretCol);
+        try{ _visSelGuardUntil = 0; }catch{}
         if (sOff <= eOff) editor.setSelectionRange(sOff, eOff); else editor.setSelectionRange(eOff, sOff);
       }
     }catch{}
@@ -6444,6 +6447,7 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
    *********************************************************/
   let _scrollGuardUntil = 0; // temporary guard to suppress auto scroll adjustments
   let _selGuardUntil = 0;    // temporary guard to suppress selection-driven caret sync (e.g., right after save)
+  let _visSelGuardUntil = 0; // suppress select-driven caret sync right after programmatic VISUAL selection updates
   let _skipEnsureOnceAfterSwitch = false; // skip the next ensureScrolloff once right after buffer switch
   let _lastBufferSwitchAt = 0; // timestamp of last successful buffer switch
   // Prefer not to scroll on the very first motion after a buffer switch when caret is already visible (#415 case1)
@@ -10827,15 +10831,22 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
           // In VISUAL mode, keep overlay caret behavior consistent with our model.
           // For linewise VISUAL, preserve the caret column and only track the moving edge's ROW.
           if (_visualLinewise){
+            // Ignore programmatic selection changes from _updateVisualSelection.
+            try{ if (Date.now() < _visSelGuardUntil) return; }catch{}
             const s = editor.selectionStart|0;
             const e = editor.selectionEnd|0;
-            const a = _offsetFromRC(_visualAnchorR, _visualAnchorC)|0;
-            const ds = Math.abs(s - a);
-            const de = Math.abs(e - a);
-            const offEdge = (de >= ds) ? e : s;
+            // Use selectionDirection when available to find the moving edge.
+            // - backward: caret at selectionStart
+            // - forward/none: caret at selectionEnd
+            let offEdge = e;
+            try{ if (String(editor.selectionDirection||'') === 'backward') offEdge = s; }catch{}
             const rc = _rcFromOffset(offEdge);
             // Keep column as-is to avoid jumping to line head/tail when entering with 'V' (#448)
-            caretRow = rc.r;
+            // Clamp to non-phantom line range (exclude raw trailing empty line when text ends with '\n').
+            try{
+              const maxRow = Math.max(0, (_splitLines().length|0) - 1);
+              caretRow = Math.max(0, Math.min(maxRow, rc.r|0));
+            }catch{ caretRow = rc.r|0; }
             // caretCol: no change
           } else {
             // Characterwise VISUAL: follow the farther endpoint fully (row+col)
