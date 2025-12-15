@@ -18953,6 +18953,17 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
             // If not allowed (text filter + digit), fall through so the key is handled by cmdinput
           }
 
+          // Grep dialog is a special modal: do not perform global tab switching.
+          // Let the dialog handle F1–F3, but block other function keys to avoid host defaults.
+          const grepOpen = !!(document.getElementById('grepDialog') || (window._grepDialogOpen===true));
+          if (grepOpen){
+            if (/^F[1-3]$/.test(key)) return; // let grep dialog handle
+            if (/^F\d{1,2}$/i.test(key)){
+              try{ e.preventDefault(); e.stopPropagation(); }catch{}
+              return;
+            }
+          }
+
           // When any modal or non-buf popup is open, consume function keys to avoid host defaults (except F10 handled above)
           if (isModalOpen || encOpen || (fileOpenReal && key!=='F1')){
             if (/^F\d{1,2}$/i.test(key)){ try{ e.preventDefault(); e.stopPropagation(); }catch{} }
@@ -18960,7 +18971,7 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
           }
 
           // F1–F8: direct tab switching (not in CMD)
-          if (/^F[1-8]$/.test(key) && !inCmd){
+          if (/^F[1-8]$/.test(key) && !inCmd && !grepOpen){
             try{ e.preventDefault(); e.stopPropagation(); }catch{}
             const n = parseInt(key.slice(1), 10);
             const targetIdx = n - 1;
@@ -18993,7 +19004,7 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
       const box = document.createElement('div');
       // Match Help modal style (opaque background, border)
       // Use var(--font-size) for text size to match body
-      box.style.cssText = 'background:var(--six-modal-bg, #1e1e1e); border:1px solid var(--six-border, #444); color:var(--text-color); padding:16px; width:400px; max-width:90%; box-shadow:0 4px 12px rgba(0,0,0,0.5); display:flex; flex-direction:column; gap:12px; border-radius:4px; font-size:var(--font-size, 16px);';
+      box.style.cssText = 'background:var(--six-modal-bg, #1e1e1e); border:1px solid var(--six-border, #444); color:var(--text-color); padding:16px; width:640px; max-width:92%; box-shadow:0 4px 12px rgba(0,0,0,0.5); display:flex; flex-direction:column; gap:12px; border-radius:4px; font-size:var(--font-size, 16px);';
       modal.appendChild(box);
 
       // Title
@@ -19063,11 +19074,302 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
 
       // Target Label
       const targetLabel = document.createElement('div');
-      // Default to current buffer, but if we support changing it later, this label might need update.
-      // For now, the dialog only supports current buffer search.
-      targetLabel.textContent = '検索対象：このバッファ';
-      targetLabel.style.cssText = 'font-size:0.85em; color:var(--text-dim); margin-top:1rem;';
+      targetLabel.textContent = '検索対象';
+      targetLabel.style.cssText = 'font-size:0.85em; color:var(--text-dim); margin-top:1rem; margin-bottom:-6px;';
       box.appendChild(targetLabel);
+
+      // Target mode buttons + path inputs
+      let _grepTargetMode = 'buffer'; // 'buffer' | 'dirfiles' | 'files'
+      let _grepPathLayout = 'single'; // 'single' | 'dir' (buffer mode does not change this)
+      const _palGray = '#9aa0aa';
+      const _palGreen = '#49e26f';
+
+      const targetWrap = document.createElement('div');
+      // Increase vertical breathing room around the target buttons (~1.5x)
+      targetWrap.style.cssText = 'display:flex; flex-direction:column; gap:12px;';
+
+      const targetBtnRow = document.createElement('div');
+      targetBtnRow.style.cssText = 'display:flex; gap:6px; align-items:center; justify-content:flex-start; margin:9px 0;';
+
+      const _mkTargetBtn = (label)=>{
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        // Do not include in Tab order (focus should stay on inputs/buttons like Execute/Cancel)
+        btn.tabIndex = -1;
+        btn.textContent = label;
+        btn.style.cssText = [
+          'border:1px solid #2a3244',
+          'background:#1a2030',
+          'color:#e6e6e6',
+          'border-radius:6px',
+          'padding:3px 6px',
+          'cursor:pointer',
+          "font:11px/1.2 system-ui, -apple-system, 'Segoe UI', sans-serif",
+          'opacity:0.92',
+          'user-select:none',
+          'outline:none',
+          'white-space:nowrap'
+        ].join(';');
+        // Prevent focus change on mouse click (like overlay palette)
+        btn.addEventListener('mousedown', (e)=>{ try{ e.preventDefault(); }catch{} });
+        return btn;
+      };
+
+      const btnThisBuf = _mkTargetBtn('このバッファ');
+      const btnDirFiles = _mkTargetBtn('ディレクトリ+ファイル指定');
+      const btnFiles = _mkTargetBtn('ファイル指定');
+
+      // F-key tags (like :e popup breadcrumb)
+      const _wrapWithFKey = (btn, fKey, titleText, onClick)=>{
+        const wrap = document.createElement('div');
+        wrap.style.position = 'relative';
+        wrap.style.display = 'inline-flex';
+        wrap.style.alignItems = 'flex-end';
+        wrap.appendChild(btn);
+        try{
+          const tag = document.createElement('div');
+          tag.className = 'fkey-tag';
+          tag.textContent = fKey;
+          tag.title = titleText || fKey;
+          tag.style.cssText = 'position:absolute; left:0.8rem; top:-10px; display:inline-flex; align-items:center; justify-content:center; padding:2px 6px; font:11px/1.15 system-ui, -apple-system,\'Segoe UI\',sans-serif; background:#1a2030; color:#e6e6e6; border:1px solid #2a3244; border-radius:6px; line-height:1.1; pointer-events:auto; cursor:pointer; user-select:none; box-shadow:0 4px 10px rgba(0,0,0,0.4); opacity:0.95;';
+          tag.addEventListener('mousedown', (ev)=>{ try{ ev.preventDefault(); ev.stopPropagation(); }catch{} });
+          tag.addEventListener('click', (ev)=>{ try{ ev.preventDefault(); ev.stopPropagation(); }catch{}; try{ onClick && onClick(); }catch{} });
+          wrap.appendChild(tag);
+        }catch{}
+        return wrap;
+      };
+
+      const wrapThis = _wrapWithFKey(btnThisBuf, 'F1', 'F1 で「このバッファ」', ()=>{ _grepTargetMode='buffer'; _syncTargetUI(); try{ _syncExecEnabled(); }catch{} });
+      const wrapDir  = _wrapWithFKey(btnDirFiles, 'F2', 'F2 で「ディレクトリ+ファイル指定」', ()=>{ _grepTargetMode='dirfiles'; _syncTargetUI(); try{ _syncExecEnabled(); }catch{} });
+      const wrapFile = _wrapWithFKey(btnFiles, 'F3', 'F3 で「ファイル指定」', ()=>{ _grepTargetMode='files'; _syncTargetUI(); try{ _syncExecEnabled(); }catch{} });
+
+      targetBtnRow.appendChild(wrapThis);
+      targetBtnRow.appendChild(wrapDir);
+      targetBtnRow.appendChild(wrapFile);
+      targetWrap.appendChild(targetBtnRow);
+
+      const pathWrap = document.createElement('div');
+      pathWrap.style.cssText = 'display:flex; flex-direction:column; gap:6px; align-items:stretch;';
+
+      // Recursive controls row (enabled only in dirfiles mode)
+      const recurRow = document.createElement('div');
+      recurRow.style.cssText = 'display:flex; align-items:center; justify-content:space-between; gap:10px;';
+
+      let _grepRecursive = false;
+
+      const recurLeft = document.createElement('div');
+      recurLeft.style.cssText = 'display:flex; align-items:center; gap:8px; user-select:none; color:var(--text-color);';
+
+      const recurText = document.createElement('span');
+      recurText.textContent = 'サブディレクトリまで検索';
+      recurText.style.cssText = 'font-size:0.95em;';
+
+      const recurPills = document.createElement('div');
+      recurPills.style.cssText = 'display:flex; align-items:center; gap:6px;';
+
+      const _mkPillBtn = (label)=>{
+        const b = document.createElement('button');
+        b.type = 'button';
+        b.tabIndex = -1; // not focusable via Tab
+        b.textContent = label;
+        b.style.cssText = 'border:1px solid #2a3244; background:transparent; color:#e6e6e6; border-radius:6px; padding:2px 10px; cursor:pointer; font-size:11px; line-height:1.5; user-select:none; outline:none;';
+        b.addEventListener('mousedown', (e)=>{ try{ e.preventDefault(); e.stopPropagation(); }catch{} });
+        return b;
+      };
+      const recurBtnOn = _mkPillBtn('する');
+      const recurBtnOff = _mkPillBtn('しない');
+      recurPills.appendChild(recurBtnOn);
+      recurPills.appendChild(recurBtnOff);
+
+      recurLeft.appendChild(recurText);
+      recurLeft.appendChild(recurPills);
+
+      const depthWrap = document.createElement('div');
+      depthWrap.style.cssText = 'display:flex; align-items:center; gap:6px;';
+
+      const depthLabel = document.createElement('span');
+      depthLabel.textContent = 'maxdepth';
+      depthLabel.style.cssText = 'font-size:0.85em; color:var(--text-dim);';
+
+      const _mkDepthInput = ()=>{
+        const el = document.createElement('input');
+        el.type = 'text';
+        el.inputMode = 'numeric';
+        el.tabIndex = -1; // avoid Tab focus; user can click to edit
+        el.style.cssText = 'width:3.2em; text-align:center; background:var(--bg-color); color:var(--text-color); border:1px solid #ffffff; padding:4px 6px; font-family:var(--font-mono); outline:none; font-size:inherit;';
+        return el;
+      };
+      const depthInput = _mkDepthInput();
+      depthInput.value = '9';
+
+      depthWrap.appendChild(depthLabel);
+      depthWrap.appendChild(depthInput);
+
+      recurRow.appendChild(recurLeft);
+      recurRow.appendChild(depthWrap);
+
+      const _mkPathInput = ()=>{
+        const el = document.createElement('input');
+        el.type = 'text';
+        el.style.cssText = 'width:100%; background:var(--bg-color); color:var(--text-color); border:1px solid #ffffff; padding:4px 8px; font-family:var(--font-mono); outline:none; font-size:inherit;';
+        return el;
+      };
+
+      const pathSingle = _mkPathInput();
+      pathSingle.placeholder = 'PATH[/] または glob';
+      try{ pathSingle.style.marginRight = '0.5rem'; }catch{}
+
+      const basedirInput = _mkPathInput();
+      basedirInput.placeholder = '-basedir (DIR[/])';
+
+      const fileglobInput = _mkPathInput();
+      fileglobInput.placeholder = 'fileglob (例: *.md)';
+      try{ fileglobInput.style.minWidth = '12rem'; }catch{}
+
+      function _applyDisabledStyle(el, disabled){
+        try{
+          if (!el || !el.style) return;
+          if (disabled){
+            el.style.opacity = '0.95';
+            el.style.background = '#14161d';
+            el.style.borderColor = '#1f2636';
+            el.style.color = '#4e5664';
+          } else {
+            el.style.opacity = '1.0';
+            el.style.background = 'var(--bg-color)';
+            el.style.borderColor = '#ffffff';
+            el.style.color = 'var(--text-color)';
+          }
+        }catch{}
+      }
+
+      // Prebuild both path layouts and toggle by display.
+      const pathRowSingle = document.createElement('div');
+      pathRowSingle.style.cssText = 'display:flex; align-items:center;';
+      pathRowSingle.appendChild(pathSingle);
+
+      const pathRowDir = document.createElement('div');
+      pathRowDir.style.cssText = 'display:flex; align-items:center; gap:6px;';
+      try{ basedirInput.style.flex = '8 1 0%'; fileglobInput.style.flex = '2 1 0%'; }catch{}
+      pathRowDir.appendChild(basedirInput);
+      pathRowDir.appendChild(fileglobInput);
+
+      // Start with single row visible
+      pathWrap.appendChild(pathRowSingle);
+      pathWrap.appendChild(pathRowDir);
+      targetWrap.appendChild(pathWrap);
+      targetWrap.appendChild(recurRow);
+      box.appendChild(targetWrap);
+
+      // maxdepth manual input (1..9)
+      depthInput.addEventListener('input', ()=>{
+        try{
+          let v = String(depthInput.value||'').trim();
+          v = v.replace(/[^0-9]/g, '');
+          if (v.length > 1) v = v.slice(0, 1);
+          if (v === '0') v = '';
+          depthInput.value = v;
+        }catch{}
+      });
+
+      function _setTargetBtnStyle(btn, active){
+        try{
+          // Use palette ON/OFF colors
+          btn.style.background = active ? _palGreen : _palGray;
+          btn.style.borderColor = '#2a3244';
+          btn.style.color = '#000';
+          btn.style.opacity = active ? '1.0' : '0.9';
+        }catch{}
+      }
+
+      function _applyBtnDisabledStyle(btn, disabled){
+        try{
+          if (!btn || !btn.style) return;
+          if (disabled){
+            btn.style.opacity = '0.55';
+            btn.style.cursor = 'default';
+            btn.style.filter = 'grayscale(0.35)';
+          } else {
+            btn.style.opacity = '1.0';
+            btn.style.cursor = 'pointer';
+            btn.style.filter = '';
+          }
+        }catch{}
+      }
+
+      function _syncRecurPillsVisual(){
+        try{
+          // reset
+          recurBtnOn.style.background = 'transparent'; recurBtnOn.style.color = '#e6e6e6';
+          recurBtnOff.style.background = 'transparent'; recurBtnOff.style.color = '#e6e6e6';
+          if (_grepRecursive){
+            recurBtnOn.style.background = _palGreen; recurBtnOn.style.color = '#000';
+          } else {
+            recurBtnOff.style.background = _palGray; recurBtnOff.style.color = '#000';
+          }
+          _applyBtnDisabledStyle(recurBtnOn, !!recurBtnOn.disabled);
+          _applyBtnDisabledStyle(recurBtnOff, !!recurBtnOff.disabled);
+        }catch{}
+      }
+
+      function _syncTargetUI(){
+        try{
+          _setTargetBtnStyle(btnThisBuf, _grepTargetMode==='buffer');
+          _setTargetBtnStyle(btnDirFiles, _grepTargetMode==='dirfiles');
+          _setTargetBtnStyle(btnFiles, _grepTargetMode==='files');
+
+          // Update path layout selection. Buffer mode does not change layout.
+          if (_grepTargetMode === 'dirfiles') _grepPathLayout = 'dir';
+          else if (_grepTargetMode === 'files') _grepPathLayout = 'single';
+
+          const showSingle = (_grepPathLayout === 'single');
+          const showDir = (_grepPathLayout === 'dir');
+          pathRowSingle.style.display = showSingle ? 'flex' : 'none';
+          pathRowDir.style.display = showDir ? 'flex' : 'none';
+
+          const enableRecur = (_grepTargetMode === 'dirfiles');
+          try{
+            recurBtnOn.disabled = !enableRecur;
+            recurBtnOff.disabled = !enableRecur;
+            depthInput.disabled = !enableRecur || !_grepRecursive;
+            recurRow.style.opacity = enableRecur ? '1.0' : '0.75';
+            depthWrap.style.opacity = (enableRecur && _grepRecursive) ? '1.0' : '0.75';
+            try{ _applyDisabledStyle(depthInput, !!depthInput.disabled); }catch{}
+            try{
+              const dimCol = '#7b8493';
+              const onCol = 'var(--text-color)';
+              recurText.style.color = enableRecur ? onCol : dimCol;
+              depthLabel.style.color = enableRecur ? 'var(--text-dim)' : dimCol;
+            }catch{}
+            _syncRecurPillsVisual();
+          }catch{}
+
+          // Enable/disable path inputs. Buffer mode: grey-out only (no layout change).
+          const pathDisabled = (_grepTargetMode === 'buffer');
+          try{
+            pathSingle.disabled = pathDisabled;
+            basedirInput.disabled = pathDisabled || (_grepTargetMode !== 'dirfiles');
+            fileglobInput.disabled = pathDisabled || (_grepTargetMode !== 'dirfiles');
+          }catch{}
+          _applyDisabledStyle(pathSingle, !!pathSingle.disabled);
+          _applyDisabledStyle(basedirInput, !!basedirInput.disabled);
+          _applyDisabledStyle(fileglobInput, !!fileglobInput.disabled);
+          try{
+            // Avoid keyboard focus on these controls while still allowing click editing
+            depthInput.tabIndex = -1;
+          }catch{}
+        }catch{}
+      }
+
+      btnThisBuf.onclick = (e)=>{ try{ e.preventDefault(); e.stopPropagation(); _grepTargetMode='buffer'; _syncTargetUI(); _syncExecEnabled(); }catch{} };
+      btnDirFiles.onclick = (e)=>{ try{ e.preventDefault(); e.stopPropagation(); _grepTargetMode='dirfiles'; _syncTargetUI(); _syncExecEnabled(); }catch{} };
+      btnFiles.onclick = (e)=>{ try{ e.preventDefault(); e.stopPropagation(); _grepTargetMode='files'; _syncTargetUI(); _syncExecEnabled(); }catch{} };
+
+      recurBtnOn.onclick = (e)=>{ try{ e.preventDefault(); e.stopPropagation(); if (recurBtnOn.disabled) return; _grepRecursive = true; _syncTargetUI(); _syncExecEnabled(); }catch{} };
+      recurBtnOff.onclick = (e)=>{ try{ e.preventDefault(); e.stopPropagation(); if (recurBtnOff.disabled) return; _grepRecursive = false; _syncTargetUI(); _syncExecEnabled(); }catch{} };
+
+      // Initialize
+      _syncTargetUI();
 
       // Case sensitivity row (styled like overlay button)
       const caseRow = document.createElement('div');
@@ -19147,7 +19449,7 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
           cursor: pointer;
           font-weight: bold;
       `;
-      execBtn.onclick = () => doGrep();
+      execBtn.onclick = () => { try{ if (execBtn && execBtn.disabled) return; }catch{} doGrep(); };
 
       const cancelBtn = document.createElement('button');
       cancelBtn.textContent = 'キャンセル';
@@ -19169,14 +19471,63 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
       // Logic
       let histIdx = -1; // -1 means current input
       window._grepDialogOpen = true;
+
+      // Keep a removable window key listener for this dialog instance
+      let _grepWinKeyListener = null;
+
+      function _isFilled(s){ return !!String(s||'').trim(); }
+      function _canExecuteNow(){
+        try{
+          if (!_isFilled(input.value)) return false;
+          if (_grepTargetMode === 'buffer') return true;
+          if (_grepTargetMode === 'files') return _isFilled(pathSingle && pathSingle.value);
+          if (_grepTargetMode === 'dirfiles'){
+            if (!_isFilled(basedirInput && basedirInput.value)) return false;
+            if (!_isFilled(fileglobInput && fileglobInput.value)) return false;
+            if (_grepRecursive){
+              const v = String((depthInput && depthInput.value) ? depthInput.value : '').trim();
+              const n = parseInt(v, 10);
+              if (!(n>=1 && n<=9)) return false;
+            }
+            return true;
+          }
+          return false;
+        }catch{ return false; }
+      }
+      function _syncExecEnabled(){
+        try{
+          const ok = _canExecuteNow();
+          execBtn.disabled = !ok;
+          if (execBtn.disabled){
+            execBtn.style.background = '#171a22';
+            execBtn.style.borderColor = '#1f2636';
+            execBtn.style.color = '#4e5664';
+            execBtn.style.cursor = 'default';
+          } else {
+            execBtn.style.background = 'var(--six-help-close-bg, #2a3756)';
+            execBtn.style.borderColor = 'var(--six-help-close-border, #2f4064)';
+            execBtn.style.color = 'var(--six-help-close-fg, #e6e6e6)';
+            execBtn.style.cursor = 'pointer';
+          }
+        }catch{}
+      }
+
+      try{ input.addEventListener('input', _syncExecEnabled); }catch{}
+      try{ pathSingle.addEventListener('input', _syncExecEnabled); }catch{}
+      try{ basedirInput.addEventListener('input', _syncExecEnabled); }catch{}
+      try{ fileglobInput.addEventListener('input', _syncExecEnabled); }catch{}
+      try{ depthInput.addEventListener('input', _syncExecEnabled); }catch{}
       
       function close(){
         window._grepDialogOpen = false;
+        try{ if (typeof _grepWinKeyListener === 'function') window.removeEventListener('keydown', _grepWinKeyListener, true); }catch{}
         if (modal.parentNode) modal.parentNode.removeChild(modal);
         editor.focus();
       }
 
       function doGrep(){
+        try{ _syncExecEnabled(); }catch{}
+        try{ if (execBtn && execBtn.disabled) return; }catch{}
         const pat = input.value;
         if (!pat) return;
         
@@ -19197,11 +19548,30 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
             }
         }
         
-        // Execute grep directly
+        // Execute grep directly based on target mode.
         // suppressToast=false (show toast)
         // _execGrep is now async-capable (returns Promise or count).
-        // We should handle both.
-        const res = _execGrep(pat, flagChar, false, '%');
+        let targetArg = '%';
+        if (_grepTargetMode === 'buffer'){
+          targetArg = '%';
+        } else if (_grepTargetMode === 'dirfiles'){
+          const baseDirRaw = String((basedirInput && basedirInput.value) ? basedirInput.value : '').trim();
+          const fg = String((fileglobInput && fileglobInput.value) ? fileglobInput.value : '').trim() || '*';
+          if (!baseDirRaw){ toast('grep: -basedir が空です'); return; }
+          let depthN = 0;
+          if (_grepRecursive){
+            const v = String((depthInput && depthInput.value) ? depthInput.value : '').trim();
+            depthN = Math.max(1, Math.min(9, (parseInt(v, 10)|0)));
+            if (!(depthN>=1 && depthN<=9)){ toast('grep: maxdepth は 1〜9'); return; }
+          }
+          targetArg = { path: baseDirRaw, basedir: baseDirRaw, fileGlob: fg, recursive:!!_grepRecursive, depth: depthN };
+        } else {
+          const p = String((pathSingle && pathSingle.value) ? pathSingle.value : '').trim();
+          if (!p){ toast('grep: パスが空です'); return; }
+          targetArg = p;
+        }
+
+        const res = _execGrep(pat, flagChar, false, targetArg);
         
         if (res instanceof Promise) {
             res.then(count => {
@@ -19215,16 +19585,31 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
 
       // Key handling
       const keyHandler = (e)=>{
-        // Block IME switching keys to prevent editor mode change
-        if (e.key === 'KanaMode' || e.key === 'Hiragana' || e.key === 'Eisu' || e.key === 'Alphanumeric' || e.key === 'RomanCharacters' || e.code === 'Convert' || e.code === 'NonConvert' || e.code === 'Lang1' || e.code === 'Lang2'){
-            e.stopPropagation();
+        // F1/F2/F3: direct target selection (like :e breadcrumb)
+        try{
+          if (e && (e.key==='F1' || e.key==='F2' || e.key==='F3')){
+            e.preventDefault(); e.stopPropagation();
+            if (e.key==='F1') _grepTargetMode='buffer';
+            else if (e.key==='F2') _grepTargetMode='dirfiles';
+            else _grepTargetMode='files';
+            _syncTargetUI();
+            try{ _syncExecEnabled(); }catch{}
             return;
+          }
+        }catch{}
+        // Block IME switching keys to prevent editor mode change
+        if (e && (e.key === 'KanaMode' || e.key === 'Hiragana' || e.key === 'Eisu' || e.key === 'Alphanumeric' || e.key === 'RomanCharacters' || e.code === 'Convert' || e.code === 'NonConvert' || e.code === 'Lang1' || e.code === 'Lang2')){
+          // Do not let Six's editor handlers see it, but keep default behavior (IME toggle)
+          try{ e.stopPropagation(); }catch{}
+          return;
         }
 
         if (e.key === 'Enter'){
             e.preventDefault();
             e.stopPropagation();
-            doGrep();
+          try{ _syncExecEnabled(); }catch{}
+          try{ if (execBtn && execBtn.disabled) return; }catch{}
+          doGrep();
         } else if (e.key === 'Escape' || e.key === 'Esc'){
             e.preventDefault();
             e.stopPropagation();
@@ -19260,10 +19645,23 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
       
       // Attach to modal to capture events even if focus is on buttons
       // Use capture to ensure we get it before anyone else
-      window.addEventListener('keydown', (e)=>{
-          if (!document.getElementById('grepDialog')) return;
-          keyHandler(e);
-      }, true);
+      _grepWinKeyListener = (e)=>{
+        try{ if (!document.getElementById('grepDialog')) return; }catch{ return; }
+        keyHandler(e);
+      };
+      window.addEventListener('keydown', _grepWinKeyListener, true);
+
+      // Allow Tab focus navigation inside the dialog by preventing global editor handlers from consuming it.
+      try{
+        modal.addEventListener('keydown', (e)=>{
+          try{
+            if (e && e.key === 'Tab'){
+              // Do not preventDefault: keep native focus traversal.
+              e.stopPropagation();
+            }
+          }catch{}
+        }, true);
+      }catch{}
       
       // Also attach to input specifically to ensure it works
       input.addEventListener('keydown', keyHandler);
@@ -19273,7 +19671,15 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
       modal.id = 'grepDialog';
 
       document.body.appendChild(modal);
-      input.focus();
+      try{ _syncExecEnabled(); }catch{}
+      // Ensure focus lands on search term input (some hosts ignore immediate focus)
+      try{ input.focus({preventScroll:true}); }catch{ try{ input.focus(); }catch{} }
+      try{
+        setTimeout(()=>{
+          try{ if (!document.getElementById('grepDialog')) return; }catch{}
+          try{ if (document.activeElement !== input){ input.focus({preventScroll:true}); } }catch{ try{ input.focus(); }catch{} }
+        }, 0);
+      }catch{}
 
     }catch(e){ console.error(e); }
   }
