@@ -13,6 +13,7 @@ window.SIX_OPTIONS = {
   visualbell: true, // ヴィジュアルベル。指定しなくてもデフォルトでON
   UNDO_STEPS_IN_SESSION: 5, // 即時終了から復帰した後まで引き継ぐアンドゥバッファの深さ(各バッファ毎に持つバッファに対する共通の深さ)
   SEARCH_TERM_IN_SESSION: 20,
+  GREP_BASEDIR_IN_SESSION: 30,
   GREP_EXCLUDE_EXTENSIONS: [ '.png','.jpg','.jpeg','.gif','.bmp','.webp','.ico','.icns',
     '.zip','.7z','.rar','.gz','.bz2','.xz','.tar',
     '.pdf',
@@ -44,8 +45,8 @@ window.THEME = {
   editorTextColor: "#004a0a",
 
   // 行背景(カーソル外)グラデーション
-  lineGradientStart: "#f4fff4",
-  lineGradientEnd: "#f5f7f5",
+  lineGradientStart: "#f6faf6",
+  lineGradientEnd: "#ebeeeb",
   // 行番号背景(カーソル外)グラデーション
   inactiveGutterGradientStart: "#e8f8e8",
   inactiveGutterGradientEnd: "#d9e2d9",

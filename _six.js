@@ -354,6 +354,14 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
         // When hidden/suspended, reduce background activity.
         try{ if (document && document.hidden){ _schedule(2000); return; } }catch{}
         try{
+          // While a modal like grep dialog is open, do not apply IME state changes to the editor.
+          // (User may toggle IME using かな/英数 while typing in the dialog; the main editor must not react.)
+          try{
+            if ((window && window._grepDialogOpen===true) || document.getElementById('grepDialog') || (_modalOverlay && _modalOverlay.style && _modalOverlay.style.display !== 'none')){
+              _schedule(_imePollDelayMs);
+              return;
+            }
+          }catch{}
           // タイピング直後は一時停止
           if (Date.now() < _imePollPausedUntil){ _schedule(_imePollDelayMs); return; }
           // 未確定文字列編集中はポーリングしない（候補操作の流量優先）
@@ -7646,8 +7654,11 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
           
           // Add to search history
           _searchHistoryMaybePush('/' + args.pat);
+
+          // Fixed-string mode: carry as a synthetic flag 'F' (not shown in /.../flags).
+          const flags2 = String(args.flags||'') + (args.fixed ? 'F' : '');
           
-          _execGrep(args.pat, args.flags, false, {
+          _execGrep(args.pat, flags2, false, {
               path: args.path,
               basedir: args.basedir,
               recursive: args.recursive,
@@ -19055,27 +19066,51 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
           document.removeEventListener('mouseup', onDragEnd);
       }
 
-      // Input Label
-      const inputLabel = document.createElement('div');
-      inputLabel.textContent = '検索語(正規表現)';
-      inputLabel.style.cssText = 'font-size:0.85em; color:var(--text-dim); margin-bottom:-8px;';
-      box.appendChild(inputLabel);
-
       // Input row
       const inputRow = document.createElement('div');
       inputRow.style.cssText = 'display:flex; gap:8px; align-items:center;';
+
+      // Label on the left (requested)
+      const inputLabel = document.createElement('div');
+      inputLabel.textContent = '検索語(正規表現)';
+      inputLabel.style.cssText = 'flex:0 0 auto; font-size:0.85em; color:var(--text-dim); white-space:nowrap; user-select:none;';
+      inputRow.appendChild(inputLabel);
       
       const input = document.createElement('input');
       input.type = 'text';
       input.placeholder = '';
-      input.style.cssText = 'flex:1; background:var(--bg-color); color:var(--text-color); border:1px solid #ffffff; padding:4px 8px; font-family:var(--font-mono); outline:none; font-size:inherit;';
+      // Leave space for regex/literal toggle buttons on the right
+      input.style.cssText = 'flex:1 1 auto; min-width:0; background:var(--bg-color); color:var(--text-color); border:1px solid #ffffff; padding:4px 8px; font-family:var(--font-mono); outline:none; font-size:inherit;';
       inputRow.appendChild(input);
+
+      // Pattern mode buttons: [正規表現] [リテラル]
+      let _grepPatMode = 'regex'; // 'regex' | 'literal'
+      const patBtnWrap = document.createElement('div');
+      // Focusable region: Tab from the search input lands here.
+      patBtnWrap.tabIndex = 0;
+      patBtnWrap.setAttribute('role','group');
+      patBtnWrap.setAttribute('aria-label','検索語モード (正規表現/リテラル)');
+      patBtnWrap.style.cssText = 'display:flex; gap:6px; align-items:center; flex:0 0 auto; padding:4px; border:1px solid #2f3644; border-radius:8px; box-sizing:border-box;';
+      const _mkPatBtn = (label)=>{
+        const b = document.createElement('button');
+        b.type = 'button';
+        b.tabIndex = -1;
+        b.textContent = label;
+        b.style.cssText = 'border:1px solid #2a3244; background:transparent; color:#e6e6e6; border-radius:6px; padding:6px 10px; cursor:pointer; font-size:11px; line-height:1.2; user-select:none; outline:none; white-space:nowrap;';
+        b.addEventListener('mousedown', (e)=>{ try{ e.preventDefault(); e.stopPropagation(); }catch{} });
+        return b;
+      };
+      const btnRegex = _mkPatBtn('正規表現');
+      const btnLiteral = _mkPatBtn('リテラル');
+      patBtnWrap.appendChild(btnRegex);
+      patBtnWrap.appendChild(btnLiteral);
+      inputRow.appendChild(patBtnWrap);
       box.appendChild(inputRow);
 
       // Target Label
       const targetLabel = document.createElement('div');
       targetLabel.textContent = '検索対象';
-      targetLabel.style.cssText = 'font-size:0.85em; color:var(--text-dim); margin-top:1rem; margin-bottom:-6px;';
+      targetLabel.style.cssText = 'font-size:0.85em; color:var(--text-dim); margin-top:0.5rem; margin-bottom:-6px;';
       box.appendChild(targetLabel);
 
       // Target mode buttons + path inputs
@@ -19085,11 +19120,10 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
       const _palGreen = '#49e26f';
 
       const targetWrap = document.createElement('div');
-      // Increase vertical breathing room around the target buttons (~1.5x)
-      targetWrap.style.cssText = 'display:flex; flex-direction:column; gap:12px;';
+      targetWrap.style.cssText = 'display:flex; flex-direction:column; gap:8px;';
 
       const targetBtnRow = document.createElement('div');
-      targetBtnRow.style.cssText = 'display:flex; gap:6px; align-items:center; justify-content:flex-start; margin:9px 0;';
+      targetBtnRow.style.cssText = 'display:flex; gap:6px; align-items:center; justify-content:flex-start;';
 
       const _mkTargetBtn = (label)=>{
         const btn = document.createElement('button');
@@ -19097,14 +19131,27 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
         // Do not include in Tab order (focus should stay on inputs/buttons like Execute/Cancel)
         btn.tabIndex = -1;
         btn.textContent = label;
+        // Reduce height by 1.0rem (top 0.5rem + bottom 0.5rem) from the previous sizing.
+        // Compute safely so it never becomes negative on large font sizes.
+        let pt = 7, pb = 8, mh = 38;
+        try{
+          const rem = parseFloat(getComputedStyle(document.documentElement).fontSize) || 16;
+          const half = Math.round(rem * 0.5);
+          const one = Math.round(rem);
+          pt = Math.max(2, pt - half);
+          pb = Math.max(2, pb - half);
+          mh = Math.max(18, mh - one);
+        }catch{}
         btn.style.cssText = [
           'border:1px solid #2a3244',
           'background:#1a2030',
           'color:#e6e6e6',
           'border-radius:6px',
-          'padding:3px 6px',
+          // Give enough top padding so the F-key tag can overlap without covering the label.
+          `padding:${pt}px 10px ${pb}px 10px`,
+          `min-height:${mh}px`,
           'cursor:pointer',
-          "font:11px/1.2 system-ui, -apple-system, 'Segoe UI', sans-serif",
+          "font:12px/1.25 system-ui, -apple-system, 'Segoe UI', sans-serif",
           'opacity:0.92',
           'user-select:none',
           'outline:none',
@@ -19153,12 +19200,17 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
 
       // Recursive controls row (enabled only in dirfiles mode)
       const recurRow = document.createElement('div');
-      recurRow.style.cssText = 'display:flex; align-items:center; justify-content:space-between; gap:10px;';
+      // Left-align maxdepth and keep a clear gap (1rem) from recursion region
+      recurRow.style.cssText = 'display:flex; align-items:center; justify-content:flex-start; gap:1rem;';
 
       let _grepRecursive = false;
 
       const recurLeft = document.createElement('div');
-      recurLeft.style.cssText = 'display:flex; align-items:center; gap:8px; user-select:none; color:var(--text-color);';
+      // Focusable region (Space/Enter toggles recursion)
+      recurLeft.tabIndex = 0;
+      recurLeft.setAttribute('role','button');
+      recurLeft.setAttribute('aria-label','サブディレクトリまで検索 (する/しない)');
+      recurLeft.style.cssText = 'display:flex; align-items:center; gap:8px; user-select:none; color:var(--text-color); padding:4px 6px; border:1px solid #2f3644; border-radius:8px; box-sizing:border-box; outline:none;';
 
       const recurText = document.createElement('span');
       recurText.textContent = 'サブディレクトリまで検索';
@@ -19185,7 +19237,10 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
       recurLeft.appendChild(recurPills);
 
       const depthWrap = document.createElement('div');
-      depthWrap.style.cssText = 'display:flex; align-items:center; gap:6px;';
+      // Visual region (focus goes to the input directly)
+      depthWrap.setAttribute('role','group');
+      depthWrap.setAttribute('aria-label','maxdepth');
+      depthWrap.style.cssText = 'display:flex; align-items:center; gap:6px; padding:4px 6px; border:1px solid #2f3644; border-radius:8px; box-sizing:border-box; outline:none;';
 
       const depthLabel = document.createElement('span');
       depthLabel.textContent = 'maxdepth';
@@ -19195,7 +19250,7 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
         const el = document.createElement('input');
         el.type = 'text';
         el.inputMode = 'numeric';
-        el.tabIndex = -1; // avoid Tab focus; user can click to edit
+        el.tabIndex = 0;
         el.style.cssText = 'width:3.2em; text-align:center; background:var(--bg-color); color:var(--text-color); border:1px solid #ffffff; padding:4px 6px; font-family:var(--font-mono); outline:none; font-size:inherit;';
         return el;
       };
@@ -19231,9 +19286,9 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
           if (!el || !el.style) return;
           if (disabled){
             el.style.opacity = '0.95';
-            el.style.background = '#14161d';
-            el.style.borderColor = '#1f2636';
-            el.style.color = '#4e5664';
+            el.style.background = '#07080c';
+            el.style.borderColor = '#0f1320';
+            el.style.color = '#2f3644';
           } else {
             el.style.opacity = '1.0';
             el.style.background = 'var(--bg-color)';
@@ -19286,9 +19341,12 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
         try{
           if (!btn || !btn.style) return;
           if (disabled){
-            btn.style.opacity = '0.55';
+            btn.style.opacity = '1.0';
             btn.style.cursor = 'default';
-            btn.style.filter = 'grayscale(0.35)';
+            btn.style.filter = '';
+            btn.style.background = '#07080c';
+            btn.style.borderColor = '#0f1320';
+            btn.style.color = '#2f3644';
           } else {
             btn.style.opacity = '1.0';
             btn.style.cursor = 'pointer';
@@ -19332,11 +19390,14 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
             recurBtnOn.disabled = !enableRecur;
             recurBtnOff.disabled = !enableRecur;
             depthInput.disabled = !enableRecur || !_grepRecursive;
+            // Tab focus: skip when disabled
+            try{ recurLeft.tabIndex = enableRecur ? 0 : -1; }catch{}
+            try{ depthInput.tabIndex = depthInput.disabled ? -1 : 0; }catch{}
             recurRow.style.opacity = enableRecur ? '1.0' : '0.75';
             depthWrap.style.opacity = (enableRecur && _grepRecursive) ? '1.0' : '0.75';
             try{ _applyDisabledStyle(depthInput, !!depthInput.disabled); }catch{}
             try{
-              const dimCol = '#7b8493';
+              const dimCol = '#2f3644';
               const onCol = 'var(--text-color)';
               recurText.style.color = enableRecur ? onCol : dimCol;
               depthLabel.style.color = enableRecur ? 'var(--text-dim)' : dimCol;
@@ -19354,10 +19415,6 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
           _applyDisabledStyle(pathSingle, !!pathSingle.disabled);
           _applyDisabledStyle(basedirInput, !!basedirInput.disabled);
           _applyDisabledStyle(fileglobInput, !!fileglobInput.disabled);
-          try{
-            // Avoid keyboard focus on these controls while still allowing click editing
-            depthInput.tabIndex = -1;
-          }catch{}
         }catch{}
       }
 
@@ -19499,9 +19556,9 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
           const ok = _canExecuteNow();
           execBtn.disabled = !ok;
           if (execBtn.disabled){
-            execBtn.style.background = '#171a22';
-            execBtn.style.borderColor = '#1f2636';
-            execBtn.style.color = '#4e5664';
+            execBtn.style.background = '#07080c';
+            execBtn.style.borderColor = '#0f1320';
+            execBtn.style.color = '#2f3644';
             execBtn.style.cursor = 'default';
           } else {
             execBtn.style.background = 'var(--six-help-close-bg, #2a3756)';
@@ -19511,6 +19568,58 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
           }
         }catch{}
       }
+
+      function _syncPatButtons(){
+        try{
+          // Use palette-ish colors consistent with other toggles
+          const onBg = '#49e26f';
+          const offBg = '#9aa0aa';
+          const on = (_grepPatMode === 'regex');
+          btnRegex.style.background = on ? onBg : offBg;
+          btnRegex.style.color = '#000';
+          btnLiteral.style.background = (!on) ? onBg : offBg;
+          btnLiteral.style.color = '#000';
+          try{ inputLabel.textContent = on ? '検索語(正規表現)' : '検索語(リテラル)'; }catch{}
+        }catch{}
+      }
+      btnRegex.onclick = ()=>{ try{ _grepPatMode = 'regex'; _syncPatButtons(); }catch{} };
+      btnLiteral.onclick = ()=>{ try{ _grepPatMode = 'literal'; _syncPatButtons(); }catch{} };
+      _syncPatButtons();
+
+      // Focus visuals for the region
+      try{
+        patBtnWrap.addEventListener('focus', ()=>{
+          try{ patBtnWrap.style.borderColor = '#e6e6e6'; patBtnWrap.style.boxShadow = '0 0 0 2px rgba(230,230,230,0.25)'; }catch{}
+        });
+        patBtnWrap.addEventListener('blur', ()=>{
+          try{ patBtnWrap.style.borderColor = '#2f3644'; patBtnWrap.style.boxShadow = 'none'; }catch{}
+        });
+      }catch{}
+
+      // Focus visuals for recursion and maxdepth regions
+      try{
+        recurLeft.addEventListener('focus', ()=>{ try{ recurLeft.style.borderColor = '#e6e6e6'; recurLeft.style.boxShadow = '0 0 0 2px rgba(230,230,230,0.22)'; }catch{} });
+        recurLeft.addEventListener('blur',  ()=>{ try{ recurLeft.style.borderColor = '#2f3644'; recurLeft.style.boxShadow = 'none'; }catch{} });
+        depthInput.addEventListener('focus', ()=>{ try{ depthWrap.style.borderColor = '#e6e6e6'; depthWrap.style.boxShadow = '0 0 0 2px rgba(230,230,230,0.22)'; }catch{} });
+        depthInput.addEventListener('blur',  ()=>{ try{ depthWrap.style.borderColor = '#2f3644'; depthWrap.style.boxShadow = 'none'; }catch{} });
+      }catch{}
+
+      // Toggle by Space/Enter when the region is focused
+      try{
+        patBtnWrap.addEventListener('keydown', (e)=>{
+          try{
+            const k = String((e && e.key) || '');
+            if (k === 'Enter' || k === ' ' || k === 'Spacebar'){
+              e.preventDefault();
+              e.stopPropagation();
+              _grepPatMode = (_grepPatMode === 'regex') ? 'literal' : 'regex';
+              _syncPatButtons();
+              try{ _syncExecEnabled(); }catch{}
+              return;
+            }
+          }catch{}
+        }, true);
+      }catch{}
 
       try{ input.addEventListener('input', _syncExecEnabled); }catch{}
       try{ pathSingle.addEventListener('input', _syncExecEnabled); }catch{}
@@ -19547,6 +19656,9 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
                 else flagChar = 'i';
             }
         }
+        // Literal mode: pass a synthetic flag 'F' to make grep treat pat as fixed string.
+        let flagChar2 = String(flagChar||'');
+        try{ if (_grepPatMode === 'literal') flagChar2 += 'F'; }catch{}
         
         // Execute grep directly based on target mode.
         // suppressToast=false (show toast)
@@ -19571,7 +19683,7 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
           targetArg = p;
         }
 
-        const res = _execGrep(pat, flagChar, false, targetArg);
+        const res = _execGrep(pat, flagChar2, false, targetArg);
         
         if (res instanceof Promise) {
             res.then(count => {
@@ -19585,6 +19697,78 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
 
       // Key handling
       const keyHandler = (e)=>{
+        // When the case popup is visible: Esc closes the popup (not the dialog).
+        try{
+          if (typeof _casePopupVisible === 'function' && _casePopupVisible()){
+            const kx = String((e && e.key) || '');
+            if (kx === 'Escape' || kx === 'Esc'){
+              try{ e.preventDefault(); e.stopPropagation(); }catch{}
+              try{ if (typeof _casePopupHide === 'function') _casePopupHide(); }catch{}
+              return;
+            }
+            if (kx === 'ArrowUp'){
+              try{ e.preventDefault(); e.stopPropagation(); }catch{}
+              try{ if (typeof _casePopupMoveSel === 'function') _casePopupMoveSel(-1); }catch{}
+              return;
+            }
+            if (kx === 'ArrowDown'){
+              try{ e.preventDefault(); e.stopPropagation(); }catch{}
+              try{ if (typeof _casePopupMoveSel === 'function') _casePopupMoveSel(+1); }catch{}
+              return;
+            }
+            if (kx === 'Enter' || kx === ' ' || kx === 'Spacebar'){
+              try{ e.preventDefault(); e.stopPropagation(); }catch{}
+              try{
+                const idx = Number.isFinite(_caseSel) ? (_caseSel|0) : 0;
+                if (typeof _applyCaseIndex === 'function') _applyCaseIndex(idx);
+                if (typeof _casePopupHide === 'function') _casePopupHide();
+              }catch{}
+              try{
+                const b2 = currentBuffer();
+                let label2 = '常に区別';
+                if (b2 && b2.ignorecase){ label2 = b2.smartcase ? '混在時区別' : '同一視'; }
+                const el = document.getElementById('grepDialogCaseLabel');
+                if (el) el.textContent = label2;
+              }catch{}
+              try{ caseBtn && caseBtn.focus && caseBtn.focus({preventScroll:true}); }catch{ try{ caseBtn.focus(); }catch{} }
+              return;
+            }
+            // While popup is open, never run grep on other keys.
+            try{ e.stopPropagation(); }catch{}
+            return;
+          }
+        }catch{}
+
+        // When focus is on the pattern toggle region, Enter/Space toggles it (do not run grep).
+        try{
+          if (document.activeElement === patBtnWrap){
+            const k0 = String((e && e.key) || '');
+            if (k0 === 'Enter' || k0 === ' ' || k0 === 'Spacebar'){
+              e.preventDefault(); e.stopPropagation();
+              _grepPatMode = (_grepPatMode === 'regex') ? 'literal' : 'regex';
+              _syncPatButtons();
+              try{ _syncExecEnabled(); }catch{}
+              return;
+            }
+          }
+        }catch{}
+
+        // When focus is on recursion region, Space/Enter toggles recursion.
+        try{
+          if (document.activeElement === recurLeft){
+            const kR = String((e && e.key) || '');
+            if (kR === 'Enter' || kR === ' ' || kR === 'Spacebar'){
+              e.preventDefault(); e.stopPropagation();
+              if (recurBtnOn && recurBtnOn.disabled) return;
+              _grepRecursive = !_grepRecursive;
+              _syncTargetUI();
+              try{ _syncExecEnabled(); }catch{}
+              return;
+            }
+          }
+        }catch{}
+
+        // (maxdepth focuses the input directly via Tab)
         // F1/F2/F3: direct target selection (like :e breadcrumb)
         try{
           if (e && (e.key==='F1' || e.key==='F2' || e.key==='F3')){
@@ -19597,11 +19781,19 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
             return;
           }
         }catch{}
-        // Block IME switching keys to prevent editor mode change
-        if (e && (e.key === 'KanaMode' || e.key === 'Hiragana' || e.key === 'Eisu' || e.key === 'Alphanumeric' || e.key === 'RomanCharacters' || e.code === 'Convert' || e.code === 'NonConvert' || e.code === 'Lang1' || e.code === 'Lang2')){
-          // Do not let Six's editor handlers see it, but keep default behavior (IME toggle)
-          try{ e.stopPropagation(); }catch{}
-          return;
+        // Block IME switching keys so they never reach the editor while the dialog is open.
+        // NOTE: some environments report かな as key='Process' with code='KanaMode'.
+        if (e){
+          const k = String(e.key||'');
+          const c = String(e.code||'');
+          const isKana = (k==='KanaMode' || k==='Hiragana' || c==='KanaMode' || c==='Hiragana' || (k==='Process' && (c==='KanaMode' || c==='Lang1')) || c==='Lang1');
+          const isEisu = (k==='Eisu' || k==='Alphanumeric' || k==='RomanCharacters' || (k==='Process' && (c==='Lang2' || c==='Convert')) || c==='Lang2' || c==='Convert');
+          const isConv = (c==='Convert' || c==='NonConvert');
+          if (isKana || isEisu || isConv){
+            // Keep default behavior for IME toggle, but stop propagation into Six.
+            try{ e.stopPropagation(); }catch{}
+            return;
+          }
         }
 
         if (e.key === 'Enter'){
@@ -19651,20 +19843,81 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
       };
       window.addEventListener('keydown', _grepWinKeyListener, true);
 
-      // Allow Tab focus navigation inside the dialog by preventing global editor handlers from consuming it.
+      // Tab navigation: keep it inside the dialog, skip disabled, and loop (Cancel -> Search input).
       try{
+        const _isVisible = (el)=>{
+          try{
+            if (!el) return false;
+            if (el.style && el.style.display === 'none') return false;
+            // If any parent is display:none, offsetParent becomes null (except fixed).
+            if (el.offsetParent === null){
+              // For fixed-position elements, offsetParent can be null even when visible.
+              // In this dialog, tab-stops are direct children and should be visible.
+              // Allow active element.
+              if (document.activeElement === el) return true;
+            }
+            return true;
+          }catch{ return true; }
+        };
+
+        const _tabOrder = ()=>{
+          const arr = [];
+          arr.push(input);
+          arr.push(patBtnWrap);
+          // Path inputs depend on target mode/layout and enabled state
+          if (_grepTargetMode === 'files'){
+            if (pathSingle && !pathSingle.disabled && _isVisible(pathRowSingle)) arr.push(pathSingle);
+          } else if (_grepTargetMode === 'dirfiles'){
+            if (basedirInput && !basedirInput.disabled && _isVisible(pathRowDir)) arr.push(basedirInput);
+            if (fileglobInput && !fileglobInput.disabled && _isVisible(pathRowDir)) arr.push(fileglobInput);
+          }
+          if (recurLeft && recurLeft.tabIndex >= 0 && _isVisible(recurRow)) arr.push(recurLeft);
+          if (depthInput && depthInput.tabIndex >= 0 && _isVisible(recurRow)) arr.push(depthInput);
+          if (caseBtn && !caseBtn.disabled) arr.push(caseBtn);
+          if (execBtn && !execBtn.disabled) arr.push(execBtn);
+          arr.push(cancelBtn);
+          return arr.filter(el=>!!el);
+        };
+
+        const _focusMove = (dir)=>{
+          try{
+            const list = _tabOrder();
+            if (!list.length) return;
+            const cur = document.activeElement;
+            let idx = list.indexOf(cur);
+            if (idx < 0) idx = 0;
+            const n = list.length;
+            for (let step = 1; step <= n; step++){
+              const j = (idx + (dir>0?step:-step) + n) % n;
+              const el = list[j];
+              if (!el) continue;
+              if (el.disabled) continue;
+              if (el.tabIndex < 0) continue;
+              if (!_isVisible(el)) continue;
+              try{ el.focus({preventScroll:true}); }catch{ try{ el.focus(); }catch{} }
+              break;
+            }
+          }catch{}
+        };
+
         modal.addEventListener('keydown', (e)=>{
           try{
-            if (e && e.key === 'Tab'){
-              // Do not preventDefault: keep native focus traversal.
-              e.stopPropagation();
-            }
+            if (!e || e.key !== 'Tab') return;
+            e.preventDefault();
+            e.stopPropagation();
+            _focusMove(e.shiftKey ? -1 : 1);
           }catch{}
         }, true);
       }catch{}
       
       // Also attach to input specifically to ensure it works
       input.addEventListener('keydown', keyHandler);
+
+      // A/a button: show a clear focus border
+      try{
+        caseBtn.addEventListener('focus', ()=>{ try{ caseBtn.style.borderColor = '#e6e6e6'; caseBtn.style.boxShadow = '0 0 0 2px rgba(230,230,230,0.22)'; }catch{} });
+        caseBtn.addEventListener('blur',  ()=>{ try{ caseBtn.style.borderColor = '#2a3244'; caseBtn.style.boxShadow = 'none'; }catch{} });
+      }catch{}
 
       // Global keydown for modal to trap Escape/Enter if focus lost (though input has focus)
       // Also to block editor interaction, we set an ID to be checked by keydown handler
@@ -19673,12 +19926,20 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
       document.body.appendChild(modal);
       try{ _syncExecEnabled(); }catch{}
       // Ensure focus lands on search term input (some hosts ignore immediate focus)
+      try{ input.autofocus = true; }catch{}
       try{ input.focus({preventScroll:true}); }catch{ try{ input.focus(); }catch{} }
       try{
         setTimeout(()=>{
           try{ if (!document.getElementById('grepDialog')) return; }catch{}
           try{ if (document.activeElement !== input){ input.focus({preventScroll:true}); } }catch{ try{ input.focus(); }catch{} }
         }, 0);
+      }catch{}
+      // Second attempt a bit later (some hosts steal focus right after opening)
+      try{
+        setTimeout(()=>{
+          try{ if (!document.getElementById('grepDialog')) return; }catch{}
+          try{ if (document.activeElement !== input){ input.focus({preventScroll:true}); } }catch{ try{ input.focus(); }catch{} }
+        }, 60);
       }catch{}
 
     }catch(e){ console.error(e); }
@@ -19732,6 +19993,7 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
     const rawArgs = cmd.replace(/^:?\s*grep\s+/, '').trim();
     let pat = '';
     let flags = '';
+    let fixed = false;
     let recursive = false;
     let depth = null;
     let path = '';
@@ -19777,6 +20039,9 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
       if (t === '-r') {
         if (recursive) { error = 'grep: duplicate -r'; break; }
         recursive = true;
+      } else if (t === '-F' || t === '-fixed' || t === '-literal') {
+        if (fixed) { error = 'grep: duplicate -F'; break; }
+        fixed = true;
       } else if (t === '-maxdepth') {
         if (depth !== null) { error = 'grep: duplicate -maxdepth'; break; }
         if (i + 1 < tokens.length) {
@@ -19856,13 +20121,19 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
     if (recursive && depth === null) depth = Infinity; // unlimited
     if (!recursive && depth === null) depth = 0;
 
-    return { pat, flags, recursive, depth, path, basedir, fileGlob, error };
+    return { pat, flags, fixed, recursive, depth, path, basedir, fileGlob, error };
   }
 
     function _buildGrepHeader(pat, targetPath, bName, caseLabel, flagStr, extraInfo, hitTotalOverride) {
       const cmdFlag = flagStr ? `/${flagStr}` : '';
       const cmdLine = (extraInfo && extraInfo.cmdLine) ? String(extraInfo.cmdLine) : `:grep /${pat}${cmdFlag} ${targetPath}`;
       let header = `CMD\t\t${cmdLine}\n`;
+      // Under CMD: show how the pattern is interpreted.
+      try{
+        const kind = (extraInfo && (extraInfo.searchKind || extraInfo.patternKind)) ? String(extraInfo.searchKind || extraInfo.patternKind) : '';
+        const label = (kind === 'literal' || kind === 'リテラル') ? 'リテラル' : '正規表現';
+        header += `検索語\t\t${label}\n`;
+      }catch{ header += `検索語\t\t正規表現\n`; }
       const hasExtra = !!(extraInfo && (extraInfo.basePath || extraInfo.fileGlob || extraInfo.recursive));
       if (hasExtra) {
         const baseStr = extraInfo.basePath || targetPath;
@@ -20044,6 +20315,7 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
         };
         const _buildReproCmd = (flagStrForCmd, targetExpr, baseDirForCmd, fileGlobForCmd)=>{
           const parts = [':grep'];
+          try{ if (String(flagsGiven||'').includes('F')) parts.push('-F'); }catch{}
           if (recursive) parts.push('-r');
           if (recursive && Number.isFinite(maxDepth)) parts.push('-maxdepth', String(maxDepth|0));
           const cmdFlag = flagStrForCmd ? `/${flagStrForCmd}` : '';
@@ -20168,7 +20440,7 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
                                      }
                                      
                                      const regex = _globToRegex(globPattern);
-                                     extraInfo0 = { recursive: recursive, depth: maxDepth, basePath: basePathForHeader, fileGlob: globPattern };
+                                     extraInfo0 = { recursive: recursive, depth: maxDepth, basePath: basePathForHeader, fileGlob: globPattern, searchKind: (String(flagsGiven||'').includes('F') ? 'literal' : 'regex') };
                                      // CMD欄の -basedir は入力値のまま表示する（フルパスへ正規化しない） (#1421)
                                      try{ extraInfo0.cmdLine = _buildReproCmd(baseFlagStr0, targetPath, (basedirRawOpt || targetPath), globPattern); }catch{}
                                      // Open the result buffer now (blank hit total)
@@ -20538,6 +20810,9 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
   function _grepScan(pat, flagsGiven, targetText) {
     try {
         const b = currentBuffer(); // For settings fallback
+        const isFixed = !!(flagsGiven && String(flagsGiven).includes('F'));
+        const _escapeRegExpLiteral = (s)=> String(s??'').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        const patSrc = isFixed ? _escapeRegExpLiteral(pat) : pat;
         // Case sensitivity logic
         let needI = false;
         let caseLabel = '常に区別';
@@ -20580,7 +20855,7 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
         const flags = 'gm' + (needI ? 'i' : '');
         
         let re = null;
-        try{ re = new RegExp(pat, flags); }catch(e){ 
+        try{ re = new RegExp(patSrc, flags); }catch(e){ 
             return { error: 'grep: invalid regex' };
         }
 
@@ -20592,7 +20867,7 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
           re.lastIndex = 0;
           if (re.test(line)){
              let m;
-             const lineRe = new RegExp(pat, (needI?'i':'') + 'g');
+             const lineRe = new RegExp(patSrc, (needI?'i':'') + 'g');
              while ((m = lineRe.exec(line)) !== null) {
                  // #1367: Use visual column for display (matches posInfo)
                  const visCol = _visualWidthUpToLine(line, m.index) + 1;
@@ -20675,21 +20950,19 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
   }
 
   function _showGrepResult(pat, targetPath, bName, caseLabel, flagStr, resultLines, grepHighlights, extraInfo) {
-      const cmdFlag = flagStr ? `/${flagStr}` : '';
-      let header = `CMD\t\t:grep /${pat}${cmdFlag} ${targetPath}\n`;
-      
-      if (extraInfo && extraInfo.recursive) {
-          const baseStr = extraInfo.basePath || targetPath;
-          header += `基点\t\t${baseStr}\n`;
-          header += `再帰\t\tYes\n`;
-          header += `最大階層\t${extraInfo.depth}\n`;
-      } else {
-          header += `対象\t\t【${bName}】\n`;
-      }
-      
-      header += `検索時 A/a\t${caseLabel}\n`;
       const hitTotal = (Array.isArray(grepHighlights) ? grepHighlights.length : 0);
-      header += `ヒット総数\t${hitTotal}件\n\n`;
+      // Ensure cmdLine contains -F for fixed-string searches when applicable.
+      try{
+        const isFixed = !!(extraInfo && (extraInfo.searchKind==='literal' || extraInfo.patternKind==='literal'));
+        if (!extraInfo) extraInfo = {};
+        if (!extraInfo.searchKind) extraInfo.searchKind = isFixed ? 'literal' : 'regex';
+        if (!extraInfo.cmdLine) {
+          const cmdFlag = flagStr ? `/${flagStr}` : '';
+          const optF = isFixed ? '-F ' : '';
+          extraInfo.cmdLine = `:grep ${optF}/${pat}${cmdFlag} ${targetPath}`;
+        }
+      }catch{}
+      const header = _buildGrepHeader(pat, targetPath, bName, caseLabel, flagStr, extraInfo, hitTotal);
 
       const headerLineCount = header.split('\n').length - 1;
       const newText = header + resultLines.join('\n') + '\n';
@@ -20723,13 +20996,23 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
             const displayPath = (targetPath === '%' ? bName : targetPath);
             const formatted = _formatGrepMatches(res.matches, displayPath);
             
-            _showGrepResult(pat, targetPath, bName, res.caseLabel, res.flagStr, formatted.lines, formatted.highlights);
+            const isFixed0 = !!(flagsGiven && String(flagsGiven).includes('F'));
+            const cmdFlag = res.flagStr ? `/${res.flagStr}` : '';
+            const optF = isFixed0 ? '-F ' : '';
+            const cmdLine = `:grep ${optF}/${pat}${cmdFlag} ${targetPath}`;
+            const extraInfo0 = { cmdLine, searchKind: (isFixed0 ? 'literal' : 'regex') };
+            _showGrepResult(pat, targetPath, bName, res.caseLabel, res.flagStr, formatted.lines, formatted.highlights, extraInfo0);
             return res.matches.length;
         } else {
           // 外部検索は0件でも結果バッファを生成する。
           if (targetPath && targetPath !== '%') {
             // legacy path: keep creating a buffer, but do not toast here.
-            _showGrepResult(pat, targetPath, bName, res.caseLabel, res.flagStr, ['','', 'grep: no matches found'], []);
+            const isFixed0 = !!(flagsGiven && String(flagsGiven).includes('F'));
+            const cmdFlag = res.flagStr ? `/${res.flagStr}` : '';
+            const optF = isFixed0 ? '-F ' : '';
+            const cmdLine = `:grep ${optF}/${pat}${cmdFlag} ${targetPath}`;
+            const extraInfo0 = { cmdLine, searchKind: (isFixed0 ? 'literal' : 'regex') };
+            _showGrepResult(pat, targetPath, bName, res.caseLabel, res.flagStr, ['','', 'grep: no matches found'], [], extraInfo0);
           } else {
             if (!suppressToast) toast('grep: no matches found');
           }
