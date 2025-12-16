@@ -11073,19 +11073,24 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
                 caretRow = rc2.r|0; caretCol = rc2.c|0;
               }catch{}
               // Preserve scroll position.
-              // If EOF padding/blank lines are visible (bottom slack > 0), preserve that slack.
+              // Preserve scroll position.
+              // NOTE: bottomSlackPx>0 is true for most non-bottom positions, so using it unconditionally
+              // causes a drift that grows as you move away from EOF (observed around ~visible-lines threshold).
+              // We only preserve bottom slack when the viewport is actually showing *past EOF* (blank area).
               // Otherwise preserve caret's relative row position within the viewport.
               try{
                 const lh = (typeof LINE_HEIGHT==='number' && LINE_HEIGHT>0) ? LINE_HEIGHT : 20;
                 const newMax = Math.max(0, ((editor.scrollHeight|0) - (editor.clientHeight|0))|0);
-                if ((_imeOrigBottomSlackPx|0) > 0){
+                const origTopLine = Math.floor((_imeOrigScrollTop|0) / lh);
+                const vis = Math.max(1, Math.floor(((editor && editor.clientHeight)||0) / lh));
+                // past-EOF check is based on *full* line count before reduction
+                const pastEofVisible = ((origTopLine + vis) > (lines ? (lines.length|0) : 0));
+                if (pastEofVisible && ((_imeOrigBottomSlackPx|0) > 0)){
                   const stNew = Math.max(0, Math.min(newMax, (newMax - (_imeOrigBottomSlackPx|0))|0));
                   editor.scrollTop = stNew;
                 } else {
-                  const origTopLine = Math.floor((_imeOrigScrollTop|0) / lh);
                   const relRow = Math.max(0, (r - origTopLine)|0);
                   const reducedCaretRow = Math.max(0, (r - startLine)|0);
-                  const vis = Math.max(1, Math.floor(((editor && editor.clientHeight)||0) / lh));
                   const maxTop = Math.max(0, subset.length - vis);
                   let topLineNew = (reducedCaretRow - relRow)|0;
                   if (topLineNew < 0) topLineNew = 0;
