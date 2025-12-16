@@ -341,6 +341,13 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
         // Exponential backoff to avoid ERR_CONNECTION_REFUSED spam after sleep.
         const next = Math.min(30000, 500 * (2 ** Math.min(6, _imePollFailCount)));
         _imePollDelayMs = next;
+        // If the local API seems dead (e.g. after sleep) IME-related keys may stop working.
+        // Prompt restart once after a few consecutive failures.
+        try{
+          if (_imePollFailCount === 3){
+            try{ _apiPromptRestartOnce && _apiPromptRestartOnce('IME'); }catch{}
+          }
+        }catch{}
         _schedule(_imePollDelayMs);
       };
       const _noteOk = ()=>{
@@ -357,7 +364,7 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
           // While a modal like grep dialog is open, do not apply IME state changes to the editor.
           // (User may toggle IME using かな/英数 while typing in the dialog; the main editor must not react.)
           try{
-            if ((window && window._grepDialogOpen===true) || document.getElementById('grepDialog') || (_modalOverlay && _modalOverlay.style && _modalOverlay.style.display !== 'none')){
+            if ((window && window._grepDialogOpen===true) || document.getElementById('grepDialog') || (typeof _isModalOverlayOpen==='function' && _isModalOverlayOpen())){
               _schedule(_imePollDelayMs);
               return;
             }
@@ -4925,6 +4932,18 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
     try{ _apiDisabledUntil = 0; _apiFailCount = 0; }catch{}
   }
 
+  function _isModalOverlayOpen(){
+    try{
+      if (!_modalOverlay) return false;
+      // Prefer computed style because style.display may be '' while CSS hides it.
+      const cs = getComputedStyle(_modalOverlay);
+      if (cs && cs.display) return cs.display !== 'none';
+      return !!(_modalOverlay.style && _modalOverlay.style.display && _modalOverlay.style.display !== 'none');
+    }catch{
+      try{ return !!(_modalOverlay && _modalOverlay.style && _modalOverlay.style.display !== 'none'); }catch{ return false; }
+    }
+  }
+
   // One-shot (cooldown) dialog to encourage restart when local API seems dead after sleep.
   let _apiRestartPromptLastTs = 0;
   async function _apiPromptRestartOnce(reason){
@@ -4933,7 +4952,7 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
       // Cooldown: avoid repeatedly interrupting the user.
       if (_apiRestartPromptLastTs && (now - _apiRestartPromptLastTs) < 10*60*1000) return;
       // Don't stack dialogs.
-      try{ if (_modalOverlay && _modalOverlay.style && _modalOverlay.style.display !== 'none') return; }catch{}
+      try{ if (_isModalOverlayOpen()) return; }catch{}
       try{ if (document.getElementById('grepDialog')) return; }catch{}
       _apiRestartPromptLastTs = now;
 
@@ -4942,7 +4961,7 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
       const detail =
         'スリープ復帰後にホスト側が停止した可能性があります。\n' +
         'この状態では F19 / かな / 英数 やファイル操作が効かないことがあります。\n\n' +
-        'F10でSixを即時終了して再起動してください。' + (r ? ('\n(検知: ' + r + ')') : '');
+        '「終了」を押して再起動してください（F10/即時終了でも可）。' + (r ? ('\n(検知: ' + r + ')') : '');
 
       const choice = await choiceModal({
         title,
