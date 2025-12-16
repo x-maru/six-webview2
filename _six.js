@@ -19152,7 +19152,7 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
 
       // Label on the left (requested)
       const inputLabel = document.createElement('div');
-      inputLabel.textContent = '検索語(正規表現)';
+      inputLabel.textContent = '検索語';
       inputLabel.style.cssText = 'flex:0 0 auto; font-size:0.85em; color:var(--text-dim); white-space:nowrap; user-select:none;';
       inputRow.appendChild(inputLabel);
       
@@ -19170,7 +19170,7 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
       const termHistBtn = document.createElement('button');
       termHistBtn.type = 'button';
       termHistBtn.tabIndex = -1;
-      termHistBtn.textContent = '履歴';
+      termHistBtn.textContent = '[F4履歴]';
       termHistBtn.style.cssText = 'position:absolute; right:4px; top:50%; transform:translateY(-50%); border:1px solid #2a3244; background:#1a2030; color:#e6e6e6; border-radius:6px; padding:3px 8px; cursor:pointer; font-size:11px; line-height:1.2; user-select:none; outline:none;';
       termHistBtn.addEventListener('mousedown', (e)=>{ try{ e.preventDefault(); e.stopPropagation(); }catch{} });
       inputWrap.appendChild(termHistBtn);
@@ -19386,8 +19386,9 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
         const b = document.createElement('button');
         b.type = 'button';
         b.tabIndex = -1;
-        b.textContent = '履歴';
+        b.textContent = '[F4履歴]';
         b.style.cssText = 'position:absolute; right:4px; top:50%; transform:translateY(-50%); border:1px solid #2a3244; background:#1a2030; color:#e6e6e6; border-radius:6px; padding:3px 8px; cursor:pointer; font-size:11px; line-height:1.2; user-select:none; outline:none;';
+        // Do not steal focus from the input (clicking the history button should keep focus on the input).
         b.addEventListener('mousedown', (e)=>{ try{ e.preventDefault(); e.stopPropagation(); }catch{} });
         return b;
       };
@@ -19555,8 +19556,25 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
           _applyDisabledStyle(basedirInput, !!basedirInput.disabled);
           _applyDisabledStyle(fileglobInput, !!fileglobInput.disabled);
 
-          try{ pathHistBtn.disabled = !!pathSingle.disabled; _applyBtnDisabledStyle(pathHistBtn, !!pathHistBtn.disabled); }catch{}
-          try{ basedirHistBtn.disabled = !!basedirInput.disabled; _applyBtnDisabledStyle(basedirHistBtn, !!basedirHistBtn.disabled); }catch{}
+          try{
+            pathHistBtn.disabled = !!pathSingle.disabled;
+            if (pathHistBtn.disabled){
+              _applyBtnDisabledStyle(pathHistBtn, true);
+            } else {
+              // Restore normal colors (applyBtnDisabledStyle does not restore background/border/color).
+              try{ pathHistBtn.style.background = '#1a2030'; pathHistBtn.style.borderColor = '#2a3244'; pathHistBtn.style.color = '#e6e6e6'; }catch{}
+              try{ pathHistBtn.style.cursor = 'pointer'; pathHistBtn.style.opacity='1.0'; }catch{}
+            }
+          }catch{}
+          try{
+            basedirHistBtn.disabled = !!basedirInput.disabled;
+            if (basedirHistBtn.disabled){
+              _applyBtnDisabledStyle(basedirHistBtn, true);
+            } else {
+              try{ basedirHistBtn.style.background = '#1a2030'; basedirHistBtn.style.borderColor = '#2a3244'; basedirHistBtn.style.color = '#e6e6e6'; }catch{}
+              try{ basedirHistBtn.style.cursor = 'pointer'; basedirHistBtn.style.opacity='1.0'; }catch{}
+            }
+          }catch{}
         }catch{}
       }
 
@@ -19972,7 +19990,6 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
           btnRegex.style.color = '#000';
           btnLiteral.style.background = (!on) ? onBg : offBg;
           btnLiteral.style.color = '#000';
-          try{ inputLabel.textContent = on ? '検索語(正規表現)' : '検索語(リテラル)'; }catch{}
         }catch{}
       }
       btnRegex.onclick = ()=>{ try{ _grepPatMode = 'regex'; _syncPatButtons(); }catch{} };
@@ -20252,6 +20269,46 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
             }
             // While popup is open, never run grep on other keys.
             try{ e.stopPropagation(); }catch{}
+            return;
+          }
+        }catch{}
+
+        // F4: open history popup for the focused input (term/PATH/-basedir).
+        try{
+          if (e && e.key === 'F4'){
+            e.preventDefault(); e.stopPropagation();
+            const ae = document.activeElement;
+            // If focus is on an input that has a history button, open its popup.
+            if (ae === input){
+              try{ _grepTermHistPopupShow(); }catch{}
+              return;
+            }
+            if (ae === pathSingle && !pathHistBtn.disabled){
+              try{ _grepPathHistPopupShowFor(pathSingle, pathSingleWrap, pathHistBtn); }catch{}
+              return;
+            }
+            if (ae === basedirInput && !basedirHistBtn.disabled){
+              try{ _grepPathHistPopupShowFor(basedirInput, basedirWrap, basedirHistBtn); }catch{}
+              return;
+            }
+            // Otherwise prefer the earlier one in Tab order among visible/enabled.
+            try{
+              // 1) search term
+              _grepTermHistPopupShow();
+              return;
+            }catch{}
+            try{
+              const singleVisible = (pathRowSingle && pathRowSingle.style && pathRowSingle.style.display !== 'none');
+              const dirVisible = (pathRowDir && pathRowDir.style && pathRowDir.style.display !== 'none');
+              if (singleVisible && !pathHistBtn.disabled){
+                _grepPathHistPopupShowFor(pathSingle, pathSingleWrap, pathHistBtn);
+                return;
+              }
+              if (dirVisible && !basedirHistBtn.disabled){
+                _grepPathHistPopupShowFor(basedirInput, basedirWrap, basedirHistBtn);
+                return;
+              }
+            }catch{}
             return;
           }
         }catch{}

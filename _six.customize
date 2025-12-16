@@ -13,7 +13,8 @@ window.SIX_OPTIONS = {
   visualbell: true, // ヴィジュアルベル。指定しなくてもデフォルトでON
   UNDO_STEPS_IN_SESSION: 5, // 即時終了から復帰した後まで引き継ぐアンドゥバッファの深さ(各バッファ毎に持つバッファに対する共通の深さ)
   SEARCH_TERM_IN_SESSION: 20,
-  GREP_BASEDIR_IN_SESSION: 30,
+  GREP_BASEDIR_IN_SESSION: 20,
+  GREP_FILEGLOB_IN_SESSION: 15,
   GREP_EXCLUDE_EXTENSIONS: [ '.png','.jpg','.jpeg','.gif','.bmp','.webp','.ico','.icns',
     '.zip','.7z','.rar','.gz','.bz2','.xz','.tar',
     '.pdf',
