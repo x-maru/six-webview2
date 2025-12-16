@@ -655,6 +655,22 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
           }
       } catch {}
 
+      // #1439: Persist grep basedir/path history
+      let grepBasedirHist = [];
+      try{
+        const limit = (window.SIX_OPTIONS && typeof window.SIX_OPTIONS.GREP_BASEDIR_IN_SESSION === 'number') ? (window.SIX_OPTIONS.GREP_BASEDIR_IN_SESSION|0) : 0;
+        if (limit > 0 && typeof _grepBasedirHistory !== 'undefined' && Array.isArray(_grepBasedirHistory)) {
+          grepBasedirHist = _grepBasedirHistory.slice(-limit);
+        }
+      }catch{}
+
+      // #1440: Persist grep dialog state (target selection)
+      let grepDialogState = { targetMode:'buffer' };
+      try{
+        const t = (_grepDialogState && typeof _grepDialogState==='object') ? String(_grepDialogState.targetMode||'buffer') : 'buffer';
+        grepDialogState.targetMode = (t==='buffer' || t==='dirfiles' || t==='files') ? t : 'buffer';
+      }catch{ grepDialogState = { targetMode:'buffer' }; }
+
       const bufs = buffers.map((b)=>{
         const isFileBacked = !!(b && b.path && /^file:\/\//i.test(b.path));
         const omitText = !!(lite && isFileBacked && !b.modified);
@@ -716,7 +732,9 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
         buffers: bufs,
         scrolloff: Number.isFinite(scrolloff) ? (scrolloff|0) : 3,
         windowState: winState,
-        searchHistory: searchHist
+        searchHistory: searchHist,
+        grepBasedirHistory: grepBasedirHist,
+        grepDialogState: grepDialogState
       };
       return payload;
     }catch{ return { version:1, when:Date.now(), active:0, buffers:[] }; }
@@ -822,6 +840,22 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
               _searchHistIndex = _searchHistory.length;
           }
       } catch {}
+
+      // #1439: Restore grep basedir/path history
+      try{
+        if (Array.isArray(j.grepBasedirHistory) && typeof _grepBasedirHistory !== 'undefined'){
+          _grepBasedirHistory.length = 0;
+          j.grepBasedirHistory.forEach(v=>_grepBasedirHistory.push(String(v)));
+        }
+      }catch{}
+
+      // #1440: Restore grep dialog state
+      try{
+        if (j && typeof j.grepDialogState === 'object' && j.grepDialogState){
+          const t = String(j.grepDialogState.targetMode||'buffer');
+          _grepDialogState = { targetMode: (t==='buffer'||t==='dirfiles'||t==='files') ? t : 'buffer' };
+        }
+      }catch{}
 
       // Clear current
       buffers.length = 0; currentIdx = -1;
@@ -3105,6 +3139,28 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
   let _searchHistIndex = 0;         // 0.._searchHistory.length (length means draft)
   let _searchHistBrowsing = false;  // true when navigating search history in cmdinput
   let _searchHistTemp = '';         // current draft while browsing
+
+  // grep path history (session-shared; for grep dialog PATH/-basedir)
+  const _grepBasedirHistory = [];
+  function _grepBasedirHistoryMaybePush(s){
+    try{
+      const v = String(s||'').trim();
+      if (!v) return;
+      // Move-to-end unique
+      const i = _grepBasedirHistory.indexOf(v);
+      if (i >= 0) _grepBasedirHistory.splice(i, 1);
+      _grepBasedirHistory.push(v);
+      // Cap size if configured
+      const limit = (window.SIX_OPTIONS && typeof window.SIX_OPTIONS.GREP_BASEDIR_IN_SESSION === 'number') ? (window.SIX_OPTIONS.GREP_BASEDIR_IN_SESSION|0) : 0;
+      if (limit > 0){
+        while (_grepBasedirHistory.length > limit) _grepBasedirHistory.shift();
+      }
+    }catch{}
+  }
+
+  // grep dialog UI state (session-shared)
+  // - targetMode: 'buffer' | 'dirfiles' | 'files'
+  let _grepDialogState = { targetMode: 'buffer' };
 
   function _searchHistoryMaybePush(s){
     try{
@@ -19076,12 +19132,26 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
       inputLabel.style.cssText = 'flex:0 0 auto; font-size:0.85em; color:var(--text-dim); white-space:nowrap; user-select:none;';
       inputRow.appendChild(inputLabel);
       
+      // Search term input with an inline [履歴] button
+      const inputWrap = document.createElement('div');
+      inputWrap.style.cssText = 'position:relative; flex:1 1 auto; min-width:0;';
+
       const input = document.createElement('input');
       input.type = 'text';
       input.placeholder = '';
-      // Leave space for regex/literal toggle buttons on the right
-      input.style.cssText = 'flex:1 1 auto; min-width:0; background:var(--bg-color); color:var(--text-color); border:1px solid #ffffff; padding:4px 8px; font-family:var(--font-mono); outline:none; font-size:inherit;';
-      inputRow.appendChild(input);
+      // Leave space for [履歴] on the right inside the input
+      input.style.cssText = 'width:100%; background:var(--bg-color); color:var(--text-color); border:1px solid #ffffff; padding:4px 56px 4px 8px; font-family:var(--font-mono); outline:none; font-size:inherit; box-sizing:border-box;';
+      inputWrap.appendChild(input);
+
+      const termHistBtn = document.createElement('button');
+      termHistBtn.type = 'button';
+      termHistBtn.tabIndex = -1;
+      termHistBtn.textContent = '履歴';
+      termHistBtn.style.cssText = 'position:absolute; right:4px; top:50%; transform:translateY(-50%); border:1px solid #2a3244; background:#1a2030; color:#e6e6e6; border-radius:6px; padding:3px 8px; cursor:pointer; font-size:11px; line-height:1.2; user-select:none; outline:none;';
+      termHistBtn.addEventListener('mousedown', (e)=>{ try{ e.preventDefault(); e.stopPropagation(); }catch{} });
+      inputWrap.appendChild(termHistBtn);
+
+      inputRow.appendChild(inputWrap);
 
       // Pattern mode buttons: [正規表現] [リテラル]
       let _grepPatMode = 'regex'; // 'regex' | 'literal'
@@ -19119,11 +19189,17 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
       const _palGray = '#9aa0aa';
       const _palGreen = '#49e26f';
 
+      // Restore last target selection from session-shared state
+      try{
+        const t = (_grepDialogState && typeof _grepDialogState==='object') ? String(_grepDialogState.targetMode||'buffer') : 'buffer';
+        if (t==='buffer' || t==='dirfiles' || t==='files') _grepTargetMode = t;
+      }catch{}
+
       const targetWrap = document.createElement('div');
       targetWrap.style.cssText = 'display:flex; flex-direction:column; gap:8px;';
 
       const targetBtnRow = document.createElement('div');
-      targetBtnRow.style.cssText = 'display:flex; gap:6px; align-items:center; justify-content:flex-start;';
+      targetBtnRow.style.cssText = 'display:flex; gap:6px; align-items:center; justify-content:flex-start; margin-top:0.25rem;';
 
       const _mkTargetBtn = (label)=>{
         const btn = document.createElement('button');
@@ -19141,6 +19217,13 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
           pt = Math.max(2, pt - half);
           pb = Math.max(2, pb - half);
           mh = Math.max(18, mh - one);
+        }catch{}
+        // #1440: inside padding tweak (+0.25rem top, +0.25rem bottom)
+        try{
+          const rem2 = parseFloat(getComputedStyle(document.documentElement).fontSize) || 16;
+          const q = Math.round(rem2 * 0.25);
+          pt = Math.max(1, (pt|0) + q);
+          pb = Math.max(1, (pb|0) + q);
         }catch{}
         btn.style.cssText = [
           'border:1px solid #2a3244',
@@ -19186,9 +19269,14 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
         return wrap;
       };
 
-      const wrapThis = _wrapWithFKey(btnThisBuf, 'F1', 'F1 で「このバッファ」', ()=>{ _grepTargetMode='buffer'; _syncTargetUI(); try{ _syncExecEnabled(); }catch{} });
-      const wrapDir  = _wrapWithFKey(btnDirFiles, 'F2', 'F2 で「ディレクトリ+ファイル指定」', ()=>{ _grepTargetMode='dirfiles'; _syncTargetUI(); try{ _syncExecEnabled(); }catch{} });
-      const wrapFile = _wrapWithFKey(btnFiles, 'F3', 'F3 で「ファイル指定」', ()=>{ _grepTargetMode='files'; _syncTargetUI(); try{ _syncExecEnabled(); }catch{} });
+      const _persistTargetMode = ()=>{
+        try{ _grepDialogState = { targetMode: String(_grepTargetMode||'buffer') }; }catch{}
+        try{ if (typeof _schedulePersist === 'function') _schedulePersist('grep-dialog'); }catch{}
+      };
+
+      const wrapThis = _wrapWithFKey(btnThisBuf, 'F1', 'F1 で「このバッファ」', ()=>{ _grepTargetMode='buffer'; _syncTargetUI(); try{ _syncExecEnabled(); }catch{}; _persistTargetMode(); });
+      const wrapDir  = _wrapWithFKey(btnDirFiles, 'F2', 'F2 で「ディレクトリ+ファイル指定」', ()=>{ _grepTargetMode='dirfiles'; _syncTargetUI(); try{ _syncExecEnabled(); }catch{}; _persistTargetMode(); });
+      const wrapFile = _wrapWithFKey(btnFiles, 'F3', 'F3 で「ファイル指定」', ()=>{ _grepTargetMode='files'; _syncTargetUI(); try{ _syncExecEnabled(); }catch{}; _persistTargetMode(); });
 
       targetBtnRow.appendChild(wrapThis);
       targetBtnRow.appendChild(wrapDir);
@@ -19270,12 +19358,34 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
         return el;
       };
 
+      const _mkInlineHistBtn = ()=>{
+        const b = document.createElement('button');
+        b.type = 'button';
+        b.tabIndex = -1;
+        b.textContent = '履歴';
+        b.style.cssText = 'position:absolute; right:4px; top:50%; transform:translateY(-50%); border:1px solid #2a3244; background:#1a2030; color:#e6e6e6; border-radius:6px; padding:3px 8px; cursor:pointer; font-size:11px; line-height:1.2; user-select:none; outline:none;';
+        b.addEventListener('mousedown', (e)=>{ try{ e.preventDefault(); e.stopPropagation(); }catch{} });
+        return b;
+      };
+
+      const pathSingleWrap = document.createElement('div');
+      pathSingleWrap.style.cssText = 'position:relative; flex:1 1 auto; min-width:0;';
       const pathSingle = _mkPathInput();
       pathSingle.placeholder = 'PATH[/] または glob';
-      try{ pathSingle.style.marginRight = '0.5rem'; }catch{}
+      // Leave space for [履歴]
+      try{ pathSingle.style.padding = '4px 56px 4px 8px'; pathSingle.style.boxSizing='border-box'; }catch{}
+      const pathHistBtn = _mkInlineHistBtn();
+      pathSingleWrap.appendChild(pathSingle);
+      pathSingleWrap.appendChild(pathHistBtn);
 
+      const basedirWrap = document.createElement('div');
+      basedirWrap.style.cssText = 'position:relative; min-width:0;';
       const basedirInput = _mkPathInput();
       basedirInput.placeholder = '-basedir (DIR[/])';
+      try{ basedirInput.style.padding = '4px 56px 4px 8px'; basedirInput.style.boxSizing='border-box'; }catch{}
+      const basedirHistBtn = _mkInlineHistBtn();
+      basedirWrap.appendChild(basedirInput);
+      basedirWrap.appendChild(basedirHistBtn);
 
       const fileglobInput = _mkPathInput();
       fileglobInput.placeholder = 'fileglob (例: *.md)';
@@ -19301,12 +19411,12 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
       // Prebuild both path layouts and toggle by display.
       const pathRowSingle = document.createElement('div');
       pathRowSingle.style.cssText = 'display:flex; align-items:center;';
-      pathRowSingle.appendChild(pathSingle);
+      pathRowSingle.appendChild(pathSingleWrap);
 
       const pathRowDir = document.createElement('div');
       pathRowDir.style.cssText = 'display:flex; align-items:center; gap:6px;';
-      try{ basedirInput.style.flex = '8 1 0%'; fileglobInput.style.flex = '2 1 0%'; }catch{}
-      pathRowDir.appendChild(basedirInput);
+      try{ basedirWrap.style.flex = '8 1 0%'; fileglobInput.style.flex = '2 1 0%'; }catch{}
+      pathRowDir.appendChild(basedirWrap);
       pathRowDir.appendChild(fileglobInput);
 
       // Start with single row visible
@@ -19326,6 +19436,11 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
           depthInput.value = v;
         }catch{}
       });
+
+      // #1439: Focus on maxdepth selects all
+      try{
+        depthInput.addEventListener('focus', ()=>{ try{ depthInput.select && depthInput.select(); }catch{} }, true);
+      }catch{}
 
       function _setTargetBtnStyle(btn, active){
         try{
@@ -19415,12 +19530,15 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
           _applyDisabledStyle(pathSingle, !!pathSingle.disabled);
           _applyDisabledStyle(basedirInput, !!basedirInput.disabled);
           _applyDisabledStyle(fileglobInput, !!fileglobInput.disabled);
+
+          try{ pathHistBtn.disabled = !!pathSingle.disabled; _applyBtnDisabledStyle(pathHistBtn, !!pathHistBtn.disabled); }catch{}
+          try{ basedirHistBtn.disabled = !!basedirInput.disabled; _applyBtnDisabledStyle(basedirHistBtn, !!basedirHistBtn.disabled); }catch{}
         }catch{}
       }
 
-      btnThisBuf.onclick = (e)=>{ try{ e.preventDefault(); e.stopPropagation(); _grepTargetMode='buffer'; _syncTargetUI(); _syncExecEnabled(); }catch{} };
-      btnDirFiles.onclick = (e)=>{ try{ e.preventDefault(); e.stopPropagation(); _grepTargetMode='dirfiles'; _syncTargetUI(); _syncExecEnabled(); }catch{} };
-      btnFiles.onclick = (e)=>{ try{ e.preventDefault(); e.stopPropagation(); _grepTargetMode='files'; _syncTargetUI(); _syncExecEnabled(); }catch{} };
+      btnThisBuf.onclick = (e)=>{ try{ e.preventDefault(); e.stopPropagation(); _grepTargetMode='buffer'; _syncTargetUI(); _syncExecEnabled(); _persistTargetMode(); }catch{} };
+      btnDirFiles.onclick = (e)=>{ try{ e.preventDefault(); e.stopPropagation(); _grepTargetMode='dirfiles'; _syncTargetUI(); _syncExecEnabled(); _persistTargetMode(); }catch{} };
+      btnFiles.onclick = (e)=>{ try{ e.preventDefault(); e.stopPropagation(); _grepTargetMode='files'; _syncTargetUI(); _syncExecEnabled(); _persistTargetMode(); }catch{} };
 
       recurBtnOn.onclick = (e)=>{ try{ e.preventDefault(); e.stopPropagation(); if (recurBtnOn.disabled) return; _grepRecursive = true; _syncTargetUI(); _syncExecEnabled(); }catch{} };
       recurBtnOff.onclick = (e)=>{ try{ e.preventDefault(); e.stopPropagation(); if (recurBtnOff.disabled) return; _grepRecursive = false; _syncTargetUI(); _syncExecEnabled(); }catch{} };
@@ -19528,6 +19646,257 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
       // Logic
       let histIdx = -1; // -1 means current input
       window._grepDialogOpen = true;
+
+      // Search term history popup inside dialog
+      let _grepTermHistSel = 0;
+      const _grepTermHistPopupId = 'grepTermHistPopup';
+      const _grepTermHistPopupVisible = ()=>{ try{ const p=document.getElementById(_grepTermHistPopupId); return !!(p && p.style.display!=='none'); }catch{ return false; } };
+      const _grepTermHistPopupHide = ()=>{ try{ const p=document.getElementById(_grepTermHistPopupId); if (p) p.style.display='none'; }catch{} };
+      const _grepTermHistItems = ()=>{
+        try{
+          const src = Array.isArray(_searchHistory) ? _searchHistory : [];
+          const out = [];
+          for (let i = src.length - 1; i >= 0; i--){
+            const r = String(src[i]||'');
+            const d = r.replace(/^[:\s]*[/?]/, '');
+            const it = { raw: r, display: d, origIndex: i };
+            if (it.display) out.push(it);
+          }
+          return out;
+        }catch{ return []; }
+      };
+      const _grepTermHistPopupRender = ()=>{
+        try{
+          const pop = document.getElementById(_grepTermHistPopupId); if (!pop) return;
+          pop.innerHTML='';
+          const inner = document.createElement('div');
+          inner.className = 'inner';
+          inner.style.maxHeight = '35vh';
+          inner.style.overflow = 'auto';
+          pop.appendChild(inner);
+          const items = _grepTermHistItems();
+          if (!items.length){
+            const empty = document.createElement('div');
+            empty.textContent = '(履歴なし)';
+            empty.style.padding = '6px 10px';
+            empty.style.color = '#2f3644';
+            inner.appendChild(empty);
+            return;
+          }
+          _grepTermHistSel = Math.max(0, Math.min(items.length-1, (_grepTermHistSel|0)));
+          items.forEach((it,i)=>{
+            const item = document.createElement('div');
+            item.className = 'item';
+            item.style.display='block';
+            item.style.padding='4px 10px';
+            item.style.cursor='pointer';
+            item.style.whiteSpace='nowrap';
+            item.style.borderRadius='4px';
+            item.textContent = it.display;
+            item.style.background = (i===_grepTermHistSel) ? 'var(--popupActiveLine, #1a2030)' : 'transparent';
+            item.addEventListener('mouseenter', ()=>{ try{ _grepTermHistSel=i; _grepTermHistPopupRender(); }catch{} });
+            item.addEventListener('mousedown', (ev)=>{ try{ ev.preventDefault(); ev.stopPropagation(); }catch{}; try{ input.value = it.display; _syncExecEnabled(); }catch{}; _grepTermHistPopupHide(); try{ input.focus({preventScroll:true}); }catch{ try{ input.focus(); }catch{} } });
+            item.addEventListener('click', (ev)=>{ try{ ev.preventDefault(); ev.stopPropagation(); }catch{}; try{ input.value = it.display; _syncExecEnabled(); }catch{}; _grepTermHistPopupHide(); try{ input.focus({preventScroll:true}); }catch{ try{ input.focus(); }catch{} } });
+            inner.appendChild(item);
+          });
+        }catch{}
+      };
+      const _grepTermHistPopupShow = ()=>{
+        try{
+          let pop = document.getElementById(_grepTermHistPopupId);
+          if (!pop){
+            pop = document.createElement('div');
+            pop.id = _grepTermHistPopupId;
+            pop.style.position='fixed';
+            pop.style.maxHeight='35vh';
+            pop.style.background='#0f1117';
+            pop.style.color='#e6e6e6';
+            pop.style.border='1px solid #2a3244';
+            pop.style.boxShadow='0 10px 24px rgba(0,0,0,0.4)';
+            pop.style.zIndex='10001';
+            pop.style.borderRadius='6px';
+            pop.style.overflow='hidden';
+            pop.style.boxSizing='border-box';
+            pop.style.padding='4px 6px';
+            document.body.appendChild(pop);
+          }
+          pop.style.display='';
+          const items = _grepTermHistItems();
+          _grepTermHistSel = 0;
+          _grepTermHistPopupRender();
+          // Position above the input
+          const r = inputWrap.getBoundingClientRect();
+          const vw = (window.innerWidth||0), vh=(window.innerHeight||0);
+          const pw = (pop.offsetWidth||260), ph=(pop.offsetHeight||160);
+          let left = Math.max(8, Math.min(vw - pw - 8, Math.round(r.right - pw)));
+          let top  = Math.max(8, Math.min(vh - ph - 8, Math.round(r.top - ph - 6)));
+          pop.style.left = left + 'px';
+          pop.style.top  = top + 'px';
+          // Outside click closes
+          if (!pop.__outsideClose){
+            pop.__outsideClose = true;
+            document.addEventListener('mousedown', (ev)=>{
+              try{
+                const pp = document.getElementById(_grepTermHistPopupId);
+                if (!pp || pp.style.display==='none') return;
+                const within = pp.contains(ev.target) || termHistBtn.contains(ev.target) || inputWrap.contains(ev.target);
+                if (!within) _grepTermHistPopupHide();
+              }catch{}
+            }, true);
+          }
+        }catch{}
+      };
+
+      termHistBtn.onclick = (e)=>{ try{ e.preventDefault(); e.stopPropagation(); }catch{}; try{ _grepTermHistPopupShow(); }catch{} };
+
+      // Path history popup inside dialog (PATH / -basedir)
+      let _grepPathHistSel = 0;
+      let _grepPathHistTarget = null;
+      let _grepPathHistAnchor = null;
+      let _grepPathHistBtn = null;
+      const _grepPathHistPopupId = 'grepPathHistPopup';
+      const _grepPathHistPopupVisible = ()=>{ try{ const p=document.getElementById(_grepPathHistPopupId); return !!(p && p.style.display!=='none'); }catch{ return false; } };
+      const _grepPathHistPopupHide = ()=>{ try{ const p=document.getElementById(_grepPathHistPopupId); if (p) p.style.display='none'; }catch{} };
+      const _grepPathHistItems = ()=>{
+        try{
+          const src = Array.isArray(_grepBasedirHistory) ? _grepBasedirHistory : [];
+          const out = [];
+          for (let i = src.length - 1; i >= 0; i--){
+            const v = String(src[i]||'').trim();
+            if (!v) continue;
+            out.push({ value: v, origIndex: i });
+          }
+          return out;
+        }catch{ return []; }
+      };
+      const _grepPathHistPopupRender = ()=>{
+        try{
+          const pop = document.getElementById(_grepPathHistPopupId); if (!pop) return;
+          pop.innerHTML='';
+          const inner = document.createElement('div');
+          inner.className = 'inner';
+          inner.style.maxHeight = '35vh';
+          inner.style.overflow = 'auto';
+          pop.appendChild(inner);
+          const items = _grepPathHistItems();
+          if (!items.length){
+            const empty = document.createElement('div');
+            empty.textContent = '(履歴なし)';
+            empty.style.padding = '6px 10px';
+            empty.style.color = '#2f3644';
+            inner.appendChild(empty);
+            return;
+          }
+          _grepPathHistSel = Math.max(0, Math.min(items.length-1, (_grepPathHistSel|0)));
+          items.forEach((it,i)=>{
+            const item = document.createElement('div');
+            item.className = 'item';
+            item.style.display='block';
+            item.style.padding='4px 10px';
+            item.style.cursor='pointer';
+            item.style.whiteSpace='nowrap';
+            item.style.borderRadius='4px';
+            item.textContent = it.value;
+            item.style.background = (i===_grepPathHistSel) ? 'var(--popupActiveLine, #1a2030)' : 'transparent';
+            item.addEventListener('mouseenter', ()=>{ try{ _grepPathHistSel=i; _grepPathHistPopupRender(); }catch{} });
+            const _apply = (ev)=>{
+              try{ ev.preventDefault(); ev.stopPropagation(); }catch{}
+              try{
+                if (_grepPathHistTarget){
+                  _grepPathHistTarget.value = String(it.value||'');
+                  try{ _histCommit(_grepPathHistTarget); }catch{}
+                  try{ _syncExecEnabled(); }catch{}
+                }
+              }catch{}
+              _grepPathHistPopupHide();
+              try{ _grepPathHistTarget && _grepPathHistTarget.focus && _grepPathHistTarget.focus({preventScroll:true}); }catch{ try{ _grepPathHistTarget && _grepPathHistTarget.focus && _grepPathHistTarget.focus(); }catch{} }
+            };
+            item.addEventListener('mousedown', _apply);
+            item.addEventListener('click', _apply);
+            inner.appendChild(item);
+          });
+        }catch{}
+      };
+      const _grepPathHistPopupShowFor = (targetInput, anchorEl, btnEl)=>{
+        try{
+          if (!targetInput || targetInput.disabled) return;
+          _grepPathHistTarget = targetInput;
+          _grepPathHistAnchor = anchorEl || targetInput;
+          _grepPathHistBtn = btnEl || null;
+          let pop = document.getElementById(_grepPathHistPopupId);
+          if (!pop){
+            pop = document.createElement('div');
+            pop.id = _grepPathHistPopupId;
+            pop.style.position='fixed';
+            pop.style.maxHeight='35vh';
+            pop.style.background='#0f1117';
+            pop.style.color='#e6e6e6';
+            pop.style.border='1px solid #2a3244';
+            pop.style.boxShadow='0 10px 24px rgba(0,0,0,0.4)';
+            pop.style.zIndex='10001';
+            pop.style.borderRadius='6px';
+            pop.style.overflow='hidden';
+            pop.style.boxSizing='border-box';
+            pop.style.padding='4px 6px';
+            document.body.appendChild(pop);
+          }
+          pop.style.display='';
+          _grepPathHistSel = 0;
+          _grepPathHistPopupRender();
+          const r = (_grepPathHistAnchor && _grepPathHistAnchor.getBoundingClientRect) ? _grepPathHistAnchor.getBoundingClientRect() : targetInput.getBoundingClientRect();
+          const vw = (window.innerWidth||0), vh=(window.innerHeight||0);
+          const pw = (pop.offsetWidth||360), ph=(pop.offsetHeight||160);
+          let left = Math.max(8, Math.min(vw - pw - 8, Math.round(r.right - pw)));
+          let top  = Math.max(8, Math.min(vh - ph - 8, Math.round(r.top - ph - 6)));
+          pop.style.left = left + 'px';
+          pop.style.top  = top + 'px';
+          if (!pop.__outsideClose){
+            pop.__outsideClose = true;
+            document.addEventListener('mousedown', (ev)=>{
+              try{
+                const pp = document.getElementById(_grepPathHistPopupId);
+                if (!pp || pp.style.display==='none') return;
+                const within = pp.contains(ev.target)
+                  || (_grepPathHistBtn && _grepPathHistBtn.contains && _grepPathHistBtn.contains(ev.target))
+                  || (_grepPathHistAnchor && _grepPathHistAnchor.contains && _grepPathHistAnchor.contains(ev.target));
+                if (!within) _grepPathHistPopupHide();
+              }catch{}
+            }, true);
+          }
+        }catch{}
+      };
+
+      pathHistBtn.onclick = (e)=>{ try{ e.preventDefault(); e.stopPropagation(); }catch{}; try{ _grepPathHistPopupShowFor(pathSingle, pathSingleWrap, pathHistBtn); }catch{} };
+      basedirHistBtn.onclick = (e)=>{ try{ e.preventDefault(); e.stopPropagation(); }catch{}; try{ _grepPathHistPopupShowFor(basedirInput, basedirWrap, basedirHistBtn); }catch{} };
+
+      // Path history browsing state (per-input)
+      const _histInit = (el)=>{ try{ if (!el.__grepHist){ el.__grepHist = { idx:_grepBasedirHistory.length, browsing:false, temp:'' }; } }catch{} };
+      const _histStart = (el)=>{ try{ _histInit(el); const st = el.__grepHist; if (!st.browsing){ st.temp = String(el.value||''); st.idx = _grepBasedirHistory.length; st.browsing = true; } }catch{} };
+      const _histMove = (el, dir)=>{
+        try{
+          if (!Array.isArray(_grepBasedirHistory) || !_grepBasedirHistory.length) return false;
+          _histStart(el);
+          const st = el.__grepHist;
+          const n = _grepBasedirHistory.length;
+          st.idx = Math.max(0, Math.min(n-1, (st.idx|0) + (dir>0?1:-1)));
+          el.value = String(_grepBasedirHistory[st.idx]||'');
+          try{ el.select && el.select(); }catch{}
+          try{ _syncExecEnabled(); }catch{}
+          return true;
+        }catch{ return false; }
+      };
+      const _histCommit = (el)=>{
+        try{
+          _histInit(el);
+          const st = el.__grepHist;
+          if (!st.browsing) return false;
+          st.browsing = false;
+          st.idx = _grepBasedirHistory.length;
+          st.temp = '';
+          try{ _syncExecEnabled(); }catch{}
+          return true;
+        }catch{ return false; }
+      };
 
       // Keep a removable window key listener for this dialog instance
       let _grepWinKeyListener = null;
@@ -19670,6 +20039,7 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
           const baseDirRaw = String((basedirInput && basedirInput.value) ? basedirInput.value : '').trim();
           const fg = String((fileglobInput && fileglobInput.value) ? fileglobInput.value : '').trim() || '*';
           if (!baseDirRaw){ toast('grep: -basedir が空です'); return; }
+          try{ _grepBasedirHistoryMaybePush(baseDirRaw); _schedulePersist && _schedulePersist('grep-basedir'); }catch{}
           let depthN = 0;
           if (_grepRecursive){
             const v = String((depthInput && depthInput.value) ? depthInput.value : '').trim();
@@ -19680,6 +20050,7 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
         } else {
           const p = String((pathSingle && pathSingle.value) ? pathSingle.value : '').trim();
           if (!p){ toast('grep: パスが空です'); return; }
+          try{ _grepBasedirHistoryMaybePush(p); _schedulePersist && _schedulePersist('grep-basedir'); }catch{}
           targetArg = p;
         }
 
@@ -19697,6 +20068,128 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
 
       // Key handling
       const keyHandler = (e)=>{
+        // When the grep term history popup is visible: handle navigation/confirm.
+        try{
+          if (_grepTermHistPopupVisible()){
+            const kH = String((e && e.key) || '');
+            if (kH === 'Escape' || kH === 'Esc'){
+              try{ e.preventDefault(); e.stopPropagation(); }catch{}
+              _grepTermHistPopupHide();
+              return;
+            }
+            if (kH === 'Delete' || kH === 'Del'){
+              try{ e.preventDefault(); e.stopPropagation(); }catch{}
+              try{
+                const items = _grepTermHistItems();
+                if (items.length && Array.isArray(_searchHistory) && _searchHistory.length){
+                  const sel = Math.max(0, Math.min(items.length-1, (_grepTermHistSel|0)));
+                  const it = items[sel];
+                  const origIdx = (it && (it.origIndex|0));
+                  if (origIdx >= 0 && origIdx < _searchHistory.length){
+                    _searchHistory.splice(origIdx, 1);
+                    try{ if (typeof _schedulePersist === 'function') _schedulePersist('search-history'); }catch{}
+                  }
+                }
+              }catch{}
+              try{
+                const items2 = _grepTermHistItems();
+                _grepTermHistSel = Math.max(0, Math.min(Math.max(0, items2.length-1), (_grepTermHistSel|0)));
+                _grepTermHistPopupRender();
+              }catch{}
+              return;
+            }
+            if (kH === 'ArrowUp'){
+              try{ e.preventDefault(); e.stopPropagation(); }catch{}
+              const items = _grepTermHistItems();
+              if (items.length){ _grepTermHistSel = Math.max(0, (_grepTermHistSel|0) - 1); _grepTermHistPopupRender(); }
+              return;
+            }
+            if (kH === 'ArrowDown'){
+              try{ e.preventDefault(); e.stopPropagation(); }catch{}
+              const items = _grepTermHistItems();
+              if (items.length){ _grepTermHistSel = Math.min(items.length-1, (_grepTermHistSel|0) + 1); _grepTermHistPopupRender(); }
+              return;
+            }
+            if (kH === 'Enter' || kH === ' ' || kH === 'Spacebar'){
+              try{ e.preventDefault(); e.stopPropagation(); }catch{}
+              const items = _grepTermHistItems();
+              if (items.length){
+                const it = items[Math.max(0, Math.min(items.length-1, (_grepTermHistSel|0)))];
+                try{ input.value = String((it && it.display) || ''); _syncExecEnabled(); }catch{}
+              }
+              _grepTermHistPopupHide();
+              try{ input.focus({preventScroll:true}); }catch{ try{ input.focus(); }catch{} }
+              return;
+            }
+            // Any other key closes the popup and continues.
+            try{ _grepTermHistPopupHide(); }catch{}
+          }
+        }catch{}
+
+        // When the path history popup is visible: handle navigation/confirm/delete.
+        try{
+          if (typeof _grepPathHistPopupVisible === 'function' && _grepPathHistPopupVisible()){
+            const kP = String((e && e.key) || '');
+            if (kP === 'Escape' || kP === 'Esc'){
+              try{ e.preventDefault(); e.stopPropagation(); }catch{}
+              _grepPathHistPopupHide();
+              return;
+            }
+            if (kP === 'Delete' || kP === 'Del'){
+              try{ e.preventDefault(); e.stopPropagation(); }catch{}
+              try{
+                const items = _grepPathHistItems();
+                if (items.length && Array.isArray(_grepBasedirHistory) && _grepBasedirHistory.length){
+                  const sel = Math.max(0, Math.min(items.length-1, (_grepPathHistSel|0)));
+                  const it = items[sel];
+                  const origIdx = (it && (it.origIndex|0));
+                  if (origIdx >= 0 && origIdx < _grepBasedirHistory.length){
+                    _grepBasedirHistory.splice(origIdx, 1);
+                    try{ if (typeof _schedulePersist === 'function') _schedulePersist('grep-basedir-history'); }catch{}
+                  }
+                }
+              }catch{}
+              try{
+                const items2 = _grepPathHistItems();
+                _grepPathHistSel = Math.max(0, Math.min(Math.max(0, items2.length-1), (_grepPathHistSel|0)));
+                _grepPathHistPopupRender();
+              }catch{}
+              return;
+            }
+            if (kP === 'ArrowUp'){
+              try{ e.preventDefault(); e.stopPropagation(); }catch{}
+              const items = _grepPathHistItems();
+              if (items.length){ _grepPathHistSel = Math.max(0, (_grepPathHistSel|0) - 1); _grepPathHistPopupRender(); }
+              return;
+            }
+            if (kP === 'ArrowDown'){
+              try{ e.preventDefault(); e.stopPropagation(); }catch{}
+              const items = _grepPathHistItems();
+              if (items.length){ _grepPathHistSel = Math.min(items.length-1, (_grepPathHistSel|0) + 1); _grepPathHistPopupRender(); }
+              return;
+            }
+            if (kP === 'Enter' || kP === ' ' || kP === 'Spacebar'){
+              try{ e.preventDefault(); e.stopPropagation(); }catch{}
+              const items = _grepPathHistItems();
+              if (items.length){
+                const it = items[Math.max(0, Math.min(items.length-1, (_grepPathHistSel|0)))];
+                try{
+                  if (_grepPathHistTarget){
+                    _grepPathHistTarget.value = String((it && it.value) || '');
+                    try{ _histCommit(_grepPathHistTarget); }catch{}
+                    try{ _syncExecEnabled(); }catch{}
+                  }
+                }catch{}
+              }
+              _grepPathHistPopupHide();
+              try{ _grepPathHistTarget && _grepPathHistTarget.focus && _grepPathHistTarget.focus({preventScroll:true}); }catch{ try{ _grepPathHistTarget && _grepPathHistTarget.focus && _grepPathHistTarget.focus(); }catch{} }
+              return;
+            }
+            // Any other key closes the popup and continues.
+            try{ _grepPathHistPopupHide(); }catch{}
+          }
+        }catch{}
+
         // When the case popup is visible: Esc closes the popup (not the dialog).
         try{
           if (typeof _casePopupVisible === 'function' && _casePopupVisible()){
@@ -19768,6 +20261,35 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
           }
         }catch{}
 
+        // Path history browsing: Up/Down to browse, Space/Enter to commit.
+        try{
+          const ae = document.activeElement;
+          const isPathEl = (ae === pathSingle || ae === basedirInput);
+          if (isPathEl){
+            const kk = String((e && e.key) || '');
+            if (kk === 'ArrowUp'){
+              try{ e.preventDefault(); e.stopPropagation(); }catch{}
+              _histMove(ae, -1);
+              return;
+            }
+            if (kk === 'ArrowDown'){
+              try{ e.preventDefault(); e.stopPropagation(); }catch{}
+              _histMove(ae, +1);
+              return;
+            }
+            if (kk === 'Enter' || kk === ' ' || kk === 'Spacebar'){
+              // Only commit when browsing mode is active
+              _histInit(ae);
+              if (ae.__grepHist && ae.__grepHist.browsing){
+                try{ e.preventDefault(); e.stopPropagation(); }catch{}
+                _histCommit(ae);
+                try{ ae.select && ae.select(); }catch{}
+                return;
+              }
+            }
+          }
+        }catch{}
+
         // (maxdepth focuses the input directly via Tab)
         // F1/F2/F3: direct target selection (like :e breadcrumb)
         try{
@@ -19778,6 +20300,7 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
             else _grepTargetMode='files';
             _syncTargetUI();
             try{ _syncExecEnabled(); }catch{}
+            try{ typeof _persistTargetMode === 'function' && _persistTargetMode(); }catch{}
             return;
           }
         }catch{}
