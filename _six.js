@@ -19204,10 +19204,19 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
       const termHistBtn = document.createElement('button');
       termHistBtn.type = 'button';
       termHistBtn.tabIndex = -1;
-      termHistBtn.textContent = '[F4履歴]';
+      termHistBtn.textContent = '履歴 F4';
       termHistBtn.style.cssText = 'position:absolute; right:4px; top:50%; transform:translateY(-50%); border:1px solid #2a3244; background:#1a2030; color:#e6e6e6; border-radius:6px; padding:3px 8px; cursor:pointer; font-size:11px; line-height:1.2; user-select:none; outline:none;';
       termHistBtn.addEventListener('mousedown', (e)=>{ try{ e.preventDefault(); e.stopPropagation(); }catch{} });
       inputWrap.appendChild(termHistBtn);
+
+      // #1446: Prefill with latest search history (if any)
+      try{
+        if (Array.isArray(_searchHistory) && _searchHistory.length){
+          const raw = String(_searchHistory[_searchHistory.length-1]||'');
+          const d = raw.replace(/^[:\s]*[/?]/, '');
+          if (d) input.value = d;
+        }
+      }catch{}
 
       inputRow.appendChild(inputWrap);
 
@@ -19416,12 +19425,17 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
         return el;
       };
 
-      const _mkInlineHistBtn = ()=>{
+      const _mkInlineHistBtn = (opts={})=>{
         const b = document.createElement('button');
         b.type = 'button';
         b.tabIndex = -1;
-        b.textContent = '[F4履歴]';
-        b.style.cssText = 'position:absolute; right:4px; top:50%; transform:translateY(-50%); border:1px solid #2a3244; background:#1a2030; color:#e6e6e6; border-radius:6px; padding:3px 8px; cursor:pointer; font-size:11px; line-height:1.2; user-select:none; outline:none;';
+        b.textContent = '履歴 F4';
+        const inline = !(opts && opts.inline === false);
+        if (inline){
+          b.style.cssText = 'position:absolute; right:4px; top:50%; transform:translateY(-50%); border:1px solid #2a3244; background:#1a2030; color:#e6e6e6; border-radius:6px; padding:3px 8px; cursor:pointer; font-size:11px; line-height:1.2; user-select:none; outline:none;';
+        } else {
+          b.style.cssText = 'border:1px solid #2a3244; background:#1a2030; color:#e6e6e6; border-radius:6px; padding:3px 8px; cursor:pointer; font-size:11px; line-height:1.2; user-select:none; outline:none;';
+        }
         // Do not steal focus from the input (clicking the history button should keep focus on the input).
         b.addEventListener('mousedown', (e)=>{ try{ e.preventDefault(); e.stopPropagation(); }catch{} });
         return b;
@@ -19447,15 +19461,17 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
       basedirWrap.appendChild(basedirHistBtn);
 
       const fileglobWrap = document.createElement('div');
-      fileglobWrap.style.cssText = 'position:relative; min-width:0;';
+      // fileglob is narrow; place history button outside (below-right).
+      fileglobWrap.style.cssText = 'display:flex; flex-direction:column; align-items:stretch; gap:4px; min-width:0;';
       const fileglobInput = _mkPathInput();
       fileglobInput.placeholder = 'fileglob (例: *.md)';
-      // Leave space for [履歴]
-      try{ fileglobInput.style.padding = '4px 56px 4px 8px'; fileglobInput.style.boxSizing='border-box'; }catch{}
       try{ fileglobInput.style.minWidth = '12rem'; }catch{}
-      const fileglobHistBtn = _mkInlineHistBtn();
+      const fileglobHistBtn = _mkInlineHistBtn({ inline:false });
+      const fileglobBtnRow = document.createElement('div');
+      fileglobBtnRow.style.cssText = 'display:flex; justify-content:flex-end; align-items:center;';
+      fileglobBtnRow.appendChild(fileglobHistBtn);
       fileglobWrap.appendChild(fileglobInput);
-      fileglobWrap.appendChild(fileglobHistBtn);
+      fileglobWrap.appendChild(fileglobBtnRow);
 
       function _applyDisabledStyle(el, disabled){
         try{
@@ -19484,6 +19500,23 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
       try{ basedirWrap.style.flex = '8 1 0%'; fileglobWrap.style.flex = '2 1 0%'; }catch{}
       pathRowDir.appendChild(basedirWrap);
       pathRowDir.appendChild(fileglobWrap);
+
+      // #1446: Prefill with latest PATH/-basedir/fileglob history (if any)
+      try{
+        if (Array.isArray(_grepBasedirHistory) && _grepBasedirHistory.length){
+          const last = String(_grepBasedirHistory[_grepBasedirHistory.length-1]||'');
+          if (last){
+            try{ pathSingle.value = last; }catch{}
+            try{ basedirInput.value = last; }catch{}
+          }
+        }
+      }catch{}
+      try{
+        if (Array.isArray(_grepFileglobHistory) && _grepFileglobHistory.length){
+          const last = String(_grepFileglobHistory[_grepFileglobHistory.length-1]||'');
+          if (last) fileglobInput.value = last;
+        }
+      }catch{}
 
       // Start with single row visible
       pathWrap.appendChild(pathRowSingle);
@@ -19581,7 +19614,7 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
               const dimCol = '#2f3644';
               const onCol = 'var(--text-color)';
               recurText.style.color = enableRecur ? onCol : dimCol;
-              depthLabel.style.color = enableRecur ? 'var(--text-dim)' : dimCol;
+              depthLabel.style.color = (enableRecur && _grepRecursive) ? 'var(--text-dim)' : dimCol;
             }catch{}
             _syncRecurPillsVisual();
           }catch{}
@@ -19817,11 +19850,13 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
           const items = _grepTermHistItems();
           _grepTermHistSel = 0;
           _grepTermHistPopupRender();
-          // Position above the input
-          const r = inputWrap.getBoundingClientRect();
+          // #1446: Width fixed to the input width; position above the input
+          const r = input.getBoundingClientRect();
+          const fixedW = Math.max(120, Math.round(r.width||0));
+          try{ pop.style.width = fixedW + 'px'; pop.style.minWidth = fixedW + 'px'; pop.style.maxWidth = fixedW + 'px'; }catch{}
           const vw = (window.innerWidth||0), vh=(window.innerHeight||0);
-          const pw = (pop.offsetWidth||260), ph=(pop.offsetHeight||160);
-          let left = Math.max(8, Math.min(vw - pw - 8, Math.round(r.right - pw)));
+          const ph=(pop.offsetHeight||160);
+          let left = Math.max(8, Math.min(vw - fixedW - 8, Math.round(r.left)));
           let top  = Math.max(8, Math.min(vh - ph - 8, Math.round(r.top - ph - 6)));
           pop.style.left = left + 'px';
           pop.style.top  = top + 'px';
@@ -19936,11 +19971,14 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
           pop.style.display='';
           _grepPathHistSel = 0;
           _grepPathHistPopupRender();
-          const r = (_grepPathHistAnchor && _grepPathHistAnchor.getBoundingClientRect) ? _grepPathHistAnchor.getBoundingClientRect() : targetInput.getBoundingClientRect();
+          // #1446: Width fixed to the target input width; position above the target input
+          const r = (targetInput && targetInput.getBoundingClientRect) ? targetInput.getBoundingClientRect() : ((_grepPathHistAnchor && _grepPathHistAnchor.getBoundingClientRect) ? _grepPathHistAnchor.getBoundingClientRect() : null);
+          const fixedW = Math.max(120, Math.round((r && r.width) ? r.width : 360));
+          try{ pop.style.width = fixedW + 'px'; pop.style.minWidth = fixedW + 'px'; pop.style.maxWidth = fixedW + 'px'; }catch{}
           const vw = (window.innerWidth||0), vh=(window.innerHeight||0);
-          const pw = (pop.offsetWidth||360), ph=(pop.offsetHeight||160);
-          let left = Math.max(8, Math.min(vw - pw - 8, Math.round(r.right - pw)));
-          let top  = Math.max(8, Math.min(vh - ph - 8, Math.round(r.top - ph - 6)));
+          const ph=(pop.offsetHeight||160);
+          let left = Math.max(8, Math.min(vw - fixedW - 8, Math.round((r && r.left) ? r.left : 8)));
+          let top  = Math.max(8, Math.min(vh - ph - 8, Math.round((r && r.top) ? (r.top - ph - 6) : 8)));
           pop.style.left = left + 'px';
           pop.style.top  = top + 'px';
           if (!pop.__outsideClose){
@@ -20056,11 +20094,14 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
           pop.style.display='';
           _grepFileglobHistSel = 0;
           _grepFileglobHistPopupRender();
-          const r = (_grepFileglobHistAnchor && _grepFileglobHistAnchor.getBoundingClientRect) ? _grepFileglobHistAnchor.getBoundingClientRect() : targetInput.getBoundingClientRect();
+          // #1446: Width fixed to the target input width; position above the fileglob input
+          const r = (targetInput && targetInput.getBoundingClientRect) ? targetInput.getBoundingClientRect() : ((_grepFileglobHistAnchor && _grepFileglobHistAnchor.getBoundingClientRect) ? _grepFileglobHistAnchor.getBoundingClientRect() : null);
+          const fixedW = Math.max(120, Math.round((r && r.width) ? r.width : 240));
+          try{ pop.style.width = fixedW + 'px'; pop.style.minWidth = fixedW + 'px'; pop.style.maxWidth = fixedW + 'px'; }catch{}
           const vw = (window.innerWidth||0), vh=(window.innerHeight||0);
-          const pw = (pop.offsetWidth||360), ph=(pop.offsetHeight||160);
-          let left = Math.max(8, Math.min(vw - pw - 8, Math.round(r.right - pw)));
-          let top  = Math.max(8, Math.min(vh - ph - 8, Math.round(r.top - ph - 6)));
+          const ph=(pop.offsetHeight||160);
+          let left = Math.max(8, Math.min(vw - fixedW - 8, Math.round((r && r.left) ? r.left : 8)));
+          let top  = Math.max(8, Math.min(vh - ph - 8, Math.round((r && r.top) ? (r.top - ph - 6) : 8)));
           pop.style.left = left + 'px';
           pop.style.top  = top + 'px';
           if (!pop.__outsideClose){
