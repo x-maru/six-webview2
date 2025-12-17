@@ -671,6 +671,15 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
         }
       }catch{}
 
+      // #1447: Persist grep PATH/glob history
+      let grepPathGlobHist = [];
+      try{
+        const limit = (window.SIX_OPTIONS && typeof window.SIX_OPTIONS.GREP_PATH_GLOB_IN_SESSION === 'number') ? (window.SIX_OPTIONS.GREP_PATH_GLOB_IN_SESSION|0) : 0;
+        if (limit > 0 && typeof _grepPathGlobHistory !== 'undefined' && Array.isArray(_grepPathGlobHistory)){
+          grepPathGlobHist = _grepPathGlobHistory.slice(-limit);
+        }
+      }catch{}
+
       // #1445: Persist grep fileglob history
       let grepFileglobHist = [];
       try{
@@ -750,6 +759,7 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
         windowState: winState,
         searchHistory: searchHist,
         grepBasedirHistory: grepBasedirHist,
+        grepPathGlobHistory: grepPathGlobHist,
         grepFileglobHistory: grepFileglobHist,
         grepDialogState: grepDialogState
       };
@@ -863,6 +873,14 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
         if (Array.isArray(j.grepBasedirHistory) && typeof _grepBasedirHistory !== 'undefined'){
           _grepBasedirHistory.length = 0;
           j.grepBasedirHistory.forEach(v=>_grepBasedirHistory.push(String(v)));
+        }
+      }catch{}
+
+      // #1447: Restore grep PATH/glob history
+      try{
+        if (Array.isArray(j.grepPathGlobHistory) && typeof _grepPathGlobHistory !== 'undefined'){
+          _grepPathGlobHistory.length = 0;
+          j.grepPathGlobHistory.forEach(v=>_grepPathGlobHistory.push(String(v)));
         }
       }catch{}
 
@@ -3199,6 +3217,22 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
     }catch{}
   }
 
+  // grep PATH history (session-shared; for grep dialog PATH)
+  const _grepPathGlobHistory = [];
+  function _grepPathGlobHistoryMaybePush(s){
+    try{
+      const v = String(s||'').trim();
+      if (!v) return;
+      const i = _grepPathGlobHistory.indexOf(v);
+      if (i >= 0) _grepPathGlobHistory.splice(i, 1);
+      _grepPathGlobHistory.push(v);
+      const limit = (window.SIX_OPTIONS && typeof window.SIX_OPTIONS.GREP_PATH_GLOB_IN_SESSION === 'number') ? (window.SIX_OPTIONS.GREP_PATH_GLOB_IN_SESSION|0) : 0;
+      if (limit > 0){
+        while (_grepPathGlobHistory.length > limit) _grepPathGlobHistory.shift();
+      }
+    }catch{}
+  }
+
   // grep dialog UI state (session-shared)
   // - targetMode: 'buffer' | 'dirfiles' | 'files'
   let _grepDialogState = { targetMode: 'buffer' };
@@ -3212,8 +3246,9 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
       v = v.replace(/^:\s*/, '');
     // Require '/pat' or '?pat' with non-empty pattern (flags optional)
     if (!/^[\/?].+/.test(v)) return;
-      const last = _searchHistory.length ? _searchHistory[_searchHistory.length-1] : null;
-      if (last === v) return; // skip identical consecutive
+      // Move-to-end unique
+      const i = _searchHistory.indexOf(v);
+      if (i >= 0) _searchHistory.splice(i, 1);
       _searchHistory.push(v);
 
       // #1374: Cap history size if configured
@@ -4127,6 +4162,8 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
       // ケース感度表示(検索時 A/a)をタブ切替時にも更新 (#955)
       try{ _updateOverlayCaseVisual(); }catch{}
       _updateHlsearchFull();
+      // Refresh listchars (including EOL markers) on buffer switch to avoid stale markers from the previous buffer.
+      try{ if (typeof _scheduleListCharsRender === 'function') _scheduleListCharsRender('switch'); }catch{}
       // Ensure editor regains focus after switch (covers INSERT restore as well)
       try{ setTimeout(()=>{ try{ editor && editor.focus && editor.focus(); }catch{} }, 0); }catch{}
       // Persist last-active index as part of session (debounced)
@@ -16707,16 +16744,25 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
 
       const u = _ensureSlash(dirUrl);
       if (!u) return [];
+      const key = u.toString();
+      const _noteErrorOut = (msg)=>{
+        try{
+          if (opts && opts.__errorOut && !opts.__errorOut.message){
+            opts.__errorOut.message = String(msg||'');
+            opts.__errorOut.url = key;
+          }
+        }catch{}
+      };
       // UNC/WSL の file:// はブラウザの file fetch/XHR で CORS 失敗しやすい。
       // ここは「API が取れるなら API のみ」「取れないなら空」を原則として CORS スパムを避ける。
       const isHostFile = (function(){ try{ return (u.protocol==='file:' && !!u.host); }catch{ return false; } })();
       if (isHostFile && !_apiIsEnabled()){
         try{ _apiPromptRestartOnce && _apiPromptRestartOnce('dir'); }catch{}
+        _noteErrorOut('dir list requires API for UNC/WSL');
         return [];
       }
       // ホスト直下 (file:////host/) は _listDirEntries の対象外: shares は別経路で取得する
       try{ if (_isHostRoot(u)) return []; }catch{}
-      const key = u.toString();
       try{ if (_dirHardFail && _dirHardFail.delete) _dirHardFail.delete(key); }catch{}
       if (_dirCache.has(key)) return _dirCache.get(key);
       // URL 正規化ヘルパー（APIのentries.urlが省略/相対/Windowsパスの場合に補う）
@@ -16787,7 +16833,13 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
                 const tmo = (apiTimeoutMs!=null) ? Math.max(timeoutFs, apiTimeoutMs) : timeoutFs;
                 jf = await _fetchJSONWithTimeout(apiFs, tmo); try{ _apiNoteSuccess(); }catch{}
                 // Server may return 200 + {error:"..."} for invalid/unreachable dirs.
-                try{ if (jf && jf.error){ _dirCache.set(key, []); return []; } }catch{}
+                try{
+                  if (jf && jf.error){
+                    _noteErrorOut(String(jf.error||''));
+                    _dirCache.set(key, []);
+                    return [];
+                  }
+                }catch{}
                 if (jf && Array.isArray(jf.entries)){
                   const arrFs = jf.entries.map(e=>{
                     const n = e.name; const d = !!e.isDir; const url = makeEntryUrl(u, n, d, e.url);
@@ -16899,6 +16951,7 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
           if (isHostFile){
             // HTTP 400 etc means API is reachable but path is invalid for host; don't prompt restart.
             try{ _apiNoteFailure(e); }catch{}
+            try{ _noteErrorOut(e && e.message ? ('API dir listing failed: ' + e.message) : 'API dir listing failed'); }catch{}
             try{
               if (e && Number.isFinite(e.status) && (e.status|0) >= 400){
                 _dirHardFail.set(key, { ts: Date.now(), status: (e.status|0) });
@@ -19129,7 +19182,7 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
       const box = document.createElement('div');
       // Match Help modal style (opaque background, border)
       // Use var(--font-size) for text size to match body
-      box.style.cssText = 'background:var(--six-modal-bg, #1e1e1e); border:1px solid var(--six-border, #444); color:var(--text-color); padding:16px; width:640px; max-width:92%; box-shadow:0 4px 12px rgba(0,0,0,0.5); display:flex; flex-direction:column; gap:12px; border-radius:4px; font-size:var(--font-size, 16px);';
+      box.style.cssText = 'background:var(--six-modal-bg, #1e1e1e); border:1px solid var(--six-border, #444); color:var(--text-color); padding:16px; width:780px; max-width:96%; box-shadow:0 4px 12px rgba(0,0,0,0.5); display:flex; flex-direction:column; gap:12px; border-radius:4px; font-size:var(--font-size, 16px);';
       modal.appendChild(box);
 
       // Title
@@ -19421,7 +19474,7 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
       const _mkPathInput = ()=>{
         const el = document.createElement('input');
         el.type = 'text';
-        el.style.cssText = 'width:100%; background:var(--bg-color); color:var(--text-color); border:1px solid #ffffff; padding:4px 8px; font-family:var(--font-mono); outline:none; font-size:inherit;';
+        el.style.cssText = 'width:100%; min-width:0; box-sizing:border-box; background:var(--bg-color); color:var(--text-color); border:1px solid #ffffff; padding:4px 8px; font-family:var(--font-mono); outline:none; font-size:inherit;';
         return el;
       };
 
@@ -19445,6 +19498,7 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
       pathSingleWrap.style.cssText = 'position:relative; flex:1 1 auto; min-width:0;';
       const pathSingle = _mkPathInput();
       pathSingle.placeholder = 'PATH[/] または glob';
+      try{ pathSingle.title = String(pathSingle.placeholder||''); }catch{}
       // Leave space for [履歴]
       try{ pathSingle.style.padding = '4px 56px 4px 8px'; pathSingle.style.boxSizing='border-box'; }catch{}
       const pathHistBtn = _mkInlineHistBtn();
@@ -19452,19 +19506,33 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
       pathSingleWrap.appendChild(pathHistBtn);
 
       const basedirWrap = document.createElement('div');
-      basedirWrap.style.cssText = 'position:relative; min-width:0;';
+      basedirWrap.style.cssText = 'display:flex; align-items:center; gap:6px; min-width:0;';
+
+      const basedirLabel = document.createElement('span');
+      basedirLabel.textContent = '-basedir';
+      basedirLabel.style.cssText = 'font-size:0.85em; color:var(--text-dim); white-space:nowrap; user-select:none;';
+
+      const basedirInputWrap = document.createElement('div');
+      basedirInputWrap.style.cssText = 'position:relative; flex:1 1 auto; min-width:0;';
+
       const basedirInput = _mkPathInput();
-      basedirInput.placeholder = '-basedir (DIR[/])';
+      basedirInput.placeholder = 'フルパス、相対パスによるディレクトリ指定';
+      try{ basedirInput.title = String(basedirInput.placeholder||''); }catch{}
       try{ basedirInput.style.padding = '4px 56px 4px 8px'; basedirInput.style.boxSizing='border-box'; }catch{}
       const basedirHistBtn = _mkInlineHistBtn();
-      basedirWrap.appendChild(basedirInput);
-      basedirWrap.appendChild(basedirHistBtn);
+      basedirInputWrap.appendChild(basedirInput);
+      basedirInputWrap.appendChild(basedirHistBtn);
+
+      basedirWrap.appendChild(basedirLabel);
+      basedirWrap.appendChild(basedirInputWrap);
 
       const fileglobWrap = document.createElement('div');
       // fileglob is narrow; place history button outside (below-right).
       fileglobWrap.style.cssText = 'display:flex; flex-direction:column; align-items:stretch; gap:4px; min-width:0;';
       const fileglobInput = _mkPathInput();
       fileglobInput.placeholder = 'fileglob (例: *.md)';
+      try{ fileglobInput.style.boxSizing='border-box'; }catch{}
+      try{ fileglobInput.title = String(fileglobInput.placeholder||''); }catch{}
       try{ fileglobInput.style.minWidth = '12rem'; }catch{}
       const fileglobHistBtn = _mkInlineHistBtn({ inline:false });
       const fileglobBtnRow = document.createElement('div');
@@ -19496,19 +19564,23 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
       pathRowSingle.appendChild(pathSingleWrap);
 
       const pathRowDir = document.createElement('div');
-      pathRowDir.style.cssText = 'display:flex; align-items:center; gap:6px;';
-      try{ basedirWrap.style.flex = '8 1 0%'; fileglobWrap.style.flex = '2 1 0%'; }catch{}
+      pathRowDir.style.cssText = 'display:flex; align-items:flex-start; gap:6px;';
+      try{ basedirWrap.style.flex = '1 1 auto'; basedirWrap.style.minWidth='0'; }catch{}
+      try{ fileglobWrap.style.flex = '0 0 12rem'; fileglobWrap.style.width='12rem'; fileglobWrap.style.maxWidth='12rem'; }catch{}
       pathRowDir.appendChild(basedirWrap);
       pathRowDir.appendChild(fileglobWrap);
 
       // #1446: Prefill with latest PATH/-basedir/fileglob history (if any)
       try{
+        if (Array.isArray(_grepPathGlobHistory) && _grepPathGlobHistory.length){
+          const last = String(_grepPathGlobHistory[_grepPathGlobHistory.length-1]||'');
+          if (last) try{ pathSingle.value = last; }catch{}
+        }
+      }catch{}
+      try{
         if (Array.isArray(_grepBasedirHistory) && _grepBasedirHistory.length){
           const last = String(_grepBasedirHistory[_grepBasedirHistory.length-1]||'');
-          if (last){
-            try{ pathSingle.value = last; }catch{}
-            try{ basedirInput.value = last; }catch{}
-          }
+          if (last) try{ basedirInput.value = last; }catch{}
         }
       }catch{}
       try{
@@ -19626,6 +19698,8 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
             basedirInput.disabled = pathDisabled || (_grepTargetMode !== 'dirfiles');
             fileglobInput.disabled = pathDisabled || (_grepTargetMode !== 'dirfiles');
           }catch{}
+          // Also dim the '-basedir' label when buffer mode is selected.
+          try{ basedirLabel.style.color = pathDisabled ? '#2f3644' : 'var(--text-dim)'; }catch{}
           _applyDisabledStyle(pathSingle, !!pathSingle.disabled);
           _applyDisabledStyle(basedirInput, !!basedirInput.disabled);
           _applyDisabledStyle(fileglobInput, !!fileglobInput.disabled);
@@ -19782,7 +19856,7 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
         try{
           const src = Array.isArray(_searchHistory) ? _searchHistory : [];
           const out = [];
-          for (let i = src.length - 1; i >= 0; i--){
+          for (let i = 0; i < src.length; i++){
             const r = String(src[i]||'');
             const d = r.replace(/^[:\s]*[/?]/, '');
             const it = { raw: r, display: d, origIndex: i };
@@ -19794,12 +19868,15 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
       const _grepTermHistPopupRender = ()=>{
         try{
           const pop = document.getElementById(_grepTermHistPopupId); if (!pop) return;
+          let prevScroll = 0;
+          try{ prevScroll = Number.isFinite(pop.__scrollTop) ? (pop.__scrollTop|0) : 0; }catch{}
           pop.innerHTML='';
           const inner = document.createElement('div');
           inner.className = 'inner';
           inner.style.maxHeight = '35vh';
           inner.style.overflow = 'auto';
           pop.appendChild(inner);
+          try{ inner.scrollTop = prevScroll; }catch{}
           const items = _grepTermHistItems();
           if (!items.length){
             const empty = document.createElement('div');
@@ -19810,6 +19887,7 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
             return;
           }
           _grepTermHistSel = Math.max(0, Math.min(items.length-1, (_grepTermHistSel|0)));
+          let selEl = null;
           items.forEach((it,i)=>{
             const item = document.createElement('div');
             item.className = 'item';
@@ -19820,11 +19898,42 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
             item.style.borderRadius='4px';
             item.textContent = it.display;
             item.style.background = (i===_grepTermHistSel) ? 'var(--popupActiveLine, #1a2030)' : 'transparent';
+            if (i===_grepTermHistSel) selEl = item;
             item.addEventListener('mouseenter', ()=>{ try{ _grepTermHistSel=i; _grepTermHistPopupRender(); }catch{} });
-            item.addEventListener('mousedown', (ev)=>{ try{ ev.preventDefault(); ev.stopPropagation(); }catch{}; try{ input.value = it.display; _syncExecEnabled(); }catch{}; _grepTermHistPopupHide(); try{ input.focus({preventScroll:true}); }catch{ try{ input.focus(); }catch{} } });
-            item.addEventListener('click', (ev)=>{ try{ ev.preventDefault(); ev.stopPropagation(); }catch{}; try{ input.value = it.display; _syncExecEnabled(); }catch{}; _grepTermHistPopupHide(); try{ input.focus({preventScroll:true}); }catch{ try{ input.focus(); }catch{} } });
+            const _apply = (ev)=>{
+              try{ ev.preventDefault(); ev.stopPropagation(); }catch{}
+              try{ input.value = it.display; _syncExecEnabled(); }catch{}
+              try{ _searchHistoryMaybePush(it.raw); }catch{}
+              try{ if (typeof _schedulePersist === 'function') _schedulePersist('search-history'); }catch{}
+              _grepTermHistPopupHide();
+              try{ input.focus({preventScroll:true}); }catch{ try{ input.focus(); }catch{} }
+            };
+            item.addEventListener('mousedown', _apply);
+            item.addEventListener('click', _apply);
             inner.appendChild(item);
           });
+          try{
+            const ensure = (container, el)=>{
+              try{
+                if (!container || !el) return;
+                const top = container.scrollTop;
+                const h = container.clientHeight || 0;
+                const margin = Math.floor(h * 0.35);
+                const et = el.offsetTop;
+                const eb = et + (el.offsetHeight||0);
+                const min = top + margin;
+                const max = top + h - margin;
+                if (et < min) container.scrollTop = Math.max(0, et - margin);
+                else if (eb > max) container.scrollTop = Math.max(0, eb - (h - margin));
+              }catch{}
+            };
+            ensure(inner, selEl);
+            pop.__scrollTop = inner.scrollTop;
+            if (!inner.__bindScroll){
+              inner.__bindScroll = true;
+              inner.addEventListener('scroll', ()=>{ try{ pop.__scrollTop = inner.scrollTop; }catch{} }, { passive:true });
+            }
+          }catch{}
         }catch{}
       };
       const _grepTermHistPopupShow = ()=>{
@@ -19848,7 +19957,7 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
           }
           pop.style.display='';
           const items = _grepTermHistItems();
-          _grepTermHistSel = 0;
+          _grepTermHistSel = items.length ? (items.length - 1) : 0;
           _grepTermHistPopupRender();
           // #1446: Width fixed to the input width; position above the input
           const r = input.getBoundingClientRect();
@@ -19887,9 +19996,9 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
       const _grepPathHistPopupHide = ()=>{ try{ const p=document.getElementById(_grepPathHistPopupId); if (p) p.style.display='none'; }catch{} };
       const _grepPathHistItems = ()=>{
         try{
-          const src = Array.isArray(_grepBasedirHistory) ? _grepBasedirHistory : [];
+          const src = (_grepPathHistTarget === pathSingle) ? (Array.isArray(_grepPathGlobHistory) ? _grepPathGlobHistory : []) : (Array.isArray(_grepBasedirHistory) ? _grepBasedirHistory : []);
           const out = [];
-          for (let i = src.length - 1; i >= 0; i--){
+          for (let i = 0; i < src.length; i++){
             const v = String(src[i]||'').trim();
             if (!v) continue;
             out.push({ value: v, origIndex: i });
@@ -19900,12 +20009,15 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
       const _grepPathHistPopupRender = ()=>{
         try{
           const pop = document.getElementById(_grepPathHistPopupId); if (!pop) return;
+          let prevScroll = 0;
+          try{ prevScroll = Number.isFinite(pop.__scrollTop) ? (pop.__scrollTop|0) : 0; }catch{}
           pop.innerHTML='';
           const inner = document.createElement('div');
           inner.className = 'inner';
           inner.style.maxHeight = '35vh';
           inner.style.overflow = 'auto';
           pop.appendChild(inner);
+          try{ inner.scrollTop = prevScroll; }catch{}
           const items = _grepPathHistItems();
           if (!items.length){
             const empty = document.createElement('div');
@@ -19916,6 +20028,7 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
             return;
           }
           _grepPathHistSel = Math.max(0, Math.min(items.length-1, (_grepPathHistSel|0)));
+          let selEl = null;
           items.forEach((it,i)=>{
             const item = document.createElement('div');
             item.className = 'item';
@@ -19926,12 +20039,23 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
             item.style.borderRadius='4px';
             item.textContent = it.value;
             item.style.background = (i===_grepPathHistSel) ? 'var(--popupActiveLine, #1a2030)' : 'transparent';
+            if (i===_grepPathHistSel) selEl = item;
             item.addEventListener('mouseenter', ()=>{ try{ _grepPathHistSel=i; _grepPathHistPopupRender(); }catch{} });
             const _apply = (ev)=>{
               try{ ev.preventDefault(); ev.stopPropagation(); }catch{}
               try{
                 if (_grepPathHistTarget){
-                  _grepPathHistTarget.value = String(it.value||'');
+                  const v = String(it.value||'');
+                  _grepPathHistTarget.value = v;
+                  try{
+                    if (_grepPathHistTarget === pathSingle){
+                      _grepPathGlobHistoryMaybePush(v);
+                      try{ if (typeof _schedulePersist === 'function') _schedulePersist('grep-pathglob-history'); }catch{}
+                    } else {
+                      _grepBasedirHistoryMaybePush(v);
+                      try{ if (typeof _schedulePersist === 'function') _schedulePersist('grep-basedir-history'); }catch{}
+                    }
+                  }catch{}
                   try{ _histCommit(_grepPathHistTarget); }catch{}
                   try{ _syncExecEnabled(); }catch{}
                 }
@@ -19943,6 +20067,28 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
             item.addEventListener('click', _apply);
             inner.appendChild(item);
           });
+          try{
+            const ensure = (container, el)=>{
+              try{
+                if (!container || !el) return;
+                const top = container.scrollTop;
+                const h = container.clientHeight || 0;
+                const margin = Math.floor(h * 0.35);
+                const et = el.offsetTop;
+                const eb = et + (el.offsetHeight||0);
+                const min = top + margin;
+                const max = top + h - margin;
+                if (et < min) container.scrollTop = Math.max(0, et - margin);
+                else if (eb > max) container.scrollTop = Math.max(0, eb - (h - margin));
+              }catch{}
+            };
+            ensure(inner, selEl);
+            pop.__scrollTop = inner.scrollTop;
+            if (!inner.__bindScroll){
+              inner.__bindScroll = true;
+              inner.addEventListener('scroll', ()=>{ try{ pop.__scrollTop = inner.scrollTop; }catch{} }, { passive:true });
+            }
+          }catch{}
         }catch{}
       };
       const _grepPathHistPopupShowFor = (targetInput, anchorEl, btnEl)=>{
@@ -19969,7 +20115,8 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
             document.body.appendChild(pop);
           }
           pop.style.display='';
-          _grepPathHistSel = 0;
+          const items = _grepPathHistItems();
+          _grepPathHistSel = items.length ? (items.length - 1) : 0;
           _grepPathHistPopupRender();
           // #1446: Width fixed to the target input width; position above the target input
           const r = (targetInput && targetInput.getBoundingClientRect) ? targetInput.getBoundingClientRect() : ((_grepPathHistAnchor && _grepPathHistAnchor.getBoundingClientRect) ? _grepPathHistAnchor.getBoundingClientRect() : null);
@@ -20012,7 +20159,7 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
         try{
           const src = Array.isArray(_grepFileglobHistory) ? _grepFileglobHistory : [];
           const out = [];
-          for (let i = src.length - 1; i >= 0; i--){
+          for (let i = 0; i < src.length; i++){
             const v = String(src[i]||'').trim();
             if (!v) continue;
             out.push({ value: v, origIndex: i });
@@ -20023,12 +20170,15 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
       const _grepFileglobHistPopupRender = ()=>{
         try{
           const pop = document.getElementById(_grepFileglobHistPopupId); if (!pop) return;
+          let prevScroll = 0;
+          try{ prevScroll = Number.isFinite(pop.__scrollTop) ? (pop.__scrollTop|0) : 0; }catch{}
           pop.innerHTML='';
           const inner = document.createElement('div');
           inner.className = 'inner';
           inner.style.maxHeight = '35vh';
           inner.style.overflow = 'auto';
           pop.appendChild(inner);
+          try{ inner.scrollTop = prevScroll; }catch{}
           const items = _grepFileglobHistItems();
           if (!items.length){
             const empty = document.createElement('div');
@@ -20039,6 +20189,7 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
             return;
           }
           _grepFileglobHistSel = Math.max(0, Math.min(items.length-1, (_grepFileglobHistSel|0)));
+          let selEl = null;
           items.forEach((it,i)=>{
             const item = document.createElement('div');
             item.className = 'item';
@@ -20049,12 +20200,16 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
             item.style.borderRadius='4px';
             item.textContent = it.value;
             item.style.background = (i===_grepFileglobHistSel) ? 'var(--popupActiveLine, #1a2030)' : 'transparent';
+            if (i===_grepFileglobHistSel) selEl = item;
             item.addEventListener('mouseenter', ()=>{ try{ _grepFileglobHistSel=i; _grepFileglobHistPopupRender(); }catch{} });
             const _apply = (ev)=>{
               try{ ev.preventDefault(); ev.stopPropagation(); }catch{}
               try{
                 if (_grepFileglobHistTarget){
-                  _grepFileglobHistTarget.value = String(it.value||'');
+                  const v = String(it.value||'');
+                  _grepFileglobHistTarget.value = v;
+                  try{ _grepFileglobHistoryMaybePush(v); }catch{}
+                  try{ if (typeof _schedulePersist === 'function') _schedulePersist('grep-fileglob-history'); }catch{}
                   try{ _fgHistCommit(_grepFileglobHistTarget); }catch{}
                   try{ _syncExecEnabled(); }catch{}
                 }
@@ -20066,6 +20221,28 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
             item.addEventListener('click', _apply);
             inner.appendChild(item);
           });
+          try{
+            const ensure = (container, el)=>{
+              try{
+                if (!container || !el) return;
+                const top = container.scrollTop;
+                const h = container.clientHeight || 0;
+                const margin = Math.floor(h * 0.35);
+                const et = el.offsetTop;
+                const eb = et + (el.offsetHeight||0);
+                const min = top + margin;
+                const max = top + h - margin;
+                if (et < min) container.scrollTop = Math.max(0, et - margin);
+                else if (eb > max) container.scrollTop = Math.max(0, eb - (h - margin));
+              }catch{}
+            };
+            ensure(inner, selEl);
+            pop.__scrollTop = inner.scrollTop;
+            if (!inner.__bindScroll){
+              inner.__bindScroll = true;
+              inner.addEventListener('scroll', ()=>{ try{ pop.__scrollTop = inner.scrollTop; }catch{} }, { passive:true });
+            }
+          }catch{}
         }catch{}
       };
       const _grepFileglobHistPopupShowFor = (targetInput, anchorEl, btnEl)=>{
@@ -20092,7 +20269,8 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
             document.body.appendChild(pop);
           }
           pop.style.display='';
-          _grepFileglobHistSel = 0;
+          const items = _grepFileglobHistItems();
+          _grepFileglobHistSel = items.length ? (items.length - 1) : 0;
           _grepFileglobHistPopupRender();
           // #1446: Width fixed to the target input width; position above the fileglob input
           const r = (targetInput && targetInput.getBoundingClientRect) ? targetInput.getBoundingClientRect() : ((_grepFileglobHistAnchor && _grepFileglobHistAnchor.getBoundingClientRect) ? _grepFileglobHistAnchor.getBoundingClientRect() : null);
@@ -20122,17 +20300,24 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
 
       fileglobHistBtn.onclick = (e)=>{ try{ e.preventDefault(); e.stopPropagation(); }catch{}; try{ _grepFileglobHistPopupShowFor(fileglobInput, fileglobWrap, fileglobHistBtn); }catch{} };
 
-      // Path history browsing state (per-input)
-      const _histInit = (el)=>{ try{ if (!el.__grepHist){ el.__grepHist = { idx:_grepBasedirHistory.length, browsing:false, temp:'' }; } }catch{} };
-      const _histStart = (el)=>{ try{ _histInit(el); const st = el.__grepHist; if (!st.browsing){ st.temp = String(el.value||''); st.idx = _grepBasedirHistory.length; st.browsing = true; } }catch{} };
+      // Path/basedir history browsing state (per-input)
+      const _histSrcFor = (el)=>{
+        try{
+          if (el === pathSingle) return Array.isArray(_grepPathGlobHistory) ? _grepPathGlobHistory : [];
+          return Array.isArray(_grepBasedirHistory) ? _grepBasedirHistory : [];
+        }catch{ return []; }
+      };
+      const _histInit = (el)=>{ try{ if (!el.__grepHist){ const src=_histSrcFor(el); el.__grepHist = { idx:src.length, browsing:false, temp:'' }; } }catch{} };
+      const _histStart = (el)=>{ try{ _histInit(el); const st = el.__grepHist; const src=_histSrcFor(el); if (!st.browsing){ st.temp = String(el.value||''); st.idx = src.length; st.browsing = true; } }catch{} };
       const _histMove = (el, dir)=>{
         try{
-          if (!Array.isArray(_grepBasedirHistory) || !_grepBasedirHistory.length) return false;
+          const src = _histSrcFor(el);
+          if (!Array.isArray(src) || !src.length) return false;
           _histStart(el);
           const st = el.__grepHist;
-          const n = _grepBasedirHistory.length;
+          const n = src.length;
           st.idx = Math.max(0, Math.min(n-1, (st.idx|0) + (dir>0?1:-1)));
-          el.value = String(_grepBasedirHistory[st.idx]||'');
+          el.value = String(src[st.idx]||'');
           try{ el.select && el.select(); }catch{}
           try{ _syncExecEnabled(); }catch{}
           return true;
@@ -20144,7 +20329,8 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
           const st = el.__grepHist;
           if (!st.browsing) return false;
           st.browsing = false;
-          st.idx = _grepBasedirHistory.length;
+          const src = _histSrcFor(el);
+          st.idx = (src && src.length) ? src.length : 0;
           st.temp = '';
           try{ _syncExecEnabled(); }catch{}
           return true;
@@ -20290,11 +20476,9 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
         const pat = input.value;
         if (!pat) return;
         
-        // Add to history if new (prefix with / for compatibility with search history)
-        const histVal = '/' + pat;
-        if (_searchHistory.indexOf(histVal) === -1){
-            _searchHistory.push(histVal);
-        }
+        // Update search term history (CMD bar-compatible: move-to-end unique)
+        try{ _searchHistoryMaybePush('/' + pat); }catch{}
+        try{ if (typeof _schedulePersist === 'function') _schedulePersist('search-history'); }catch{}
         
         // Determine flags based on current buffer state (since button syncs with buffer)
         // We don't need to read from button, just read from buffer
@@ -20309,6 +20493,16 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
         // Literal mode: pass a synthetic flag 'F' to make grep treat pat as fixed string.
         let flagChar2 = String(flagChar||'');
         try{ if (_grepPatMode === 'literal') flagChar2 += 'F'; }catch{}
+
+        // For external grep targets, validate regexp early so we can keep the dialog open on error.
+        // (External grep creates a result buffer immediately; waiting for completion keeps the dialog stuck.)
+        const _isExternalTarget = (_grepTargetMode !== 'buffer');
+        if (_isExternalTarget){
+          try{
+            const meta = _grepScan(pat, flagChar2, '');
+            if (meta && meta.error){ toast(String(meta.error||'grep: invalid pattern')); return; }
+          }catch{}
+        }
         
         // Execute grep directly based on target mode.
         // suppressToast=false (show toast)
@@ -20332,20 +20526,27 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
         } else {
           const p = String((pathSingle && pathSingle.value) ? pathSingle.value : '').trim();
           if (!p){ toast('grep: パスが空です'); return; }
-          try{ _grepBasedirHistoryMaybePush(p); _schedulePersist && _schedulePersist('grep-basedir'); }catch{}
+          try{ _grepPathGlobHistoryMaybePush(p); _schedulePersist && _schedulePersist('grep-pathglob-history'); }catch{}
           targetArg = p;
         }
 
         const res = _execGrep(pat, flagChar2, false, targetArg);
-        
-        if (res instanceof Promise) {
-            res.then(count => {
-                if (count > 0) close();
-            });
-        } else {
-            if (res > 0) close();
+
+        // Close behavior:
+        // - External targets (PATH/dirfiles): close immediately after launch (result buffer appears and updates asynchronously).
+        // - Current buffer target: close only when there are hits (legacy UX).
+        if (_isExternalTarget){
+          try{ close(); }catch{}
+          return;
         }
-        // If count <= 0, toast is shown by _execGrep, dialog stays open.
+
+        if (res instanceof Promise) {
+          res.then(count => {
+            if ((count|0) > 0) close();
+          }).catch(()=>{});
+        } else {
+          if ((res|0) > 0) close();
+        }
       }
 
       // Key handling
@@ -20398,6 +20599,8 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
               if (items.length){
                 const it = items[Math.max(0, Math.min(items.length-1, (_grepTermHistSel|0)))];
                 try{ input.value = String((it && it.display) || ''); _syncExecEnabled(); }catch{}
+                try{ if (it && it.raw) _searchHistoryMaybePush(it.raw); }catch{}
+                try{ if (typeof _schedulePersist === 'function') _schedulePersist('search-history'); }catch{}
               }
               _grepTermHistPopupHide();
               try{ input.focus({preventScroll:true}); }catch{ try{ input.focus(); }catch{} }
@@ -20421,14 +20624,23 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
               try{ e.preventDefault(); e.stopPropagation(); }catch{}
               try{
                 const items = _grepPathHistItems();
-                if (items.length && Array.isArray(_grepBasedirHistory) && _grepBasedirHistory.length){
+                if (items.length){
                   const sel = Math.max(0, Math.min(items.length-1, (_grepPathHistSel|0)));
                   const it = items[sel];
                   const origIdx = (it && (it.origIndex|0));
-                  if (origIdx >= 0 && origIdx < _grepBasedirHistory.length){
-                    _grepBasedirHistory.splice(origIdx, 1);
-                    try{ if (typeof _schedulePersist === 'function') _schedulePersist('grep-basedir-history'); }catch{}
-                  }
+                  try{
+                    if (_grepPathHistTarget === pathSingle){
+                      if (Array.isArray(_grepPathGlobHistory) && origIdx >= 0 && origIdx < _grepPathGlobHistory.length){
+                        _grepPathGlobHistory.splice(origIdx, 1);
+                        try{ if (typeof _schedulePersist === 'function') _schedulePersist('grep-pathglob-history'); }catch{}
+                      }
+                    } else {
+                      if (Array.isArray(_grepBasedirHistory) && origIdx >= 0 && origIdx < _grepBasedirHistory.length){
+                        _grepBasedirHistory.splice(origIdx, 1);
+                        try{ if (typeof _schedulePersist === 'function') _schedulePersist('grep-basedir-history'); }catch{}
+                      }
+                    }
+                  }catch{}
                 }
               }catch{}
               try{
@@ -20925,41 +21137,69 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
     let fileGlob = '';
     let error = '';
 
-    const tokens = [];
+    // Tokenize with both single/double quotes.
+    // Quotes are removed; unmatched quotes produce an error.
+    const tokens = []; // { s, quoted }
     let current = '';
-    let inQuote = false;
+    let quoteChar = null; // ' or "
+    let curQuoted = false;
     for (let i = 0; i < rawArgs.length; i++) {
       const c = rawArgs[i];
-      if (c === '"') { inQuote = !inQuote; }
-      else if (c === ' ' && !inQuote) {
-        if (current.length > 0) tokens.push(current);
+      if (quoteChar){
+        if (c === quoteChar){
+          quoteChar = null;
+          curQuoted = true;
+        } else {
+          current += c;
+        }
+        continue;
+      }
+      if (c === '"' || c === "'"){
+        quoteChar = c;
+        curQuoted = true;
+        continue;
+      }
+      if ((c === ' ' || c === '\t') && !quoteChar){
+        if (current.length > 0 || curQuoted){
+          tokens.push({ s: current, quoted: !!curQuoted });
+        }
         current = '';
-      } else {
-        current += c;
+        curQuoted = false;
+        continue;
+      }
+      current += c;
+    }
+    if (quoteChar){
+      error = "grep: unterminated quote";
+    } else {
+      if (current.length > 0 || curQuoted) tokens.push({ s: current, quoted: !!curQuoted });
+    }
+
+    // Pattern: /pat/flags (only when not quoted)
+    if (!error){
+      let patIndex = -1;
+      for (let i = 0; i < tokens.length; i++) {
+        const t = tokens[i];
+        if (!t.quoted && t.s.startsWith('/') && t.s.lastIndexOf('/') > 0) {
+          patIndex = i;
+          break;
+        }
+      }
+
+      if (patIndex !== -1) {
+        const t = tokens[patIndex].s;
+        const lastSlash = t.lastIndexOf('/');
+        pat = t.substring(1, lastSlash);
+        flags = t.substring(lastSlash + 1);
+        tokens.splice(patIndex, 1);
       }
     }
-    if (current.length > 0) tokens.push(current);
 
-    let patIndex = -1;
-    for (let i = 0; i < tokens.length; i++) {
-      const t = tokens[i];
-      if (t.startsWith('/') && t.lastIndexOf('/') > 0) {
-        patIndex = i;
-        break;
-      }
-    }
-
-    if (patIndex !== -1) {
-      const t = tokens[patIndex];
-      const lastSlash = t.lastIndexOf('/');
-      pat = t.substring(1, lastSlash);
-      flags = t.substring(lastSlash + 1);
-      tokens.splice(patIndex, 1);
-    }
-
-    const pos = [];
-    for (let i = 0; i < tokens.length; i++) {
-      const t = tokens[i];
+    const pos = [];      // string list for path/glob
+    const posTok = [];   // { s, quoted } for fixed-pattern support
+    for (let i = 0; i < tokens.length && !error; i++) {
+      const tok = tokens[i];
+      const t = tok.s;
       if (t === '-r') {
         if (recursive) { error = 'grep: duplicate -r'; break; }
         recursive = true;
@@ -20969,7 +21209,7 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
       } else if (t === '-maxdepth') {
         if (depth !== null) { error = 'grep: duplicate -maxdepth'; break; }
         if (i + 1 < tokens.length) {
-          depth = parseInt(tokens[i + 1], 10);
+          depth = parseInt(tokens[i + 1].s, 10);
           if (!Number.isFinite(depth) || depth < 0) { error = 'grep: invalid -maxdepth'; break; }
           i++;
         } else {
@@ -20979,7 +21219,7 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
       } else if (t === '-basedir') {
         if (basedir) { error = 'grep: duplicate -basedir'; break; }
         if (i + 1 < tokens.length) {
-          basedir = String(tokens[i + 1] || '').replace(/^"|"$/g, '');
+          basedir = String(tokens[i + 1].s || '');
           i++;
         } else {
           error = 'grep: missing -basedir value';
@@ -20989,7 +21229,22 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
         error = 'grep: unknown option ' + t;
         break;
       } else {
-        pos.push(t.replace(/^"|"$/g, ''));
+        pos.push(String(t||''));
+        posTok.push({ s: String(t||''), quoted: !!tok.quoted });
+      }
+    }
+
+    // #1447: In literal mode (-F), allow quoted pattern: "word" or 'word'
+    if (!error && fixed && !pat){
+      const q = posTok.find(x=>x && x.quoted);
+      if (q){
+        pat = String(q.s||'');
+        // Remove the first quoted token from positional args
+        const qi = posTok.indexOf(q);
+        if (qi >= 0){
+          try{ posTok.splice(qi, 1); }catch{}
+          try{ pos.splice(qi, 1); }catch{}
+        }
       }
     }
 
@@ -21049,7 +21304,9 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
   }
 
     function _buildGrepHeader(pat, targetPath, bName, caseLabel, flagStr, extraInfo, hitTotalOverride) {
-      const cmdFlag = flagStr ? `/${flagStr}` : '';
+      // Always render /pat/flags form (or /pat/ when no flags) so CMD is CLI-reproducible.
+      const flagStrSafe = String(flagStr||'');
+      const cmdFlag = flagStrSafe ? `/${flagStrSafe}` : '/';
       const cmdLine = (extraInfo && extraInfo.cmdLine) ? String(extraInfo.cmdLine) : `:grep /${pat}${cmdFlag} ${targetPath}`;
       let header = `CMD\t\t${cmdLine}\n`;
       // Under CMD: show how the pattern is interpreted.
@@ -21151,6 +21408,7 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
         if (currentBuffer && currentBuffer() === buf){
           try{ editor.value = newText; }catch{}
           try{ _repositionCaret(); updateGutter(); }catch{}
+          try{ if (typeof _scheduleListCharsRender === 'function') _scheduleListCharsRender('grep-result-update'); }catch{}
         }
       }catch(e){ console.error(e); }
     }
@@ -21231,6 +21489,7 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
       const fileGlobOpt = (options && options.fileGlob) ? String(options.fileGlob) : '';
       const hasExplicitFileGlob = !!fileGlobOpt;
 
+
         const _grepQuoteArg = (s)=>{
           const v = String(s ?? '');
           if (!v) return '""';
@@ -21242,7 +21501,7 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
           try{ if (String(flagsGiven||'').includes('F')) parts.push('-F'); }catch{}
           if (recursive) parts.push('-r');
           if (recursive && Number.isFinite(maxDepth)) parts.push('-maxdepth', String(maxDepth|0));
-          const cmdFlag = flagStrForCmd ? `/${flagStrForCmd}` : '';
+          const cmdFlag = flagStrForCmd ? `/${flagStrForCmd}` : '/';
           parts.push(`/${pat}${cmdFlag}`);
           if (hasExplicitFileGlob) {
             parts.push('-basedir', _grepQuoteArg(baseDirForCmd), _grepQuoteArg(fileGlobForCmd || '*'));
@@ -21394,9 +21653,13 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
                                        }
                                      };
                                      let files = [];
+                                     let listEntryCount = 0;
+                                     let listFileCount = 0;
 
                                      if (recursive) {
                                        files = await _recursiveList(searchRootUrl, 0, maxDepth, regex, '', true, listOpts);
+                                       try{ listFileCount = (listProgress && Number.isFinite(listProgress.fileCount)) ? (listProgress.fileCount|0) : 0; }catch{}
+                                       try{ listEntryCount = (listProgress && Number.isFinite(listProgress.dirCount)) ? (listProgress.dirCount|0) : 0; }catch{}
                                      } else {
                                        // If the glob pattern spans subdirectories (contains '/'), we must traverse
                                        // to evaluate patterns like '*/*.md' (otherwise we'd only see immediate children).
@@ -21404,8 +21667,16 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
                                          const segs = globPattern.split('/').filter(s => s.length > 0);
                                          const needDepth = Math.max(1, segs.length);
                                          files = await _recursiveList(searchRootUrl, 0, needDepth, regex, '', true, listOpts);
+                                         try{ listFileCount = (listProgress && Number.isFinite(listProgress.fileCount)) ? (listProgress.fileCount|0) : 0; }catch{}
+                                         try{ listEntryCount = (listProgress && Number.isFinite(listProgress.dirCount)) ? (listProgress.dirCount|0) : 0; }catch{}
                                        } else {
                                          const entries = await _listDirEntries(searchRootUrl, listOpts);
+                                         try{
+                                           if (Array.isArray(entries)){
+                                             listEntryCount = entries.length;
+                                             listFileCount = entries.filter(e=>e && !e.isDir).length;
+                                           }
+                                         }catch{}
                                          files = entries.filter(e => !e.isDir && regex.test(e.name));
                                        }
                                      }
@@ -21414,8 +21685,17 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
                                        // no files match: write message into the result buffer (no toast)
                                        let msg = 'grep: no files match ' + globPattern;
                                        try{
+                                         const baseShown = (basedirRawOpt || targetPath || basePathForHeader || '').toString();
                                          if (hasExplicitFileGlob && listErrorOut && listErrorOut.message) {
-                                           msg = 'grep: basedir not found: ' + (basedirRawOpt || targetPath) + '  (' + basePathForHeader + ')';
+                                           msg = 'grep: cannot list basedir: ' + baseShown + '  (' + String(listErrorOut.message) + ')';
+                                         } else {
+                                           const apiState = (typeof _apiIsEnabled==='function' && _apiIsEnabled()) ? 'on' : 'off';
+                                           // When listEntryCount==0 (and no explicit error), this is likely a listing failure (CORS/API/timeout) rather than a true glob miss.
+                                           if ((listEntryCount|0) === 0 && (listFileCount|0) === 0) {
+                                             msg = 'grep: cannot list basedir (0 entries): ' + baseShown + '  (API=' + apiState + ')';
+                                           } else {
+                                             msg = 'grep: no files match ' + globPattern + '  (dir files:' + (listFileCount|0) + ', entries:' + (listEntryCount|0) + ', API=' + apiState + ')';
+                                           }
                                          }
                                        }catch{}
                                        _updateExternalGrepResultBuffer(extBufRef, pat, targetPath, basePathForHeader, baseCaseLabel0, baseFlagStr0, [], [], extraInfo0, 0, msg);
@@ -21881,7 +22161,8 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
         if (!extraInfo) extraInfo = {};
         if (!extraInfo.searchKind) extraInfo.searchKind = isFixed ? 'literal' : 'regex';
         if (!extraInfo.cmdLine) {
-          const cmdFlag = flagStr ? `/${flagStr}` : '';
+          const flagStrSafe = String(flagStr||'');
+          const cmdFlag = flagStrSafe ? `/${flagStrSafe}` : '/';
           const optF = isFixed ? '-F ' : '';
           extraInfo.cmdLine = `:grep ${optF}/${pat}${cmdFlag} ${targetPath}`;
         }
@@ -21921,22 +22202,24 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
             const formatted = _formatGrepMatches(res.matches, displayPath);
             
             const isFixed0 = !!(flagsGiven && String(flagsGiven).includes('F'));
-            const cmdFlag = res.flagStr ? `/${res.flagStr}` : '';
+            const flagStr0 = (res && typeof res.flagStr === 'string') ? res.flagStr : '';
+            const cmdFlag = flagStr0 ? `/${flagStr0}` : '/';
             const optF = isFixed0 ? '-F ' : '';
             const cmdLine = `:grep ${optF}/${pat}${cmdFlag} ${targetPath}`;
             const extraInfo0 = { cmdLine, searchKind: (isFixed0 ? 'literal' : 'regex') };
-            _showGrepResult(pat, targetPath, bName, res.caseLabel, res.flagStr, formatted.lines, formatted.highlights, extraInfo0);
+            _showGrepResult(pat, targetPath, bName, res.caseLabel, flagStr0, formatted.lines, formatted.highlights, extraInfo0);
             return res.matches.length;
         } else {
           // 外部検索は0件でも結果バッファを生成する。
           if (targetPath && targetPath !== '%') {
             // legacy path: keep creating a buffer, but do not toast here.
             const isFixed0 = !!(flagsGiven && String(flagsGiven).includes('F'));
-            const cmdFlag = res.flagStr ? `/${res.flagStr}` : '';
+            const flagStr0 = (res && typeof res.flagStr === 'string') ? res.flagStr : '';
+            const cmdFlag = flagStr0 ? `/${flagStr0}` : '/';
             const optF = isFixed0 ? '-F ' : '';
             const cmdLine = `:grep ${optF}/${pat}${cmdFlag} ${targetPath}`;
             const extraInfo0 = { cmdLine, searchKind: (isFixed0 ? 'literal' : 'regex') };
-            _showGrepResult(pat, targetPath, bName, res.caseLabel, res.flagStr, ['','', 'grep: no matches found'], [], extraInfo0);
+            _showGrepResult(pat, targetPath, bName, res.caseLabel, flagStr0, ['','', 'grep: no matches found'], [], extraInfo0);
           } else {
             if (!suppressToast) toast('grep: no matches found');
           }
