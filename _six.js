@@ -671,6 +671,15 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
         }
       }catch{}
 
+      // #1445: Persist grep fileglob history
+      let grepFileglobHist = [];
+      try{
+        const limit = (window.SIX_OPTIONS && typeof window.SIX_OPTIONS.GREP_FILEGLOB_IN_SESSION === 'number') ? (window.SIX_OPTIONS.GREP_FILEGLOB_IN_SESSION|0) : 0;
+        if (limit > 0 && typeof _grepFileglobHistory !== 'undefined' && Array.isArray(_grepFileglobHistory)){
+          grepFileglobHist = _grepFileglobHistory.slice(-limit);
+        }
+      }catch{}
+
       // #1440: Persist grep dialog state (target selection)
       let grepDialogState = { targetMode:'buffer' };
       try{
@@ -741,6 +750,7 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
         windowState: winState,
         searchHistory: searchHist,
         grepBasedirHistory: grepBasedirHist,
+        grepFileglobHistory: grepFileglobHist,
         grepDialogState: grepDialogState
       };
       return payload;
@@ -853,6 +863,14 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
         if (Array.isArray(j.grepBasedirHistory) && typeof _grepBasedirHistory !== 'undefined'){
           _grepBasedirHistory.length = 0;
           j.grepBasedirHistory.forEach(v=>_grepBasedirHistory.push(String(v)));
+        }
+      }catch{}
+
+      // #1445: Restore grep fileglob history
+      try{
+        if (Array.isArray(j.grepFileglobHistory) && typeof _grepFileglobHistory !== 'undefined'){
+          _grepFileglobHistory.length = 0;
+          j.grepFileglobHistory.forEach(v=>_grepFileglobHistory.push(String(v)));
         }
       }catch{}
 
@@ -3161,6 +3179,22 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
       const limit = (window.SIX_OPTIONS && typeof window.SIX_OPTIONS.GREP_BASEDIR_IN_SESSION === 'number') ? (window.SIX_OPTIONS.GREP_BASEDIR_IN_SESSION|0) : 0;
       if (limit > 0){
         while (_grepBasedirHistory.length > limit) _grepBasedirHistory.shift();
+      }
+    }catch{}
+  }
+
+  // grep fileglob history (session-shared; for grep dialog fileglob)
+  const _grepFileglobHistory = [];
+  function _grepFileglobHistoryMaybePush(s){
+    try{
+      const v = String(s||'').trim();
+      if (!v) return;
+      const i = _grepFileglobHistory.indexOf(v);
+      if (i >= 0) _grepFileglobHistory.splice(i, 1);
+      _grepFileglobHistory.push(v);
+      const limit = (window.SIX_OPTIONS && typeof window.SIX_OPTIONS.GREP_FILEGLOB_IN_SESSION === 'number') ? (window.SIX_OPTIONS.GREP_FILEGLOB_IN_SESSION|0) : 0;
+      if (limit > 0){
+        while (_grepFileglobHistory.length > limit) _grepFileglobHistory.shift();
       }
     }catch{}
   }
@@ -19412,9 +19446,16 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
       basedirWrap.appendChild(basedirInput);
       basedirWrap.appendChild(basedirHistBtn);
 
+      const fileglobWrap = document.createElement('div');
+      fileglobWrap.style.cssText = 'position:relative; min-width:0;';
       const fileglobInput = _mkPathInput();
       fileglobInput.placeholder = 'fileglob (例: *.md)';
+      // Leave space for [履歴]
+      try{ fileglobInput.style.padding = '4px 56px 4px 8px'; fileglobInput.style.boxSizing='border-box'; }catch{}
       try{ fileglobInput.style.minWidth = '12rem'; }catch{}
+      const fileglobHistBtn = _mkInlineHistBtn();
+      fileglobWrap.appendChild(fileglobInput);
+      fileglobWrap.appendChild(fileglobHistBtn);
 
       function _applyDisabledStyle(el, disabled){
         try{
@@ -19440,9 +19481,9 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
 
       const pathRowDir = document.createElement('div');
       pathRowDir.style.cssText = 'display:flex; align-items:center; gap:6px;';
-      try{ basedirWrap.style.flex = '8 1 0%'; fileglobInput.style.flex = '2 1 0%'; }catch{}
+      try{ basedirWrap.style.flex = '8 1 0%'; fileglobWrap.style.flex = '2 1 0%'; }catch{}
       pathRowDir.appendChild(basedirWrap);
-      pathRowDir.appendChild(fileglobInput);
+      pathRowDir.appendChild(fileglobWrap);
 
       // Start with single row visible
       pathWrap.appendChild(pathRowSingle);
@@ -19573,6 +19614,16 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
             } else {
               try{ basedirHistBtn.style.background = '#1a2030'; basedirHistBtn.style.borderColor = '#2a3244'; basedirHistBtn.style.color = '#e6e6e6'; }catch{}
               try{ basedirHistBtn.style.cursor = 'pointer'; basedirHistBtn.style.opacity='1.0'; }catch{}
+            }
+          }catch{}
+
+          try{
+            fileglobHistBtn.disabled = !!fileglobInput.disabled;
+            if (fileglobHistBtn.disabled){
+              _applyBtnDisabledStyle(fileglobHistBtn, true);
+            } else {
+              try{ fileglobHistBtn.style.background = '#1a2030'; fileglobHistBtn.style.borderColor = '#2a3244'; fileglobHistBtn.style.color = '#e6e6e6'; }catch{}
+              try{ fileglobHistBtn.style.cursor = 'pointer'; fileglobHistBtn.style.opacity='1.0'; }catch{}
             }
           }catch{}
         }catch{}
@@ -19911,6 +19962,125 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
       pathHistBtn.onclick = (e)=>{ try{ e.preventDefault(); e.stopPropagation(); }catch{}; try{ _grepPathHistPopupShowFor(pathSingle, pathSingleWrap, pathHistBtn); }catch{} };
       basedirHistBtn.onclick = (e)=>{ try{ e.preventDefault(); e.stopPropagation(); }catch{}; try{ _grepPathHistPopupShowFor(basedirInput, basedirWrap, basedirHistBtn); }catch{} };
 
+      // Fileglob history popup inside dialog
+      let _grepFileglobHistSel = 0;
+      let _grepFileglobHistTarget = null;
+      let _grepFileglobHistAnchor = null;
+      let _grepFileglobHistBtn = null;
+      const _grepFileglobHistPopupId = 'grepFileglobHistPopup';
+      const _grepFileglobHistPopupVisible = ()=>{ try{ const p=document.getElementById(_grepFileglobHistPopupId); return !!(p && p.style.display!=='none'); }catch{ return false; } };
+      const _grepFileglobHistPopupHide = ()=>{ try{ const p=document.getElementById(_grepFileglobHistPopupId); if (p) p.style.display='none'; }catch{} };
+      const _grepFileglobHistItems = ()=>{
+        try{
+          const src = Array.isArray(_grepFileglobHistory) ? _grepFileglobHistory : [];
+          const out = [];
+          for (let i = src.length - 1; i >= 0; i--){
+            const v = String(src[i]||'').trim();
+            if (!v) continue;
+            out.push({ value: v, origIndex: i });
+          }
+          return out;
+        }catch{ return []; }
+      };
+      const _grepFileglobHistPopupRender = ()=>{
+        try{
+          const pop = document.getElementById(_grepFileglobHistPopupId); if (!pop) return;
+          pop.innerHTML='';
+          const inner = document.createElement('div');
+          inner.className = 'inner';
+          inner.style.maxHeight = '35vh';
+          inner.style.overflow = 'auto';
+          pop.appendChild(inner);
+          const items = _grepFileglobHistItems();
+          if (!items.length){
+            const empty = document.createElement('div');
+            empty.textContent = '(履歴なし)';
+            empty.style.padding = '6px 10px';
+            empty.style.color = '#2f3644';
+            inner.appendChild(empty);
+            return;
+          }
+          _grepFileglobHistSel = Math.max(0, Math.min(items.length-1, (_grepFileglobHistSel|0)));
+          items.forEach((it,i)=>{
+            const item = document.createElement('div');
+            item.className = 'item';
+            item.style.display='block';
+            item.style.padding='4px 10px';
+            item.style.cursor='pointer';
+            item.style.whiteSpace='nowrap';
+            item.style.borderRadius='4px';
+            item.textContent = it.value;
+            item.style.background = (i===_grepFileglobHistSel) ? 'var(--popupActiveLine, #1a2030)' : 'transparent';
+            item.addEventListener('mouseenter', ()=>{ try{ _grepFileglobHistSel=i; _grepFileglobHistPopupRender(); }catch{} });
+            const _apply = (ev)=>{
+              try{ ev.preventDefault(); ev.stopPropagation(); }catch{}
+              try{
+                if (_grepFileglobHistTarget){
+                  _grepFileglobHistTarget.value = String(it.value||'');
+                  try{ _fgHistCommit(_grepFileglobHistTarget); }catch{}
+                  try{ _syncExecEnabled(); }catch{}
+                }
+              }catch{}
+              _grepFileglobHistPopupHide();
+              try{ _grepFileglobHistTarget && _grepFileglobHistTarget.focus && _grepFileglobHistTarget.focus({preventScroll:true}); }catch{ try{ _grepFileglobHistTarget && _grepFileglobHistTarget.focus && _grepFileglobHistTarget.focus(); }catch{} }
+            };
+            item.addEventListener('mousedown', _apply);
+            item.addEventListener('click', _apply);
+            inner.appendChild(item);
+          });
+        }catch{}
+      };
+      const _grepFileglobHistPopupShowFor = (targetInput, anchorEl, btnEl)=>{
+        try{
+          if (!targetInput || targetInput.disabled) return;
+          _grepFileglobHistTarget = targetInput;
+          _grepFileglobHistAnchor = anchorEl || targetInput;
+          _grepFileglobHistBtn = btnEl || null;
+          let pop = document.getElementById(_grepFileglobHistPopupId);
+          if (!pop){
+            pop = document.createElement('div');
+            pop.id = _grepFileglobHistPopupId;
+            pop.style.position='fixed';
+            pop.style.maxHeight='35vh';
+            pop.style.background='#0f1117';
+            pop.style.color='#e6e6e6';
+            pop.style.border='1px solid #2a3244';
+            pop.style.boxShadow='0 10px 24px rgba(0,0,0,0.4)';
+            pop.style.zIndex='10001';
+            pop.style.borderRadius='6px';
+            pop.style.overflow='hidden';
+            pop.style.boxSizing='border-box';
+            pop.style.padding='4px 6px';
+            document.body.appendChild(pop);
+          }
+          pop.style.display='';
+          _grepFileglobHistSel = 0;
+          _grepFileglobHistPopupRender();
+          const r = (_grepFileglobHistAnchor && _grepFileglobHistAnchor.getBoundingClientRect) ? _grepFileglobHistAnchor.getBoundingClientRect() : targetInput.getBoundingClientRect();
+          const vw = (window.innerWidth||0), vh=(window.innerHeight||0);
+          const pw = (pop.offsetWidth||360), ph=(pop.offsetHeight||160);
+          let left = Math.max(8, Math.min(vw - pw - 8, Math.round(r.right - pw)));
+          let top  = Math.max(8, Math.min(vh - ph - 8, Math.round(r.top - ph - 6)));
+          pop.style.left = left + 'px';
+          pop.style.top  = top + 'px';
+          if (!pop.__outsideClose){
+            pop.__outsideClose = true;
+            document.addEventListener('mousedown', (ev)=>{
+              try{
+                const pp = document.getElementById(_grepFileglobHistPopupId);
+                if (!pp || pp.style.display==='none') return;
+                const within = pp.contains(ev.target)
+                  || (_grepFileglobHistBtn && _grepFileglobHistBtn.contains && _grepFileglobHistBtn.contains(ev.target))
+                  || (_grepFileglobHistAnchor && _grepFileglobHistAnchor.contains && _grepFileglobHistAnchor.contains(ev.target));
+                if (!within) _grepFileglobHistPopupHide();
+              }catch{}
+            }, true);
+          }
+        }catch{}
+      };
+
+      fileglobHistBtn.onclick = (e)=>{ try{ e.preventDefault(); e.stopPropagation(); }catch{}; try{ _grepFileglobHistPopupShowFor(fileglobInput, fileglobWrap, fileglobHistBtn); }catch{} };
+
       // Path history browsing state (per-input)
       const _histInit = (el)=>{ try{ if (!el.__grepHist){ el.__grepHist = { idx:_grepBasedirHistory.length, browsing:false, temp:'' }; } }catch{} };
       const _histStart = (el)=>{ try{ _histInit(el); const st = el.__grepHist; if (!st.browsing){ st.temp = String(el.value||''); st.idx = _grepBasedirHistory.length; st.browsing = true; } }catch{} };
@@ -19934,6 +20104,35 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
           if (!st.browsing) return false;
           st.browsing = false;
           st.idx = _grepBasedirHistory.length;
+          st.temp = '';
+          try{ _syncExecEnabled(); }catch{}
+          return true;
+        }catch{ return false; }
+      };
+
+      // Fileglob history browsing state (per-input)
+      const _fgHistInit = (el)=>{ try{ if (!el.__grepFgHist){ el.__grepFgHist = { idx:_grepFileglobHistory.length, browsing:false, temp:'' }; } }catch{} };
+      const _fgHistStart = (el)=>{ try{ _fgHistInit(el); const st = el.__grepFgHist; if (!st.browsing){ st.temp = String(el.value||''); st.idx = _grepFileglobHistory.length; st.browsing = true; } }catch{} };
+      const _fgHistMove = (el, dir)=>{
+        try{
+          if (!Array.isArray(_grepFileglobHistory) || !_grepFileglobHistory.length) return false;
+          _fgHistStart(el);
+          const st = el.__grepFgHist;
+          const n = _grepFileglobHistory.length;
+          st.idx = Math.max(0, Math.min(n-1, (st.idx|0) + (dir>0?1:-1)));
+          el.value = String(_grepFileglobHistory[st.idx]||'');
+          try{ el.select && el.select(); }catch{}
+          try{ _syncExecEnabled(); }catch{}
+          return true;
+        }catch{ return false; }
+      };
+      const _fgHistCommit = (el)=>{
+        try{
+          _fgHistInit(el);
+          const st = el.__grepFgHist;
+          if (!st.browsing) return false;
+          st.browsing = false;
+          st.idx = _grepFileglobHistory.length;
           st.temp = '';
           try{ _syncExecEnabled(); }catch{}
           return true;
@@ -20081,6 +20280,7 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
           const fg = String((fileglobInput && fileglobInput.value) ? fileglobInput.value : '').trim() || '*';
           if (!baseDirRaw){ toast('grep: -basedir が空です'); return; }
           try{ _grepBasedirHistoryMaybePush(baseDirRaw); _schedulePersist && _schedulePersist('grep-basedir'); }catch{}
+          try{ _grepFileglobHistoryMaybePush(fg); _schedulePersist && _schedulePersist('grep-fileglob-history'); }catch{}
           let depthN = 0;
           if (_grepRecursive){
             const v = String((depthInput && depthInput.value) ? depthInput.value : '').trim();
@@ -20231,6 +20431,69 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
           }
         }catch{}
 
+        // When the fileglob history popup is visible: handle navigation/confirm/delete.
+        try{
+          if (typeof _grepFileglobHistPopupVisible === 'function' && _grepFileglobHistPopupVisible()){
+            const kP = String((e && e.key) || '');
+            if (kP === 'Escape' || kP === 'Esc'){
+              try{ e.preventDefault(); e.stopPropagation(); }catch{}
+              _grepFileglobHistPopupHide();
+              return;
+            }
+            if (kP === 'Delete' || kP === 'Del'){
+              try{ e.preventDefault(); e.stopPropagation(); }catch{}
+              try{
+                const items = _grepFileglobHistItems();
+                if (items.length && Array.isArray(_grepFileglobHistory) && _grepFileglobHistory.length){
+                  const sel = Math.max(0, Math.min(items.length-1, (_grepFileglobHistSel|0)));
+                  const it = items[sel];
+                  const origIdx = (it && (it.origIndex|0));
+                  if (origIdx >= 0 && origIdx < _grepFileglobHistory.length){
+                    _grepFileglobHistory.splice(origIdx, 1);
+                    try{ if (typeof _schedulePersist === 'function') _schedulePersist('grep-fileglob-history'); }catch{}
+                  }
+                }
+              }catch{}
+              try{
+                const items2 = _grepFileglobHistItems();
+                _grepFileglobHistSel = Math.max(0, Math.min(Math.max(0, items2.length-1), (_grepFileglobHistSel|0)));
+                _grepFileglobHistPopupRender();
+              }catch{}
+              return;
+            }
+            if (kP === 'ArrowUp'){
+              try{ e.preventDefault(); e.stopPropagation(); }catch{}
+              const items = _grepFileglobHistItems();
+              if (items.length){ _grepFileglobHistSel = Math.max(0, (_grepFileglobHistSel|0) - 1); _grepFileglobHistPopupRender(); }
+              return;
+            }
+            if (kP === 'ArrowDown'){
+              try{ e.preventDefault(); e.stopPropagation(); }catch{}
+              const items = _grepFileglobHistItems();
+              if (items.length){ _grepFileglobHistSel = Math.min(items.length-1, (_grepFileglobHistSel|0) + 1); _grepFileglobHistPopupRender(); }
+              return;
+            }
+            if (kP === 'Enter' || kP === ' ' || kP === 'Spacebar'){
+              try{ e.preventDefault(); e.stopPropagation(); }catch{}
+              const items = _grepFileglobHistItems();
+              if (items.length){
+                const it = items[Math.max(0, Math.min(items.length-1, (_grepFileglobHistSel|0)))];
+                try{
+                  if (_grepFileglobHistTarget){
+                    _grepFileglobHistTarget.value = String((it && it.value) || '');
+                    try{ _fgHistCommit(_grepFileglobHistTarget); }catch{}
+                    try{ _syncExecEnabled(); }catch{}
+                  }
+                }catch{}
+              }
+              _grepFileglobHistPopupHide();
+              try{ _grepFileglobHistTarget && _grepFileglobHistTarget.focus && _grepFileglobHistTarget.focus({preventScroll:true}); }catch{ try{ _grepFileglobHistTarget && _grepFileglobHistTarget.focus && _grepFileglobHistTarget.focus(); }catch{} }
+              return;
+            }
+            try{ _grepFileglobHistPopupHide(); }catch{}
+          }
+        }catch{}
+
         // When the case popup is visible: Esc closes the popup (not the dialog).
         try{
           if (typeof _casePopupVisible === 'function' && _casePopupVisible()){
@@ -20291,6 +20554,10 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
               try{ _grepPathHistPopupShowFor(basedirInput, basedirWrap, basedirHistBtn); }catch{}
               return;
             }
+            if (ae === fileglobInput && !fileglobHistBtn.disabled){
+              try{ _grepFileglobHistPopupShowFor(fileglobInput, fileglobWrap, fileglobHistBtn); }catch{}
+              return;
+            }
             // Otherwise prefer the earlier one in Tab order among visible/enabled.
             try{
               // 1) search term
@@ -20345,27 +20612,39 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
         // Path history browsing: Up/Down to browse, Space/Enter to commit.
         try{
           const ae = document.activeElement;
-          const isPathEl = (ae === pathSingle || ae === basedirInput);
+          const isPathEl = (ae === pathSingle || ae === basedirInput || ae === fileglobInput);
           if (isPathEl){
             const kk = String((e && e.key) || '');
             if (kk === 'ArrowUp'){
               try{ e.preventDefault(); e.stopPropagation(); }catch{}
-              _histMove(ae, -1);
+              if (ae === fileglobInput) _fgHistMove(ae, -1);
+              else _histMove(ae, -1);
               return;
             }
             if (kk === 'ArrowDown'){
               try{ e.preventDefault(); e.stopPropagation(); }catch{}
-              _histMove(ae, +1);
+              if (ae === fileglobInput) _fgHistMove(ae, +1);
+              else _histMove(ae, +1);
               return;
             }
             if (kk === 'Enter' || kk === ' ' || kk === 'Spacebar'){
               // Only commit when browsing mode is active
-              _histInit(ae);
-              if (ae.__grepHist && ae.__grepHist.browsing){
-                try{ e.preventDefault(); e.stopPropagation(); }catch{}
-                _histCommit(ae);
-                try{ ae.select && ae.select(); }catch{}
-                return;
+              if (ae === fileglobInput){
+                _fgHistInit(ae);
+                if (ae.__grepFgHist && ae.__grepFgHist.browsing){
+                  try{ e.preventDefault(); e.stopPropagation(); }catch{}
+                  _fgHistCommit(ae);
+                  try{ ae.select && ae.select(); }catch{}
+                  return;
+                }
+              } else {
+                _histInit(ae);
+                if (ae.__grepHist && ae.__grepHist.browsing){
+                  try{ e.preventDefault(); e.stopPropagation(); }catch{}
+                  _histCommit(ae);
+                  try{ ae.select && ae.select(); }catch{}
+                  return;
+                }
               }
             }
           }
