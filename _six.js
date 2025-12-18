@@ -11695,7 +11695,11 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
               _setCaret(caretRow, caretCol);
               // ネイティブ選択も同期しないと次入力が末尾に挿入されうる (#506)
               try{ _syncNativeSelectionToCaret(); }catch{}
-              _touchBufferModified(); ensureScrolloff(); _repositionCaret(); updateGutter();
+              _touchBufferModified();
+              try{ _insertSegDirty = true; }catch{}
+              ensureScrolloff(); _repositionCaret(); updateGutter();
+              // TAB挿入は preventDefault + editor.value 直書きで input イベントが発火しないため、listchars を明示更新する (#1463)
+              try{ if (typeof _scheduleListCharsRender === 'function') _scheduleListCharsRender('tab'); }catch{}
             } else {
               // 通常ケース（選択なし）: caret位置へ挿入
               try{
@@ -11704,7 +11708,11 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
                 _setCaret(caretRow, caretCol);
                 // ネイティブ選択も同期 (#506)
                 try{ _syncNativeSelectionToCaret(); }catch{}
-                _touchBufferModified(); ensureScrolloff(); _repositionCaret(); updateGutter();
+                _touchBufferModified();
+                try{ _insertSegDirty = true; }catch{}
+                ensureScrolloff(); _repositionCaret(); updateGutter();
+                // TAB挿入は preventDefault + editor.value 直書きで input イベントが発火しないため、listchars を明示更新する (#1463)
+                try{ if (typeof _scheduleListCharsRender === 'function') _scheduleListCharsRender('tab'); }catch{}
               }catch{}
             }
             return; // 既に処理したので抜ける
