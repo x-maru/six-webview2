@@ -178,8 +178,8 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
       // 可視幅計測は後段の _visualWidthUpToLine を利用
       const visCol = _visualWidthUpToLine(line, caretCol|0);
       const visTotal = _visualWidthUpToLine(line, (line||'').length);
-      // 表示形式: 「行Y, 列X/W」 (#633)
-      posinfoEl.textContent = '行' + (r+1) + ', ' + '列' + (visCol+1) + '/' + (visTotal+1);
+      // 表示形式: 「行Y 列X/W」 (#633/#1470)
+      posinfoEl.textContent = '行' + (r+1) + ' ' + '列' + (visCol+1) + '/' + (visTotal+1);
       // THEME反映 (#634): window.THEME.posInfoText or fallback 'yellow'
       try{ let col='yellow'; if (window && window.THEME && window.THEME.posInfoText){ col=String(window.THEME.posInfoText); } posinfoEl.style.color=col; }catch{}
       // 未確定中はタブボタン再計算の遅延呼び出しも抑止
