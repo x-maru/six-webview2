@@ -765,6 +765,7 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
               shiftwidth: Number.isFinite(b.shiftwidth)? (b.shiftwidth|0) : 4,
         ignorecase: !!b.ignorecase,
         smartcase:  !!b.smartcase,
+        markdown: !!b.markdown,
     undo: undoArr,
     extMtime: (typeof b._extMtime === 'number') ? b._extMtime : null,
     extSize: (typeof b._extSize === 'number') ? b._extSize : null,
@@ -951,8 +952,9 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
         else shiftwidth = Number.isFinite(it && it.shiftwidth) ? Math.max(1, (it.shiftwidth|0)) : 4;
         const ignorecase = !!(it && it.ignorecase);
         const smartcase  = !!(it && it.smartcase);
+        const markdown  = !!(it && it.markdown);
         const edScale = Number.isFinite(it && it.edScale) ? _nearestScale(it.edScale) : 1;
-        _addBuffer({ name, path, text, modified, enc, ff, bom, shiftwidth, ignorecase, smartcase, edScale });
+        _addBuffer({ name, path, text, modified, enc, ff, bom, shiftwidth, ignorecase, smartcase, markdown, edScale });
         try{
           const b = buffers[buffers.length-1];
           // If savedText is provided, trust it; otherwise, if not modified, set savedText=text
@@ -976,6 +978,8 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
           // restore case flags (default false)
           try{ b.ignorecase = !!(it && it.ignorecase); }catch{ b.ignorecase = !!b.ignorecase; }
           try{ b.smartcase  = !!(it && it.smartcase);  }catch{ b.smartcase  = !!b.smartcase;  }
+          // restore markdown flag (default false)
+          try{ b.markdown = !!(it && it.markdown); }catch{ b.markdown = !!b.markdown; }
           // recompute ticks from modified flag
           b._changeTick = modified ? 1 : 0; b._savedTick = 0; b.modified = !!modified;
           // Restore undo snapshots (limited) if present
@@ -4542,6 +4546,8 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
         // per-buffer case sensitivity options (#696)
         ignorecase: !!b.ignorecase,
         smartcase:  !!b.smartcase,
+        // per-buffer markdown mode (planned feature) (#1471)
+        markdown: !!b.markdown,
         // original final newline presence (established on initial load/create) — #598
         _origHadFinalLF: text0.endsWith('\n'),
         // encoding/newline metadata
@@ -4729,6 +4735,7 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
       try{ _updateOverlayShiftwidthVisual(); }catch{}
       // ケース感度表示(検索時 A/a)をタブ切替時にも更新 (#955)
       try{ _updateOverlayCaseVisual(); }catch{}
+      try{ _updateOverlayMarkdownVisual(); }catch{}
       _updateHlsearchFull();
       // Refresh listchars (including EOL markers) on buffer switch to avoid stale markers from the previous buffer.
       try{ if (typeof _scheduleListCharsRender === 'function') _scheduleListCharsRender('switch'); }catch{}
@@ -9116,6 +9123,27 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
     if (/^:set\s+smartcase\?\s*$/i.test(cmd)){
       const b=currentBuffer(); toast('smartcase: ' + (b&&b.smartcase?'on':'off'), 1200); return;
     }
+
+    // :set markdown / :set nomarkdown / :set markdown! / :set markdown?
+    if (/^:set\s+markdown\s*$/i.test(cmd)){
+      const b=currentBuffer(); if (b){ b.markdown=true; _schedulePersist('markdown'); }
+      try{ _updateOverlayMarkdownVisual(); }catch{}
+      toast('markdown: on', 900); return;
+    }
+    if (/^:set\s+nomarkdown\s*$/i.test(cmd)){
+      const b=currentBuffer(); if (b){ b.markdown=false; _schedulePersist('markdown'); }
+      try{ _updateOverlayMarkdownVisual(); }catch{}
+      toast('markdown: off', 900); return;
+    }
+    if (/^:set\s+markdown!\s*$/i.test(cmd)){
+      const b=currentBuffer(); if (b){ b.markdown=!b.markdown; _schedulePersist('markdown'); }
+      try{ _updateOverlayMarkdownVisual(); }catch{}
+      toast('markdown: ' + (b&&b.markdown?'on':'off'), 900); return;
+    }
+    if (/^:set\s+markdown\?\s*$/i.test(cmd)){
+      const b=currentBuffer(); toast('markdown: ' + (b&&b.markdown?'on':'off'), 1200); return;
+    }
+
     // :set list / :set nolist / :set list! / :set list?
     if (/^:set\s+list\s*$/i.test(cmd)){
       _optList = true; toast('list: on', 900); try{ _renderListChars(); }catch{} updateGutter(); try{ _updateOverlayListVisual(); }catch{} return;
@@ -19461,12 +19489,62 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
       });
       palTR.appendChild(caseBtn);
 
+      // Markdown mode button（右上パレット：バッファ毎設定） (#1471)
+      const mdBtn = document.createElement('button');
+      mdBtn.type = 'button';
+      mdBtn.id = 'overlayBtnMarkdown';
+      mdBtn.style.minWidth = '100px';
+      mdBtn.style.border = '1px solid #2a3244';
+      mdBtn.style.background = '#1a2030';
+      mdBtn.style.color = '#e6e6e6';
+      mdBtn.style.borderRadius = '6px';
+      mdBtn.style.padding = '4px 3px';
+      mdBtn.style.cursor = 'pointer';
+      mdBtn.style.font = "12px/1.25 system-ui, -apple-system, 'Segoe UI', sans-serif";
+      mdBtn.style.opacity = '0.92';
+      mdBtn.style.userSelect = 'none';
+      mdBtn.style.outline = 'none';
+      attachHover(mdBtn);
+      mdBtn.addEventListener('contextmenu', (e)=>{ try{ e.preventDefault(); e.stopPropagation(); }catch{} });
+      mdBtn.addEventListener('mousedown', (e)=>{ try{ lastFocusedEl = document.activeElement; e.preventDefault(); }catch{} });
+      const mdWrap = document.createElement('div');
+      mdWrap.style.display = 'flex';
+      mdWrap.style.flexDirection = 'column';
+      mdWrap.style.gap = '2px';
+      const mdTitle = document.createElement('div');
+      mdTitle.textContent = 'markdown';
+      mdTitle.style.textAlign = 'center';
+      mdTitle.style.fontWeight = '500';
+      const mdLine = document.createElement('div');
+      mdLine.style.display = 'flex';
+      mdLine.style.justifyContent = 'center';
+      mdLine.style.gap = '6px';
+      const mdOff = pillBase('OFF', 'overlayBtnMd_off');
+      const mdOn  = pillBase('ON',  'overlayBtnMd_on');
+      mdLine.appendChild(mdOff);
+      mdLine.appendChild(mdOn);
+      mdWrap.appendChild(mdTitle);
+      mdWrap.appendChild(mdLine);
+      mdBtn.appendChild(mdWrap);
+      mdBtn.addEventListener('click', (e)=>{
+        try{ e.preventDefault(); e.stopPropagation(); }catch{}
+        try{
+          const b = currentBuffer();
+          if (b){ b.markdown = !b.markdown; _schedulePersist('markdown'); }
+        }catch{}
+        try{ _updateOverlayMarkdownVisual(); }catch{}
+        try{ const b = currentBuffer(); toast('markdown: ' + (b&&b.markdown?'on':'off'), 900); }catch{}
+        try{ if (lastFocusedEl && typeof lastFocusedEl.focus==='function') lastFocusedEl.focus(); }catch{}
+      });
+      palTR.appendChild(mdBtn);
+
   // initialize visual state for hlsearch & list pills
   try{ _updateOverlayHlsearchVisual(); }catch{}
   try{ _updateOverlayListVisual(); }catch{}
   try{ _updateOverlayEncodeVisual(); }catch{}
   try{ _updateOverlayShiftwidthVisual(); }catch{}
   try{ _updateOverlayCaseVisual(); }catch{}
+  try{ _updateOverlayMarkdownVisual(); }catch{}
       // Initial position sync with scrollbars
       try{ _positionPaletteUI(); }catch{}
       // Overlay palette opacity control: default highly transparent; hover undims only one (#925)
@@ -19675,6 +19753,28 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
 
       const elDialog = document.getElementById('grepDialogCaseLabel');
       if (elDialog) elDialog.textContent = label;
+    }catch{}
+  }
+
+  // Reflect current markdown mode state to overlay button
+  function _updateOverlayMarkdownVisual(){
+    try{
+      const off = document.getElementById('overlayBtnMd_off');
+      const on  = document.getElementById('overlayBtnMd_on');
+      if (!off || !on) return;
+      const gray = '#9aa0aa';
+      const green = '#49e26f';
+      off.style.background = 'transparent';
+      on.style.background  = 'transparent';
+      off.style.color = '#e6e6e6';
+      on .style.color = '#e6e6e6';
+      const b = currentBuffer();
+      const md = !!(b && b.markdown);
+      if (md){
+        on.style.background = green; on.style.color = '#000';
+      } else {
+        off.style.background = gray; off.style.color = '#000';
+      }
     }catch{}
   }
 
