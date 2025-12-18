@@ -38,6 +38,262 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
   const viewport   = document.getElementById('editorViewport');
   const editor     = document.getElementById('editor');
   const gutter     = document.getElementById('gutter');
+
+  /*********************************************************
+   * Markdown rich view (per-line font-size / line-height)
+   *
+   * textarea は行ごとに line-height を変えられないため、markdownモード時のみ
+   * 表示を別レイヤ(textLayer)に描画して「見た目の行高」を行単位で変える。
+   *
+   * NOTE: 初期段階 (#1472) では、既存の各種overlay(hlsearch/listchars/link等)は
+   * 固定LINE_HEIGHT前提が多いので markdown-rich 中は抑止する。
+   *********************************************************/
+  let _mdTextLayer = null;
+  let _mdTextInner = null;
+  let _mdVisualSuppressed = false; // reserved: temporarily disable rich visuals if needed
+  let _mdImeRange = null; // { sOff,eOff, sRow,eRow, sCol,eCol }
+
+  // Japanese/CJK ranges for heading emphasis (#1486)
+  // - Hiragana, Katakana, CJK Unified Ideographs (+ Ext A), iteration marks, halfwidth katakana
+  const _mdCjkAnyRe = /[\u3040-\u309F\u30A0-\u30FF\u3400-\u4DBF\u4E00-\u9FFF\u3005\u3006\u3007\u303B\uFF66-\uFF9D]/;
+  const _mdCjkRunRe = /([\u3040-\u309F\u30A0-\u30FF\u3400-\u4DBF\u4E00-\u9FFF\u3005\u3006\u3007\u303B\uFF66-\uFF9D]+)/g;
+
+  function _mdEscHtml(s){
+    try{
+      return String(s||'')
+        .replace(/&/g,'&amp;')
+        .replace(/</g,'&lt;')
+        .replace(/>/g,'&gt;')
+        .replace(/"/g,'&quot;')
+        .replace(/'/g,'&#39;');
+    }catch{ return ''; }
+  }
+
+  function _mdHeadingCjkHtml(text, level){
+    try{
+      const lv = level|0;
+      if (lv < 2 || lv > 6) return null;
+      const s = String(text||'');
+      if (!s) return null;
+      if (!_mdCjkAnyRe.test(s)) return null;
+      // Wrap CJK runs so we can apply a slightly higher weight than ASCII.
+      let out = '';
+      let last = 0;
+      _mdCjkRunRe.lastIndex = 0;
+      let m;
+      while ((m = _mdCjkRunRe.exec(s))){
+        const a = m.index|0;
+        const b = a + (m[1] ? m[1].length : 0);
+        if (a > last) out += _mdEscHtml(s.slice(last, a));
+        out += '<span class="md-heading-cjk">' + _mdEscHtml(m[1]||'') + '</span>';
+        last = b;
+      }
+      if (last < s.length) out += _mdEscHtml(s.slice(last));
+      return out;
+    }catch{ return null; }
+  }
+
+  function _mdImeUpdateRange(){
+    try{
+      if (!editor) return;
+      if (!(window && window._imeComposing===true)) { _mdImeRange = null; return; }
+      const sOff = (typeof editor.selectionStart==='number') ? (editor.selectionStart|0) : 0;
+      const eOff = (typeof editor.selectionEnd==='number') ? (editor.selectionEnd|0) : sOff;
+      const a = Math.min(sOff, eOff);
+      const b = Math.max(sOff, eOff);
+      const r1 = _rcFromOffset(a);
+      const r2 = _rcFromOffset(b);
+      _mdImeRange = {
+        sOff:a, eOff:b,
+        sRow:(r1 && typeof r1.r==='number') ? (r1.r|0) : (caretRow|0),
+        eRow:(r2 && typeof r2.r==='number') ? (r2.r|0) : (caretRow|0),
+        sCol:(r1 && typeof r1.c==='number') ? (r1.c|0) : 0,
+        eCol:(r2 && typeof r2.c==='number') ? (r2.c|0) : 0,
+      };
+    }catch{ _mdImeRange = null; }
+  }
+  function _mdRichEnabled(){ try{ const b = currentBuffer && currentBuffer(); return !!(b && b.markdown); }catch{ return false; } }
+  function _mdRichActive(){ try{ return _mdRichEnabled() && !_mdVisualSuppressed; }catch{ return false; } }
+  function _mdEnsureTextLayer(){
+    try{
+      if (_mdTextLayer && _mdTextInner) return;
+      const parent = (caretLayer && caretLayer.parentNode) ? caretLayer.parentNode : null;
+      if (!parent) return;
+      _mdTextLayer = document.getElementById('textLayer');
+      if (!_mdTextLayer){
+        _mdTextLayer = document.createElement('div');
+        _mdTextLayer.id = 'textLayer';
+      }
+      _mdTextInner = _mdTextLayer.querySelector('.md-inner');
+      if (!_mdTextInner){
+        _mdTextInner = document.createElement('div');
+        _mdTextInner.className = 'md-inner';
+        _mdTextInner.style.position = 'relative';
+        _mdTextInner.style.width = '100%';
+        _mdTextInner.style.height = '100%';
+        _mdTextLayer.appendChild(_mdTextInner);
+      }
+      if (_mdTextLayer.parentNode !== parent){
+        parent.insertBefore(_mdTextLayer, caretLayer);
+      }
+      _mdTextLayer.style.display = 'none';
+    }catch{}
+  }
+  function _mdHeadingLevel(line){
+    try{
+      const s = String(line||'');
+      // GFM ATX headings:
+      // - Up to 3 leading spaces
+      // - 1..6 '#'
+      // - Followed by space or tab, or end-of-line
+      // - Optional closing sequence of '#' (with optional spaces) is allowed, but doesn't affect level
+      // Reference: GFM spec (rendering is CSS-defined, but parsing rules are strict)
+      // six deviation: require at least one space/tab after '#...'
+      // (so a lone '#', '##', etc stays normal text until a space is typed) (#1482)
+      const m = s.match(/^[ ]{0,3}(#{1,6})[ \t]+(.*)$/);
+      if (!m) return 0;
+      // If line is like "#######" (7 hashes) it won't match (good).
+      // Reject cases where the "rest" is only closing hashes without a space separation? GFM allows closing hashes.
+      return (m[1] ? (m[1].length|0) : 0);
+    }catch{ return 0; }
+  }
+  function _mdHeadingScale(level){
+    // NOTE: GFM/CommonMark does not define font sizes; it's semantics + CSS.
+    // #1474: H1=1.5x, H2=1.2x relative to H3(1.0). H4-6 keep the existing step mapping.
+    const lv = level|0;
+    if (lv===1) return 1.50;
+    if (lv===2) return 1.20;
+    // Keep the original relationship centered on ###.
+    // ### => 1.00, #### => -1 step, ##### => -2 steps, ###### => -3 steps
+    const step = 0.12;
+    const d = (3 - lv);
+    return Math.max(0.45, Math.min(1.9, 1 + d*step));
+  }
+  function _mdLineScale(line){
+    try{ const lv = _mdHeadingLevel(line); return lv ? _mdHeadingScale(lv) : 1; }catch{ return 1; }
+  }
+  function _mdLineHeightPx(line){
+    try{
+      const lv = _mdHeadingLevel(line);
+      if (lv===1) return Math.max(1, Math.round(LINE_HEIGHT * 1.50));
+      if (lv===2) return Math.max(1, Math.round(LINE_HEIGHT * 1.20));
+      // #1474: H3-6 line-height is the same as normal line (H3 baseline).
+      if (lv>=3 && lv<=6) return LINE_HEIGHT;
+      return LINE_HEIGHT;
+    }catch{ return LINE_HEIGHT; }
+  }
+  function _mdRenderTextLayer(){
+    try{
+      if (!_mdRichActive()) return;
+      _mdEnsureTextLayer();
+      if (!_mdTextLayer || !_mdTextInner) return;
+      const lines = _splitLines();
+      const total = lines.length|0;
+      const topLine1 = _topLine();
+      const vis = _visibleLinesExact();
+      const start = Math.max(0, (topLine1|0) - 1);
+      const want = Math.max(1, (vis|0));
+
+      // scroll remainder vs fixed grid (for subpixel alignment)
+      let rem = 0;
+      let hs = 0;
+      try{
+        const st = (editor.scrollTop||0);
+        rem = st - Math.floor(st/LINE_HEIGHT)*LINE_HEIGHT;
+        if (Math.abs(rem) < 0.01) rem = 0;
+      }catch{}
+      try{ hs = (editor.scrollLeft||0); }catch{}
+      try{ _mdTextInner.style.transform = `translate(${-hs}px, ${-rem}px)`; }catch{}
+
+      // Base font size (already includes zoom)
+      let baseFontPx = 16;
+      try{ baseFontPx = parseFloat(getComputedStyle(editor).fontSize)||baseFontPx; }catch{}
+
+      const children = Array.from(_mdTextInner.children);
+      let y = 0;
+      for (let i=0; i<want; i++){
+        const row = start + i;
+        const text = (row>=0 && row<total) ? String(lines[row]||'') : '';
+        const lv = _mdHeadingLevel(text);
+        const isActiveRow = (row === (caretRow|0));
+        const scale = _mdLineScale(text);
+        const lh = _mdLineHeightPx(text);
+        const fs = Math.max(6, Math.round(baseFontPx * scale));
+        let el = children[i];
+        if (!el){
+          el = document.createElement('div');
+          el.className = 'md-line';
+          _mdTextInner.appendChild(el);
+        }
+        // IME: underline composition range in the rendered layer (textarea stays hidden).
+        // This avoids full-viewport double rendering while still giving composition feedback.
+        let usedHtml = false;
+        const headingCjkHtml = _mdHeadingCjkHtml(text, lv);
+        try{
+          if (window && window._imeComposing===true && _mdImeRange && row>=0){
+            const sr = _mdImeRange.sRow|0;
+            const er = _mdImeRange.eRow|0;
+            if (row>=sr && row<=er){
+              const sCol = (row===sr) ? (_mdImeRange.sCol|0) : 0;
+              const eCol = (row===er) ? (_mdImeRange.eCol|0) : (text.length|0);
+              const a = Math.max(0, Math.min(text.length|0, sCol));
+              const b = Math.max(0, Math.min(text.length|0, eCol));
+              if (b >= a){
+                const pre = text.slice(0, a);
+                const mid = text.slice(a, b);
+                const post = text.slice(b);
+                const preH = headingCjkHtml ? (_mdHeadingCjkHtml(pre, lv) || _mdEscHtml(pre)) : _mdEscHtml(pre);
+                const midH = headingCjkHtml ? (_mdHeadingCjkHtml(mid || ' ', lv) || _mdEscHtml(mid || ' ')) : _mdEscHtml(mid || ' ');
+                const postH = headingCjkHtml ? (_mdHeadingCjkHtml(post, lv) || _mdEscHtml(post)) : _mdEscHtml(post);
+                el.innerHTML = preH + '<span class="md-ime-uline">' + midH + '</span>' + postH;
+                usedHtml = true;
+              }
+            }
+          }
+        }catch{ usedHtml = false; }
+
+        // Heading H2-H6: make Japanese/CJK runs slightly bolder while keeping ASCII weight as-is (#1486)
+        if (!usedHtml && headingCjkHtml){
+          try{ el.innerHTML = headingCjkHtml; usedHtml = true; }catch{ usedHtml = false; }
+        }
+        if (!usedHtml){
+          // Ensure we don't keep stale HTML
+          if (el.innerHTML !== ''){ try{ el.textContent = ''; }catch{} }
+          el.textContent = text;
+        }
+
+        // Active line background: let #edstripe show through without dimming glyphs.
+        // Other lines keep their own per-line background gradient via CSS.
+        try{ el.style.background = isActiveRow ? 'transparent' : ''; }catch{}
+        el.style.top = y + 'px';
+        el.style.height = lh + 'px';
+        el.style.lineHeight = lh + 'px';
+        el.style.fontSize = fs + 'px';
+        try{
+          if (lv === 1) el.style.fontWeight = 'var(--mdHeadingWeightH1, 750)';
+          else if (lv >= 2 && lv <= 6) el.style.fontWeight = 'var(--mdHeadingWeightH2_6, 520)';
+          else el.style.fontWeight = '';
+        }catch{}
+        y += lh;
+      }
+      for (let i=children.length-1; i>=want; i--){
+        try{ _mdTextInner.removeChild(children[i]); }catch{}
+      }
+    }catch{}
+  }
+  function _mdApplyVisualState(){
+    try{
+      const on = _mdRichActive();
+      try{ document.body.classList.toggle('md-rich', on); }catch{}
+      _mdEnsureTextLayer();
+      if (_mdTextLayer){ _mdTextLayer.style.display = on ? '' : 'none'; }
+      if (on){
+        try{ _mdRenderTextLayer(); }catch{}
+        try{ updateGutter({ force:true }); }catch{}
+        try{ _repositionCaret({ force:true }); }catch{}
+      }
+    }catch{}
+  }
   const tabbarEl   = document.getElementById('tabbar');
   const tabbarTabs = tabbarEl ? tabbarEl.querySelector('.tabs') : null;
   const tabbarTools = tabbarEl ? tabbarEl.querySelector('#tabtools') : null;
@@ -462,10 +718,12 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
   }
   let _caretGradStartBase = null, _caretGradMidBase = null; // theme baseline to restore
   // IME compositionイベントで状態更新
+  let _mdImeUpdatePending = false;
   try{
     if (editor){
       editor.addEventListener('compositionstart', ()=>{
         try{ window._imeComposing = true; }catch{}
+        try{ _mdImeUpdateRange(); }catch{}
         try{ _imeDeferredTickBumped = false; _imeDeferredModifyPending = false; }catch{}
         try{
           const M = window.SIX_IME_METRICS; if (M){
@@ -477,6 +735,8 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
         // タイピング中の重い再描画を少し長めに抑止（IME候補表示中のフレーム落ち対策）
         try{ _typingGuardUntil = Date.now() + 200; }catch{}
         try{ _applyCaretGradient(); }catch{}
+        // markdown-rich: keep rich layer active during composition (#1477)
+        try{ _mdApplyVisualState(); }catch{}
         // #1319: Hide listchars on the active line during IME composition (cheap: avoid full rerender here)
         try{
           if (_optList && _listLayer){
@@ -486,9 +746,34 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
           }
         }catch{}
       });
+
+      // Keep markdown-rich visuals in sync while composing (rAF-throttled) (#1477)
+      editor.addEventListener('compositionupdate', ()=>{
+        try{
+          if (!_mdRichEnabled()) return;
+          try{ _mdImeUpdateRange(); }catch{}
+          if (_mdImeUpdatePending) return;
+          _mdImeUpdatePending = true;
+          if (window.requestAnimationFrame){
+            requestAnimationFrame(()=>{
+              _mdImeUpdatePending = false;
+              try{ _mdRenderTextLayer(); }catch{}
+              try{ updateGutter({ force:true }); }catch{}
+              try{ _repositionCaret({ force:true }); }catch{}
+            });
+          } else {
+            _mdImeUpdatePending = false;
+            try{ _mdRenderTextLayer(); }catch{}
+            try{ updateGutter({ force:true }); }catch{}
+            try{ _repositionCaret({ force:true }); }catch{}
+          }
+        }catch{ _mdImeUpdatePending = false; }
+      });
+
       // 仕様(#1022): 未確定文字の確定瞬間では何もしない（IMEは継続ONとみなす）
       editor.addEventListener('compositionend',   ()=>{
         try{ window._imeComposing = false; }catch{}
+        try{ _mdImeRange = null; }catch{}
 
         // Sync overlay caret position once at commit time (skip for huge buffers).
         try{
@@ -515,6 +800,8 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
         }catch{}
         // composition終了後の再描画はrAFへ集約
         try{ _requestCaretRender(); }catch{}
+        // markdown-rich: keep rich layer (#1477)
+        try{ _mdApplyVisualState(); }catch{}
         // #1319: Restore listchars (EOL markers) after commit
         try{ _scheduleListCharsRender && _scheduleListCharsRender('compositionend'); }catch{}
         // IME未確定中に抑止したUI/セッション更新をここで一括反映
@@ -3141,7 +3428,24 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
       if (!isReal) return;
 
       const line = String(lines[idx]||'');
-      const yTop = (row1 - topLine) * LINE_HEIGHT;
+
+      const mdRich = !!(function(){ try{ return _mdRichActive(); }catch{ return false; } })();
+      let rowHeightPx = LINE_HEIGHT;
+      let yTop = (row1 - topLine) * LINE_HEIGHT;
+      let scale = 1;
+      let baseFontPx = 16;
+      if (mdRich){
+        try{ baseFontPx = parseFloat(getComputedStyle(editor).fontSize)||baseFontPx; }catch{}
+        try{ scale = _mdLineScale(line) || 1; }catch{ scale = 1; }
+        try{ rowHeightPx = _mdLineHeightPx(line) || LINE_HEIGHT; }catch{ rowHeightPx = LINE_HEIGHT; }
+        try{
+          const startIdx = Math.max(0, (topLine|0) - 1);
+          const targetIdx = Math.max(0, Math.min(lines.length-1, idx|0));
+          let y = 0;
+          for (let r=startIdx; r<targetIdx; r++) y += _mdLineHeightPx(lines[r]||'');
+          yTop = y;
+        }catch{}
+      }
 
       // tab expander (same logic as full render)
       const _exp = (s)=>{
@@ -3176,9 +3480,11 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
         const ch = line.charAt(c);
         if (ch==='\t' || ch==='\u3000' || (c>=trailStart && ch===' ')){
           _measureSpan.textContent = _exp(line.slice(0,c));
-          const x1 = _measureSpan.getBoundingClientRect().width;
+          const x1b = _measureSpan.getBoundingClientRect().width;
           _measureSpan.textContent = _exp(line.slice(0,c+1));
-          const x2 = _measureSpan.getBoundingClientRect().width;
+          const x2b = _measureSpan.getBoundingClientRect().width;
+          const x1 = mdRich ? (x1b * scale) : x1b;
+          const x2 = mdRich ? (x2b * scale) : x2b;
           const el = document.createElement('div');
           el.className='listchar';
           let sym = '';
@@ -3188,7 +3494,10 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
           el.textContent = sym;
           try{ el.dataset.row = String(row1); }catch{}
           let _hs=0; try{ _hs=(editor.scrollLeft||0); }catch{}
-          el.style.position='absolute'; el.style.left=(x1-_hs)+'px'; el.style.top=yTop+'px'; el.style.height=LINE_HEIGHT+'px'; el.style.lineHeight=LINE_HEIGHT+'px'; el.style.fontSize='inherit'; el.style.fontFamily='var(--controlCharFont, "Segoe UI Symbol","Noto Sans Symbols 2","Cascadia Mono","Consolas",monospace)'; el.style.padding='0'; el.style.margin='0'; el.style.color='var(--controlCharColor, yellow)';
+          el.style.position='absolute'; el.style.left=(x1-_hs)+'px'; el.style.top=yTop+'px';
+          el.style.height=(mdRich ? rowHeightPx : LINE_HEIGHT)+'px'; el.style.lineHeight=(mdRich ? rowHeightPx : LINE_HEIGHT)+'px';
+          if (mdRich){ el.style.fontSize = Math.max(6, Math.round(baseFontPx * scale)) + 'px'; } else { el.style.fontSize='inherit'; }
+          el.style.fontFamily='var(--controlCharFont, "Segoe UI Symbol","Noto Sans Symbols 2","Cascadia Mono","Consolas",monospace)'; el.style.padding='0'; el.style.margin='0'; el.style.color='var(--controlCharColor, yellow)';
           _listLayer.appendChild(el);
         }
       }
@@ -3196,7 +3505,8 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
       // EOL marker
       if (!(window._imeComposing === true && row1 === (caretRow + 1))) {
         _measureSpan.textContent = _exp(line);
-        const xEnd = _measureSpan.getBoundingClientRect().width;
+        const xEndb = _measureSpan.getBoundingClientRect().width;
+        const xEnd = mdRich ? (xEndb * scale) : xEndb;
         let _hs=0; try{ _hs=(editor.scrollLeft||0); }catch{}
         const elE = document.createElement('div');
         elE.className='listchar-eol';
@@ -3219,7 +3529,10 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
         }catch{}
         elE.textContent=eolSym;
         try{ elE.dataset.row = String(row1); }catch{}
-        elE.style.position='absolute'; elE.style.left=(xEnd-_hs)+'px'; elE.style.top=yTop+'px'; elE.style.height=LINE_HEIGHT+'px'; elE.style.lineHeight=LINE_HEIGHT+'px'; elE.style.fontSize='inherit'; elE.style.fontFamily='var(--controlCharFont, "Segoe UI Symbol","Noto Sans Symbols 2","Cascadia Mono","Consolas",monospace)'; elE.style.color=ffColor; elE.style.margin='0'; elE.style.padding='0';
+        elE.style.position='absolute'; elE.style.left=(xEnd-_hs)+'px'; elE.style.top=yTop+'px';
+        elE.style.height=(mdRich ? rowHeightPx : LINE_HEIGHT)+'px'; elE.style.lineHeight=(mdRich ? rowHeightPx : LINE_HEIGHT)+'px';
+        if (mdRich){ elE.style.fontSize = Math.max(6, Math.round(baseFontPx * scale)) + 'px'; } else { elE.style.fontSize='inherit'; }
+        elE.style.fontFamily='var(--controlCharFont, "Segoe UI Symbol","Noto Sans Symbols 2","Cascadia Mono","Consolas",monospace)'; elE.style.color=ffColor; elE.style.margin='0'; elE.style.padding='0';
         _listLayer.appendChild(elE);
       }
     }catch{}
@@ -3228,6 +3541,9 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
     try{
       if (!_optList) return false;
       if (!_listLayer) return false;
+      // markdown-rich uses variable line heights; the listchars fast paths assume fixed LINE_HEIGHT.
+      // Avoid shifting nodes by LINE_HEIGHT and instead let the normal render path recompute positions.
+      try{ if (_mdRichActive()) return false; }catch{}
       if (window && window._imeComposing===true) return false;
       if (document.body.classList.contains('is-scrolling')) return false;
       try{ if (_editorTextLen() > 200000){ _listClear(); return true; } }catch{}
@@ -3341,12 +3657,30 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
       const topLine = _topLine();
       const vis = _visibleLinesExact();
       const endLine = topLine + vis - 1;
+
+      const mdRich = !!(function(){ try{ return _mdRichActive(); }catch{ return false; } })();
+      let baseFontPx = 16;
+      if (mdRich){
+        try{ baseFontPx = parseFloat(getComputedStyle(editor).fontSize)||baseFontPx; }catch{}
+      }
+
+      // In markdown-rich, rows have variable heights. Compute y cumulatively from the viewport start.
+      let yAcc = 0;
       // For performance do one measurement span reuse
       for (let row = topLine; row <= endLine; row++){
         const idx = row - 1;
         const isReal = idx >= 0 && idx < realTotal;
         const line = isReal ? String(lines[idx]||'') : '';
-        const yTop = (row - topLine) * LINE_HEIGHT;
+
+        let rowHeightPx = LINE_HEIGHT;
+        let scale = 1;
+        if (mdRich){
+          try{ scale = _mdLineScale(line) || 1; }catch{ scale = 1; }
+          try{ rowHeightPx = isReal ? (_mdLineHeightPx(line) || LINE_HEIGHT) : LINE_HEIGHT; }catch{ rowHeightPx = LINE_HEIGHT; }
+        }
+        const yTop = mdRich ? yAcc : ((row - topLine) * LINE_HEIGHT);
+        if (mdRich) yAcc += rowHeightPx;
+
         // Render trailing spaces, tabs, eol marker. We overlay individual inline boxes.
         // Trailing run: treat ASCII space, TAB, and IDEOGRAPHIC SPACE as trailing (#461)
         let trailStart = line.length;
@@ -3382,9 +3716,11 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
           const ch = line.charAt(c);
           if (ch==='\t' || ch==='\u3000' || (c>=trailStart && ch===' ')){
             _measureSpan.textContent = _exp(line.slice(0,c));
-            const x1 = _measureSpan.getBoundingClientRect().width;
+            const x1b = _measureSpan.getBoundingClientRect().width;
             _measureSpan.textContent = _exp(line.slice(0,c+1));
-            const x2 = _measureSpan.getBoundingClientRect().width;
+            const x2b = _measureSpan.getBoundingClientRect().width;
+            const x1 = mdRich ? (x1b * scale) : x1b;
+            const x2 = mdRich ? (x2b * scale) : x2b;
             const el = document.createElement('div');
             el.className='listchar';
             let sym = '';
@@ -3394,7 +3730,10 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
             el.textContent = sym;
             try{ el.dataset.row = String(row); }catch{}
             let _hs=0; try{ _hs=(editor.scrollLeft||0); }catch{}
-            el.style.position='absolute'; el.style.left=(x1-_hs)+'px'; el.style.top=yTop+'px'; el.style.height=LINE_HEIGHT+'px'; el.style.lineHeight=LINE_HEIGHT+'px'; el.style.fontSize='inherit'; el.style.fontFamily='var(--controlCharFont, "Segoe UI Symbol","Noto Sans Symbols 2","Cascadia Mono","Consolas",monospace)'; /* weight via CSS var on class */ el.style.padding='0'; el.style.margin='0'; el.style.color='var(--controlCharColor, yellow)';
+            el.style.position='absolute'; el.style.left=(x1-_hs)+'px'; el.style.top=yTop+'px';
+            el.style.height=(mdRich ? rowHeightPx : LINE_HEIGHT)+'px'; el.style.lineHeight=(mdRich ? rowHeightPx : LINE_HEIGHT)+'px';
+            if (mdRich){ el.style.fontSize = Math.max(6, Math.round(baseFontPx * scale)) + 'px'; } else { el.style.fontSize='inherit'; }
+            el.style.fontFamily='var(--controlCharFont, "Segoe UI Symbol","Noto Sans Symbols 2","Cascadia Mono","Consolas",monospace)'; /* weight via CSS var on class */ el.style.padding='0'; el.style.margin='0'; el.style.color='var(--controlCharColor, yellow)';
             _listLayer.appendChild(el);
           }
         }
@@ -3405,7 +3744,8 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
              // skip
           } else {
             _measureSpan.textContent = _exp(line);
-            const xEnd = _measureSpan.getBoundingClientRect().width;
+            const xEndb = _measureSpan.getBoundingClientRect().width;
+            const xEnd = mdRich ? (xEndb * scale) : xEndb;
             let _hs=0; try{ _hs=(editor.scrollLeft||0); }catch{}
             const elE = document.createElement('div');
             elE.className='listchar-eol';
@@ -3435,7 +3775,10 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
             }catch{}
             elE.textContent=eolSym;
             try{ elE.dataset.row = String(row); }catch{}
-            elE.style.position='absolute'; elE.style.left=(xEnd-_hs)+'px'; elE.style.top=yTop+'px'; elE.style.height=LINE_HEIGHT+'px'; elE.style.lineHeight=LINE_HEIGHT+'px'; elE.style.fontSize='inherit'; elE.style.fontFamily='var(--controlCharFont, "Segoe UI Symbol","Noto Sans Symbols 2","Cascadia Mono","Consolas",monospace)'; /* weight via CSS var on class */ elE.style.color=ffColor; elE.style.margin='0'; elE.style.padding='0';
+            elE.style.position='absolute'; elE.style.left=(xEnd-_hs)+'px'; elE.style.top=yTop+'px';
+            elE.style.height=(mdRich ? rowHeightPx : LINE_HEIGHT)+'px'; elE.style.lineHeight=(mdRich ? rowHeightPx : LINE_HEIGHT)+'px';
+            if (mdRich){ elE.style.fontSize = Math.max(6, Math.round(baseFontPx * scale)) + 'px'; } else { elE.style.fontSize='inherit'; }
+            elE.style.fontFamily='var(--controlCharFont, "Segoe UI Symbol","Noto Sans Symbols 2","Cascadia Mono","Consolas",monospace)'; /* weight via CSS var on class */ elE.style.color=ffColor; elE.style.margin='0'; elE.style.padding='0';
             _listLayer.appendChild(elE);
           }
         }
@@ -4736,6 +5079,7 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
       // ケース感度表示(検索時 A/a)をタブ切替時にも更新 (#955)
       try{ _updateOverlayCaseVisual(); }catch{}
       try{ _updateOverlayMarkdownVisual(); }catch{}
+      try{ _mdApplyVisualState(); }catch{}
       _updateHlsearchFull();
       // Refresh listchars (including EOL markers) on buffer switch to avoid stale markers from the previous buffer.
       try{ if (typeof _scheduleListCharsRender === 'function') _scheduleListCharsRender('switch'); }catch{}
@@ -6040,7 +6384,20 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
     }
 
     if (offsetLines < 0) { edstripe.style.display='none'; return; }
-    const topPx = offsetLines * LINE_HEIGHT;
+    let topPx = offsetLines * LINE_HEIGHT;
+    let rowHeightPx = LINE_HEIGHT;
+    if (_mdRichActive()){
+      try{
+        const lines = _splitLines();
+        const startIdx = Math.max(0, (topLine|0) - 1);
+        const targetIdx = Math.max(0, Math.min(lines.length-1, caretRow|0));
+        if (targetIdx < startIdx){ edstripe.style.display='none'; return; }
+        let y = 0;
+        for (let r=startIdx; r<targetIdx; r++) y += _mdLineHeightPx(lines[r]||'');
+        topPx = y;
+        rowHeightPx = _mdLineHeightPx(lines[targetIdx]||'');
+      }catch{}
+    }
     // Subpixel remainder between scrollTop and line-height (e.g., due to DPI/zoom)
     // Align overlays (stripe/caret) with the text by canceling the remainder via translateY.
     // IMPORTANT: Use floor, not round. We define the logical top line with Math.floor(scrollTop/LINE_HEIGHT)+1
@@ -6061,7 +6418,7 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
     if (topPx >= 0 && topPx < viewport.clientHeight) {
       edstripe.style.display='';
       edstripe.style.top = topPx + 'px';
-      edstripe.style.height = LINE_HEIGHT + 'px';
+      edstripe.style.height = rowHeightPx + 'px';
       // INSERT時はアクティブ行のグラデ色を切り替える (#437)
       try{
         if (_mode === 'INSERT'){
@@ -6071,8 +6428,11 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
           edstripe.style.background = '';
         }
       }catch{}
-      // apply remainder compensation to stripe (skip if View Scroll)
-      try{ edstripe.style.transform = (!isViewScroll && Math.abs(rem) > 0.01) ? `translateY(${-rem}px)` : ''; }catch{}
+      // apply remainder compensation to stripe.
+      // For normal (non-md-rich) view scroll we skip to avoid jitter.
+      // For markdown-rich, the textLayer already applies remainder compensation, so the stripe must match
+      // even during Alt+j/k; otherwise it can appear to jump/flicker by ~1 line (#1487).
+      try{ edstripe.style.transform = (( !isViewScroll || _mdRichActive() ) && Math.abs(rem) > 0.01) ? `translateY(${-rem}px)` : ''; }catch{}
     } else {
       edstripe.style.display='none';
       try{ edstripe.style.transform = ''; }catch{}
@@ -6094,14 +6454,14 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
       if (topPx >= 0 && topPx < viewport.clientHeight) {
         gStripe.style.display = '';
         gStripe.style.top = topPx + 'px';
-        gStripe.style.height = LINE_HEIGHT + 'px';
+        gStripe.style.height = rowHeightPx + 'px';
         if (_mode === 'INSERT'){
           gStripe.style.background = 'linear-gradient(to bottom, var(--activeEditGutterGradStart, yellow), var(--activeEditGutterGradEnd, yellow))';
         } else {
           gStripe.style.background = 'linear-gradient(to bottom, var(--activeGutterGradStart, yellow), var(--activeGutterGradEnd, yellow))';
         }
         // Apply same compensation logic as edstripe
-        gStripe.style.transform = (!isViewScroll && Math.abs(rem) > 0.01) ? `translateY(${-rem}px)` : '';
+        gStripe.style.transform = (( !isViewScroll || _mdRichActive() ) && Math.abs(rem) > 0.01) ? `translateY(${-rem}px)` : '';
       } else {
         gStripe.style.display = 'none';
       }
@@ -6124,7 +6484,7 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
       // Ensure visible if it was hidden
       caret.style.display = '';
       caret.style.top = topPx + 'px';
-      caret.style.height = Math.max(1, Math.round(LINE_HEIGHT)) + 'px';
+      caret.style.height = Math.max(1, Math.round(rowHeightPx)) + 'px';
       // transform remainder 適用（行境界ずれ防止）
       // #1279: Disable sub-pixel compensation on caret element itself (handled by caretLayer)
       try{ caret.style.transform = ''; }catch{}
@@ -6150,6 +6510,11 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
     try{ _applyCaretGradient(); }catch{}
     const lines = _splitLines();
     const line = lines[caretRow] || '';
+
+    // markdown-rich: caret X/width should follow per-line font scale
+    // (approximate by scaling base measurements; textarea itself cannot vary per-line font size).
+    let _mdScaleX = 1;
+    try{ if (_mdRichActive()) _mdScaleX = _mdLineScale(line) || 1; }catch{ _mdScaleX = 1; }
     // Expand tabs using pixel-based tab stops (columns measured in space-width units) (#507)
     // This keeps overlay caret aligned with the textarea's native rendering even after full-width chars.
     const _expandTabs = (s)=>{
@@ -6184,13 +6549,16 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
       const fullW = _measureSpan.getBoundingClientRect().width || (halfW*2);
       return { halfW, fullW };
     };
-    const { halfW: _halfRefW, fullW: _fullRefW } = _measureRefWidths();
+    const _refs0 = _measureRefWidths();
+    const _halfRefW = (_refs0.halfW||1) * _mdScaleX;
+    const _fullRefW = (_refs0.fullW||(_refs0.halfW||1)*2) * _mdScaleX;
     const _charWidth = (ch)=>{
       try{
         if (!ch) return _halfRefW;
         _measureSpan.textContent = ch;
-        const w = _measureSpan.getBoundingClientRect().width;
-        return (w && w>0) ? w : (_isFullwidth(ch) ? _fullRefW : _halfRefW);
+        const w0 = _measureSpan.getBoundingClientRect().width;
+        const w = (w0 && w0>0) ? (w0 * _mdScaleX) : (_isFullwidth(ch) ? _fullRefW : _halfRefW);
+        return w;
       }catch{ return _halfRefW; }
     };
     // 食い込み(ハンギング)防止対象: 、。 ， ． … (#938)
@@ -6199,7 +6567,7 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
     // Primary width measurement up to caretCol
   // Expand tabs before measurement to avoid mid-tab caret mis-centering
   _measureSpan.textContent = _expandTabs(line.slice(0, Math.max(0, caretCol)));
-    let x = _measureSpan.getBoundingClientRect().width; // px
+    let x = (_measureSpan.getBoundingClientRect().width || 0) * _mdScaleX; // px
     // If the tail just before caret consists of hangable CJK punctuation (e.g., '、、' '。'),
     // some fonts may apply hanging/kerning so substr width does not grow. Recompute locally.
     try{
@@ -6209,14 +6577,14 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
       if (clusterStart < caretCol){
         // クラスタ直前までの幅
         _measureSpan.textContent = line.slice(0, clusterStart);
-        const baseX = _measureSpan.getBoundingClientRect().width || 0;
+        const baseX = ((_measureSpan.getBoundingClientRect().width || 0) * _mdScaleX);
         // 連続句読点を「各文字=全角セル幅」に統一。フォントのハンギングによる食い込みを排除 (#934/#935/#936)
         let sum = 0;
         for (let i=clusterStart; i<caretCol; i++){
           const ch = line[i];
           // 実測幅
           _measureSpan.textContent = ch;
-          let wChar = _measureSpan.getBoundingClientRect().width || 0;
+          let wChar = ((_measureSpan.getBoundingClientRect().width || 0) * _mdScaleX);
           // 対象句読点は強制的に full-width 基準へ (閾値: 実測が基準の85%未満なら上書き)
           if (_isHangablePunct(ch)){
             if (wChar < _fullRefW * 0.85) wChar = _fullRefW; else wChar = Math.max(wChar, _fullRefW); // ハンギングで僅差でも最終的に full 幅に揃える
@@ -6228,7 +6596,8 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
     }catch{}
   // Make caret height match the full line box
   caret.style.top = topPx + 'px';
-  caret.style.height = Math.max(1, Math.round(LINE_HEIGHT)) + 'px';
+  // Make caret height match the actual row height (markdown-rich can vary by line)
+  caret.style.height = Math.max(1, Math.round(_mdRichActive() ? rowHeightPx : LINE_HEIGHT)) + 'px';
   // #1279: Disable sub-pixel compensation on caret element itself (handled by caretLayer)
   try{ caret.style.transform = ''; }catch{}
     // Determine character box width at caret (full-width aware), then shrink to 90%
@@ -6236,7 +6605,7 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
     if (caretCol < line.length){
       // width of the next character box
   _measureSpan.textContent = _expandTabs(line.slice(0, caretCol+1));
-      const x2 = _measureSpan.getBoundingClientRect().width;
+      const x2 = ((_measureSpan.getBoundingClientRect().width || 0) * _mdScaleX);
       chW = Math.max(0, x2 - x);
       if (!(chW>0)){
         // fallback to per-char width (e.g., hanging punctuation cluster)
@@ -6245,7 +6614,7 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
     } else {
       // at EOL: use half-width box width (measure with 'W')
   _measureSpan.textContent = 'W';
-      chW = _measureSpan.getBoundingClientRect().width;
+      chW = ((_measureSpan.getBoundingClientRect().width || 0) * _mdScaleX);
     }
     // Guard: if measurement collapsed (e.g., hanging punctuation), fallback by character class
     if (!(chW > 0)){
@@ -7657,8 +8026,92 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
    * updateGutter
    *********************************************************/
   function updateGutter(opts){
-    // IME未確定中はガター更新を停止（高さ計算・DOM更新・transformによる再レイアウトを抑止）
-    try{ if (window._imeComposing===true){ return; } }catch{}
+    // IME未確定中はガター更新を停止（重いDOM更新を避ける）
+    // ただし markdown-rich は行高同期が必要なので抑止しない (#1477)
+    try{ if (window._imeComposing===true && !_mdRichEnabled()){ return; } }catch{}
+    // Markdown rich mode: render per-line heights + text layer (visible region only)
+    try{
+      if (_mdRichActive()){
+        try{ _mdRenderTextLayer(); }catch{}
+        // In large buffers, the editor may temporarily reduce textarea content during IME composition (#1416).
+        // In that state, the gutter can still show correct *absolute* line numbers if we know
+        // the original base line of the reduced subset (#1480).
+        let imeReduced = false;
+        try{ imeReduced = (window && window._imeComposing===true) && !!(document.body && document.body.classList && document.body.classList.contains('ime-reduced-text')); }catch{}
+        let imeBase1 = 0;
+        try{ imeBase1 = (window && Number.isFinite(window._imeReducedBaseLine1)) ? (window._imeReducedBaseLine1|0) : 0; }catch{ imeBase1 = 0; }
+        const vis = _visibleLinesExact();
+        const top = _topLine();
+        const total = _totalLines();
+        const active1 = caretRow + 1;
+        const end = Math.min(total, top + vis - 1);
+        const rows = [];
+        for (let ln=top; ln<=end; ln++){
+          const active = (ln === active1);
+          rows.push({ ln, active });
+        }
+        const drawn = end - top + 1;
+        const eofCount = Math.max(0, vis-drawn);
+        const safeEofCount = Math.min(eofCount, 200);
+        for (let i=0;i<safeEofCount; i++) rows.push({ ln:null, eof:true });
+
+        const lines = _splitLines();
+        const children = Array.from(gutter.children).filter(c => !c.classList.contains('gutter-stripe'));
+        let y = 0;
+        for (let i=0;i<rows.length; i++){
+          const r = rows[i];
+          let el = children[i];
+          if (!el){ el = document.createElement('div'); gutter.appendChild(el); }
+          const idx0 = r.eof ? -1 : ((r.ln|0) - 1);
+          const text = (idx0>=0 && idx0<lines.length) ? String(lines[idx0]||'') : '';
+          const lh = r.eof ? LINE_HEIGHT : _mdLineHeightPx(text);
+          try{
+            el.style.display = 'block';
+            el.style.height = lh + 'px';
+            el.style.lineHeight = lh + 'px';
+            el.style.position = 'relative';
+            el.style.zIndex = '1';
+          }catch{}
+          if (r.eof){
+            el.textContent = '';
+            el.style.background = 'var(--eofGutterFillColor, yellow)';
+            el.style.color = 'var(--gutterNumberColor, yellow)';
+          } else {
+            if (imeReduced){
+              // r.ln is 1-based within reduced subset; map to original absolute line number.
+              // If base is unknown, hide numbers rather than showing wrong ones.
+              el.textContent = (imeBase1 > 0) ? ((imeBase1 + (r.ln|0) - 1)|0) : '';
+            } else {
+              el.textContent = r.ln;
+            }
+            // In md-rich mode, row heights can vary; paint per-row inactive gradient
+            // so the gutter background visually tracks the same variable row heights.
+            // Keep active row background transparent so the gutter-stripe remains visible.
+            if (r.active){
+              el.style.background = '';
+            } else {
+              el.style.background = 'linear-gradient(to bottom, var(--inactiveGutterGradStart, rgb(235,239,235)), var(--inactiveGutterGradEnd, rgb(219,227,219)))';
+            }
+            el.style.color = 'var(--gutterNumberColor, yellow)';
+          }
+          // keep flow layout (no absolute) but accumulate height via inline height/lineHeight
+          y += lh;
+        }
+        for (let i=rows.length; i<children.length; i++){
+          try{ gutter.removeChild(children[i]); }catch{}
+        }
+        // Subpixel alignment guard (same as normal mode)
+        try{
+          gutter.style.transform = '';
+          const st = (editor.scrollTop||0);
+          const rem = st - Math.floor(st/LINE_HEIGHT)*LINE_HEIGHT;
+          const children2 = Array.from(gutter.children).filter(c => !c.classList.contains('gutter-stripe'));
+          const first = children2[0];
+          if (first){ first.style.marginTop = Math.abs(rem) > 0.01 ? (-rem)+'px' : '0px'; }
+        }catch{}
+        return;
+      }
+    }catch{}
     // Large buffer throttle: avoid full splitLines/totalLines while actively typing.
     try{ if (_mode==='INSERT' && !(opts && opts.force) && _editorTextLen() > 200000){ return; } }catch{}
     const T = (window.THEME || {});
@@ -9776,6 +10229,8 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
       try{ _nativeCaretForceUntil = 0; _refreshCaretMode(); }catch{}
       // ユーザー編集を許可（INSERT のみ）
       try{ if (editor) editor.readOnly = false; }catch{}
+      // Keep text color consistent in INSERT (#1481)
+      try{ if (editor) editor.style.color = 'var(--editorTextColor, #e6e6e6)'; }catch{}
       // If we previously hinted IME off by focus juggling, restore focus cleanly once here
       try{ if (editor && document.activeElement !== editor){ editor.focus(); } }catch{}
       // Snap scrollTop to exact line boundary proactively to avoid half-line misalignment before typing
@@ -11172,7 +11627,8 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
         }
 
         // Force synchronous update of overlays to prevent flickering
-        try{ _repositionCaret(); updateGutter(); }catch{}
+        // In md-rich, update textLayer (via updateGutter) before moving stripe/caret.
+        try{ updateGutter(); _repositionCaret(); }catch{}
       }
 
       if (!document.body.classList.contains('is-scrolling')) document.body.classList.add('is-scrolling');
@@ -11263,6 +11719,27 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
       }catch(e){ try{ console.error('[scroll-snap] error:', e); }catch{} }
       
       try{
+        // markdown-rich: suppress fixed-grid overlays (hlsearch/incprev/visSel/link) for now (#1472)
+        try{
+          if (_mdRichActive()){
+            const st0 = (editor.scrollTop||0);
+            const maxScroll0 = editor.scrollHeight - editor.clientHeight;
+            const atEof0 = (maxScroll0 - st0 <= 1.5);
+            // IMPORTANT: update textLayer first (active-row background transparency), then move stripe/caret.
+            // Otherwise the stripe can briefly show through the previous row (1-frame flicker) during smooth scroll.
+            updateGutter({ inactive:false, noSnap: atEof0 });
+            _repositionCaret();
+            // listchars overlay: keep in sync on scroll in md-rich too (#1485)
+            try{ if (_optList && !(window && window._imeComposing===true)) { _renderListChars(); } }catch{}
+            _updatePosInfo();
+            try{
+              const b = currentBuffer();
+              if (b){ b.viewScrollTop = (editor.scrollTop||0)|0; b.viewRow = caretRow|0; b.viewCol = caretCol|0; }
+            }catch{}
+            return;
+          }
+        }catch{}
+
         // キーボード操作直後は塗りつぶしcaretを強制維持
         if (Date.now() < _cursorForceHiddenUntil){ _hideCursor(); }
         else {
@@ -11783,6 +12260,9 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
               }catch{ /* keep browser default clamp */ }
               try{ editor.scrollLeft = _imeOrigScrollLeft|0; }catch{}
               _imeReducedText = true;
+              // Expose reduced-text base line for other renderers (e.g. markdown-rich gutter) (#1480)
+              // startLine is 0-based in the full buffer; baseLine1 is 1-based.
+              try{ window._imeReducedText = true; window._imeReducedBaseLine1 = ((startLine|0) + 1)|0; }catch{}
               try{ document.body.classList.add('ime-reduced-text'); }catch{}
               try{ editor && editor.classList && editor.classList.add('ime-reduced-text'); }catch{}
               // Ensure overlay caret matches the (preserved) visual position after scrollTop adjustment.
@@ -11835,6 +12315,7 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
       }catch{}
       _imeComposing = false; _blockedComposition = false; _lastCompEndTs = Date.now();
       try{ window._imeComposing = false; }catch{}
+      try{ window._imeReducedText = false; window._imeReducedBaseLine1 = 0; }catch{}
       try{ document.body.classList.remove('ime-reduced-text'); }catch{}
       try{ editor && editor.classList && editor.classList.remove('ime-reduced-text'); }catch{}
 

@@ -93,6 +93,11 @@ body { font: var(--fontBase, 18px)/20px Consolas, 'Courier New', monospace; over
 	overflow: hidden;
 }
 
+/* Markdown rich: per-line height can vary, so draw backgrounds per rendered line instead of fixed tiling. */
+body.md-rich #editorViewport {
+	background: var(--lineBaseFill, #0f1117);
+}
+
 #editWrap { position:absolute; inset:0; display:flex; }
 #gutter { width: var(--gw); flex: 0 0 var(--gw);
 	/* Base: per-line tiled inactive gradient to avoid per-row repaint flicker */
@@ -105,8 +110,13 @@ body { font: var(--fontBase, 18px)/20px Consolas, 'Courier New', monospace; over
 	font-family: "Cascadia Code", "Cascadia Mono", "JetBrains Mono", "Fira Code", "Consolas", "Yu Gothic", "游ゴシック Light", "Meiryo", monospace !important;
 	font-weight: 200 !important;
 }
+
+/* Markdown rich: gutter row heights can vary, so don't tile a fixed-line background. */
+body.md-rich #gutter {
+	background: linear-gradient(var(--gutterGradientStart, #141821), var(--gutterGradientEnd, #0f1117));
+}
 #gutter div { line-height: var(--lhEff, var(--lh)); padding-right: calc(6px * var(--edScale)); box-sizing: border-box; width: 100%; /* use line-height centering; avoid flex rounding drift; make row background span full gutter incl. padding */ }
-#editor { flex: 1; background: transparent; color: var(--editorTextColor, #e6e6e6); border:0; outline:0; resize:none; line-height: var(--lhEff, var(--lh)); tab-size: var(--tabstop, 8); -moz-tab-size: var(--tabstop, 8); white-space: pre; padding: 0 2rem calc(var(--eofPadLines, 10) * var(--lhEff, var(--lh))) 0; margin: 0; box-sizing: content-box; position: relative; z-index: 1; font-size: calc(var(--editorFontBase, 20px) * var(--edScale));
+#editor { flex: 1; background: transparent; color: var(--editorTextColor, #e6e6e6); border:0; outline:0; resize:none; line-height: var(--lhEff, var(--lh)); tab-size: var(--tabstop, 8); -moz-tab-size: var(--tabstop, 8); white-space: pre; padding: 0 2rem calc(var(--eofPadLines, 10) * var(--lhEff, var(--lh))) 0; margin: 0; box-sizing: content-box; position: relative; z-index: 2; font-size: calc(var(--editorFontBase, 20px) * var(--edScale));
 	/* Default = original order (CJK not forced first) */
 	font-family: "Cascadia Code", "Cascadia Mono", "JetBrains Mono", "Fira Code", "Consolas", "Yu Gothic", "游ゴシック Light", "Meiryo", monospace !important;
 	font-weight: 220 !important;
@@ -143,8 +153,60 @@ body.ime-reduced-text #editor::-webkit-scrollbar-thumb:active,
 }
 
 /* caret overlay placeholder */
-#caretLayer { position:absolute; top:0; left:var(--gw); right:0; bottom:0; pointer-events:none; z-index: 2; }
+#caretLayer { position:absolute; top:0; left:var(--gw); right:0; bottom:0; pointer-events:none; z-index: 3; }
 #caretLayer { font-size: calc(var(--editorFontBase, 20px) * var(--edScale)); }
+
+/* Markdown rich view layer (per-line font-size/line-height). */
+#textLayer {
+	position: absolute;
+	top: 0;
+	left: var(--gw);
+	right: 0;
+	bottom: 0;
+	pointer-events: none;
+	overflow: hidden;
+	z-index: 1; /* above active-line stripe, below textarea/caret */
+	font-size: calc(var(--editorFontBase, 20px) * var(--edScale));
+	color: var(--editorTextColor, #e6e6e6);
+	font-family: "Cascadia Code", "Cascadia Mono", "JetBrains Mono", "Fira Code", "Consolas", "Yu Gothic", "游ゴシック Light", "Meiryo", monospace !important;
+	font-weight: 220 !important;
+	white-space: pre;
+	tab-size: var(--tabstop, 8);
+	-moz-tab-size: var(--tabstop, 8);
+	user-select: none;
+}
+#textLayer .md-line {
+	position: absolute;
+	left: 0;
+	right: 0;
+	white-space: pre;
+	box-sizing: border-box;
+	background:
+		linear-gradient(to bottom, var(--lineGradStart, rgb(243,251,243)), var(--lineGradEnd, rgb(237,243,237))),
+		var(--lineBaseFill, #0f1117);
+}
+
+/* When markdown-rich view is active, hide textarea glyphs (keep input/caret logic). */
+body.md-rich #editor {
+	color: transparent !important;
+	text-shadow: none !important;
+}
+body.md-rich #editor::selection {
+	background: transparent !important;
+}
+
+/* Markdown-rich IME: draw underline inside #textLayer (textarea stays hidden to avoid double rendering). */
+#textLayer .md-ime-uline {
+	text-decoration: underline;
+	text-decoration-thickness: 2px;
+	text-underline-offset: 3px;
+	text-decoration-color: rgba(255, 255, 0, 0.85);
+}
+
+/* Markdown-rich: make Japanese/CJK runs slightly bolder in headings (H2-H6) (#1486) */
+#textLayer .md-heading-cjk {
+	font-weight: var(--mdHeadingWeightH2_6_CJK, 640);
+}
 
 /* Control character overlay scaling & weight (#464) */
 .listchar, .listchar-eol {
@@ -157,6 +219,8 @@ body.ime-reduced-text #editor::-webkit-scrollbar-thumb:active,
 	display:inline-block;
 }
 :root { --controlCharFont: "Cascadia Mono", "JetBrains Mono", monospace; }
+/* Markdown-rich heading weights (tweakable) */
+:root { --mdHeadingWeightH1: 780; --mdHeadingWeightH2_6: 560; --mdHeadingWeightH2_6_CJK: 640; }
 /* Allow ideographic space to expand more if needed */
 .listchar-ideospc { --controlCharScale: 1.50; --controlCharWeight: 100; }
 .incprev {
