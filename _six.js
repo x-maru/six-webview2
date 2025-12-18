@@ -1207,6 +1207,168 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
       return false;
     }catch{ return false; }
   }
+
+  // Overlay palette / popup keyboard interception (capture-phase, highest priority)
+  // #1469: while popups are open, swallow handled keys so the main editor textarea
+  // does not also consume them.
+  (function(){
+    try{
+      if (window.__sixOverlayPopupKeyboardOnce) return;
+      window.__sixOverlayPopupKeyboardOnce = true;
+      window.addEventListener('keydown', (e)=>{
+        try{
+          const key = String((e && e.key) || '');
+
+          // Zoom popup (overlayZoomPopup)
+          try{
+            if (typeof _overlayZoomPopupVisible === 'function' && _overlayZoomPopupVisible()){
+              if (_isEsc(e) || key === 'Escape' || key === 'Esc'){
+                try{ e.preventDefault(); e.stopImmediatePropagation(); }catch{}
+                try{ const pop=document.getElementById('overlayZoomPopup'); if (pop) pop.style.display='none'; }catch{}
+                try{ const palTR=document.getElementById('overlayPaletteTop'); if(palTR && palTR.__applyPaletteOpacity) palTR.__applyPaletteOpacity(); }catch{}
+                return;
+              }
+              if (key === 'ArrowUp'){
+                try{ e.preventDefault(); e.stopImmediatePropagation(); }catch{}
+                try{ _overlayZoomPopupMoveSel(-1); }catch{}
+                return;
+              }
+              if (key === 'ArrowDown'){
+                try{ e.preventDefault(); e.stopImmediatePropagation(); }catch{}
+                try{ _overlayZoomPopupMoveSel(+1); }catch{}
+                return;
+              }
+              if (key === 'Home'){
+                try{ e.preventDefault(); e.stopImmediatePropagation(); }catch{}
+                try{ _overlayZoomSel = 0; _overlayZoomPopupRenderSel(); }catch{}
+                return;
+              }
+              if (key === 'End'){
+                try{ e.preventDefault(); e.stopImmediatePropagation(); }catch{}
+                try{ const items=_overlayZoomPopupItems(); _overlayZoomSel = Math.max(0, (items.length|0) - 1); _overlayZoomPopupRenderSel(); }catch{}
+                return;
+              }
+              if (key === 'PageUp'){
+                try{ e.preventDefault(); e.stopImmediatePropagation(); }catch{}
+                try{ for (let i=0;i<4;i++) _overlayZoomPopupMoveSel(-1); }catch{}
+                return;
+              }
+              if (key === 'PageDown'){
+                try{ e.preventDefault(); e.stopImmediatePropagation(); }catch{}
+                try{ for (let i=0;i<4;i++) _overlayZoomPopupMoveSel(+1); }catch{}
+                return;
+              }
+              if (key === 'Enter' || key === ' ' || key === 'Spacebar'){
+                try{ e.preventDefault(); e.stopImmediatePropagation(); }catch{}
+                try{ _overlayZoomPopupCommitSel(); }catch{}
+                return;
+              }
+              // Any other key: close and let it continue.
+              try{ const pop=document.getElementById('overlayZoomPopup'); if (pop) pop.style.display='none'; }catch{}
+              try{ const palTR=document.getElementById('overlayPaletteTop'); if(palTR && palTR.__applyPaletteOpacity) palTR.__applyPaletteOpacity(); }catch{}
+              return;
+            }
+          }catch{}
+
+          // Encoding popup (encpopup)
+          try{
+            if (typeof _encPopupVisible === 'function' && _encPopupVisible()){
+              if (_isEsc(e) || key === 'Escape' || key === 'Esc'){
+                try{ e.preventDefault(); e.stopImmediatePropagation(); }catch{}
+                try{ _encPopupHide(); }catch{}
+                return;
+              }
+              if (key === 'ArrowUp' || key === 'k'){
+                try{ e.preventDefault(); e.stopImmediatePropagation(); }catch{}
+                try{ _encPopupMoveSel(-1); }catch{}
+                return;
+              }
+              if (key === 'ArrowDown' || key === 'j' || key === 'Tab'){
+                try{ e.preventDefault(); e.stopImmediatePropagation(); }catch{}
+                try{ _encPopupMoveSel(+1); }catch{}
+                return;
+              }
+              if (key === 'Home'){
+                try{ e.preventDefault(); e.stopImmediatePropagation(); }catch{}
+                try{ _encSel = 0; _encPopupRender(); }catch{}
+                return;
+              }
+              if (key === 'End'){
+                try{ e.preventDefault(); e.stopImmediatePropagation(); }catch{}
+                try{ _encSel = Math.max(0, _allowedEncodeSets.length-1); _encPopupRender(); }catch{}
+                return;
+              }
+              if (key === 'PageUp'){
+                try{ e.preventDefault(); e.stopImmediatePropagation(); }catch{}
+                try{ _encPopupMoveSel(-4); }catch{}
+                return;
+              }
+              if (key === 'PageDown'){
+                try{ e.preventDefault(); e.stopImmediatePropagation(); }catch{}
+                try{ _encPopupMoveSel(+4); }catch{}
+                return;
+              }
+              if (key === 'Enter' || key === ' ' || key === 'Spacebar'){
+                try{ e.preventDefault(); e.stopImmediatePropagation(); }catch{}
+                try{
+                  const idx = Math.max(0, Math.min(_allowedEncodeSets.length-1, _encSel|0));
+                  const meta = _allowedEncodeSets[idx] || null;
+                  if (meta) _applyEncodeMeta(meta);
+                }catch{}
+                try{ _encPopupHide(); }catch{}
+                try{ setTimeout(()=>{ try{ editor && editor.focus && editor.focus(); }catch{} }, 0); }catch{}
+                return;
+              }
+              // Any other key: close and let it continue.
+              try{ _encPopupHide(); }catch{}
+              return;
+            }
+          }catch{}
+
+          // Case popup (casepopup)
+          try{
+            if (typeof _casePopupVisible === 'function' && _casePopupVisible()){
+              if (_isEsc(e) || key === 'Escape' || key === 'Esc'){
+                try{ e.preventDefault(); e.stopImmediatePropagation(); }catch{}
+                try{ _casePopupHide(); }catch{}
+                return;
+              }
+              if (key === 'ArrowUp' || key === 'k'){
+                try{ e.preventDefault(); e.stopImmediatePropagation(); }catch{}
+                try{ _casePopupMoveSel(-1); }catch{}
+                return;
+              }
+              if (key === 'ArrowDown' || key === 'j' || key === 'Tab'){
+                try{ e.preventDefault(); e.stopImmediatePropagation(); }catch{}
+                try{ _casePopupMoveSel(+1); }catch{}
+                return;
+              }
+              if (key === 'Home'){
+                try{ e.preventDefault(); e.stopImmediatePropagation(); }catch{}
+                try{ _caseSel = 0; _casePopupRender(); }catch{}
+                return;
+              }
+              if (key === 'End'){
+                try{ e.preventDefault(); e.stopImmediatePropagation(); }catch{}
+                try{ _caseSel = 2; _casePopupRender(); }catch{}
+                return;
+              }
+              if (key === 'Enter' || key === ' ' || key === 'Spacebar'){
+                try{ e.preventDefault(); e.stopImmediatePropagation(); }catch{}
+                try{ _applyCaseIndex(Math.max(0, Math.min(2, _caseSel|0))); }catch{}
+                try{ _casePopupHide(); }catch{}
+                try{ setTimeout(()=>{ try{ editor && editor.focus && editor.focus(); }catch{} }, 0); }catch{}
+                return;
+              }
+              // Any other key: close and let it continue.
+              try{ _casePopupHide(); }catch{}
+              return;
+            }
+          }catch{}
+        }catch{}
+      }, true);
+    }catch{}
+  })();
   // editor zoom state (scale only editor/gutter, not global UI)
   let _edScale = 1;
   // short guard to ignore stray key events immediately after modal close
@@ -2042,6 +2204,80 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
     }catch{}
   }
   function _casePopupMoveSel(dir){ try{ const n=3; _caseSel = (((_caseSel|0)+(dir>0?1:-1)) + n) % n; _casePopupRender(); }catch{} }
+
+  // ---- Overlay Zoom popup helpers ----
+  // overlayZoomPopup is created inside _initOverlayPalette and lives under #overlayPaletteTop.
+  // We keep selection state here so keyboard navigation works.
+  let _overlayZoomSel = NaN;
+  function _overlayZoomPopupVisible(){
+    try{ const pop=document.getElementById('overlayZoomPopup'); return !!(pop && pop.style && pop.style.display!=='none'); }catch{ return false; }
+  }
+  function _overlayZoomPopupItems(){
+    try{
+      const pop=document.getElementById('overlayZoomPopup');
+      if (!pop) return [];
+      return Array.from(pop.querySelectorAll('[data-scale]'));
+    }catch{ return []; }
+  }
+  function _overlayZoomHoverBg(){
+    try{ const s=getComputedStyle(document.documentElement); const v=String(s.getPropertyValue('--popupActiveLine')||'').trim(); return v||'#1a2030'; }catch{ return '#1a2030'; }
+  }
+  function _overlayZoomPopupRenderSel(){
+    try{
+      const items=_overlayZoomPopupItems();
+      if (!items.length) return;
+      const bg=_overlayZoomHoverBg();
+      const idx = (Number.isFinite(_overlayZoomSel) ? (_overlayZoomSel|0) : -1);
+      for (let i=0;i<items.length;i++){
+        const it = items[i];
+        if (!it) continue;
+        it.style.background = (i===idx) ? bg : 'transparent';
+      }
+      if (idx>=0 && idx<items.length){
+        try{ items[idx].scrollIntoView({ block:'nearest' }); }catch{}
+      }
+    }catch{}
+  }
+  function _overlayZoomPopupSyncSelToCurrent(){
+    try{
+      const items=_overlayZoomPopupItems();
+      if (!items.length) return;
+      let bestIdx = 0;
+      let bestDiff = Infinity;
+      for (let i=0;i<items.length;i++){
+        const s = parseFloat(String(items[i] && items[i].dataset ? items[i].dataset.scale : ''));
+        if (!Number.isFinite(s)) continue;
+        const d = Math.abs((_edScale||1) - s);
+        if (d < bestDiff){ bestDiff = d; bestIdx = i; }
+      }
+      _overlayZoomSel = bestIdx|0;
+      _overlayZoomPopupRenderSel();
+    }catch{}
+  }
+  function _overlayZoomPopupMoveSel(dir){
+    try{
+      const items=_overlayZoomPopupItems();
+      const n=items.length|0;
+      if (!n) return;
+      if (!Number.isFinite(_overlayZoomSel)){
+        _overlayZoomPopupSyncSelToCurrent();
+      }
+      _overlayZoomSel = (((_overlayZoomSel|0) + (dir>0?1:-1)) + n) % n;
+      _overlayZoomPopupRenderSel();
+    }catch{}
+  }
+  function _overlayZoomPopupCommitSel(){
+    try{
+      const items=_overlayZoomPopupItems();
+      if (!items.length) return;
+      if (!Number.isFinite(_overlayZoomSel)) _overlayZoomPopupSyncSelToCurrent();
+      const idx = Math.max(0, Math.min(items.length-1, (_overlayZoomSel|0)));
+      const it = items[idx];
+      if (it && typeof it.click === 'function') it.click();
+      // overlay palette opacity recalculation
+      try{ const palTR=document.getElementById('overlayPaletteTop'); if(palTR && palTR.__applyPaletteOpacity) palTR.__applyPaletteOpacity(); }catch{}
+    }catch{}
+  }
   // --- Global outside-click close for encode/case/zoom popups (#906/#929) ---
   (function(){
     try{
@@ -19101,8 +19337,8 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
         const item=document.createElement('div'); item.textContent=Math.round(s*100)+'%'; item.style.padding='2px 8px'; item.style.cursor='pointer'; item.style.borderRadius='4px'; item.style.whiteSpace='nowrap'; item.dataset.scale=String(s);
         // すべて右寄せ (#896)
         item.style.textAlign = 'right';
-        item.addEventListener('mouseenter',()=>{ item.style.background=hoverBg; });
-        item.addEventListener('mouseleave',()=>{ item.style.background='transparent'; });
+        item.addEventListener('mouseenter',()=>{ try{ _overlayZoomSel = (Array.from(zoomPopup.querySelectorAll('[data-scale]')).indexOf(item)|0); _overlayZoomPopupRenderSel(); }catch{ try{ item.style.background=hoverBg; }catch{} } });
+        item.addEventListener('mouseleave',()=>{ try{ _overlayZoomPopupRenderSel(); }catch{ try{ item.style.background='transparent'; }catch{} } });
         item.addEventListener('click',(e)=>{ try{ e.preventDefault(); e.stopPropagation(); }catch{} _setEditorScale(s); _showZoomHUD(); zoomPopup.style.display='none'; try{ if (lastFocusedEl && typeof lastFocusedEl.focus==='function') lastFocusedEl.focus(); }catch{} });
         zoomPopup.appendChild(item);
         if (Math.abs(s-1.0) < 1e-9){ zoomPopup.appendChild(makeSep()); }
@@ -19122,6 +19358,8 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
               zoomPopup.style.left = 'auto';
               zoomPopup.style.top = ((r.bottom - vr.top)|0) + 'px';
             }
+            // Initialize keyboard selection to current zoom
+            try{ _overlayZoomPopupSyncSelToCurrent(); }catch{}
             try{ const palTR=document.getElementById('overlayPaletteTop'); if(palTR && palTR.__applyPaletteOpacity) palTR.__applyPaletteOpacity(); }catch{}
           }else{ zoomPopup.style.display='none'; try{ const palTR=document.getElementById('overlayPaletteTop'); if(palTR && palTR.__applyPaletteOpacity) palTR.__applyPaletteOpacity(); }catch{} }
         }catch{}
@@ -22858,15 +23096,15 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
             try{
               if (!_encPopupVisible()) return;
               const key = e.key;
-              if (key==='Escape'){ e.preventDefault(); e.stopPropagation(); _encPopupHide(); return; }
-              if (key==='ArrowUp' || key==='k'){ e.preventDefault(); e.stopPropagation(); _encPopupMoveSel(-1); return; }
-              if (key==='ArrowDown' || key==='j' || key==='Tab'){ e.preventDefault(); e.stopPropagation(); _encPopupMoveSel(+1); return; }
-              if (key==='Home'){ e.preventDefault(); e.stopPropagation(); try{ _encSel = 0; _encPopupRender(); }catch{} return; }
-              if (key==='End'){ e.preventDefault(); e.stopPropagation(); try{ _encSel = Math.max(0, _allowedEncodeSets.length-1); _encPopupRender(); }catch{} return; }
-              if (key==='PageUp'){ e.preventDefault(); e.stopPropagation(); try{ _encPopupMoveSel(-4); }catch{} return; }
-              if (key==='PageDown'){ e.preventDefault(); e.stopPropagation(); try{ _encPopupMoveSel(+4); }catch{} return; }
-              if (e.key==='Enter'){
-                e.preventDefault(); e.stopPropagation();
+              if (key==='Escape'){ e.preventDefault(); e.stopImmediatePropagation(); _encPopupHide(); return; }
+              if (key==='ArrowUp' || key==='k'){ e.preventDefault(); e.stopImmediatePropagation(); _encPopupMoveSel(-1); return; }
+              if (key==='ArrowDown' || key==='j' || key==='Tab'){ e.preventDefault(); e.stopImmediatePropagation(); _encPopupMoveSel(+1); return; }
+              if (key==='Home'){ e.preventDefault(); e.stopImmediatePropagation(); try{ _encSel = 0; _encPopupRender(); }catch{} return; }
+              if (key==='End'){ e.preventDefault(); e.stopImmediatePropagation(); try{ _encSel = Math.max(0, _allowedEncodeSets.length-1); _encPopupRender(); }catch{} return; }
+              if (key==='PageUp'){ e.preventDefault(); e.stopImmediatePropagation(); try{ _encPopupMoveSel(-4); }catch{} return; }
+              if (key==='PageDown'){ e.preventDefault(); e.stopImmediatePropagation(); try{ _encPopupMoveSel(+4); }catch{} return; }
+              if (e.key==='Enter' || e.key===' ' || e.key==='Spacebar'){
+                e.preventDefault(); e.stopImmediatePropagation();
                 const idx = Math.max(0, Math.min(_allowedEncodeSets.length-1, _encSel|0));
                 const meta = _allowedEncodeSets[idx] || null;
                 if (meta) _applyEncodeMeta(meta);
@@ -22894,19 +23132,73 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
               try{
                 if (!_casePopupVisible()) return;
                 const key = e.key;
-                if (key==='Escape'){ e.preventDefault(); e.stopPropagation(); _casePopupHide(); return; }
-                if (key==='ArrowUp' || key==='k'){ e.preventDefault(); e.stopPropagation(); _casePopupMoveSel(-1); return; }
-                if (key==='ArrowDown' || key==='j' || key==='Tab'){ e.preventDefault(); e.stopPropagation(); _casePopupMoveSel(+1); return; }
-                if (key==='Home'){ e.preventDefault(); e.stopPropagation(); try{ _caseSel = 0; _casePopupRender(); }catch{} return; }
-                if (key==='End'){ e.preventDefault(); e.stopPropagation(); try{ _caseSel = 2; _casePopupRender(); }catch{} return; }
-                if (e.key==='Enter'){
-                  e.preventDefault(); e.stopPropagation();
+                if (key==='Escape'){ e.preventDefault(); e.stopImmediatePropagation(); _casePopupHide(); return; }
+                if (key==='ArrowUp' || key==='k'){ e.preventDefault(); e.stopImmediatePropagation(); _casePopupMoveSel(-1); return; }
+                if (key==='ArrowDown' || key==='j' || key==='Tab'){ e.preventDefault(); e.stopImmediatePropagation(); _casePopupMoveSel(+1); return; }
+                if (key==='Home'){ e.preventDefault(); e.stopImmediatePropagation(); try{ _caseSel = 0; _casePopupRender(); }catch{} return; }
+                if (key==='End'){ e.preventDefault(); e.stopImmediatePropagation(); try{ _caseSel = 2; _casePopupRender(); }catch{} return; }
+                if (e.key==='Enter' || e.key===' ' || e.key==='Spacebar'){
+                  e.preventDefault(); e.stopImmediatePropagation();
                   const idx = Math.max(0, Math.min(2, _caseSel|0));
                   _applyCaseIndex(idx);
                   _casePopupHide();
                   setTimeout(()=>{ try{ editor && editor.focus && editor.focus(); }catch{} }, 0);
                   return;
                 }
+              }catch{}
+            }, true);
+          }catch{}
+
+          // Overlay Zoom popup: keyboard navigation/confirm/close (capture-phase)
+          try{
+            window.addEventListener('keydown', (e)=>{
+              try{
+                if (!_overlayZoomPopupVisible()) return;
+                const key = String((e && e.key) || '');
+                if (_isEsc(e) || key==='Escape' || key==='Esc'){
+                  e.preventDefault(); e.stopImmediatePropagation();
+                  try{ const pop=document.getElementById('overlayZoomPopup'); if (pop) pop.style.display='none'; }catch{}
+                  try{ const palTR=document.getElementById('overlayPaletteTop'); if(palTR && palTR.__applyPaletteOpacity) palTR.__applyPaletteOpacity(); }catch{}
+                  return;
+                }
+                if (key === 'ArrowUp'){
+                  e.preventDefault(); e.stopImmediatePropagation();
+                  _overlayZoomPopupMoveSel(-1);
+                  return;
+                }
+                if (key === 'ArrowDown'){
+                  e.preventDefault(); e.stopImmediatePropagation();
+                  _overlayZoomPopupMoveSel(+1);
+                  return;
+                }
+                if (key === 'Home'){
+                  e.preventDefault(); e.stopImmediatePropagation();
+                  try{ _overlayZoomSel = 0; _overlayZoomPopupRenderSel(); }catch{}
+                  return;
+                }
+                if (key === 'End'){
+                  e.preventDefault(); e.stopImmediatePropagation();
+                  try{ const items=_overlayZoomPopupItems(); _overlayZoomSel = Math.max(0, (items.length|0) - 1); _overlayZoomPopupRenderSel(); }catch{}
+                  return;
+                }
+                if (key === 'PageUp'){
+                  e.preventDefault(); e.stopImmediatePropagation();
+                  try{ for (let i=0;i<4;i++) _overlayZoomPopupMoveSel(-1); }catch{}
+                  return;
+                }
+                if (key === 'PageDown'){
+                  e.preventDefault(); e.stopImmediatePropagation();
+                  try{ for (let i=0;i<4;i++) _overlayZoomPopupMoveSel(+1); }catch{}
+                  return;
+                }
+                if (key === 'Enter' || key === ' ' || key === 'Spacebar'){
+                  e.preventDefault(); e.stopImmediatePropagation();
+                  _overlayZoomPopupCommitSel();
+                  return;
+                }
+                // Any other key: close popup and continue normal handling
+                try{ const pop=document.getElementById('overlayZoomPopup'); if (pop) pop.style.display='none'; }catch{}
+                try{ const palTR=document.getElementById('overlayPaletteTop'); if(palTR && palTR.__applyPaletteOpacity) palTR.__applyPaletteOpacity(); }catch{}
               }catch{}
             }, true);
           }catch{}
