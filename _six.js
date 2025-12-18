@@ -1681,11 +1681,13 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
       }
 
       // Detect explicit URL schemes first (external): http(s), file://, mailto
-      const re = /(https?:\/\/[^\s<>"')\]}]+|file:\/\/[^\s<>"')\]}]+|mailto:[^\s<>"')\]}]+)/g;
+      // Treat Japanese punctuation/brackets as URL terminators to avoid over-matching in prose (#1467).
+      // NOTE: we intentionally exclude these from the URL even though they could be URL-encoded in rare cases.
+      const re = /(https?:\/\/[^\s<>"')\]}、。，．！？；：（）［］｛｝「」『』【】〈〉《》〔〕]+|file:\/\/[^\s<>"')\]}、。，．！？；：（）［］｛｝「」『』【】〈〉《》〔〕]+|mailto:[^\s<>"')\]}、。，．！？；：（）［］｛｝「」『』【】〈〉《》〔〕]+)/g;
       // Windows absolute path like C:/Users/... or with backslashes (local open via :e)
-      const reWin = /\b([A-Za-z]:[\/\\][^\s<>"')\]}]+)\b/g;
+      const reWin = /\b([A-Za-z]:[\/\\][^\s<>"')\]}、。，．！？；：（）［］｛｝「」『』【】〈〉《》〔〕]+)\b/g;
       // WSL UNC path //wsl.localhost/Ubuntu/... or //wsl$/... (local open via :e)
-      const reUNC = /(\/\/(?:wsl\.localhost|wsl\$)\/[^\s<>"')\]}]+)/g;
+      const reUNC = /(\/\/(?:wsl\.localhost|wsl\$)\/[^\s<>"')\]}、。，．！？；：（）［］｛｝「」『』【】〈〉《》〔〕]+)/g;
       // First check explicit schemes so "file://C:/..." is treated as one external URL
       let m; re.lastIndex=0;
       while ((m=re.exec(line))){
