@@ -3356,6 +3356,43 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
     _cmdHistTemp = '';
   }
 
+  // Should we store this CMD line into history?
+  // Spec (#1464): store only when it is a valid/implemented command.
+  // Runtime failures (e.g., :e path-not-found) are still stored; unknown commands are not.
+  function _cmdHistoryShouldPush(s){
+    try{
+      let v = String(s||'').trim();
+      if (!v || v === ':') return false;
+      // Normalize optional leading ':'
+      if (!/^\s*:/.test(v)) v = ':' + v;
+
+      // Search prompts: /... or ?... (cmdinput may include leading ':')
+      if (/^:\s*[\/?].+/.test(v) || /^\s*[\/?].+/.test(String(s||'').trim())) return true;
+
+      // Implemented ex-commands (broad-but-safe match based on runCommand handlers)
+      if (/^:\s*e!?\b/i.test(v)) return true;
+      if (/^:\s*grep\b/i.test(v)) return true;
+      if (/^:?[\s]*(%|'<,'>)?\s*s(?:ubstitute)?\//i.test(v)) return true;
+      if (/^:\s*help\b/i.test(v)) return true;
+      if (/^:\s*b\b/i.test(v)) return true;
+      if (/^:\s*\d+\s*$/.test(v)) return true;
+      if (/^:\s*q!?\s*$/i.test(v) || /^:\s*quit\s*$/i.test(v)) return true;
+      if (/^:\s*qa\s*$/i.test(v) || /^:\s*quitall\s*$/i.test(v)) return true;
+      if (/^:\s*(?:w|wa|wq|wqa)!?\b/i.test(v)) return true;
+      // Only store implemented :set family (we treat any :set as valid since it's a single command surface)
+      if (/^:\s*set\b/i.test(v)) return true;
+
+      // Utility/debug commands implemented in runCommand
+      if (/^:\s*reload\s*$/i.test(v)) return true;
+      if (/^:\s*pick!?\s*$/i.test(v)) return true;
+      if (/^:\s*api\?\s*$/i.test(v)) return true;
+      if (/^:\s*echo\s+api\s*$/i.test(v)) return true;
+      if (/^:\s*(?:lastsynctime|statmeta!?|parentnav|dumpkeys|dumprawkeys|clearkeys|clearrawkeys)\b/i.test(v)) return true;
+
+      return false;
+    }catch{ return false; }
+  }
+
   // CMD history popup (F4)
   const _cmdHistPopupId = 'cmdHistPopup';
   let _cmdHistPopupSel = 0;
@@ -7610,6 +7647,16 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
   function _firstNonBlankColOf(line){ const m = String(line||'').match(/^\s*/); return m ? (m[0]||'').length : 0; }
   function _setCaret(r,c,opt){
     const lines=_splitLines(); r=Math.max(0, Math.min(lines.length-1, r|0)); const len=(lines[r]||'').length; caretRow=r; caretCol=Math.max(0, Math.min(len, c|0));
+    // Keep per-buffer view state fresh even when we don't switch tabs or scroll.
+    // This improves session restore reliability for caret position.
+    try{
+      const b = (typeof currentBuffer === 'function') ? currentBuffer() : null;
+      if (b){
+        b.viewRow = caretRow|0;
+        b.viewCol = caretCol|0;
+        try{ if (editor && typeof editor.scrollTop === 'number') b.viewScrollTop = (editor.scrollTop|0); }catch{}
+      }
+    }catch{}
     try{
       const suppress = !!(opt && (opt===true || opt.suppressDesired));
       if (_suppressDesiredOnce){ _suppressDesiredOnce = false; return; }
@@ -15519,8 +15566,8 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
             return;
           }
           if (raw){
-            // Push to history before clearing (store what user sees)
-            _cmdHistoryMaybePush(cmdinput.value);
+            // Store only if it is a valid/implemented command (#1464)
+            try{ if (_cmdHistoryShouldPush(cmdinput.value)) _cmdHistoryMaybePush(cmdinput.value); }catch{}
             runCommand(raw.startsWith(':')?raw:(':'+raw));
           }
           cmdinput.value = '';
