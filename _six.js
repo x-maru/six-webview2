@@ -113,7 +113,54 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
     }catch{ _mdImeRange = null; }
   }
   function _mdRichEnabled(){ try{ const b = currentBuffer && currentBuffer(); return !!(b && b.markdown); }catch{ return false; } }
+  function _mdDraftEditEnabled(){
+    try{
+      const b = currentBuffer && currentBuffer();
+      if (!b) return true;
+      if (typeof b.md_draftedit === 'boolean') return !!b.md_draftedit;
+      return true;
+    }catch{ return true; }
+  }
+  function _mdWysiwygActive(){ try{ return _mdRichEnabled() && !_mdVisualSuppressed && !_mdDraftEditEnabled(); }catch{ return false; } }
   function _mdRichActive(){ try{ return _mdRichEnabled() && !_mdVisualSuppressed; }catch{ return false; } }
+
+  function _mdHideSymbolsForRow(isActiveRow){
+    // draft: active line shows raw, other lines show clean (same as WYSIWYG)
+    // clean: all lines show clean
+    try{
+      if (!_mdRichActive()) return false;
+      const draft = _mdDraftEditEnabled();
+      if (!draft) return true; // clean
+      return !isActiveRow;
+    }catch{ return false; }
+  }
+
+  function _mdHeadingPrefixLen(line){
+    // For WYSIWYG: strip the heading marker prefix only, keep the rest as-is.
+    // Matches the same constraints as _mdHeadingLevel (<=3 indent, 1..6 '#', requires space/tab after).
+    try{
+      const s = String(line||'');
+      const m = s.match(/^([ ]{0,3}#{1,6}[\t ]+)/);
+      return (m && m[1]) ? (m[1].length|0) : 0;
+    }catch{ return 0; }
+  }
+  function _mdWysiwygAdjust(line, col){
+    try{
+      if (!_mdWysiwygActive()) return { line:String(line||''), col:(col|0), prefix:0 };
+      const s = String(line||'');
+      const p = _mdHeadingPrefixLen(s);
+      if (!(p>0)) return { line:s, col:(col|0), prefix:0 };
+      const c0 = (col|0);
+      const c1 = Math.max(0, c0 - p);
+      return { line: s.slice(p), col: c1, prefix: p };
+    }catch{ return { line:String(line||''), col:(col|0), prefix:0 }; }
+  }
+  function _visualWidthUpToLineWys(line, endCol){
+    try{
+      const a = _mdWysiwygAdjust(line, endCol|0);
+      return _visualWidthUpToLine(a.line, a.col|0);
+    }catch{ return _visualWidthUpToLine(String(line||''), endCol|0); }
+  }
   function _mdEnsureTextLayer(){
     try{
       if (_mdTextLayer && _mdTextInner) return;
@@ -213,12 +260,23 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
       let y = 0;
       for (let i=0; i<want; i++){
         const row = start + i;
-        const text = (row>=0 && row<total) ? String(lines[row]||'') : '';
-        const lv = _mdHeadingLevel(text);
+        const srcText = (row>=0 && row<total) ? String(lines[row]||'') : '';
+        const lv = _mdHeadingLevel(srcText);
         const isActiveRow = (row === (caretRow|0));
-        const scale = _mdLineScale(text);
-        const lh = _mdLineHeightPx(text);
+        const scale = _mdLineScale(srcText);
+        const lh = _mdLineHeightPx(srcText);
         const fs = Math.max(6, Math.round(baseFontPx * scale));
+
+        // Hide markdown symbols for display (initially: ATX heading prefix)
+        // - clean mode: always hide
+        // - draft mode: hide on non-caret lines only (#1489)
+        let text = srcText;
+        let prefixLen = 0;
+        if (_mdHideSymbolsForRow(isActiveRow) && lv>=1 && lv<=6){
+          prefixLen = _mdHeadingPrefixLen(srcText)|0;
+          if (prefixLen>0) text = srcText.slice(prefixLen);
+        }
+
         let el = children[i];
         if (!el){
           el = document.createElement('div');
@@ -234,8 +292,11 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
             const sr = _mdImeRange.sRow|0;
             const er = _mdImeRange.eRow|0;
             if (row>=sr && row<=er){
-              const sCol = (row===sr) ? (_mdImeRange.sCol|0) : 0;
-              const eCol = (row===er) ? (_mdImeRange.eCol|0) : (text.length|0);
+              // IME columns are on the original textarea line; map to display columns when symbols are hidden.
+              const sCol0 = (row===sr) ? (_mdImeRange.sCol|0) : 0;
+              const eCol0 = (row===er) ? (_mdImeRange.eCol|0) : (srcText.length|0);
+              const sCol = Math.max(0, (sCol0|0) - (prefixLen|0));
+              const eCol = Math.max(0, (eCol0|0) - (prefixLen|0));
               const a = Math.max(0, Math.min(text.length|0, sCol));
               const b = Math.max(0, Math.min(text.length|0, eCol));
               if (b >= a){
@@ -1053,6 +1114,7 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
         ignorecase: !!b.ignorecase,
         smartcase:  !!b.smartcase,
         markdown: !!b.markdown,
+        md_draftedit: (typeof b.md_draftedit === 'boolean') ? !!b.md_draftedit : true,
     undo: undoArr,
     extMtime: (typeof b._extMtime === 'number') ? b._extMtime : null,
     extSize: (typeof b._extSize === 'number') ? b._extSize : null,
@@ -1240,8 +1302,9 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
         const ignorecase = !!(it && it.ignorecase);
         const smartcase  = !!(it && it.smartcase);
         const markdown  = !!(it && it.markdown);
+        const md_draftedit = (it && typeof it.md_draftedit === 'boolean') ? !!it.md_draftedit : true;
         const edScale = Number.isFinite(it && it.edScale) ? _nearestScale(it.edScale) : 1;
-        _addBuffer({ name, path, text, modified, enc, ff, bom, shiftwidth, ignorecase, smartcase, markdown, edScale });
+        _addBuffer({ name, path, text, modified, enc, ff, bom, shiftwidth, ignorecase, smartcase, markdown, md_draftedit, edScale });
         try{
           const b = buffers[buffers.length-1];
           // If savedText is provided, trust it; otherwise, if not modified, set savedText=text
@@ -1267,6 +1330,8 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
           try{ b.smartcase  = !!(it && it.smartcase);  }catch{ b.smartcase  = !!b.smartcase;  }
           // restore markdown flag (default false)
           try{ b.markdown = !!(it && it.markdown); }catch{ b.markdown = !!b.markdown; }
+          // restore markdown edit style (default true=draft)
+          try{ b.md_draftedit = (it && typeof it.md_draftedit === 'boolean') ? !!it.md_draftedit : true; }catch{ b.md_draftedit = (typeof b.md_draftedit==='boolean') ? !!b.md_draftedit : true; }
           // recompute ticks from modified flag
           b._changeTick = modified ? 1 : 0; b._savedTick = 0; b.modified = !!modified;
           // Restore undo snapshots (limited) if present
@@ -3400,6 +3465,9 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
   let _listRenderRaf = 0;
   let _listScrollRetryTimer = 0;
   let _listLastBeforeInput = null;
+  // In markdown draft mode, only the active (caret) row shows raw symbols.
+  // Track active row to refresh listchars/EOL when the caret row changes.
+  let _mdDraftLastActiveRow1ForList = null;
   function _listEnsureLayer(){
     try{
       if (!_listLayer){ _listLayer = document.createElement('div'); _listLayer.className='listchars-layer'; _listLayer.style.position='absolute'; _listLayer.style.left='0'; _listLayer.style.top='0'; _listLayer.style.right='0'; _listLayer.style.bottom='0'; _listLayer.style.pointerEvents='none'; _listLayer.style.zIndex='1'; }
@@ -3447,6 +3515,22 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
         }catch{}
       }
 
+      // Determine display line for listchars measurement in markdown-rich.
+      // - clean mode: strip heading prefix
+      // - draft mode: strip heading prefix only on non-caret lines
+      let dispLine = line;
+      let dispPrefix = 0;
+      try{
+        if (mdRich){
+          const isActiveRow = (row1 === ((caretRow|0) + 1));
+          const hide = _mdHideSymbolsForRow(isActiveRow);
+          if (hide){
+            const p = _mdHeadingPrefixLen(line)|0;
+            if (p>0){ dispPrefix = p; dispLine = line.slice(p); }
+          }
+        }
+      }catch{ dispLine = line; dispPrefix = 0; }
+
       // tab expander (same logic as full render)
       const _exp = (s)=>{
         if (!s || s.indexOf('\t')===-1) return s;
@@ -3470,18 +3554,18 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
         return out;
       };
 
-      // trailing run
-      let trailStart = line.length;
+      // trailing run (use display line)
+      let trailStart = dispLine.length;
       while (trailStart>0){
-        const cht = line.charAt(trailStart-1);
+        const cht = dispLine.charAt(trailStart-1);
         if (cht===' ' || cht==='\t' || cht==='\u3000') trailStart--; else break;
       }
-      for (let c=0;c<line.length;c++){
-        const ch = line.charAt(c);
+      for (let c=0;c<dispLine.length;c++){
+        const ch = dispLine.charAt(c);
         if (ch==='\t' || ch==='\u3000' || (c>=trailStart && ch===' ')){
-          _measureSpan.textContent = _exp(line.slice(0,c));
+          _measureSpan.textContent = _exp(dispLine.slice(0,c));
           const x1b = _measureSpan.getBoundingClientRect().width;
-          _measureSpan.textContent = _exp(line.slice(0,c+1));
+          _measureSpan.textContent = _exp(dispLine.slice(0,c+1));
           const x2b = _measureSpan.getBoundingClientRect().width;
           const x1 = mdRich ? (x1b * scale) : x1b;
           const x2 = mdRich ? (x2b * scale) : x2b;
@@ -3504,7 +3588,7 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
 
       // EOL marker
       if (!(window._imeComposing === true && row1 === (caretRow + 1))) {
-        _measureSpan.textContent = _exp(line);
+        _measureSpan.textContent = _exp(dispLine);
         const xEndb = _measureSpan.getBoundingClientRect().width;
         const xEnd = mdRich ? (xEndb * scale) : xEndb;
         let _hs=0; try{ _hs=(editor.scrollLeft||0); }catch{}
@@ -3681,11 +3765,27 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
         const yTop = mdRich ? yAcc : ((row - topLine) * LINE_HEIGHT);
         if (mdRich) yAcc += rowHeightPx;
 
+        // Determine display line for listchars measurement in markdown-rich.
+        // - clean mode: strip heading prefix
+        // - draft mode: strip heading prefix only on non-caret lines
+        let dispLine = line;
+        let dispPrefix = 0;
+        try{
+          if (mdRich && isReal){
+            const isActiveRow = (row === ((caretRow|0) + 1));
+            const hide = _mdHideSymbolsForRow(isActiveRow);
+            if (hide){
+              const p = _mdHeadingPrefixLen(line)|0;
+              if (p>0){ dispPrefix = p; dispLine = line.slice(p); }
+            }
+          }
+        }catch{ dispLine = line; dispPrefix = 0; }
+
         // Render trailing spaces, tabs, eol marker. We overlay individual inline boxes.
         // Trailing run: treat ASCII space, TAB, and IDEOGRAPHIC SPACE as trailing (#461)
-        let trailStart = line.length;
+        let trailStart = dispLine.length;
         while (trailStart>0){
-          const cht = line.charAt(trailStart-1);
+          const cht = dispLine.charAt(trailStart-1);
           if (cht===' ' || cht==='\t' || cht==='\u3000') trailStart--; else break;
         }
         // Iterate characters for tabs and trail markers
@@ -3712,12 +3812,12 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
           }
           return out;
         };
-        for (let c=0;c<line.length;c++){
-          const ch = line.charAt(c);
+        for (let c=0;c<dispLine.length;c++){
+          const ch = dispLine.charAt(c);
           if (ch==='\t' || ch==='\u3000' || (c>=trailStart && ch===' ')){
-            _measureSpan.textContent = _exp(line.slice(0,c));
+            _measureSpan.textContent = _exp(dispLine.slice(0,c));
             const x1b = _measureSpan.getBoundingClientRect().width;
-            _measureSpan.textContent = _exp(line.slice(0,c+1));
+            _measureSpan.textContent = _exp(dispLine.slice(0,c+1));
             const x2b = _measureSpan.getBoundingClientRect().width;
             const x1 = mdRich ? (x1b * scale) : x1b;
             const x2 = mdRich ? (x2b * scale) : x2b;
@@ -3743,7 +3843,7 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
           if (window._imeComposing === true && row === (caretRow + 1)) {
              // skip
           } else {
-            _measureSpan.textContent = _exp(line);
+            _measureSpan.textContent = _exp(dispLine);
             const xEndb = _measureSpan.getBoundingClientRect().width;
             const xEnd = mdRich ? (xEndb * scale) : xEndb;
             let _hs=0; try{ _hs=(editor.scrollLeft||0); }catch{}
@@ -4891,6 +4991,8 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
         smartcase:  !!b.smartcase,
         // per-buffer markdown mode (planned feature) (#1471)
         markdown: !!b.markdown,
+        // per-buffer markdown edit style: true=draft (show symbols), false=WYSIWYG (hide symbols) (#1488)
+        md_draftedit: (typeof b.md_draftedit === 'boolean') ? !!b.md_draftedit : true,
         // original final newline presence (established on initial load/create) — #598
         _origHadFinalLF: text0.endsWith('\n'),
         // encoding/newline metadata
@@ -6509,12 +6611,16 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
     // 動的caretグラデーション適用 (#1020)
     try{ _applyCaretGradient(); }catch{}
     const lines = _splitLines();
-    const line = lines[caretRow] || '';
+    const line0 = lines[caretRow] || '';
+    const adj0 = _mdWysiwygAdjust(line0, caretCol|0);
+    const line = adj0.line;
+    const caretColVis = adj0.col|0;
 
     // markdown-rich: caret X/width should follow per-line font scale
     // (approximate by scaling base measurements; textarea itself cannot vary per-line font size).
     let _mdScaleX = 1;
-    try{ if (_mdRichActive()) _mdScaleX = _mdLineScale(line) || 1; }catch{ _mdScaleX = 1; }
+    // NOTE: scale is based on the original line (heading level markers still define scale).
+    try{ if (_mdRichActive()) _mdScaleX = _mdLineScale(line0) || 1; }catch{ _mdScaleX = 1; }
     // Expand tabs using pixel-based tab stops (columns measured in space-width units) (#507)
     // This keeps overlay caret aligned with the textarea's native rendering even after full-width chars.
     const _expandTabs = (s)=>{
@@ -6566,21 +6672,21 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
     const _isFullwidth = (ch)=> /[\u1100-\u115F\u2E80-\uA4CF\uAC00-\uD7A3\uF900-\uFAFF\uFE10-\uFE19\uFE30-\uFE6F\u3000-\u303F\uFF01-\uFF60\uFFE0-\uFFE6\uD800-\uDBFF]/.test(ch||'');
     // Primary width measurement up to caretCol
   // Expand tabs before measurement to avoid mid-tab caret mis-centering
-  _measureSpan.textContent = _expandTabs(line.slice(0, Math.max(0, caretCol)));
+  _measureSpan.textContent = _expandTabs(line.slice(0, Math.max(0, caretColVis)));
     let x = (_measureSpan.getBoundingClientRect().width || 0) * _mdScaleX; // px
     // If the tail just before caret consists of hangable CJK punctuation (e.g., '、、' '。'),
     // some fonts may apply hanging/kerning so substr width does not grow. Recompute locally.
     try{
-      let k = Math.max(0, caretCol-1);
+      let k = Math.max(0, caretColVis-1);
       while (k>=0 && _isHangablePunct(line[k])) k--;
       const clusterStart = k+1;
-      if (clusterStart < caretCol){
+      if (clusterStart < caretColVis){
         // クラスタ直前までの幅
         _measureSpan.textContent = line.slice(0, clusterStart);
         const baseX = ((_measureSpan.getBoundingClientRect().width || 0) * _mdScaleX);
         // 連続句読点を「各文字=全角セル幅」に統一。フォントのハンギングによる食い込みを排除 (#934/#935/#936)
         let sum = 0;
-        for (let i=clusterStart; i<caretCol; i++){
+        for (let i=clusterStart; i<caretColVis; i++){
           const ch = line[i];
           // 実測幅
           _measureSpan.textContent = ch;
@@ -6602,14 +6708,14 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
   try{ caret.style.transform = ''; }catch{}
     // Determine character box width at caret (full-width aware), then shrink to 90%
     let chW = 0;
-    if (caretCol < line.length){
+    if (caretColVis < line.length){
       // width of the next character box
-  _measureSpan.textContent = _expandTabs(line.slice(0, caretCol+1));
+  _measureSpan.textContent = _expandTabs(line.slice(0, caretColVis+1));
       const x2 = ((_measureSpan.getBoundingClientRect().width || 0) * _mdScaleX);
       chW = Math.max(0, x2 - x);
       if (!(chW>0)){
         // fallback to per-char width (e.g., hanging punctuation cluster)
-        chW = _charWidth(line[caretCol]||'');
+        chW = _charWidth(line[caretColVis]||'');
       }
     } else {
       // at EOL: use half-width box width (measure with 'W')
@@ -6685,6 +6791,31 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
     }catch{}
     // keep hlsearch overlay in sync with caret/scroll
     try{ if (!(window && window._imeComposing===true)) _renderHlMatchesVisible(); }catch{}
+
+    // markdown draft: caret行だけ raw 表示なので、行移動でEOL位置が変わり得る。
+    // 旧行＋新行を差分再描画して、清書/生表示の切替を即反映する (#1491)
+    try{
+      const mdRich = _mdRichActive();
+      const draft = _mdDraftEditEnabled();
+      if (_optList && mdRich && draft && !(window && window._imeComposing===true)){
+        const curRow1 = (caretRow|0) + 1;
+        if (_mdDraftLastActiveRow1ForList == null) _mdDraftLastActiveRow1ForList = curRow1;
+        if (_mdDraftLastActiveRow1ForList !== curRow1){
+          const prevRow1 = _mdDraftLastActiveRow1ForList|0;
+          _mdDraftLastActiveRow1ForList = curRow1;
+          _listEnsureLayer();
+          const topLine = _topLine()|0;
+          const lines0 = _splitLines();
+          const realTotal = lines0.length|0;
+          try{ _listRemoveRow(prevRow1); }catch{}
+          try{ _renderListCharsRow(prevRow1, lines0, topLine, realTotal); }catch{}
+          try{ _listRemoveRow(curRow1); }catch{}
+          try{ _renderListCharsRow(curRow1, lines0, topLine, realTotal); }catch{}
+        }
+      } else {
+        _mdDraftLastActiveRow1ForList = null;
+      }
+    }catch{}
     // Persist caret (and current viewport) to the active buffer so its view state
     // survives a tab switch even if no scroll event occurs yet (#358)
     try{
@@ -8327,13 +8458,28 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
     const line = (_splitLines()[caretRow] || '');
     const fromR = caretRow|0, fromC = caretCol|0;
     let nc = caretCol;
+
+    // In markdown clean mode (md_draftedit=false), heading marker prefix is visually hidden.
+    // Treat the hidden prefix as non-navigable for horizontal motions.
+    let minCol = 0;
+    try{
+      if (_mdHideSymbolsForRow(true)){
+        const p = _mdHeadingPrefixLen(line);
+        if (p > 0) minCol = p;
+      }
+    }catch{}
+    if (minCol > 0 && (nc|0) < minCol){
+      // Snap out of hidden prefix before applying motion.
+      nc = minCol;
+    }
+
     if (delta > 0) {
       for (let i=0; i<delta; i++) nc = _nextIndex(line, nc);
     } else if (delta < 0) {
       const count = -delta;
       for (let i=0; i<count; i++) nc = _prevIndex(line, nc);
     }
-    nc = Math.max(0, Math.min(line.length, nc));
+    nc = Math.max(minCol, Math.min(line.length, nc));
     _setCaret(caretRow, nc);
     // Detect unexpected row change (should not happen here); if it does, tag anomaly
     const wrap = (caretRow!==fromR);
@@ -8358,7 +8504,7 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
     try{
       const suppress = !!(opt && (opt===true || opt.suppressDesired));
       if (_suppressDesiredOnce){ _suppressDesiredOnce = false; return; }
-      if (!suppress){ _desiredVisualCol = _visualWidthUpToLine((lines[caretRow]||''), caretCol|0); }
+      if (!suppress){ _desiredVisualCol = _visualWidthUpToLineWys((lines[caretRow]||''), caretCol|0); }
     }catch{}
   }
   function _consumeCount(){ const n=(_countAcc==null?1:_countAcc); _countAcc=null; return Math.max(1,n); }
@@ -9579,7 +9725,7 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
 
     // :set markdown / :set nomarkdown / :set markdown! / :set markdown?
     if (/^:set\s+markdown\s*$/i.test(cmd)){
-      const b=currentBuffer(); if (b){ b.markdown=true; _schedulePersist('markdown'); }
+      const b=currentBuffer(); if (b){ b.markdown=true; if (typeof b.md_draftedit !== 'boolean') b.md_draftedit = true; _schedulePersist('markdown'); _schedulePersist('md_draftedit'); }
       try{ _updateOverlayMarkdownVisual(); }catch{}
       toast('markdown: on', 900); return;
     }
@@ -9589,12 +9735,44 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
       toast('markdown: off', 900); return;
     }
     if (/^:set\s+markdown!\s*$/i.test(cmd)){
-      const b=currentBuffer(); if (b){ b.markdown=!b.markdown; _schedulePersist('markdown'); }
+      const b=currentBuffer(); if (b){ b.markdown=!b.markdown; if (b.markdown && typeof b.md_draftedit !== 'boolean') b.md_draftedit = true; _schedulePersist('markdown'); _schedulePersist('md_draftedit'); }
       try{ _updateOverlayMarkdownVisual(); }catch{}
       toast('markdown: ' + (b&&b.markdown?'on':'off'), 900); return;
     }
     if (/^:set\s+markdown\?\s*$/i.test(cmd)){
       const b=currentBuffer(); toast('markdown: ' + (b&&b.markdown?'on':'off'), 1200); return;
+    }
+
+    // :set md_draftedit / :set nomd_draftedit / :set md_draftedit! / :set md_draftedit?
+    if (/^:set\s+md_draftedit\s*$/i.test(cmd)){
+      const b=currentBuffer(); if (b){ b.md_draftedit = true; _schedulePersist('md_draftedit'); }
+      try{ _updateOverlayMarkdownVisual(); }catch{}
+      try{ _mdApplyVisualState && _mdApplyVisualState(); }catch{}
+      try{ _repositionCaret(); }catch{}
+      try{ _renderListChars(); }catch{}
+      try{ updateGutter(); }catch{}
+      toast('md_draftedit: draft', 900); return;
+    }
+    if (/^:set\s+nomd_draftedit\s*$/i.test(cmd)){
+      const b=currentBuffer(); if (b){ b.md_draftedit = false; _schedulePersist('md_draftedit'); }
+      try{ _updateOverlayMarkdownVisual(); }catch{}
+      try{ _mdApplyVisualState && _mdApplyVisualState(); }catch{}
+      try{ _repositionCaret(); }catch{}
+      try{ _renderListChars(); }catch{}
+      try{ updateGutter(); }catch{}
+      toast('md_draftedit: 清書', 900); return;
+    }
+    if (/^:set\s+md_draftedit!\s*$/i.test(cmd)){
+      const b=currentBuffer(); if (b){ b.md_draftedit = !(typeof b.md_draftedit === 'boolean' ? b.md_draftedit : true); _schedulePersist('md_draftedit'); }
+      try{ _updateOverlayMarkdownVisual(); }catch{}
+      try{ _mdApplyVisualState && _mdApplyVisualState(); }catch{}
+      try{ _repositionCaret(); }catch{}
+      try{ _renderListChars(); }catch{}
+      try{ updateGutter(); }catch{}
+      toast('md_draftedit: ' + (b && b.md_draftedit ? 'draft' : '清書'), 900); return;
+    }
+    if (/^:set\s+md_draftedit\?\s*$/i.test(cmd)){
+      const b=currentBuffer(); toast('md_draftedit: ' + (b && b.md_draftedit ? 'draft' : '清書'), 1200); return;
     }
 
     // :set list / :set nolist / :set list! / :set list?
@@ -20019,6 +20197,65 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
       });
       palTR.appendChild(mdBtn);
 
+      // Markdown edit style button（右上パレット：バッファ毎設定） (#1488)
+      // draft=true: show markdown symbols (current behavior)
+      // WYSIWYG=false: hide markdown symbols in view (e.g., "# Title" -> "Title")
+      const mdDraftBtn = document.createElement('button');
+      mdDraftBtn.type = 'button';
+      mdDraftBtn.id = 'overlayBtnMdDraft';
+      mdDraftBtn.style.minWidth = '100px';
+      mdDraftBtn.style.border = '1px solid #2a3244';
+      mdDraftBtn.style.background = '#1a2030';
+      mdDraftBtn.style.color = '#e6e6e6';
+      mdDraftBtn.style.borderRadius = '6px';
+      mdDraftBtn.style.padding = '4px 3px';
+      mdDraftBtn.style.cursor = 'pointer';
+      mdDraftBtn.style.font = "12px/1.25 system-ui, -apple-system, 'Segoe UI', sans-serif";
+      mdDraftBtn.style.opacity = '0.92';
+      mdDraftBtn.style.userSelect = 'none';
+      mdDraftBtn.style.outline = 'none';
+      attachHover(mdDraftBtn);
+      mdDraftBtn.addEventListener('contextmenu', (e)=>{ try{ e.preventDefault(); e.stopPropagation(); }catch{} });
+      mdDraftBtn.addEventListener('mousedown', (e)=>{ try{ lastFocusedEl = document.activeElement; e.preventDefault(); }catch{} });
+      const mdDWrap = document.createElement('div');
+      mdDWrap.style.display = 'flex';
+      mdDWrap.style.flexDirection = 'column';
+      mdDWrap.style.gap = '2px';
+      const mdDTitle = document.createElement('div');
+      mdDTitle.textContent = 'markdown編集';
+      mdDTitle.style.textAlign = 'center';
+      mdDTitle.style.fontWeight = '500';
+      const mdDLine = document.createElement('div');
+      mdDLine.style.display = 'flex';
+      mdDLine.style.justifyContent = 'center';
+      mdDLine.style.gap = '6px';
+      const mdDraft = pillBase('draft', 'overlayBtnMdDraft_draft');
+      const mdWys   = pillBase('清書', 'overlayBtnMdDraft_wys');
+      mdDLine.appendChild(mdDraft);
+      mdDLine.appendChild(mdWys);
+      mdDWrap.appendChild(mdDTitle);
+      mdDWrap.appendChild(mdDLine);
+      mdDraftBtn.appendChild(mdDWrap);
+      mdDraftBtn.addEventListener('click', (e)=>{
+        try{ e.preventDefault(); e.stopPropagation(); }catch{}
+        try{
+          const b = currentBuffer();
+          if (b){
+            if (typeof b.md_draftedit !== 'boolean') b.md_draftedit = true;
+            b.md_draftedit = !b.md_draftedit;
+            _schedulePersist('md_draftedit');
+          }
+        }catch{}
+        try{ _updateOverlayMarkdownVisual(); }catch{}
+        try{ _mdApplyVisualState && _mdApplyVisualState(); }catch{}
+        try{ _repositionCaret(); }catch{}
+        try{ _renderListChars(); }catch{}
+        try{ updateGutter(); }catch{}
+        try{ const b = currentBuffer(); toast('md_draftedit: ' + (b&&b.md_draftedit?'draft':'清書'), 900); }catch{}
+        try{ if (lastFocusedEl && typeof lastFocusedEl.focus==='function') lastFocusedEl.focus(); }catch{}
+      });
+      palTR.appendChild(mdDraftBtn);
+
   // initialize visual state for hlsearch & list pills
   try{ _updateOverlayHlsearchVisual(); }catch{}
   try{ _updateOverlayListVisual(); }catch{}
@@ -20256,6 +20493,22 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
       } else {
         off.style.background = gray; off.style.color = '#000';
       }
+
+      // md_draftedit visual (draft/WYSIWYG)
+      try{
+        const d = document.getElementById('overlayBtnMdDraft_draft');
+        const w = document.getElementById('overlayBtnMdDraft_wys');
+        if (d && w){
+          d.style.background = 'transparent'; w.style.background = 'transparent';
+          d.style.color = '#e6e6e6'; w.style.color = '#e6e6e6';
+          const draft = (b && typeof b.md_draftedit === 'boolean') ? !!b.md_draftedit : true;
+          if (draft){
+            d.style.background = green; d.style.color = '#000';
+          } else {
+            w.style.background = green; w.style.color = '#000';
+          }
+        }
+      }catch{}
     }catch{}
   }
 
