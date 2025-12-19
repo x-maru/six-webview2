@@ -796,7 +796,6 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
   }catch{}
   function _applyCaretGradient(){
     try{
-      const T = (window && window.THEME) ? window.THEME : {};
       let start = 'yellow', mid = 'yellow';
       // Caret width and mid stop in rem units
       let widthLen = '1.0rem';
@@ -814,31 +813,29 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
 
       if (_mode === 'INSERT'){
         if (imeActiveUse){
-          if (T.editCaretIMEGradStart && T.editCaretIMEGradMid){
-            start = T.editCaretIMEGradStart; mid = T.editCaretIMEGradMid;
-          }
+          start = _themeGet('editCaretIMEGradStart', 'yellow');
+          mid   = _themeGet('editCaretIMEGradMid', 'yellow');
           // IME ON → width 2.0rem, mid at 1.2rem
           widthLen = '2.0rem';
           midStopLen = '1.2rem';
         } else {
-          if (T.editCaretGradStart && T.editCaretGradMid){
-            start = T.editCaretGradStart; mid = T.editCaretGradMid;
-          }
+          start = _themeGet('editCaretGradStart', 'yellow');
+          mid   = _themeGet('editCaretGradMid', 'yellow');
           // IME OFF → width 1.0rem, mid at 0.6rem
           widthLen = '1.0rem';
           midStopLen = '0.6rem';
         }
       } else if (_mode === 'NORMAL' || _mode === 'VISUAL') {
         if (imeActiveUse){
-          if (T.caretIMEGradStart && T.caretIMEGradMid){
-            start = T.caretIMEGradStart; mid = T.caretIMEGradMid;
-          }
+          start = _themeGet('caretIMEGradStart', 'yellow');
+          mid   = _themeGet('caretIMEGradMid', 'yellow');
           // IME OFF → width 1.0rem, mid at 0.6rem
           widthLen = '1.0rem';
           midStopLen = '0.6rem';
         }
       } else { // CMD などは従来通り（IME状態に依存しない）
-        if (T.caretGradStart && T.caretGradMid){ start = T.caretGradStart; mid = T.caretGradMid; }
+        start = _themeGetAny(['caretGradStart','caretGradientStart'], 'yellow');
+        mid   = _themeGetAny(['caretGradMid','caretGradientMid'], 'yellow');
         // Use IME OFF defaults for non-edit modes
         widthLen = '1.0rem';
         midStopLen = '0.6rem';
@@ -846,7 +843,8 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
       // Ensure NORMAL/VISUAL IME-OFF prefers theme caretGrad if present
       try{
         if ((_mode === 'NORMAL' || _mode === 'VISUAL') && !imeActiveUse){
-          if (T.caretGradStart && T.caretGradMid){ start = T.caretGradStart; mid = T.caretGradMid; }
+          start = _themeGetAny(['caretGradStart','caretGradientStart'], 'yellow');
+          mid   = _themeGetAny(['caretGradMid','caretGradientMid'], 'yellow');
         }
       }catch{}
 
@@ -1147,6 +1145,109 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
   // session/quit control flags
   let _skipPersistOnUnloadOnce = false; // suppress one-time session persist at unload
   let _suppressPersistOnQuit = false;   // do not rewrite session on this quit path
+
+  // Global theme profile (shared by all buffers)
+  // - 'basic': read from window.THEME only (missing => yellow)
+  // - 'ex1'  : for selected keys, read from window.EX1_THEME then fall back to window.THEME
+  let _themeName = 'basic';
+
+  function _normalizeThemeName(v){
+    try{
+      const s = String(v||'').trim().toLowerCase();
+      if (s === 'basic' || s === 'ex1') return s;
+      return null;
+    }catch{ return null; }
+  }
+
+  const _EX1_THEME_KEYS = (function(){
+    try{
+      return new Set([
+        'editorTextColor',
+        'lineGradientStart','lineGradientEnd',
+        'inactiveGutterGradientStart','inactiveGutterGradientEnd',
+        'gutterNumberColor',
+        'activeLineGradientStart','activeLineGradientEnd',
+        'activeGutterGradientStart','activeGutterGradientEnd',
+        'activeEditLineGradStart','activeEditLineGradEnd',
+        'activeEditGutterGradStart','activeEditGutterGradEnd',
+        'activeLineNumberColor',
+        'caretGradStart','caretGradMid',
+        'caretIMEGradStart','caretIMEGradMid',
+        'caretIMEGradStart','caretIMEGradMid',
+        'editCaretGradStart','editCaretGradMid',
+        'editCaretIMEGradStart','editCaretIMEGradMid',
+        'editCaretIMEGradStart','editCaretIMEGradMid'
+      ]);
+    }catch{ return new Set(); }
+  })();
+
+  function _themeGetRawFrom(obj, key){
+    try{
+      if (!obj) return undefined;
+      if (Object.prototype.hasOwnProperty.call(obj, key)){
+        const v = obj[key];
+        if (v != null && v !== '') return v;
+      }
+    }catch{}
+    return undefined;
+  }
+
+  function _themeTryGet(key){
+    try{
+      const base = (window && window.THEME) ? window.THEME : {};
+      const mode = (_themeName === 'ex1') ? 'ex1' : 'basic';
+      if (mode === 'ex1' && _EX1_THEME_KEYS && _EX1_THEME_KEYS.has(String(key))){
+        const ex1 = (window && window.EX1_THEME) ? window.EX1_THEME : {};
+        let v = _themeGetRawFrom(ex1, key);
+        if (v === undefined) v = _themeGetRawFrom(base, key);
+        if (v === undefined){
+          if (key === 'inactiveGutterGradientStart') v = _themeGetRawFrom(base, 'gutterGradientStart');
+          else if (key === 'inactiveGutterGradientEnd') v = _themeGetRawFrom(base, 'gutterGradientEnd');
+        }
+        return v;
+      }
+      return _themeGetRawFrom(base, key);
+    }catch{}
+    return undefined;
+  }
+
+  function _themeGet(key, fallback){
+    try{
+      const v = _themeTryGet(key);
+      if (v !== undefined) return v;
+    }catch{}
+    return (fallback != null ? fallback : 'yellow');
+  }
+
+  function _themeGetAny(keys, fallback){
+    try{
+      const arr = Array.isArray(keys) ? keys : [keys];
+      for (const k of arr){
+        const v = _themeTryGet(k);
+        if (v !== undefined) return v;
+      }
+      try{ return _themeGet(arr[0], fallback); }catch{}
+    }catch{}
+    return (fallback != null ? fallback : 'yellow');
+  }
+
+  function _setThemeName(name, opts={}){
+    try{
+      const n = _normalizeThemeName(name);
+      if (!n) return false;
+      if (_themeName === n) return true;
+      _themeName = n;
+      try{ _applyTheme(); }catch{}
+      try{ _applyCaretGradient && _applyCaretGradient(); }catch{}
+      try{ _repositionCaret && _repositionCaret(); }catch{}
+      try{ updateGutter && updateGutter(); }catch{}
+      try{ _updateOverlayThemeVisual && _updateOverlayThemeVisual(); }catch{}
+      if (!opts || opts.persist !== false){
+        try{ _schedulePersist('theme'); }catch{}
+      }
+      return true;
+    }catch{ return false; }
+  }
   // Track last known total lines to detect shrink/expand for post-edit scroll snapping (#436)
   let _lastLinesForSnap = 0;
   // session persistence
@@ -1356,7 +1457,7 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
           edScale: (Number.isFinite(b.edScale) ? b.edScale : 1),
           savedMode: b.savedMode||'NORMAL',
           savedVisual: (b.savedVisual ? { linewise: !!b.savedVisual.linewise, anchorR: b.savedVisual.anchorR|0, anchorC: b.savedVisual.anchorC|0, caretR: b.savedVisual.caretR|0, caretC: b.savedVisual.caretC|0 } : null),
-              shiftwidth: Number.isFinite(b.shiftwidth)? (b.shiftwidth|0) : 4,
+              shiftwidth: (b.shiftwidth === 'TAB') ? 'TAB' : (Number.isFinite(b.shiftwidth)? (b.shiftwidth|0) : 4),
         ignorecase: !!b.ignorecase,
         smartcase:  !!b.smartcase,
         markdown: !!b.markdown,
@@ -1371,6 +1472,7 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
       const payload = {
         version: 1,
         when: Date.now(),
+        theme: (_themeName === 'ex1') ? 'ex1' : 'basic',
         active: Math.max(0, Math.min((buffers.length?buffers.length-1:0), currentIdx|0)),
         buffers: bufs,
         scrolloff: Number.isFinite(scrolloff) ? (scrolloff|0) : 3,
@@ -1477,6 +1579,13 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
           scrolloff = 3;
         }
       }catch{ scrolloff = 3; }
+
+      // Restore global theme profile (basic/ex1) (#1499)
+      try{
+        const tn = (j && typeof j.theme === 'string') ? j.theme : null;
+        const nn = _normalizeThemeName(tn) || 'basic';
+        _setThemeName(nn, { persist:false });
+      }catch{}
 
       // #1373: Restore search history
       try {
@@ -4944,12 +5053,11 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
       const root = document.documentElement;
       const setVar = (k, v)=>{ try{ if (v!=null) root.style.setProperty('--'+k, String(v)); }catch{} };
       // Theme getter with uniform fallback 'yellow' when key missing (#437)
+      // Also respects global theme profile (basic/ex1) via _themeTryGet.
       const themeGet = (key, fallback)=>{
         try{
-          if (t && Object.prototype.hasOwnProperty.call(t, key)){
-            const v = t[key];
-            if (v != null && v !== '') return v;
-          }
+          const v = _themeTryGet(key);
+          if (v !== undefined) return v;
         }catch{}
         return (fallback!=null ? fallback : 'yellow');
       };
@@ -4961,11 +5069,13 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
       setVar('lineGradEnd', themeGet('lineGradientEnd', t.lineGradientEnd));
         // Markdown clean (WYSIWYG) colors (#1493)
         // - Base is monochrome-like; if you need shading, do it with opacity in CSS.
-        setVar('mdCleanFg', themeGet('md_FGColor', 'yellow'));
-        setVar('mdCleanBgStart', themeGet('md_BGGradientStart', 'yellow'));
-        setVar('mdCleanBgEnd', themeGet('md_BGGradientEnd', 'yellow'));
+        // Spec #1499: stop referencing md_FGColor/md_BGGradientStart/End.
+        // Markdown line/HR color follows editorTextColor.
+        setVar('mdCleanFg', themeGet('editorTextColor', t.editorTextColor));
+        setVar('mdCleanBgStart', themeGet('lineGradientStart', t.lineGradientStart));
+        setVar('mdCleanBgEnd', themeGet('lineGradientEnd', t.lineGradientEnd));
         // Keep legacy mdHrColor in sync (used by CSS)
-        setVar('mdHrColor', themeGet('md_FGColor', 'yellow'));
+        setVar('mdHrColor', themeGet('editorTextColor', t.editorTextColor));
   // Editor text color
   setVar('editorTextColor', themeGet('editorTextColor', t.editorTextColor));
   // Active line stripe gradient (top -> bottom)
@@ -5011,13 +5121,16 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
   // Command input colors
   setVar('cmdInputFg', themeGet('cmdInputFg', t.cmdInputFg));
   setVar('cmdInputBg', themeGet('cmdInputBg', t.cmdInputBg));
-      setVar('gutterGradientStart', themeGet('gutterGradientStart', t.gutterGradientStart));
-      setVar('gutterGradientEnd', themeGet('gutterGradientEnd', t.gutterGradientEnd));
+      const _gkS = (_themeName === 'ex1') ? 'inactiveGutterGradientStart' : 'gutterGradientStart';
+      const _gkE = (_themeName === 'ex1') ? 'inactiveGutterGradientEnd' : 'gutterGradientEnd';
+      setVar('gutterGradientStart', themeGet(_gkS, t.gutterGradientStart));
+      setVar('gutterGradientEnd', themeGet(_gkE, t.gutterGradientEnd));
       setVar('gutterNumberColor', themeGet('gutterNumberColor', t.gutterNumberColor));
       setVar('activeLineNumberColor', themeGet('activeLineNumberColor', t.activeLineNumberColor));
   // Caret gradient colors (start/mid). End is fixed to rgba(255,0,0,0.0) in CSS
-      setVar('caretGradStart', themeGet('caretGradientStart', t.caretGradientStart));
-      setVar('caretGradMid', themeGet('caretGradientMid', t.caretGradientMid));
+        // Prefer caretGradStart/Mid when present; fall back to legacy caretGradientStart/Mid.
+        setVar('caretGradStart', themeGet('caretGradStart', themeGet('caretGradientStart', t.caretGradientStart)));
+        setVar('caretGradMid', themeGet('caretGradMid', themeGet('caretGradientMid', t.caretGradientMid)));
   // Visual selection colors
   setVar('selBg', themeGet('selectionBg', t.selectionBg));
   setVar('selFg', themeGet('selectionFg', t.selectionFg));
@@ -9911,6 +10024,22 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
     // :set shiftwidth?
     if (/^:set\s+shiftwidth\?\s*$/i.test(cmd)){
       try{ const sw = _getShiftWidth(); toast('shiftwidth = ' + sw, 1200); }catch{}
+      return;
+    }
+
+    // :set theme=basic|ex1
+    let mTheme = cmd.match(/^:set\s+theme\s*=\s*(basic|ex1)\s*$/i);
+    if (mTheme){
+      const n = _normalizeThemeName(mTheme[1]);
+      if (n){
+        _setThemeName(n);
+        try{ toast('theme = ' + n, 900); }catch{}
+      }
+      return;
+    }
+    // :set theme?
+    if (/^:set\s+theme\?\s*$/i.test(cmd)){
+      try{ toast('theme = ' + ((_themeName === 'ex1') ? 'ex1' : 'basic'), 1200); }catch{}
       return;
     }
     // :set visualbell / :set novisualbell / :set visualbell! / :set visualbell?
@@ -20238,6 +20367,53 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
         try{ if (lastFocusedEl && typeof lastFocusedEl.focus === 'function'){ lastFocusedEl.focus(); } }catch{}
       });
 
+      // 清書カラーボタン（右下パレット：グローバル、theme=basic/ex1）
+      const themeBtn = document.createElement('button');
+      themeBtn.type = 'button';
+      themeBtn.id = 'overlayBtnTheme';
+      themeBtn.style.minWidth = '112px';
+      themeBtn.style.border = '1px solid #2a3244';
+      themeBtn.style.background = '#1a2030';
+      themeBtn.style.color = '#e6e6e6';
+      themeBtn.style.borderRadius = '6px';
+      themeBtn.style.padding = '4px 3px';
+      themeBtn.style.cursor = 'pointer';
+      themeBtn.style.font = "12px/1.25 system-ui, -apple-system, 'Segoe UI', sans-serif";
+      themeBtn.style.opacity = '0.92';
+      themeBtn.style.userSelect = 'none';
+      themeBtn.style.outline = 'none';
+      attachHover(themeBtn);
+      themeBtn.addEventListener('contextmenu', (e)=>{ try{ e.preventDefault(); e.stopPropagation(); }catch{} });
+      themeBtn.addEventListener('mousedown', (e)=>{ try{ lastFocusedEl = document.activeElement; e.preventDefault(); }catch{} });
+      const themeWrap = document.createElement('div');
+      themeWrap.style.display = 'flex';
+      themeWrap.style.flexDirection = 'column';
+      themeWrap.style.gap = '2px';
+      const themeTitle = document.createElement('div');
+      themeTitle.textContent = '清書カラー';
+      themeTitle.style.textAlign = 'center';
+      themeTitle.style.fontWeight = '500';
+      const themeLine = document.createElement('div');
+      themeLine.style.display = 'flex';
+      themeLine.style.justifyContent = 'center';
+      themeLine.style.gap = '6px';
+      const themeOff = pillBase('OFF', 'overlayBtnTheme_off');
+      const themeOn  = pillBase('ON',  'overlayBtnTheme_on');
+      themeLine.appendChild(themeOff);
+      themeLine.appendChild(themeOn);
+      themeWrap.appendChild(themeTitle);
+      themeWrap.appendChild(themeLine);
+      themeBtn.appendChild(themeWrap);
+      themeBtn.addEventListener('click', (e)=>{
+        try{ e.preventDefault(); e.stopPropagation(); }catch{}
+        try{
+          const next = (_themeName === 'ex1') ? 'basic' : 'ex1';
+          _setThemeName(next);
+          try{ toast('theme = ' + next, 900); }catch{}
+        }catch{}
+        try{ if (lastFocusedEl && typeof lastFocusedEl.focus === 'function'){ lastFocusedEl.focus(); } }catch{}
+      });
+
       // 即時終了ボタン（右上配置。ラベル後半は 'F10'）
       const quitBtn = document.createElement('button');
       quitBtn.type = 'button';
@@ -20269,12 +20445,18 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
         try{ if (lastFocusedEl2 && typeof lastFocusedEl2.focus==='function') lastFocusedEl2.focus(); }catch{}
       });
 
-      // Build bottom-right grid 3x2 (global options)
+      // Build bottom-right grid 3x3 (global options)
       const gridBR = document.createElement('div');
       gridBR.style.display = 'grid';
       gridBR.style.gridTemplateColumns = 'auto auto auto';
       gridBR.style.columnGap = '4px';
       gridBR.style.rowGap = '4px';
+      // Row0: [empty][empty][theme]
+      const empty00 = document.createElement('div');
+      const empty01 = document.createElement('div');
+      gridBR.appendChild(empty00);
+      gridBR.appendChild(empty01);
+      gridBR.appendChild(themeBtn);
       // Row1: [empty][list][quit]
       const emptyTL = document.createElement('div');
       gridBR.appendChild(emptyTL);   // top-left empty
@@ -20563,6 +20745,7 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
   // initialize visual state for hlsearch & list pills
   try{ _updateOverlayHlsearchVisual(); }catch{}
   try{ _updateOverlayListVisual(); }catch{}
+  try{ _updateOverlayThemeVisual(); }catch{}
   try{ _updateOverlayEncodeVisual(); }catch{}
   try{ _updateOverlayShiftwidthVisual(); }catch{}
   try{ _updateOverlayCaseVisual(); }catch{}
@@ -20736,6 +20919,27 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
       if (_optList){
         on.style.background = green; on.style.color = '#000';
       }else{
+        off.style.background = gray; off.style.color = '#000';
+      }
+    }catch{}
+  }
+
+  // Reflect current global theme profile to overlay theme button
+  function _updateOverlayThemeVisual(){
+    try{
+      const off = document.getElementById('overlayBtnTheme_off');
+      const on  = document.getElementById('overlayBtnTheme_on');
+      if (!off || !on) return;
+      const gray = '#9aa0aa';
+      const green = '#49e26f';
+      off.style.background = 'transparent';
+      on.style.background  = 'transparent';
+      off.style.color = '#e6e6e6';
+      on .style.color = '#e6e6e6';
+      const isEx1 = (_themeName === 'ex1');
+      if (isEx1){
+        on.style.background = green; on.style.color = '#000';
+      } else {
         off.style.background = gray; off.style.color = '#000';
       }
     }catch{}

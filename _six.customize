@@ -34,53 +34,6 @@ window.SIX_OPTIONS = {
   jkScrollDirection: 'reverse'  // `Alt+j`がPageDown方向のスクロールになるのが'normal'(デフォルト)
 };
 
-// markdown清書モードの色指定
-window.EX1_THEME = {
-  // 本文文字色
-  editorTextColor: "black",
-
-  // 行背景(カーソル外)グラデーション
-  lineGradientStart: "white",
-  lineGradientEnd: "#fbfbfb",
-  // 行番号背景(カーソル外)グラデーション
-  inactiveGutterGradientStart: "#fbfbfb",
-  inactiveGutterGradientEnd: "#f0f0f0",
-  // 行番号 文字色(カーソル外)
-//  gutterNumberColor: "#808080",
-
-  // 行背景(NORMALカーソル行)グラデーション
-  activeLineGradientStart: "#f6faf6",
-  activeLineGradientEnd: "#ebeeeb",
-  // 行番号背景(NORMALカーソル行)グラデーション
-  activeGutterGradientStart: "#e2f0ed",
-  activeGutterGradientEnd: "#deebea",
-  // 行背景(INSERTカーソル行)グラデーション
-  activeEditLineGradStart: "#fff0f0",
-  activeEditLineGradEnd: "#ffe0e0",
-  // 行番号背景(INSERTカーソル行)グラデーション
-  activeEditGutterGradStart: "#efe0e0",
-  activeEditGutterGradEnd: "#efd0c0",
-  // 行番号(NORMAL/INSERTカーソル行) 文字色
-  activeLineNumberColor: "#20a090",
-
-  // NORMAL/VISUALでIME OFFのcaretグラデーション(左→右の方向)
-  caretGradStart: "rgba(0,115,79,0.95)",
-  caretGradMid: "rgba(0,115,79,0.04)",
-
-  // NORMAL/VISUALでIME ONのcaretグラデーション
-  caretIMEGradStart: "rgba(0,0,0,0.9)",
-  caretIMEGradMid: "rgba(0,0,0,0.9)",
-
-  // INSERTでIME OFFのcaretグラデーション
-  editCaretGradStart: "rgba(255,79,0,0.95)",
-  editCaretGradMid: "rgba(255,79,0,0.05)",
-
-  // INSERTでIME ONのcaretグラデーション
-  editCaretIMEGradStart: "rgba(113,247,31, 0.95)",
-  editCaretIMEGradMid: "rgba(113,247,31,0.05)",
-
-};
-
 // Theme definition (色指定。基本的に全項目必須で、未定義時に代替は一切せず一律yellowとする)
 window.THEME = {
   bodyBGColor: "#0b0d12",
@@ -150,12 +103,14 @@ window.THEME = {
   tabScrollBtnDisableText: "#305030", // タブスクロールボタン(非活性)
   posInfoText: "#c0ffca", // "行Y, 列X/W"
 
-  // Visual selection default colors
+  // VISUAL選択の色
   selectionFg: "white",
-  selectionBg: "#202080",
-  // Command input colors (requested: white text on black background)
+  selectionBg: "#001d44",
+
+  // コマンドバー内の色
   cmdInputFg: "white",
-  cmdInputBg: "black",
+  cmdInputBg: "#002000",
+
   // Incremental search preview highlight (background/outline)
   incPreviewBg: "rgba(128,192,255,0.35)",
   incPreviewOutline: "rgba(128,192,255,0.55)",
@@ -199,6 +154,52 @@ window.THEME = {
   // Popup (:e popup, :b popup, encodeSet popupなど)
   popupActiveLine: "#00a090", // active line highlight
   popupHeaderBg: "#000030"
+};
+
+// markdown清書モードの色指定
+window.EX1_THEME = {
+  // 本文文字色
+  editorTextColor: "black",
+
+  // 行背景(カーソル外)グラデーション
+  lineGradientStart: "white",
+  lineGradientEnd: "#fbfbfb",
+  // 行番号背景(カーソル外)グラデーション
+  inactiveGutterGradientStart: "#fbfbfb",
+  inactiveGutterGradientEnd: "#f0f0f0",
+  // 行番号 文字色(カーソル外)
+//  gutterNumberColor: "#808080",
+
+  // 行背景(NORMALカーソル行)グラデーション
+  activeLineGradientStart: "#ffffe0",
+  activeLineGradientEnd: "#fafada",
+  // 行番号背景(NORMALカーソル行)グラデーション
+  activeGutterGradientStart: "#e2f0ed",
+  activeGutterGradientEnd: "#deebea",
+  // 行背景(INSERTカーソル行)グラデーション
+  activeEditLineGradStart: "#efefd0",
+  activeEditLineGradEnd: "#eaeaca",
+  // 行番号背景(INSERTカーソル行)グラデーション
+  activeEditGutterGradStart: "#efe0e0",
+  activeEditGutterGradEnd: "#efd0c0",
+  // 行番号(NORMAL/INSERTカーソル行) 文字色
+  activeLineNumberColor: "#20a090",
+
+  // NORMAL/VISUALでIME OFFのcaretグラデーション(左→右の方向)
+  caretGradStart: "rgba(0,115,79,0.95)",
+  caretGradMid: "rgba(0,115,79,0.04)",
+
+  // NORMAL/VISUALでIME ONのcaretグラデーション
+  caretIMEGradStart: "rgba(0,0,0,0.9)",
+  caretIMEGradMid: "rgba(0,0,0,0.9)",
+
+  // INSERTでIME OFFのcaretグラデーション
+  editCaretGradStart: "rgba(255,79,0,0.95)",
+  editCaretGradMid: "rgba(255,79,0,0.05)",
+
+  // INSERTでIME ONのcaretグラデーション
+  editCaretIMEGradStart: "rgba(113,247,31, 0.95)",
+  editCaretIMEGradMid: "rgba(113,247,31,0.05)",
 };
 
 // かな/カナでの長音として扱う記号 (単語単位の移動に利用)。コードポイント配列。
