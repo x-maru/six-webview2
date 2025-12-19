@@ -137,7 +137,8 @@ body.use-native-caret #caretLayer .caret { display: none !important; }
 body.ime-reduced-text #editor,
 #editor.ime-reduced-text {
 	/* Best-effort for engines supporting scrollbar-color */
-	scrollbar-color: transparent transparent !important;
+	/* Do NOT make the track transparent; it can reveal the dark base fill as a "black bar" (esp. horizontal). */
+	scrollbar-color: transparent rgba(255,255,255,0.10) !important;
 }
 body.ime-reduced-text #editor::-webkit-scrollbar-thumb,
 #editor.ime-reduced-text::-webkit-scrollbar-thumb,
@@ -152,11 +153,46 @@ body.ime-reduced-text #editor::-webkit-scrollbar-thumb:active,
 	box-shadow: none !important;
 }
 
+/* WebKit/Chromium scrollbar track/corner: keep a faint track to avoid black fill while thumb is hidden. */
+body.ime-reduced-text #editor::-webkit-scrollbar-track,
+#editor.ime-reduced-text::-webkit-scrollbar-track,
+body.ime-reduced-text #editor::-webkit-scrollbar-track-piece,
+#editor.ime-reduced-text::-webkit-scrollbar-track-piece,
+body.ime-reduced-text #editor::-webkit-scrollbar-corner,
+#editor.ime-reduced-text::-webkit-scrollbar-corner {
+	background: rgba(255,255,255,0.10) !important;
+}
+
 /* caret overlay placeholder */
 #caretLayer { position:absolute; top:0; left:var(--gw); right:0; bottom:0; pointer-events:none; z-index: 3; }
 #caretLayer { font-size: calc(var(--editorFontBase, 20px) * var(--edScale)); }
 
 /* Markdown rich view layer (per-line font-size/line-height). */
+#textBgLayer {
+	position: absolute;
+	top: 0;
+	left: var(--gw);
+	right: 0;
+	bottom: 0;
+	pointer-events: none;
+	overflow: hidden;
+	z-index: 1; /* above active-line stripe, below textLayer */
+}
+#textBgLayer .md-bgline {
+	position: absolute;
+	left: 0;
+	right: 0;
+	box-sizing: border-box;
+	background:
+		linear-gradient(to bottom, var(--lineGradStart, rgb(243,251,243)), var(--lineGradEnd, rgb(237,243,237))),
+		var(--lineBaseFill, #0f1117);
+}
+#textBgLayer .md-bgline.md-clean {
+	background:
+		linear-gradient(to bottom, var(--mdCleanBgStart, yellow), var(--mdCleanBgEnd, yellow)),
+		var(--lineBaseFill, #0f1117);
+}
+
 #textLayer {
 	position: absolute;
 	top: 0;
@@ -165,10 +201,13 @@ body.ime-reduced-text #editor::-webkit-scrollbar-thumb:active,
 	bottom: 0;
 	pointer-events: none;
 	overflow: hidden;
-	z-index: 1; /* above active-line stripe, below textarea/caret */
+	z-index: 2; /* above backgrounds, below textarea/caret */
 	font-size: calc(var(--editorFontBase, 20px) * var(--edScale));
 	color: var(--editorTextColor, #e6e6e6);
-	font-family: "Cascadia Code", "Cascadia Mono", "JetBrains Mono", "Fira Code", "Consolas", "Yu Gothic", "游ゴシック Light", "Meiryo", monospace !important;
+	font-family: 'SixEditorMix',
+		"Cascadia Code", "Cascadia Mono", "JetBrains Mono", "Fira Code", "Consolas",
+		"Sarasa Mono J", "Noto Sans Mono", "Noto Sans CJK JP", "Noto Sans JP", "Noto Sans Japanese",
+		"Yu Gothic", "游ゴシック Light", "Meiryo", "MS Gothic", monospace !important;
 	font-weight: 220 !important;
 	white-space: pre;
 	tab-size: var(--tabstop, 8);
@@ -181,9 +220,13 @@ body.ime-reduced-text #editor::-webkit-scrollbar-thumb:active,
 	right: 0;
 	white-space: pre;
 	box-sizing: border-box;
-	background:
-		linear-gradient(to bottom, var(--lineGradStart, rgb(243,251,243)), var(--lineGradEnd, rgb(237,243,237))),
-		var(--lineBaseFill, #0f1117);
+	background: transparent;
+}
+
+/* Markdown-rich: clean (WYSIWYG) lines use dedicated monochrome-ish palette (#1493) */
+#textLayer .md-line.md-clean {
+	color: var(--mdCleanFg, yellow);
+	background: transparent;
 }
 
 /* Markdown-rich: thematic break (horizontal rule) in clean display (#1492) */
@@ -192,12 +235,27 @@ body.ime-reduced-text #editor::-webkit-scrollbar-thumb:active,
 }
 #textLayer .md-line.md-hrline .md-hr {
 	position: absolute;
-	left: 2rem;
-	right: 2rem;
+	left: 0.5rem;
+	right: 0.5rem;
 	top: 50%;
 	transform: translateY(-50%);
-	border-top: 3px solid var(--mdHrColor, rgba(235, 235, 235, 0.65));
+	border-top: 3px solid var(--mdCleanFg, yellow);
+	opacity: 0.70;
 	box-sizing: border-box;
+}
+
+/* Markdown-rich: setext heading underline (thin, same for H1/H2) (#1493) */
+#textLayer .md-line.md-setext {
+	position: absolute;
+}
+#textLayer .md-line.md-setext::after {
+	content: "";
+	position: absolute;
+	left: 0.5rem;
+	right: 0.5rem;
+	bottom: 2px;
+	border-bottom: 1px solid var(--mdCleanFg, yellow);
+	opacity: 0.55;
 }
 
 /* When markdown-rich view is active, hide textarea glyphs (keep input/caret logic). */

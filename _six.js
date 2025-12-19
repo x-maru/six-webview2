@@ -50,6 +50,8 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
    *********************************************************/
   let _mdTextLayer = null;
   let _mdTextInner = null;
+  let _mdBgLayer = null;
+  let _mdBgInner = null;
   let _mdVisualSuppressed = false; // reserved: temporarily disable rich visuals if needed
   let _mdImeRange = null; // { sOff,eOff, sRow,eRow, sCol,eCol }
 
@@ -121,6 +123,15 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
       return true;
     }catch{ return true; }
   }
+  function _mdSetextEnabled(){
+    // per-buffer (default OFF). When enabled, setext headings take precedence over thematic breaks.
+    try{
+      const b = currentBuffer && currentBuffer();
+      if (!b) return false;
+      if (typeof b.setext === 'boolean') return !!b.setext;
+      return false;
+    }catch{ return false; }
+  }
   function _mdWysiwygActive(){ try{ return _mdRichEnabled() && !_mdVisualSuppressed && !_mdDraftEditEnabled(); }catch{ return false; } }
   function _mdRichActive(){ try{ return _mdRichEnabled() && !_mdVisualSuppressed; }catch{ return false; } }
 
@@ -163,9 +174,26 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
   }
   function _mdEnsureTextLayer(){
     try{
-      if (_mdTextLayer && _mdTextInner) return;
+      if (_mdTextLayer && _mdTextInner && _mdBgLayer && _mdBgInner) return;
       const parent = (caretLayer && caretLayer.parentNode) ? caretLayer.parentNode : null;
       if (!parent) return;
+
+      // Background layer (separate from glyph/text layer) — #1495
+      _mdBgLayer = document.getElementById('textBgLayer');
+      if (!_mdBgLayer){
+        _mdBgLayer = document.createElement('div');
+        _mdBgLayer.id = 'textBgLayer';
+      }
+      _mdBgInner = _mdBgLayer.querySelector('.md-bg-inner');
+      if (!_mdBgInner){
+        _mdBgInner = document.createElement('div');
+        _mdBgInner.className = 'md-bg-inner';
+        _mdBgInner.style.position = 'relative';
+        _mdBgInner.style.width = '100%';
+        _mdBgInner.style.height = '100%';
+        _mdBgLayer.appendChild(_mdBgInner);
+      }
+
       _mdTextLayer = document.getElementById('textLayer');
       if (!_mdTextLayer){
         _mdTextLayer = document.createElement('div');
@@ -180,10 +208,12 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
         _mdTextInner.style.height = '100%';
         _mdTextLayer.appendChild(_mdTextInner);
       }
-      if (_mdTextLayer.parentNode !== parent){
-        parent.insertBefore(_mdTextLayer, caretLayer);
-      }
+      // Order: bg -> text -> caret
+      try{ if (_mdBgLayer.parentNode !== parent){ parent.insertBefore(_mdBgLayer, caretLayer); } }catch{}
+      try{ if (_mdTextLayer.parentNode !== parent){ parent.insertBefore(_mdTextLayer, caretLayer); } }catch{}
+      try{ if (_mdBgLayer.nextSibling !== _mdTextLayer){ parent.insertBefore(_mdTextLayer, _mdBgLayer.nextSibling); } }catch{}
       _mdTextLayer.style.display = 'none';
+      try{ _mdBgLayer.style.display = 'none'; }catch{}
     }catch{}
   }
   function _mdHeadingLevel(line){
@@ -230,6 +260,98 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
     }catch{ return LINE_HEIGHT; }
   }
 
+  function _mdHeadingLineHeightPxFromLevel(level){
+    try{
+      const lv = level|0;
+      if (lv===1) return Math.max(1, Math.round(LINE_HEIGHT * 1.50));
+      if (lv===2) return Math.max(1, Math.round(LINE_HEIGHT * 1.20));
+      return LINE_HEIGHT;
+    }catch{ return LINE_HEIGHT; }
+  }
+
+  function _mdLineLayoutInfoAtRow(lines, row, isActiveRow){
+    // Return display layout info for markdown-rich view for the given row.
+    // Must stay consistent with _mdRenderTextLayer's per-row logic.
+    try{
+      const total = (lines && lines.length) ? (lines.length|0) : 0;
+      const r = row|0;
+      const srcText = (r>=0 && r<total) ? String(lines[r]||'') : '';
+      const lv0 = _mdHeadingLevel(srcText);
+      const setextOn = _mdSetextEnabled();
+      const hideSymbols = !!_mdHideSymbolsForRow(!!isActiveRow);
+      let setextLv = 0;
+      try{
+        if (setextOn && hideSymbols && (r+1) < total){
+          const next = String(lines[r+1]||'');
+          const infoN = _mdSetextUnderlineInfo(next);
+          if (infoN && (String(srcText||'').trim() !== '')) setextLv = infoN.level|0;
+        }
+      }catch{ setextLv = 0; }
+      const lv = (setextLv>0 ? setextLv : (lv0|0));
+      const scale = (setextLv>0 ? _mdHeadingScale(lv) : _mdLineScale(srcText));
+      const lineHeightPx = (setextLv>0 ? _mdHeadingLineHeightPxFromLevel(lv) : _mdLineHeightPx(srcText));
+      return { srcText, lv0, setextLv, lv, scale: (scale||1), lineHeightPx: (lineHeightPx||LINE_HEIGHT), hideSymbols, setextOn };
+    }catch{
+      return { srcText:'', lv0:0, setextLv:0, lv:0, scale:1, lineHeightPx:LINE_HEIGHT, hideSymbols:false, setextOn:false };
+    }
+  }
+
+  function _mdIsHrLineForDisplay(srcText, lines, row, isActiveRow){
+    try{
+      const hideSymbols = !!_mdHideSymbolsForRow(!!isActiveRow);
+      if (!hideSymbols) return false;
+      const tb = _mdThematicBreakInfo(srcText);
+      if (!tb) return false;
+      if (tb.ch !== '-') return true;
+      const setextOn = _mdSetextEnabled();
+      if (!setextOn) return true;
+      const prev = (row>0 && lines && row < (lines.length|0)) ? String(lines[row-1]||'') : '';
+      return (!prev || prev.trim()==='');
+    }catch{ return false; }
+  }
+
+  function _mdIsSetextUnderlineRowForDisplay(srcText, lines, row, isActiveRow){
+    try{
+      const hideSymbols = !!_mdHideSymbolsForRow(!!isActiveRow);
+      if (!hideSymbols) return false;
+      if (!_mdSetextEnabled()) return false;
+      const info = _mdSetextUnderlineInfo(srcText);
+      if (!info) return false;
+      const prev = (row>0 && lines && row < (lines.length|0)) ? String(lines[row-1]||'') : '';
+      return (!!prev && prev.trim()!=='');
+    }catch{ return false; }
+  }
+
+  function _mdClampCaretForSpecialCleanLines(){
+    try{
+      if (!_mdRichActive()) return false;
+      const lines = _splitLinesRaw();
+      if (!Array.isArray(lines) || lines.length===0) return false;
+      const r = Math.max(0, Math.min(lines.length-1, caretRow|0));
+      const srcText = String(lines[r]||'');
+      const isActiveRow = true;
+      const isHr = _mdIsHrLineForDisplay(srcText, lines, r, isActiveRow);
+      const isSetextU = _mdIsSetextUnderlineRowForDisplay(srcText, lines, r, isActiveRow);
+      if ((isHr || isSetextU) && (caretCol|0) !== 0){
+        caretCol = 0;
+        return true;
+      }
+      return false;
+    }catch{ return false; }
+  }
+
+  // Setext heading underline line info: "===" => H1, "---" => H2
+  // Rules (per request): 2+ markers, prev line must be non-blank (checked at call site).
+  function _mdSetextUnderlineInfo(line){
+    try{
+      const s = String(line||'');
+      const m = s.match(/^[ ]{0,3}([=-])\1{1,}[\t ]*$/);
+      if (!m) return null;
+      const ch = m[1];
+      return { ch, level: (ch==='=' ? 1 : 2) };
+    }catch{ return null; }
+  }
+
   // GFM/CommonMark thematic break (horizontal rule)
   // - Up to 3 leading spaces
   // - 3+ of the same marker: '*', '-', '_'
@@ -250,7 +372,7 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
     try{
       if (!_mdRichActive()) return;
       _mdEnsureTextLayer();
-      if (!_mdTextLayer || !_mdTextInner) return;
+      if (!_mdTextLayer || !_mdTextInner || !_mdBgLayer || !_mdBgInner) return;
       const lines = _splitLines();
       const total = lines.length|0;
       const topLine1 = _topLine();
@@ -268,46 +390,91 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
       }catch{}
       try{ hs = (editor.scrollLeft||0); }catch{}
       try{ _mdTextInner.style.transform = `translate(${-hs}px, ${-rem}px)`; }catch{}
+      // #1495: Keep background fixed during per-pixel smooth scroll; do NOT apply remainder compensation.
+      // Also keep it unaffected by horizontal scrolling.
+      try{ _mdBgInner.style.transform = ''; }catch{}
 
       // Base font size (already includes zoom)
       let baseFontPx = 16;
       try{ baseFontPx = parseFloat(getComputedStyle(editor).fontSize)||baseFontPx; }catch{}
 
       const children = Array.from(_mdTextInner.children);
+      const bgChildren = Array.from(_mdBgInner.children);
       let y = 0;
       for (let i=0; i<want; i++){
         const row = start + i;
         const srcText = (row>=0 && row<total) ? String(lines[row]||'') : '';
-        const lv = _mdHeadingLevel(srcText);
+        const lv0 = _mdHeadingLevel(srcText);
         const isActiveRow = (row === (caretRow|0));
         const tb = _mdThematicBreakInfo(srcText);
-        const scale = _mdLineScale(srcText);
-        const lh = _mdLineHeightPx(srcText);
-        const fs = Math.max(6, Math.round(baseFontPx * scale));
+        const setextOn = _mdSetextEnabled();
 
         // Hide markdown symbols for display.
         // - clean mode: always hide
         // - draft mode: hide on non-caret lines only (#1489)
         const hideSymbols = !!_mdHideSymbolsForRow(isActiveRow);
+
+        // setext heading: apply to this line when the *next* line is a setext underline.
+        let setextLv = 0;
+        try{
+          if (setextOn && hideSymbols && (row+1) < total){
+            const next = String(lines[row+1]||'');
+            const infoN = _mdSetextUnderlineInfo(next);
+            if (infoN && (String(srcText||'').trim() !== '')){
+              setextLv = infoN.level|0;
+            }
+          }
+        }catch{ setextLv = 0; }
+
+        const lv = (setextLv>0 ? setextLv : lv0);
+        const scale = (setextLv>0 ? _mdHeadingScale(lv) : _mdLineScale(srcText));
+        const lh = (setextLv>0 ? _mdHeadingLineHeightPxFromLevel(lv) : _mdLineHeightPx(srcText));
+        const fs = Math.max(6, Math.round(baseFontPx * scale));
+
         let text = srcText;
         let prefixLen = 0;
 
+        // setext underline line itself ("===" / "---"): in clean display, hide the marker line.
+        // (We keep the source-line height to preserve scroll/caret mapping.)
+        let renderSetextUnderlineRow = false;
+        try{
+          if (setextOn && hideSymbols){
+            const infoU = _mdSetextUnderlineInfo(srcText);
+            if (infoU){
+              const prev = (row>0) ? String(lines[row-1]||'') : '';
+              if (prev.trim() !== '') renderSetextUnderlineRow = true;
+            }
+          }
+        }catch{ renderSetextUnderlineRow = false; }
+
         // Horizontal rule (thematic break): in clean display, draw a line and hide the source markers.
-        // NOTE: "---" is ambiguous with setext heading underline when preceded by non-blank text.
-        // We avoid rendering it as HR in that case (keeps behavior closer to GFM).
+        // NOTE: '-' thematic break can be ambiguous with setext underline. When setext is enabled,
+        // treat non-blank-prev '-' lines as setext and do NOT render HR.
         let renderHr = false;
         if (hideSymbols && tb){
           if (tb.ch !== '-'){
             renderHr = true;
           } else {
-            const prev = (row>0) ? String(lines[row-1]||'') : '';
-            if (!prev || prev.trim()==='') renderHr = true;
+            if (!setextOn){
+              renderHr = true;
+            } else {
+              const prev = (row>0) ? String(lines[row-1]||'') : '';
+              if (!prev || prev.trim()==='') renderHr = true;
+            }
           }
         }
 
-        if (!renderHr && hideSymbols && lv>=1 && lv<=6){
+        // If this row is a setext underline marker, never render as HR in clean display.
+        if (renderSetextUnderlineRow) renderHr = false;
+
+        if (!renderHr && !renderSetextUnderlineRow && hideSymbols && lv0>=1 && lv0<=6){
           prefixLen = _mdHeadingPrefixLen(srcText)|0;
           if (prefixLen>0) text = srcText.slice(prefixLen);
+        }
+
+        if (renderSetextUnderlineRow){
+          text = '';
+          prefixLen = 0;
         }
 
         let el = children[i];
@@ -316,6 +483,19 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
           el.className = 'md-line';
           _mdTextInner.appendChild(el);
         }
+
+        // Background line element (separate layer)
+        let bg = bgChildren[i];
+        if (!bg){
+          bg = document.createElement('div');
+          bg.className = 'md-bgline';
+          _mdBgInner.appendChild(bg);
+        }
+
+        // Per-line display classes (clean palette + setext underline)
+        try{ el.classList.toggle('md-clean', hideSymbols); }catch{}
+        try{ el.classList.toggle('md-setext', (setextLv>0 && hideSymbols)); }catch{}
+        try{ bg.classList.toggle('md-clean', hideSymbols); }catch{}
 
         // IME/heading rendering may set innerHTML; keep a shared flag to avoid overwriting HR.
         let usedHtml = false;
@@ -372,13 +552,25 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
           el.textContent = text;
         }
 
-        // Active line background: let #edstripe show through without dimming glyphs.
-        // Other lines keep their own per-line background gradient via CSS.
-        try{ el.style.background = isActiveRow ? 'transparent' : ''; }catch{}
+        // #1495: Active line background is rendered by bg layer (not by edstripe under a transparent md-line).
+        // This avoids 1-frame flicker during smooth scroll.
+        try{
+          if (isActiveRow){
+            if (_mode === 'INSERT') bg.style.background = 'linear-gradient(to bottom, var(--activeEditLineGradStart, yellow), var(--activeEditLineGradEnd, yellow))';
+            else bg.style.background = 'linear-gradient(to bottom, var(--activeLineGradStart, rgb(231,255,231)), var(--activeLineGradEnd, rgb(219,243,219)))';
+          } else {
+            bg.style.background = '';
+          }
+        }catch{}
+
         el.style.top = y + 'px';
         el.style.height = lh + 'px';
         el.style.lineHeight = lh + 'px';
         el.style.fontSize = fs + 'px';
+        try{
+          bg.style.top = y + 'px';
+          bg.style.height = lh + 'px';
+        }catch{}
         try{
           if (lv === 1) el.style.fontWeight = 'var(--mdHeadingWeightH1, 750)';
           else if (lv >= 2 && lv <= 6) el.style.fontWeight = 'var(--mdHeadingWeightH2_6, 520)';
@@ -389,6 +581,9 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
       for (let i=children.length-1; i>=want; i--){
         try{ _mdTextInner.removeChild(children[i]); }catch{}
       }
+      for (let i=bgChildren.length-1; i>=want; i--){
+        try{ _mdBgInner.removeChild(bgChildren[i]); }catch{}
+      }
     }catch{}
   }
   function _mdApplyVisualState(){
@@ -397,10 +592,12 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
       try{ document.body.classList.toggle('md-rich', on); }catch{}
       _mdEnsureTextLayer();
       if (_mdTextLayer){ _mdTextLayer.style.display = on ? '' : 'none'; }
+      if (_mdBgLayer){ _mdBgLayer.style.display = on ? '' : 'none'; }
       if (on){
         try{ _mdRenderTextLayer(); }catch{}
         try{ updateGutter({ force:true }); }catch{}
         try{ _repositionCaret({ force:true }); }catch{}
+        try{ _renderVisSelOverlay && _renderVisSelOverlay(); }catch{}
       }
     }catch{}
   }
@@ -1164,6 +1361,7 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
         smartcase:  !!b.smartcase,
         markdown: !!b.markdown,
         md_draftedit: (typeof b.md_draftedit === 'boolean') ? !!b.md_draftedit : true,
+        setext: !!b.setext,
     undo: undoArr,
     extMtime: (typeof b._extMtime === 'number') ? b._extMtime : null,
     extSize: (typeof b._extSize === 'number') ? b._extSize : null,
@@ -1352,8 +1550,9 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
         const smartcase  = !!(it && it.smartcase);
         const markdown  = !!(it && it.markdown);
         const md_draftedit = (it && typeof it.md_draftedit === 'boolean') ? !!it.md_draftedit : true;
+        const setext = !!(it && it.setext);
         const edScale = Number.isFinite(it && it.edScale) ? _nearestScale(it.edScale) : 1;
-        _addBuffer({ name, path, text, modified, enc, ff, bom, shiftwidth, ignorecase, smartcase, markdown, md_draftedit, edScale });
+        _addBuffer({ name, path, text, modified, enc, ff, bom, shiftwidth, ignorecase, smartcase, markdown, md_draftedit, setext, edScale });
         try{
           const b = buffers[buffers.length-1];
           // If savedText is provided, trust it; otherwise, if not modified, set savedText=text
@@ -1381,6 +1580,8 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
           try{ b.markdown = !!(it && it.markdown); }catch{ b.markdown = !!b.markdown; }
           // restore markdown edit style (default true=draft)
           try{ b.md_draftedit = (it && typeof it.md_draftedit === 'boolean') ? !!it.md_draftedit : true; }catch{ b.md_draftedit = (typeof b.md_draftedit==='boolean') ? !!b.md_draftedit : true; }
+          // restore setext option (default false)
+          try{ b.setext = !!(it && it.setext); }catch{ b.setext = !!b.setext; }
           // recompute ticks from modified flag
           b._changeTick = modified ? 1 : 0; b._savedTick = 0; b.modified = !!modified;
           // Restore undo snapshots (limited) if present
@@ -3209,14 +3410,20 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
     try{
       // IME未確定中はビジュアル選択のオーバーレイ描画を停止（計測抑制）
       try{ if (window._imeComposing===true){ _visSelClear(); return; } }catch{}
-      if (!_visCmdActive){ _visSelClear(); return; }
+      const mdRich = !!(function(){ try{ return _mdRichActive(); }catch{ return false; } })();
+      const showForMdVisual = (mdRich && _visualActive && _mode==='VISUAL');
+      if (!_visCmdActive && !showForMdVisual){ _visSelClear(); return; }
       _visSelEnsureLayer();
       _visSelClear();
-      // Compute absolute selection offsets from the snapshot
-      const linewise = !!_visCmdLinewise;
-      const aR = _visCmdAnchorR|0, aC = _visCmdAnchorC|0;
-      const bR = _visCmdCaretR|0,  bC = _visCmdCaretC|0;
+
+      // Selection endpoints from either CMD snapshot or live VISUAL state
+      const linewise = _visCmdActive ? !!_visCmdLinewise : !!_visualLinewise;
+      const aR = (_visCmdActive ? _visCmdAnchorR : _visualAnchorR)|0;
+      const aC = (_visCmdActive ? _visCmdAnchorC : _visualAnchorC)|0;
+      const bR = (_visCmdActive ? _visCmdCaretR  : caretRow)|0;
+      const bC = (_visCmdActive ? _visCmdCaretC  : caretCol)|0;
       const rs = Math.min(aR, bR), re = Math.max(aR, bR);
+
       let selStart = 0, selEnd = 0;
       if (linewise){
         selStart = _offsetFromRC(rs, 0)|0;
@@ -3230,36 +3437,81 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
         selEnd = Math.max(sOff, eOff)|0;
       }
       if (!(selEnd>selStart)) return;
+
       const lines = _splitLines();
-      // Iterate rows within selection and draw segments
-      for (let r=rs; r<=re; r++){
-        const line = String(lines[r]||'');
-        let c1 = 0, c2 = line.length;
-        if (!linewise){
-          if (r === rs){ c1 = (aR<=bR ? (aR===rs ? aC : 0) : (bR===rs ? bC : 0)); }
-          if (r === re){ c2 = (aR>=bR ? (aR===re ? aC : line.length) : (bR===re ? bC : line.length)); }
-          c1 = Math.max(0, Math.min(line.length, c1|0));
-          c2 = Math.max(c1, Math.min(line.length, c2|0));
+      const topLine1 = _topLine();
+      const vis = Math.max(1, _visibleLinesExact());
+      const startIdx = Math.max(0, (topLine1|0) - 1);
+      const endIdx = Math.min((lines.length|0) - 1, startIdx + vis - 1);
+      let _hs = 0; try{ _hs = (editor.scrollLeft||0); }catch{}
+
+      let yAcc = 0;
+      for (let r=startIdx; r<=endIdx; r++){
+        const lineSrc = String(lines[r]||'');
+        const off0 = _offsetFromRC(r, 0)|0;
+        const off1 = (off0 + (lineSrc.length|0))|0; // exclude newline
+
+        let rowHeightPx = LINE_HEIGHT;
+        let scale = 1;
+        let hideSymbols = false;
+        let prefixLen = 0;
+        let dispText = lineSrc;
+        let renderHr = false;
+        let renderSetextUnderlineRow = false;
+        try{
+          if (mdRich){
+            const info = _mdLineLayoutInfoAtRow(lines, r, (r === (caretRow|0)));
+            rowHeightPx = (info && info.lineHeightPx) ? (info.lineHeightPx|0) : LINE_HEIGHT;
+            scale = (info && info.scale) ? (+info.scale || 1) : 1;
+            hideSymbols = !!(info && info.hideSymbols);
+            try{ renderHr = _mdIsHrLineForDisplay(lineSrc, lines, r, (r === (caretRow|0))); }catch{ renderHr = false; }
+            try{ renderSetextUnderlineRow = _mdIsSetextUnderlineRowForDisplay(lineSrc, lines, r, (r === (caretRow|0))); }catch{ renderSetextUnderlineRow = false; }
+            if (!renderHr && !renderSetextUnderlineRow && hideSymbols){
+              const lv0 = _mdHeadingLevel(lineSrc)|0;
+              if (lv0>=1 && lv0<=6) prefixLen = (_mdHeadingPrefixLen(lineSrc)|0);
+            }
+            if (renderSetextUnderlineRow){
+              dispText = '';
+              prefixLen = 0;
+            } else if (!renderHr && prefixLen>0){
+              dispText = lineSrc.slice(prefixLen);
+            }
+          }
+        }catch{}
+
+        const segS = Math.max(selStart|0, off0);
+        const segE = Math.min(selEnd|0, off1);
+
+        if (segE > segS && dispText){
+          let c1 = (segS - off0)|0;
+          let c2 = (segE - off0)|0;
+          if (mdRich && hideSymbols && prefixLen>0){
+            c1 = Math.max(0, c1 - (prefixLen|0));
+            c2 = Math.max(0, c2 - (prefixLen|0));
+          }
+          c1 = Math.max(0, Math.min((dispText.length|0), c1|0));
+          c2 = Math.max(c1, Math.min((dispText.length|0), c2|0));
+
+          if (c2 > c1){
+            _measureSpan.textContent = dispText.slice(0, c1);
+            const x1b = _measureSpan.getBoundingClientRect().width;
+            _measureSpan.textContent = dispText.slice(0, c2);
+            const x2b = _measureSpan.getBoundingClientRect().width;
+            const x1 = mdRich ? (x1b * scale) : x1b;
+            const x2 = mdRich ? (x2b * scale) : x2b;
+            if (x2 > x1){
+              const el = document.createElement('div');
+              el.className = 'viscmdsel';
+              el.style.left = (x1 - _hs) + 'px';
+              el.style.top = yAcc + 'px';
+              el.style.width = Math.max(1, Math.round(x2 - x1)) + 'px';
+              el.style.height = Math.max(1, Math.round(mdRich ? rowHeightPx : LINE_HEIGHT)) + 'px';
+              _visSelLayer.appendChild(el);
+            }
+          }
         }
-        // Measure x positions
-        _measureSpan.textContent = line.slice(0, c1);
-        const x1 = _measureSpan.getBoundingClientRect().width;
-        _measureSpan.textContent = line.slice(0, c2);
-        const x2 = _measureSpan.getBoundingClientRect().width;
-        if (!(x2 > x1)) continue;
-        const topLine = _topLine();
-        const row1 = r + 1;
-        const topPx = (row1 - topLine) * LINE_HEIGHT;
-  const el = document.createElement('div');
-  // dedicated style for CMD-time visual selection
-  el.className = 'viscmdsel';
-  // Adjust by horizontal scroll
-  let _hs = 0; try{ _hs = (editor.scrollLeft||0); }catch{}
-  el.style.left = (x1 - _hs) + 'px';
-        el.style.top = topPx + 'px';
-        el.style.width = Math.max(1, Math.round(x2 - x1)) + 'px';
-        el.style.height = Math.max(1, Math.round(LINE_HEIGHT)) + 'px';
-        _visSelLayer.appendChild(el);
+
+        yAcc += (mdRich ? (rowHeightPx||LINE_HEIGHT) : LINE_HEIGHT);
       }
     }catch{}
   }
@@ -3553,13 +3805,20 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
       let baseFontPx = 16;
       if (mdRich){
         try{ baseFontPx = parseFloat(getComputedStyle(editor).fontSize)||baseFontPx; }catch{}
-        try{ scale = _mdLineScale(line) || 1; }catch{ scale = 1; }
-        try{ rowHeightPx = _mdLineHeightPx(line) || LINE_HEIGHT; }catch{ rowHeightPx = LINE_HEIGHT; }
+        try{
+          const isActiveRow = (row1 === ((caretRow|0) + 1));
+          const info = _mdLineLayoutInfoAtRow(lines, idx, isActiveRow);
+          scale = info.scale || 1;
+          rowHeightPx = info.lineHeightPx || LINE_HEIGHT;
+        }catch{ scale = 1; rowHeightPx = LINE_HEIGHT; }
         try{
           const startIdx = Math.max(0, (topLine|0) - 1);
           const targetIdx = Math.max(0, Math.min(lines.length-1, idx|0));
           let y = 0;
-          for (let r=startIdx; r<targetIdx; r++) y += _mdLineHeightPx(lines[r]||'');
+          for (let r=startIdx; r<targetIdx; r++){
+            const infoR = _mdLineLayoutInfoAtRow(lines, r, (r === (caretRow|0)));
+            y += (infoR.lineHeightPx||LINE_HEIGHT);
+          }
           yTop = y;
         }catch{}
       }
@@ -3651,8 +3910,13 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
                 if (tb.ch !== '-'){
                   hrEol = true;
                 } else {
-                  const prev = (idx>0) ? String(lines[idx-1]||'') : '';
-                  if (!prev || prev.trim()==='') hrEol = true;
+                  const setextOn = _mdSetextEnabled();
+                  if (!setextOn){
+                    hrEol = true;
+                  } else {
+                    const prev = (idx>0) ? String(lines[idx-1]||'') : '';
+                    if (!prev || prev.trim()==='') hrEol = true;
+                  }
                 }
               }
             }
@@ -3820,146 +4084,10 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
       const vis = _visibleLinesExact();
       const endLine = topLine + vis - 1;
 
-      const mdRich = !!(function(){ try{ return _mdRichActive(); }catch{ return false; } })();
-      let baseFontPx = 16;
-      if (mdRich){
-        try{ baseFontPx = parseFloat(getComputedStyle(editor).fontSize)||baseFontPx; }catch{}
-      }
-
-      // In markdown-rich, rows have variable heights. Compute y cumulatively from the viewport start.
-      let yAcc = 0;
-      // For performance do one measurement span reuse
+      // Delegate per-row rendering to the unified row renderer.
+      // This keeps setext/variable line-height logic consistent with markdown-rich display.
       for (let row = topLine; row <= endLine; row++){
-        const idx = row - 1;
-        const isReal = idx >= 0 && idx < realTotal;
-        const line = isReal ? String(lines[idx]||'') : '';
-
-        let rowHeightPx = LINE_HEIGHT;
-        let scale = 1;
-        if (mdRich){
-          try{ scale = _mdLineScale(line) || 1; }catch{ scale = 1; }
-          try{ rowHeightPx = isReal ? (_mdLineHeightPx(line) || LINE_HEIGHT) : LINE_HEIGHT; }catch{ rowHeightPx = LINE_HEIGHT; }
-        }
-        const yTop = mdRich ? yAcc : ((row - topLine) * LINE_HEIGHT);
-        if (mdRich) yAcc += rowHeightPx;
-
-        // Determine display line for listchars measurement in markdown-rich.
-        // - clean mode: strip heading prefix
-        // - draft mode: strip heading prefix only on non-caret lines
-        let dispLine = line;
-        let dispPrefix = 0;
-        try{
-          if (mdRich && isReal){
-            const isActiveRow = (row === ((caretRow|0) + 1));
-            const hide = _mdHideSymbolsForRow(isActiveRow);
-            if (hide){
-              const p = _mdHeadingPrefixLen(line)|0;
-              if (p>0){ dispPrefix = p; dispLine = line.slice(p); }
-            }
-          }
-        }catch{ dispLine = line; dispPrefix = 0; }
-
-        // Render trailing spaces, tabs, eol marker. We overlay individual inline boxes.
-        // Trailing run: treat ASCII space, TAB, and IDEOGRAPHIC SPACE as trailing (#461)
-        let trailStart = dispLine.length;
-        while (trailStart>0){
-          const cht = dispLine.charAt(trailStart-1);
-          if (cht===' ' || cht==='\t' || cht==='\u3000') trailStart--; else break;
-        }
-        // Iterate characters for tabs and trail markers
-        // local tab expander using pixel-based columns (space width) for correct alignment after full-width chars (#507)
-        const _exp = (s)=>{
-          if (!s || s.indexOf('\t')===-1) return s;
-          let _ts = 8; try{ const tsRaw = (window && window.SIX_OPTIONS && window.SIX_OPTIONS.tabstop); const ts = parseInt(tsRaw,10); if (ts && ts>0) _ts = ts; }catch{}
-          // baseline space advance
-          _measureSpan.textContent = ' ';
-          const spaceW = _measureSpan.getBoundingClientRect().width || 1;
-          const _charW = (ch)=>{ _measureSpan.textContent = ch; const w=_measureSpan.getBoundingClientRect().width; return (w && w>0)?w:spaceW; };
-          let out=''; let x=0;
-          for (let i=0;i<s.length;i++){
-            const ch=s[i];
-            if (ch==='\t'){
-              const col = Math.floor((x/spaceW)+1e-6);
-              const spaces = _ts - (col % _ts);
-              out += ' '.repeat(spaces);
-              x += spaces * spaceW;
-            } else {
-              out += ch;
-              x += _charW(ch);
-            }
-          }
-          return out;
-        };
-        for (let c=0;c<dispLine.length;c++){
-          const ch = dispLine.charAt(c);
-          if (ch==='\t' || ch==='\u3000' || (c>=trailStart && ch===' ')){
-            _measureSpan.textContent = _exp(dispLine.slice(0,c));
-            const x1b = _measureSpan.getBoundingClientRect().width;
-            _measureSpan.textContent = _exp(dispLine.slice(0,c+1));
-            const x2b = _measureSpan.getBoundingClientRect().width;
-            const x1 = mdRich ? (x1b * scale) : x1b;
-            const x2 = mdRich ? (x2b * scale) : x2b;
-            const el = document.createElement('div');
-            el.className='listchar';
-            let sym = '';
-            if (ch==='\t') sym='▸';
-            else if (ch==='\u3000'){ sym='□'; el.className+=' listchar-ideospc'; } // render ideographic space visibly (#462)
-            else sym='·';
-            el.textContent = sym;
-            try{ el.dataset.row = String(row); }catch{}
-            let _hs=0; try{ _hs=(editor.scrollLeft||0); }catch{}
-            el.style.position='absolute'; el.style.left=(x1-_hs)+'px'; el.style.top=yTop+'px';
-            el.style.height=(mdRich ? rowHeightPx : LINE_HEIGHT)+'px'; el.style.lineHeight=(mdRich ? rowHeightPx : LINE_HEIGHT)+'px';
-            if (mdRich){ el.style.fontSize = Math.max(6, Math.round(baseFontPx * scale)) + 'px'; } else { el.style.fontSize='inherit'; }
-            el.style.fontFamily='var(--controlCharFont, "Segoe UI Symbol","Noto Sans Symbols 2","Cascadia Mono","Consolas",monospace)'; /* weight via CSS var on class */ el.style.padding='0'; el.style.margin='0'; el.style.color='var(--controlCharColor, yellow)';
-            _listLayer.appendChild(el);
-          }
-        }
-        // EOL marker (after line width) only for real lines (exclude virtual padding beyond EOF)
-        if (isReal){
-          // #1319: Skip EOL marker on the active line during IME composition to avoid overlap
-          if (window._imeComposing === true && row === (caretRow + 1)) {
-             // skip
-          } else {
-            _measureSpan.textContent = _exp(dispLine);
-            const xEndb = _measureSpan.getBoundingClientRect().width;
-            const xEnd = mdRich ? (xEndb * scale) : xEndb;
-            let _hs=0; try{ _hs=(editor.scrollLeft||0); }catch{}
-            const elE = document.createElement('div');
-            elE.className='listchar-eol';
-            // ff-based coloring: THEME via CSS vars for LF/CRLF; legacy CR (mac) stays red-ish as hidden feature
-            let ffColor = 'var(--controlCharColorLF, yellow)';
-            let ffKind = 'unix';
-            try{ const b=currentBuffer(); ffKind=(b&&b.ff)||'unix'; if(ffKind==='dos') ffColor='var(--controlCharColorCRLF, yellow)'; else if(ffKind==='mac') ffColor='rgba(200,80,80,0.65)'; }catch{}
-            // Dummy final newline highlighting (#599): original file lacked final LF and current text still lacks final LF.
-            // We treat the displayed end-of-line marker for the last real line as synthetic and recolor it.
-            // UI記号は常に'↲'で統一（ダミーも同一記号で色のみ差別化）
-            let eolSym = '↲';
-            try{
-              const b = currentBuffer();
-              const isLastReal = (idx === realTotal-1);
-              const bufText = String(b && b.text || '');
-              const stillNoFinalLF = b ? !bufText.endsWith('\n') : false;
-              // シンプルルール: 「現在のテキストが末尾LFを欠く」時のみダミーを表示
-              const dummyActive = !!(b && isLastReal && stillNoFinalLF);
-              if (dummyActive){
-                // Prefer explicit theme colors if provided; fall back to a distinct orange/yellow.
-                // Fallback colors: fixed yellow (#601 request) if theme not provided
-                let dLF = 'yellow'; let dCRLF = 'yellow';
-                try{ if (window && window.THEME){ if (window.THEME.dummyLFColor) dLF = String(window.THEME.dummyLFColor); if (window.THEME.dummyCRLFColor) dCRLF = String(window.THEME.dummyCRLFColor); } }catch{}
-                ffColor = (ffKind === 'dos') ? dCRLF : dLF;
-                elE.dataset.dummyFinal = '1';
-              }
-            }catch{}
-            elE.textContent=eolSym;
-            try{ elE.dataset.row = String(row); }catch{}
-            elE.style.position='absolute'; elE.style.left=(xEnd-_hs)+'px'; elE.style.top=yTop+'px';
-            elE.style.height=(mdRich ? rowHeightPx : LINE_HEIGHT)+'px'; elE.style.lineHeight=(mdRich ? rowHeightPx : LINE_HEIGHT)+'px';
-            if (mdRich){ elE.style.fontSize = Math.max(6, Math.round(baseFontPx * scale)) + 'px'; } else { elE.style.fontSize='inherit'; }
-            elE.style.fontFamily='var(--controlCharFont, "Segoe UI Symbol","Noto Sans Symbols 2","Cascadia Mono","Consolas",monospace)'; /* weight via CSS var on class */ elE.style.color=ffColor; elE.style.margin='0'; elE.style.padding='0';
-            _listLayer.appendChild(elE);
-          }
-        }
+        _renderListCharsRow(row, lines, topLine, realTotal);
       }
     }catch{}
   }
@@ -4831,6 +4959,13 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
       // Per-line gradient colors (top -> bottom)
       setVar('lineGradStart', themeGet('lineGradientStart', t.lineGradientStart));
       setVar('lineGradEnd', themeGet('lineGradientEnd', t.lineGradientEnd));
+        // Markdown clean (WYSIWYG) colors (#1493)
+        // - Base is monochrome-like; if you need shading, do it with opacity in CSS.
+        setVar('mdCleanFg', themeGet('md_FGColor', 'yellow'));
+        setVar('mdCleanBgStart', themeGet('md_BGGradientStart', 'yellow'));
+        setVar('mdCleanBgEnd', themeGet('md_BGGradientEnd', 'yellow'));
+        // Keep legacy mdHrColor in sync (used by CSS)
+        setVar('mdHrColor', themeGet('md_FGColor', 'yellow'));
   // Editor text color
   setVar('editorTextColor', themeGet('editorTextColor', t.editorTextColor));
   // Active line stripe gradient (top -> bottom)
@@ -5071,6 +5206,8 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
         markdown: !!b.markdown,
         // per-buffer markdown edit style: true=draft (show symbols), false=WYSIWYG (hide symbols) (#1488)
         md_draftedit: (typeof b.md_draftedit === 'boolean') ? !!b.md_draftedit : true,
+        // per-buffer markdown setext headings (default OFF) (#1493)
+        setext: !!b.setext,
         // original final newline presence (established on initial load/create) — #598
         _origHadFinalLF: text0.endsWith('\n'),
         // encoding/newline metadata
@@ -6554,6 +6691,16 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
     try{ if (_nativeCaretEnabled && _mode==='INSERT' && !(opts && opts.force)){ return; } }catch{}
     
     opts = opts||{};
+
+    // #1494: In markdown clean display, prevent horizontal caret moves on HR/setext underline lines.
+    try{
+      const changed = _mdClampCaretForSpecialCleanLines();
+      if (changed){
+        if (_visualActive) _updateVisualSelection();
+        else _syncNativeSelectionToCaret();
+      }
+    }catch{}
+
     const row1 = caretRow + 1;
     const topLine = _topLine();
     let offsetLines = row1 - topLine;
@@ -6573,9 +6720,12 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
         const targetIdx = Math.max(0, Math.min(lines.length-1, caretRow|0));
         if (targetIdx < startIdx){ edstripe.style.display='none'; return; }
         let y = 0;
-        for (let r=startIdx; r<targetIdx; r++) y += _mdLineHeightPx(lines[r]||'');
+        for (let r=startIdx; r<targetIdx; r++){
+          const infoR = _mdLineLayoutInfoAtRow(lines, r, false);
+          y += (infoR.lineHeightPx||LINE_HEIGHT);
+        }
         topPx = y;
-        rowHeightPx = _mdLineHeightPx(lines[targetIdx]||'');
+        rowHeightPx = (_mdLineLayoutInfoAtRow(lines, targetIdx, true).lineHeightPx||LINE_HEIGHT);
       }catch{}
     }
     // Subpixel remainder between scrollTop and line-height (e.g., due to DPI/zoom)
@@ -6596,23 +6746,26 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
     const isViewScroll = (window && window._altScroll && window._altScroll.active) || (window && window.__sixScanHoldScrollActive);
     
     if (topPx >= 0 && topPx < viewport.clientHeight) {
-      edstripe.style.display='';
-      edstripe.style.top = topPx + 'px';
-      edstripe.style.height = rowHeightPx + 'px';
-      // INSERT時はアクティブ行のグラデ色を切り替える (#437)
-      try{
-        if (_mode === 'INSERT'){
-          // Use CSS vars so values are centralized and fallback is consistently yellow
-          edstripe.style.background = 'linear-gradient(to bottom, var(--activeEditLineGradStart, yellow), var(--activeEditLineGradEnd, yellow))';
-        } else {
-          edstripe.style.background = '';
-        }
-      }catch{}
-      // apply remainder compensation to stripe.
-      // For normal (non-md-rich) view scroll we skip to avoid jitter.
-      // For markdown-rich, the textLayer already applies remainder compensation, so the stripe must match
-      // even during Alt+j/k; otherwise it can appear to jump/flicker by ~1 line (#1487).
-      try{ edstripe.style.transform = (( !isViewScroll || _mdRichActive() ) && Math.abs(rem) > 0.01) ? `translateY(${-rem}px)` : ''; }catch{}
+      if (_mdRichActive()){
+        // #1495: active line background is painted in the markdown background layer; keep edstripe hidden.
+        edstripe.style.display='none';
+        try{ edstripe.style.transform = ''; }catch{}
+      } else {
+        edstripe.style.display='';
+        edstripe.style.top = topPx + 'px';
+        edstripe.style.height = rowHeightPx + 'px';
+        // INSERT時はアクティブ行のグラデ色を切り替える (#437)
+        try{
+          if (_mode === 'INSERT'){
+            // Use CSS vars so values are centralized and fallback is consistently yellow
+            edstripe.style.background = 'linear-gradient(to bottom, var(--activeEditLineGradStart, yellow), var(--activeEditLineGradEnd, yellow))';
+          } else {
+            edstripe.style.background = '';
+          }
+        }catch{}
+        // apply remainder compensation to stripe.
+        try{ edstripe.style.transform = (( !isViewScroll ) && Math.abs(rem) > 0.01) ? `translateY(${-rem}px)` : ''; }catch{}
+      }
     } else {
       edstripe.style.display='none';
       try{ edstripe.style.transform = ''; }catch{}
@@ -7158,6 +7311,7 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
         if (sOff <= eOff) editor.setSelectionRange(sOff, eOff); else editor.setSelectionRange(eOff, sOff);
       }
     }catch{}
+    try{ _renderVisSelOverlay && _renderVisSelOverlay(); }catch{}
   }
   function _enterVisual(linewise){
     _visualActive = true; _visualLinewise = !!linewise;
@@ -7188,6 +7342,9 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
       if (caretRow<0) caretRow=0; if (caretRow>raw.length-1) caretRow=raw.length-1;
       const maxCol=(raw[caretRow]||'').length;
       if (caretCol<0) caretCol=0; if (caretCol>maxCol) caretCol=maxCol;
+
+      // #1494: markdown clean display - HR/setext underline lines clamp to column 0.
+      try{ _mdClampCaretForSpecialCleanLines(); }catch{}
     }catch{}
   }
   function _afterTextMutation(){
@@ -8273,7 +8430,12 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
           if (!el){ el = document.createElement('div'); gutter.appendChild(el); }
           const idx0 = r.eof ? -1 : ((r.ln|0) - 1);
           const text = (idx0>=0 && idx0<lines.length) ? String(lines[idx0]||'') : '';
-          const lh = r.eof ? LINE_HEIGHT : _mdLineHeightPx(text);
+          let lh = LINE_HEIGHT;
+          if (r.eof) lh = LINE_HEIGHT;
+          else {
+            const isActiveRow = ((idx0|0) === (caretRow|0));
+            lh = (_mdLineLayoutInfoAtRow(lines, idx0|0, isActiveRow).lineHeightPx||LINE_HEIGHT);
+          }
           try{
             el.style.display = 'block';
             el.style.height = lh + 'px';
@@ -9722,19 +9884,33 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
       return;
     }
     // :set shiftwidth=N  / :set sw=N
-    let mSW = cmd.match(/^:set\s+(?:shiftwidth|sw)\s*=\s*(\d+)$/i);
+    // :set shiftwidth=TAB / :set sw=TAB
+    // Note: internally, TAB-mode is stored as b.shiftwidth === 'TAB' (#1320)
+    let mSW = cmd.match(/^:set\s+(?:shiftwidth|sw)\s*=\s*(\d+|TAB)$/i);
     if (mSW){
-      const n = parseInt(mSW[1],10);
-      if (!Number.isNaN(n)){
-        const b=currentBuffer(); if (b){ b.shiftwidth = Math.max(1, n|0); _schedulePersist('shiftwidth'); }
-        try{ _updateOverlayShiftwidthVisual(); }catch{}
-        try{ toast('shiftwidth = ' + (n|0), 900); }catch{}
+      const raw = String(mSW[1]||'').toUpperCase();
+      const b=currentBuffer();
+      if (b){
+        if (raw === 'TAB'){
+          b.shiftwidth = 'TAB';
+          _schedulePersist('shiftwidth');
+          try{ _updateOverlayShiftwidthVisual(); }catch{}
+          try{ toast('shiftwidth = TAB', 900); }catch{}
+        } else {
+          const n = parseInt(raw,10);
+          if (!Number.isNaN(n)){
+            b.shiftwidth = Math.max(1, n|0);
+            _schedulePersist('shiftwidth');
+            try{ _updateOverlayShiftwidthVisual(); }catch{}
+            try{ toast('shiftwidth = ' + (n|0), 900); }catch{}
+          }
+        }
       }
       return;
     }
     // :set shiftwidth?
     if (/^:set\s+shiftwidth\?\s*$/i.test(cmd)){
-      try{ const b=currentBuffer(); const sw = b && Number.isFinite(b.shiftwidth)? (b.shiftwidth|0) : 4; toast('shiftwidth = ' + sw, 1200); }catch{}
+      try{ const sw = _getShiftWidth(); toast('shiftwidth = ' + sw, 1200); }catch{}
       return;
     }
     // :set visualbell / :set novisualbell / :set visualbell! / :set visualbell?
@@ -9805,16 +9981,28 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
     if (/^:set\s+markdown\s*$/i.test(cmd)){
       const b=currentBuffer(); if (b){ b.markdown=true; if (typeof b.md_draftedit !== 'boolean') b.md_draftedit = true; _schedulePersist('markdown'); _schedulePersist('md_draftedit'); }
       try{ _updateOverlayMarkdownVisual(); }catch{}
+      try{ _mdApplyVisualState && _mdApplyVisualState(); }catch{}
+      try{ _repositionCaret(); }catch{}
+      try{ _renderListChars(); }catch{}
+      try{ updateGutter(); }catch{}
       toast('markdown: on', 900); return;
     }
     if (/^:set\s+nomarkdown\s*$/i.test(cmd)){
       const b=currentBuffer(); if (b){ b.markdown=false; _schedulePersist('markdown'); }
       try{ _updateOverlayMarkdownVisual(); }catch{}
+      try{ _mdApplyVisualState && _mdApplyVisualState(); }catch{}
+      try{ _repositionCaret(); }catch{}
+      try{ _renderListChars(); }catch{}
+      try{ updateGutter(); }catch{}
       toast('markdown: off', 900); return;
     }
     if (/^:set\s+markdown!\s*$/i.test(cmd)){
       const b=currentBuffer(); if (b){ b.markdown=!b.markdown; if (b.markdown && typeof b.md_draftedit !== 'boolean') b.md_draftedit = true; _schedulePersist('markdown'); _schedulePersist('md_draftedit'); }
       try{ _updateOverlayMarkdownVisual(); }catch{}
+      try{ _mdApplyVisualState && _mdApplyVisualState(); }catch{}
+      try{ _repositionCaret(); }catch{}
+      try{ _renderListChars(); }catch{}
+      try{ updateGutter(); }catch{}
       toast('markdown: ' + (b&&b.markdown?'on':'off'), 900); return;
     }
     if (/^:set\s+markdown\?\s*$/i.test(cmd)){
@@ -9851,6 +10039,35 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
     }
     if (/^:set\s+md_draftedit\?\s*$/i.test(cmd)){
       const b=currentBuffer(); toast('md_draftedit: ' + (b && b.md_draftedit ? 'draft' : '清書'), 1200); return;
+    }
+
+    // :set setext / :set nosetext / :set setext! / :set setext?
+    if (/^:set\s+setext\s*$/i.test(cmd)){
+      const b=currentBuffer(); if (b){ b.setext = true; _schedulePersist('setext'); }
+      try{ _mdApplyVisualState && _mdApplyVisualState(); }catch{}
+      try{ _repositionCaret(); }catch{}
+      try{ _renderListChars(); }catch{}
+      try{ updateGutter(); }catch{}
+      toast('setext: on', 900); return;
+    }
+    if (/^:set\s+nosetext\s*$/i.test(cmd)){
+      const b=currentBuffer(); if (b){ b.setext = false; _schedulePersist('setext'); }
+      try{ _mdApplyVisualState && _mdApplyVisualState(); }catch{}
+      try{ _repositionCaret(); }catch{}
+      try{ _renderListChars(); }catch{}
+      try{ updateGutter(); }catch{}
+      toast('setext: off', 900); return;
+    }
+    if (/^:set\s+setext!\s*$/i.test(cmd)){
+      const b=currentBuffer(); if (b){ b.setext = !b.setext; _schedulePersist('setext'); }
+      try{ _mdApplyVisualState && _mdApplyVisualState(); }catch{}
+      try{ _repositionCaret(); }catch{}
+      try{ _renderListChars(); }catch{}
+      try{ updateGutter(); }catch{}
+      toast('setext: ' + (b&&b.setext?'on':'off'), 900); return;
+    }
+    if (/^:set\s+setext\?\s*$/i.test(cmd)){
+      const b=currentBuffer(); toast('setext: ' + (b&&b.setext?'on':'off'), 1200); return;
     }
 
     // :set list / :set nolist / :set list! / :set list?
@@ -15130,7 +15347,7 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
                 // #1290: Increased to 4px for faster scroll feel
                 // #1291: Use 8px if count > 9
                 // #1298: Use fixed speed if requested (e.g. 6px for step-to-scroll transition)
-                let scrollPx = 4;
+                let scrollPx = (_mdRichActive() ? 6 : 4);
                 if (_scanHold.fixedSpeed) {
                     scrollPx = _scanHold.fixedSpeed;
                 } else if (_scanHold.lastCount > 9) {
@@ -20267,9 +20484,18 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
         try{ e.preventDefault(); e.stopPropagation(); }catch{}
         try{
           const b = currentBuffer();
-          if (b){ b.markdown = !b.markdown; _schedulePersist('markdown'); }
+          if (b){
+            b.markdown = !b.markdown;
+            if (b.markdown && typeof b.md_draftedit !== 'boolean') b.md_draftedit = true;
+            _schedulePersist('markdown');
+            if (b.markdown) _schedulePersist('md_draftedit');
+          }
         }catch{}
         try{ _updateOverlayMarkdownVisual(); }catch{}
+        try{ _mdApplyVisualState && _mdApplyVisualState(); }catch{}
+        try{ _repositionCaret(); }catch{}
+        try{ _renderListChars(); }catch{}
+        try{ updateGutter(); }catch{}
         try{ const b = currentBuffer(); toast('markdown: ' + (b&&b.markdown?'on':'off'), 900); }catch{}
         try{ if (lastFocusedEl && typeof lastFocusedEl.focus==='function') lastFocusedEl.focus(); }catch{}
       });
