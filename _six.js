@@ -1334,7 +1334,10 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
     try{
       const b = currentBuffer();
       if (!b) return; // Ensure buffer exists
-        b.viewRow = caretRow | 0; b.viewCol = caretCol | 0;
+      // If this buffer is waiting for a lite-restore reload, don't overwrite its saved view state
+      // with the temporary (often clamped-to-BOF) caret/scroll positions.
+      try{ if (b && b._restoreViewPending){ return; } }catch{}
+      b.viewRow = caretRow | 0; b.viewCol = caretCol | 0;
       // snap to line grid for stability
       const st = (editor && typeof editor.scrollTop==='number') ? (editor.scrollTop|0) : 0;
     try{ b.viewScrollTop = Math.round(Math.max(0, st)/LINE_HEIGHT)*LINE_HEIGHT; }catch{ b.viewScrollTop = Math.max(0, st); }
@@ -1671,6 +1674,16 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
           b.viewRow = Number.isFinite(it&&it.viewRow)?(it.viewRow|0):0;
           b.viewCol = Number.isFinite(it&&it.viewCol)?(it.viewCol|0):0;
           b.viewScrollTop = Number.isFinite(it&&it.viewScrollTop)?(it.viewScrollTop|0):0;
+          // If this buffer is going to be reloaded (lite restore), preserve the intended view
+          // and prevent early clamping from overwriting it.
+          try{
+            if (it && it.needReload){
+              b._restoreViewPending = true;
+              b._restoreViewRow = b.viewRow|0;
+              b._restoreViewCol = b.viewCol|0;
+              b._restoreViewScrollTop = b.viewScrollTop|0;
+            }
+          }catch{}
           // restore saved mode/visual
           b.savedMode = (it && it.savedMode) || 'NORMAL';
           const sv = it && it.savedVisual;
@@ -1782,8 +1795,23 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
                 // If current, reflect into editor without disturbing view state
                 if ((buffers.indexOf(b)|0) === (currentIdx|0)){
                   const stKeep = (editor && typeof editor.scrollTop==='number') ? (editor.scrollTop|0) : 0;
-                  editor.value = norm; _syncModifiedFromTick(); _repositionCaret(); updateGutter();
-                  try{ _setEditorScrollTop(stKeep, { immediate:true }); }catch{}
+                  const hadRestorePending = !!(b && b._restoreViewPending);
+                  editor.value = norm; _syncModifiedFromTick();
+                  // If we have a preserved restore view, apply it now that text is available.
+                  try{
+                    if (hadRestorePending){
+                      const rr = Number.isFinite(b._restoreViewRow) ? (b._restoreViewRow|0) : 0;
+                      const rc = Number.isFinite(b._restoreViewCol) ? (b._restoreViewCol|0) : 0;
+                      const rst = Number.isFinite(b._restoreViewScrollTop) ? (b._restoreViewScrollTop|0) : 0;
+                      _setCaret(rr, rc);
+                      try{ _setEditorScrollTop(Math.max(0, rst|0), { immediate:true }); }catch{}
+                      b.viewRow = rr|0; b.viewCol = rc|0; b.viewScrollTop = rst|0;
+                      b._restoreViewPending = false;
+                    }
+                  }catch{}
+                  _repositionCaret(); updateGutter();
+                  // If no restore was pending, keep the prior scrollTop stable.
+                  try{ if (!hadRestorePending) _setEditorScrollTop(stKeep, { immediate:true }); }catch{}
                 }
                 _schedulePersist('reload');
               }catch{}
@@ -2501,6 +2529,43 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
       const line = String(lines[_hoverLink.r]||'');
       const c1 = Math.max(0, Math.min(line.length, _hoverLink.c1|0));
       const c2 = Math.max(c1, Math.min(line.length, _hoverLink.c2|0));
+
+      const mdRich = (function(){ try{ return _mdRichActive(); }catch{ return false; } })();
+      const mdScaleX = (function(){ try{ return mdRich ? (_mdLineScale(line)||1) : 1; }catch{ return 1; } })();
+      let yTop = ((row1 - topLine) * LINE_HEIGHT);
+      let rowHeightPx = LINE_HEIGHT;
+      let dispLine = line;
+      let prefixLen = 0;
+      let dispC1 = c1, dispC2 = c2;
+      try{
+        if (mdRich){
+          // Vertical: accumulate per-line heights from current topLine.
+          const startIdx = Math.max(0, (topLine|0) - 1);
+          const targetIdx = Math.max(0, Math.min(lines.length-1, _hoverLink.r|0));
+          let y = 0;
+          for (let r=startIdx; r<targetIdx; r++){
+            const infoR = _mdLineLayoutInfoAtRow(lines, r, (r === (caretRow|0)));
+            y += (infoR && infoR.lineHeightPx) ? (infoR.lineHeightPx||LINE_HEIGHT) : LINE_HEIGHT;
+          }
+          yTop = y;
+          const infoT = _mdLineLayoutInfoAtRow(lines, targetIdx, (targetIdx === (caretRow|0)));
+          rowHeightPx = (infoT && infoT.lineHeightPx) ? (infoT.lineHeightPx||LINE_HEIGHT) : LINE_HEIGHT;
+
+          // Horizontal: when markdown symbols are hidden on this row, subtract heading prefix.
+          const isActiveRow = (targetIdx === (caretRow|0));
+          const hide = _mdHideSymbolsForRow(isActiveRow);
+          if (hide){
+            const p = _mdHeadingPrefixLen(line)|0;
+            if (p>0){
+              prefixLen = p;
+              dispLine = line.slice(p);
+              dispC1 = Math.max(0, c1 - p);
+              dispC2 = Math.max(dispC1, c2 - p);
+            }
+          }
+        }
+      }catch{ yTop = ((row1 - topLine) * LINE_HEIGHT); rowHeightPx = LINE_HEIGHT; dispLine = line; prefixLen = 0; dispC1 = c1; dispC2 = c2; }
+
       const _exp = (s)=>{
         if (!s || s.indexOf('\t')===-1) return s;
         let _ts = 8; try{ const tsRaw = (window && window.SIX_OPTIONS && window.SIX_OPTIONS.tabstop); const ts = parseInt(tsRaw,10); if (ts && ts>0) _ts = ts; }catch{}
@@ -2518,17 +2583,17 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
         }
         return out;
       };
-      _measureSpan.textContent = _exp(line.slice(0, c1));
-      const x1 = _measureSpan.getBoundingClientRect().width;
-      _measureSpan.textContent = _exp(line.slice(0, c2));
-      const x2 = _measureSpan.getBoundingClientRect().width;
+      _measureSpan.textContent = _exp(dispLine.slice(0, dispC1));
+      const x1 = (_measureSpan.getBoundingClientRect().width||0) * mdScaleX;
+      _measureSpan.textContent = _exp(dispLine.slice(0, dispC2));
+      const x2 = (_measureSpan.getBoundingClientRect().width||0) * mdScaleX;
       if (!(x2>x1)){ _linkClear(); return; }
       const el = document.createElement('div');
       let _hs=0; try{ _hs=(editor.scrollLeft||0); }catch{}
       el.style.position='absolute'; el.style.left=(x1-_hs)+'px';
-      el.style.top=((row1 - topLine)*LINE_HEIGHT)+'px';
+      el.style.top=yTop+'px';
       el.style.width=Math.max(1, Math.round(x2-x1))+'px';
-      el.style.height=Math.max(1, Math.round(LINE_HEIGHT))+'px';
+      el.style.height=Math.max(1, Math.round(mdRich ? rowHeightPx : LINE_HEIGHT))+'px';
       // THEME 未定義時は常に yellow を既定値とする (#1133)
       let col='yellow';
       try{
@@ -2615,10 +2680,45 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
       const now = Date.now(); if (now - _lastLinkMoveAt < 25) return; _lastLinkMoveAt = now;
       const rect = viewport.getBoundingClientRect();
       const yAbs = (e.clientY - rect.top) + (editor.scrollTop||0);
-      const row = Math.floor(yAbs / LINE_HEIGHT);
+      let row = Math.floor(yAbs / LINE_HEIGHT);
       const lines = _splitLines();
+      // md-rich: textarea hit-testing assumes fixed line height; compute row using per-line layout.
+      try{
+        if (_mdRichActive()){
+          const yInView = (e.clientY - rect.top);
+          let rem = 0;
+          try{ const st=(editor.scrollTop||0); rem = st - Math.floor(st/LINE_HEIGHT)*LINE_HEIGHT; if (Math.abs(rem) < 0.01) rem = 0; }catch{ rem = 0; }
+          const yTarget = (yInView||0) + rem;
+          const topLine = _topLine()|0;
+          let r0 = Math.max(0, (topLine|0) - 1);
+          let accY = 0;
+          row = r0;
+          for (let i=r0; i<lines.length; i++){
+            const info = _mdLineLayoutInfoAtRow(lines, i, false);
+            const h = (info && info.lineHeightPx) ? (info.lineHeightPx||LINE_HEIGHT) : LINE_HEIGHT;
+            if (yTarget < accY + h){ row = i; break; }
+            accY += h;
+            row = i;
+          }
+        }
+      }catch{}
       if (row<0 || row>=lines.length){ if (_hoverLink){ _clearLinkHover(); } return; }
       const line = String(lines[row]||'');
+      // md-rich: per-line scale + optional hidden heading prefix affects X->col mapping.
+      const mdRich = (function(){ try{ return _mdRichActive(); }catch{ return false; } })();
+      const mdScaleX = (function(){ try{ return mdRich ? (_mdLineScale(line)||1) : 1; }catch{ return 1; } })();
+      let prefixLen = 0;
+      let dispLine = line;
+      try{
+        if (mdRich){
+          const isActiveRow = (row === (caretRow|0));
+          const hide = _mdHideSymbolsForRow(isActiveRow);
+          if (hide){
+            const p = _mdHeadingPrefixLen(line)|0;
+            if (p>0){ prefixLen = p; dispLine = line.slice(p); }
+          }
+        }
+      }catch{ prefixLen = 0; dispLine = line; }
       const _exp = (s)=>{
         if (!s || s.indexOf('\t')===-1) return s;
         let _ts = 8; try{ const tsRaw = (window && window.SIX_OPTIONS && window.SIX_OPTIONS.tabstop); const ts = parseInt(tsRaw,10); if (ts && ts>0) _ts = ts; }catch{}
@@ -2637,13 +2737,14 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
         return out;
       };
       const xAbs = (e.clientX - rect.left) + (editor.scrollLeft||0);
-      let c = 0;
-      while (c<line.length){
-        _measureSpan.textContent = _exp(line.slice(0, c+1));
-        const w = _measureSpan.getBoundingClientRect().width;
-        if (w >= xAbs || c===line.length-1){ break; }
-        c++;
+      let cDisp = 0;
+      while (cDisp<dispLine.length){
+        _measureSpan.textContent = _exp(dispLine.slice(0, cDisp+1));
+        const w = (_measureSpan.getBoundingClientRect().width||0) * mdScaleX;
+        if (w >= xAbs || cDisp===dispLine.length-1){ break; }
+        cDisp++;
       }
+      const c = Math.max(0, Math.min(line.length, (prefixLen|0) + (cDisp|0)));
       const hit = _detectUrlAt(line, c, row);
       if (hit){
         const same = _hoverLink && _hoverLink.r===row && _hoverLink.c1===hit.c1 && _hoverLink.c2===hit.c2 && _hoverLink.url===hit.url && _hoverLink.kind===hit.kind;
@@ -5463,10 +5564,13 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
           // Keep native selection aligned with caret; do not let this change scroll position
           try{ const stKeep = (editor && typeof editor.scrollTop==='number') ? editor.scrollTop : 0; _syncNativeSelectionToCaret(); if (editor) _setEditorScrollTop(stKeep, { immediate:true }); }catch{}
           // Persist the restored viewport to the buffer as the new baseline
+          // (but do not overwrite a pending lite-restore target view)
           try{
-            const st = (editor.scrollTop||0)|0;
-            const stSnap = Math.round(Math.max(0, st)/LINE_HEIGHT)*LINE_HEIGHT;
-            b.viewScrollTop = stSnap; b.viewRow = caretRow|0; b.viewCol = caretCol|0;
+            if (!(b && b._restoreViewPending)){
+              const st = (editor.scrollTop||0)|0;
+              const stSnap = Math.round(Math.max(0, st)/LINE_HEIGHT)*LINE_HEIGHT;
+              b.viewScrollTop = stSnap; b.viewRow = caretRow|0; b.viewCol = caretCol|0;
+            }
           }catch{}
         };
         // Force immediate apply once more for jumpTo cases to fix 1-line offset glitch
@@ -5501,8 +5605,10 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
       }catch{}
       // Also record immediately (in case no scroll events fire)
       try{
-        const st = (editor.scrollTop||0)|0; const stSnap = Math.round(Math.max(0, st)/LINE_HEIGHT)*LINE_HEIGHT;
-        b.viewScrollTop = stSnap; b.viewRow = caretRow|0; b.viewCol = caretCol|0;
+        if (!(b && b._restoreViewPending)){
+          const st = (editor.scrollTop||0)|0; const stSnap = Math.round(Math.max(0, st)/LINE_HEIGHT)*LINE_HEIGHT;
+          b.viewScrollTop = stSnap; b.viewRow = caretRow|0; b.viewCol = caretCol|0;
+        }
       }catch{}
       _setTitle(); _renderTabbar();
       try{ _updateOverlayShiftwidthVisual(); }catch{}
@@ -10326,18 +10432,36 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
         return;
       }
     }
-    // :dumprawkeys [N] — copy last N raw key events
+    // :dumprawkeys[!] [N] — print last N raw key events to DevTools Console
+    //   - no '!': console output only (easy to copy from DevTools)
+    //   - with '!': also copy to clipboard
     {
-      const mDumpRaw = cmd.match(/^:dumprawkeys(?:\s*([0-9０-９]+))?\s*$/i);
+      const mDumpRaw = cmd.match(/^:dumprawkeys(!)?(?:\s*([0-9０-９]+))?\s*$/i);
       if (mDumpRaw){
+        const doClip = !!(mDumpRaw[1] && String(mDumpRaw[1]).includes('!'));
         let arr = _rawKeyRing.slice();
-        let numStr = (mDumpRaw[1]||'').trim();
+        let numStr = (mDumpRaw[2]||'').trim();
         if (numStr){ numStr = numStr.replace(/[０-９]/g, ch=> String.fromCharCode(ch.charCodeAt(0)-0xFF10+0x30)); }
         const nArg = parseInt(numStr||'',10);
         if (Number.isFinite(nArg) && nArg>0 && nArg < arr.length){ arr = arr.slice(arr.length - nArg); }
         if (!arr.length){ toast('rawkeys: ring empty', 900); return; }
         const s = _rawDump(arr);
-        (async()=>{ const ok = await _copyToClipboard(s); toast(ok?`dumped ${arr.length} raw events.`:'Clipboard write failed.', ok?1000:1500); })();
+        try{
+          const head = arr[0];
+          const tail = arr[arr.length-1];
+          console.groupCollapsed(`[rawkeys] ${arr.length} events` + (doClip?' (+clipboard)':''));
+          try{ console.log('[rawkeys] range', { from: head||null, to: tail||null }); }catch{}
+          // Print as text (easy copy) and as structured objects (easy inspect)
+          try{ console.log(s); }catch{}
+          try{ console.log('[rawkeys] objects:', arr); }catch{}
+          console.groupEnd();
+        }catch{}
+
+        if (doClip){
+          (async()=>{ const ok = await _copyToClipboard(s); toast(ok?`dumped ${arr.length} raw events (console+clipboard).`:'Clipboard write failed (console OK).', ok?1200:1600); })();
+        } else {
+          toast(`dumped ${arr.length} raw events to console.`, 1100);
+        }
         return;
       }
     }
@@ -12651,14 +12775,157 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
       }catch{}
       _repositionCaret(); updateGutter();
     };
+
+    // md-rich: textarea native hit-testing uses fixed line height, so single-click caret can drift.
+    // Correct caret position from mouse coordinates using markdown per-line layout.
+    // md-rich click suppression flag: avoid briefly rendering caret based on native textarea hit-testing.
+    // (Native textarea assumes fixed LINE_HEIGHT; md-rich has variable line heights.)
+    let _mdMouseClickPendingAdjust = false;
+    const _tryAdjustCaretFromMouseMdRich = (ev)=>{
+      try{
+        if (!_mdRichActive()) return false;
+        if (!ev) return false;
+        try{ if (window && window._imeComposing===true) return false; }catch{}
+        // Only primary button single-click; don't interfere with selection drag/double-click.
+        try{ if (typeof ev.button === 'number' && ev.button !== 0) return false; }catch{}
+        try{ if ((ev.detail|0) >= 2) return false; }catch{}
+        const s0 = editor.selectionStart|0;
+        const e0 = editor.selectionEnd|0;
+        if (s0 !== e0) return false;
+
+        const lines = _splitLines();
+        if (!lines || !lines.length) return false;
+
+        // Use editor rect (excludes gutter) for X; Y aligns with the edit area.
+        const rectE = editor.getBoundingClientRect();
+        const yInView = (ev.clientY - rectE.top);
+        const xInContent = (ev.clientX - rectE.left) + (editor.scrollLeft||0);
+
+        // Invert overlay remainder compensation: overlays are translated by -rem.
+        let rem = 0;
+        try{
+          const st = (editor.scrollTop||0);
+          rem = st - Math.floor(st/LINE_HEIGHT)*LINE_HEIGHT;
+          if (Math.abs(rem) < 0.01) rem = 0;
+        }catch{ rem = 0; }
+        const yTarget = (yInView||0) + rem;
+
+        // Find row by accumulating md line heights from current topLine.
+        const topLine = _topLine()|0;
+        let r = Math.max(0, (topLine|0) - 1);
+        let accY = 0;
+        for (let i=r; i<lines.length; i++){
+          const info = _mdLineLayoutInfoAtRow(lines, i, false);
+          const h = (info && info.lineHeightPx) ? (info.lineHeightPx||LINE_HEIGHT) : LINE_HEIGHT;
+          if (yTarget < accY + h){ r = i; break; }
+          accY += h;
+          r = i;
+        }
+        if (r < 0) r = 0;
+        if (r >= lines.length) r = Math.max(0, lines.length-1);
+
+        const lineStr = String(lines[r]||'');
+        const scale = (function(){ try{ return _mdLineScale(lineStr) || 1; }catch{ return 1; } })();
+
+        // Determine whether this row is rendered with heading prefix hidden.
+        // Use post-click assumption: this row becomes active.
+        let prefixLen = 0;
+        try{
+          const hide = _mdHideSymbolsForRow(true);
+          if (hide){
+            const p = _mdHeadingPrefixLen(lineStr)|0;
+            if (p>0) prefixLen = p;
+          }
+        }catch{ prefixLen = 0; }
+
+        const dispLine = (prefixLen>0) ? lineStr.slice(prefixLen) : lineStr;
+
+        const colDisp = (function(line, xAbsPx, sc){
+          try{
+            if (!line) return 0;
+            const xTarget = Math.max(0, xAbsPx||0);
+            // tabstop from SIX_OPTIONS (default 8, min 1)
+            let _ts = 8; try{ const tsRaw = (window && window.SIX_OPTIONS && window.SIX_OPTIONS.tabstop); const ts = parseInt(tsRaw,10); if (ts && ts>0) _ts = ts; }catch{}
+            _measureSpan.textContent = ' ';
+            const spaceW = _measureSpan.getBoundingClientRect().width || 1;
+            const _charW = (ch)=>{ _measureSpan.textContent = ch; const w=_measureSpan.getBoundingClientRect().width; return (w && w>0)?w:spaceW; };
+            const _exp = (s)=>{
+              if (!s || s.indexOf('\t')===-1) return s;
+              let out=''; let x=0;
+              for (let i=0;i<s.length;i++){
+                const ch=s[i];
+                if (ch==='\t'){
+                  const col = Math.floor((x/spaceW)+1e-6);
+                  const spaces = _ts - (col % _ts);
+                  out += ' '.repeat(spaces);
+                  x += spaces * spaceW;
+                } else {
+                  out += ch;
+                  x += _charW(ch);
+                }
+              }
+              return out;
+            };
+            const _w = (s)=>{ _measureSpan.textContent = _exp(s); return ((_measureSpan.getBoundingClientRect().width||0) * (sc||1)); };
+
+            let lo = 0, hi = line.length;
+            while (lo < hi){
+              const mid = (lo + hi + 1) >> 1;
+              if (_w(line.slice(0, mid)) <= xTarget) lo = mid; else hi = mid - 1;
+            }
+            // Snap to nearest boundary
+            const wLo = _w(line.slice(0, lo));
+            if (lo < line.length){
+              const wHi = _w(line.slice(0, lo+1));
+              const half = (wHi - wLo) * 0.5;
+              if ((xTarget - wLo) > half) lo++;
+            }
+            return Math.max(0, Math.min(line.length, lo|0));
+          }catch{ return 0; }
+        })(dispLine, xInContent, scale);
+
+        const c = Math.max(0, Math.min(lineStr.length, (prefixLen|0) + (colDisp|0)));
+        const off = _offsetFromRC(r|0, c|0) | 0;
+        // Apply native selection so all existing downstream logic stays consistent.
+        try{ editor.selectionStart = editor.selectionEnd = off; }catch{}
+        caretRow = r|0;
+        caretCol = c|0;
+        return true;
+      }catch{}
+      return false;
+    };
     // Ensure single-click updates after browser updates selection
     // 未確定中は選択同期の遅延呼び出しを抑制（不要なレイアウト測定を避ける）
-    editor.addEventListener('mousedown', ()=>{
+    editor.addEventListener('mousedown', (e)=>{
       if (window._imeComposing===true) return;
+      try{
+        if (_mdRichActive()){
+          // For single-click, suppress early select-sync until we can correct caret from mouse coords.
+          // Drag selection (range) is not suppressed (see select handler guard).
+          _mdMouseClickPendingAdjust = true;
+          return;
+        }
+      }catch{}
       setTimeout(syncCaretFromSelection, 0);
     });
-    editor.addEventListener('mouseup', syncCaretFromSelection);
-    editor.addEventListener('click', syncCaretFromSelection);
+    editor.addEventListener('mouseup', (e)=>{
+      try{
+        if (_mdMouseClickPendingAdjust){
+          try{ _tryAdjustCaretFromMouseMdRich(e); }catch{}
+          _mdMouseClickPendingAdjust = false;
+        }
+      }catch{}
+      syncCaretFromSelection();
+    });
+    editor.addEventListener('click', (e)=>{
+      try{
+        if (_mdMouseClickPendingAdjust){
+          try{ _tryAdjustCaretFromMouseMdRich(e); }catch{}
+          _mdMouseClickPendingAdjust = false;
+        }
+      }catch{}
+      syncCaretFromSelection();
+    });
     // INSERT中の単純クリックによるカーソル再配置でも、直前に入力があればUndoを区切る
     editor.addEventListener('click', ()=>{
       try{
@@ -12677,6 +12944,15 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
         try{ if (Date.now() < _selGuardUntil) return; }catch{}
         // IME composition can cause noisy selection churn; keep this handler light.
         try{ if (window && window._imeComposing===true) return; }catch{}
+        // md-rich single-click: native textarea hit-testing can be off; wait for mouseup/click correction.
+        try{
+          if (_mdMouseClickPendingAdjust && _mdRichActive()){
+            const s0 = editor.selectionStart|0;
+            const e0 = editor.selectionEnd|0;
+            // Only suppress collapsed selection (single-click). For drag selection (range), allow updates.
+            if (s0 === e0) return;
+          }
+        }catch{}
         if (_visualActive){
           // In VISUAL mode, keep overlay caret behavior consistent with our model.
           // For linewise VISUAL, preserve the caret column and only track the moving edge's ROW.
@@ -14711,8 +14987,29 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
   if (e.key==='j' || e.key==='ArrowDown'){
     // #1253: Suppress default handling if scan-hold is active
     try{ const h=window.__sixScanHoldHeld; if(h && (h.has('KeyJ') || h.has('ArrowDown'))){ e.preventDefault(); return; } }catch{}
+
+    // Dedupe: avoid executing vertical motion multiple times for a single physical key press.
+    // - Per-event flag protects against multiple listeners on the same event.
+    // - Short-window guard protects against accidental duplicate non-repeat keydowns.
+    try{ if (e && e.__sixVertMotionDone){ e.preventDefault(); return; } }catch{}
+    try{ if (e) e.__sixVertMotionDone = true; }catch{}
+    try{
+      if (e && e.isTrusted && !e.repeat){
+        const now = Date.now();
+        const code = String(e.code||'');
+        const last = window.__sixLastVertMotion;
+        if (last && last.code === code && (now - (last.t|0)) < 25){ e.preventDefault(); return; }
+        window.__sixLastVertMotion = { t: now, code };
+      }
+    }catch{}
+
     e.preventDefault(); try{ _debugPush({ t:Date.now(), type:'motion-exec', mode:_mode, key:e.key, code:e.code, via:(e.key==='j'?'j':'ArrowDown') }); }catch{}
-    const n=_consumeCount(); _moveCaretLines(n);
+    const countAccBefore = (_countAcc==null?null:(_countAcc|0));
+    const fromRow = (caretRow|0);
+    const n=_consumeCount();
+    try{ if (_optRawKeys){ console.debug('[vert] normal j', { key:e.key, code:e.code, trusted:!!e.isTrusted, repeat:!!e.repeat, countAccBefore, countUsed:(n|0), fromRow:fromRow+1 }); } }catch{}
+    _moveCaretLines(n);
+    try{ if (_optRawKeys){ console.debug('[vert] normal j result', { toRow:(caretRow|0)+1 }); } }catch{}
     try{ _flagCaretMotion(); }catch{}
     // If center-scroll mode and auto-repeat, smoothly follow caret during repeat
     try{
@@ -14728,13 +15025,34 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
         _setEditorScrollTop((targetTop-1)*LINE_HEIGHT, { forceAnimate:true });
       }
     }catch{}
-    _ensureAfterMotion(); _repositionCaret(); updateGutter(); return;
+    _ensureAfterMotion({ immediate: ((scrolloff||0) >= 99999 && !e.repeat) }); _repositionCaret(); updateGutter(); return;
   }
   if (e.key==='k' || e.key==='ArrowUp'){
     // #1253: Suppress default handling if scan-hold is active
     try{ const h=window.__sixScanHoldHeld; if(h && (h.has('KeyK') || h.has('ArrowUp'))){ e.preventDefault(); return; } }catch{}
+
+    // Dedupe: avoid executing vertical motion multiple times for a single physical key press.
+    // - Per-event flag protects against multiple listeners on the same event.
+    // - Short-window guard protects against accidental duplicate non-repeat keydowns.
+    try{ if (e && e.__sixVertMotionDone){ e.preventDefault(); return; } }catch{}
+    try{ if (e) e.__sixVertMotionDone = true; }catch{}
+    try{
+      if (e && e.isTrusted && !e.repeat){
+        const now = Date.now();
+        const code = String(e.code||'');
+        const last = window.__sixLastVertMotion;
+        if (last && last.code === code && (now - (last.t|0)) < 25){ e.preventDefault(); return; }
+        window.__sixLastVertMotion = { t: now, code };
+      }
+    }catch{}
+
     e.preventDefault(); try{ _debugPush({ t:Date.now(), type:'motion-exec', mode:_mode, key:e.key, code:e.code, via:(e.key==='k'?'k':'ArrowUp') }); }catch{}
-    const n=_consumeCount(); _moveCaretLines(-n);
+    const countAccBefore = (_countAcc==null?null:(_countAcc|0));
+    const fromRow = (caretRow|0);
+    const n=_consumeCount();
+    try{ if (_optRawKeys){ console.debug('[vert] normal k', { key:e.key, code:e.code, trusted:!!e.isTrusted, repeat:!!e.repeat, countAccBefore, countUsed:(n|0), fromRow:fromRow+1 }); } }catch{}
+    _moveCaretLines(-n);
+    try{ if (_optRawKeys){ console.debug('[vert] normal k result', { toRow:(caretRow|0)+1 }); } }catch{}
     try{ _flagCaretMotion(); }catch{}
     try{
       if ((scrolloff||0) >= 99999 && !!e.repeat){
@@ -14749,7 +15067,7 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
         _setEditorScrollTop((targetTop-1)*LINE_HEIGHT, { forceAnimate:true });
       }
     }catch{}
-    _ensureAfterMotion(); _repositionCaret(); updateGutter(); return;
+    _ensureAfterMotion({ immediate: ((scrolloff||0) >= 99999 && !e.repeat) }); _repositionCaret(); updateGutter(); return;
   }
   // Strict IME mode: while composing in NORMAL, ignore letter motions j/k/h/l (arrows still work)
   if (_optStrictNormalIME && _imeComposing){
@@ -14848,7 +15166,7 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
           // debug removed: digit during pending
         } else {
           _countAcc = (_countAcc==null?0:_countAcc)*10 + parseInt(e.key,10);
-          // debug removed: digit precount
+          try{ if (_optRawKeys){ console.debug('[count] _countAcc set', { key:e.key, code:e.code, countAcc:(_countAcc|0), mode:_mode }); } }catch{}
         }
         return;
       }
@@ -14862,7 +15180,7 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
             // debug removed: zero extend pending
           } else if (_countAcc!=null){
             _countAcc = _countAcc*10;
-            // debug removed: zero extend precount
+            try{ if (_optRawKeys){ console.debug('[count] _countAcc extend', { key:e.key, code:e.code, countAcc:(_countAcc|0), mode:_mode }); } }catch{}
           }
           return;
         }
@@ -15373,6 +15691,8 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
         // Caret mode: traditional motion (consume count, move caret, ensureScrolloff)
         const _scanHoldCaretMode = (delta, opts)=>{
           try{
+            const countAccBefore = (_countAcc==null?null:(_countAcc|0));
+            const beforeRow = (caretRow|0);
             const count = _consumeCount();
             // #1293: If count > 20, it's a jump. Do not multiply by delta again if count is already signed?
             // Actually _consumeCount returns positive integer.
@@ -15381,6 +15701,21 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
             
             const lines = _splitLines();
             const newRow = Math.max(0, Math.min(lines.length-1, caretRow + (delta * count)));
+
+            // Debug (rawkeys): confirm count usage and actual row delta
+            try{
+              if (_optRawKeys){
+                console.debug('[vert] scanHold caretMode', {
+                  delta: (delta|0),
+                  countAccBefore,
+                  countUsed: (count|0),
+                  fromRow: beforeRow+1,
+                  toRow: newRow+1,
+                  mode: _mode,
+                  immediate: !!(opts && opts.immediate),
+                });
+              }
+            }catch{}
             
             // #1254: Optimization: if caret doesn't move (e.g. at EOF), skip heavy lifting
             // to prevent CPU spin/freeze when holding key at boundary.
@@ -15644,21 +15979,69 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
                   _scanHold.stuckAt = Date.now();
                   _scanHold.stuckPos = editor.scrollTop;
 
-                  // Switch to caret mode immediately
+                  // Switch to caret mode.
+                  // IMPORTANT (#1506): If we get stuck during the *initial* scroll step (before promotion),
+                  // do NOT start the continuous caret RAF loop immediately. That causes a single tap to
+                  // move 2-4 lines depending on how long the key is held (e.g. ~30ms intervals).
+                  const wasInitial = !_scanHold.continuous;
+                  const lh = (typeof LINE_HEIGHT === 'number' && LINE_HEIGHT > 0) ? LINE_HEIGHT : 20;
+                  const remainPx = Math.max(0, (_scanHold.scrollTargetPx || 0));
+                  const remainLines = (remainPx > 0) ? Math.max(1, Math.round(remainPx / lh)) : 1;
+
+                  // Stop the current scroll RAF loop cleanly.
+                  // NOTE (#1507): leaving _scanHold.raf non-null prevents later promotion from starting
+                  // the caret loop (it checks `!_scanHold.raf`).
+                  if (_scanHold.raf){
+                    try{ cancelAnimationFrame(_scanHold.raf); }catch{}
+                    _scanHold.raf = null;
+                    _scanHold.lastTs = 0;
+                  }
+
                   _scanHold.scrollActive = false;
+                  _scanHold.continuous = false;
+                  _scanHold.scrollTargetPx = 0;
                   try{ window.__sixScanHoldScrollActive = false; }catch{}
                   try{ document.body.classList.remove('is-scrolling'); }catch{}
                   // #1256: Cancel any pending scroll render to prevent conflict
                   try{ if (_scrollRAF) cancelAnimationFrame(_scrollRAF); }catch{}
+
                   _scanHold.mode = 'caret';
                   _scanHold.caretDir = dir;
                   _scanHold.caretLastMove = performance.now();
-                  // #1251: Do NOT force move immediately to prevent infinite loop/blocking
-                  // if ensureScrolloff pushes us back to scroll mode in the same frame.
-                  // Let the next RAF frame handle the caret move.
-                  // _scanHoldCaretMode(dir);
-                  
-                  // Switch RAF loop
+
+                  // Debug (rawkeys): confirm stuck path and gating behavior
+                  try{
+                    if (_optRawKeys){
+                      console.debug('[vert] scanHold stuck->caret', {
+                        wasInitial,
+                        remainPx,
+                        remainLines,
+                        heldSize: (_scanHold.held ? _scanHold.held.size : null),
+                        firstKeydownTs: _scanHold.firstKeydownTs,
+                      });
+                    }
+                  }catch{}
+
+                  if (wasInitial){
+                    // Perform exactly the remaining logical motion once (usually 1 line),
+                    // then wait for promotionDelayMs before starting continuous motion.
+                    try{ _countAcc = remainLines; }catch{}
+                    _scanHoldCaretMode(dir, { immediate: true });
+                    _scanHold.caretLastMove = performance.now();
+
+                    if (_scanHold.promotionTimer){ clearTimeout(_scanHold.promotionTimer); _scanHold.promotionTimer = null; }
+                    _scanHold.promotionTimer = setTimeout(()=>{
+                      try{
+                        // Only start continuous loop if the key is still held and we are still in caret mode.
+                        if (_scanHold.held.size > 0 && _scanHold.mode === 'caret' && _scanHold.caretDir){
+                          if (!_scanHold.raf) _scanHold.raf = requestAnimationFrame(_scanHoldCaretLoop);
+                        }
+                      }catch{}
+                    }, _scanHold.promotionDelayMs);
+                    return;
+                  }
+
+                  // Continuous scroll was already active → keep motion smooth by switching to caret loop now.
                   _scanHold.raf = requestAnimationFrame(_scanHoldCaretLoop);
                   return;
                 }
@@ -15707,16 +16090,27 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
 
         const _scanHoldKeyDown = (e)=>{
           try{
-            if (!e || !e.code) return;
+            if (!e) return;
             // #1327: If a modal is open, do not intercept keys (let modal handle them)
             if ((_modalOverlay && _modalOverlay.style && _modalOverlay.style.display !== 'none') || (window._grepDialogOpen===true)) return;
 
-            if (!_scanHold.codes.has(e.code)) return;
+            // Some environments can deliver key events with an empty/unstable .code.
+            // Normalize to an effective code based on .key so scan-hold can consistently
+            // swallow duplicates and prevent double motions.
+            const _effCode = (e.code && String(e.code)) || (
+              (e.key === 'j') ? 'KeyJ' :
+              (e.key === 'k') ? 'KeyK' :
+              (e.key === 'ArrowDown') ? 'ArrowDown' :
+              (e.key === 'ArrowUp') ? 'ArrowUp' :
+              ''
+            );
+            if (!_effCode) return;
+            if (!_scanHold.codes.has(_effCode)) return;
             if (e.ctrlKey || e.altKey || e.metaKey) return;
             
             // #1249: Allow INSERT mode for Arrow keys (continuous scroll support)
             if (_mode === 'INSERT') {
-                if (e.code === 'KeyJ' || e.code === 'KeyK') return;
+              if (_effCode === 'KeyJ' || _effCode === 'KeyK') return;
             } else {
                 if (!(_mode === 'NORMAL' || _mode === 'VISUAL')) return;
             }
@@ -15725,21 +16119,21 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
 
             // #1303: If command scroll is active, swallow all keys to prevent interference
             if (_scanHold.commandScroll) {
-                try{ e.preventDefault(); e.stopPropagation(); }catch{}
+              try{ e.preventDefault(); e.stopImmediatePropagation(); }catch{}
                 return;
             }
 
             // If already held (repeated keydown), swallow
-            if (_scanHold.held.has(e.code)){
-              try{ e.preventDefault(); e.stopPropagation(); }catch{}
+            if (_scanHold.held.has(_effCode)){
+              try{ e.preventDefault(); e.stopImmediatePropagation(); }catch{}
               return;
             }
             
             // Mark as held BEFORE preventDefault so editor handler sees it
-            _scanHold.held.add(e.code);
+            _scanHold.held.add(_effCode);
             try{ window.__sixScanHoldHeld = _scanHold.held; }catch{}
             
-            try{ e.preventDefault(); e.stopPropagation(); }catch{}
+            try{ e.preventDefault(); e.stopImmediatePropagation(); }catch{}
             try{ _showCursor(); _cursorForceHiddenUntil = 0; }catch{}
 
             // #1246: Reset state to prevent conflict with previous stopping/active action
@@ -15761,11 +16155,26 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
             // But _scanHoldDecideMode handles fractional scrollTop now.
 
             // Decide mode: caret or scroll (only once, stick to this mode until keyup)
-            const delta = (e.code === 'KeyJ' || e.code === 'ArrowDown') ? 1 : -1;
+            const delta = (_effCode === 'KeyJ' || _effCode === 'ArrowDown') ? 1 : -1;
             const mode = _scanHoldDecideMode(delta);
             _scanHold.mode = mode;
             _scanHold.stopping = false; // #1238: Reset stopping flag on new keydown
             _scanHold.firstKeydownTs = performance.now();
+
+            // Debug (rawkeys): show handler path + count state
+            try{
+              if (_optRawKeys){
+                console.debug('[vert] scanHold keydown', {
+                  key: e.key, code: e.code, effCode: _effCode,
+                  repeat: !!e.repeat, trusted: !!e.isTrusted,
+                  mode: _mode, decide: mode,
+                  countAcc: (_countAcc==null?null:(_countAcc|0)),
+                  caretRow: (caretRow|0)+1,
+                  topLine: (typeof _topLine==='function') ? _topLine() : null,
+                  scrollTop: (editor && typeof editor.scrollTop==='number') ? editor.scrollTop : null,
+                });
+              }
+            }catch{}
             
             // DEBUG
             try{
@@ -15969,12 +16378,20 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
 
         const _scanHoldKeyUp = (e)=>{
           try{
-            if (!e || !e.code) return;
-            if (!_scanHold.codes.has(e.code)) return;
-            const wasHeld = _scanHold.held.has(e.code);
+            if (!e) return;
+            const _effCode = (e.code && String(e.code)) || (
+              (e.key === 'j') ? 'KeyJ' :
+              (e.key === 'k') ? 'KeyK' :
+              (e.key === 'ArrowDown') ? 'ArrowDown' :
+              (e.key === 'ArrowUp') ? 'ArrowUp' :
+              ''
+            );
+            if (!_effCode) return;
+            if (!_scanHold.codes.has(_effCode)) return;
+            const wasHeld = _scanHold.held.has(_effCode);
             if (!wasHeld) return;
-            _scanHold.held.delete(e.code);
-            try{ e.preventDefault(); e.stopPropagation(); }catch{}
+            _scanHold.held.delete(_effCode);
+            try{ e.preventDefault(); e.stopImmediatePropagation(); }catch{}
 
             // #1298: If step animation is active, do not interrupt it.
             // The loop will finish the pending count and then check held status.
@@ -16086,56 +16503,70 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
           }catch{}
         };
 
-        try{ window.addEventListener('keydown', _scanHoldKeyDown, true); }catch{}
-        try{ window.addEventListener('keyup', _scanHoldKeyUp, true); }catch{}
-        try{ window.addEventListener('keyup', (e)=>{
-          const as = window._altScroll;
-          if (as && as.active && (e.key === as.key || e.key === 'Alt')){
-            as.active = false;
-            as.acc = 0; // reset accumulator
-            if (as.raf) cancelAnimationFrame(as.raf);
-            as.raf = null;
-            document.body.classList.remove('is-scrolling');
-            try{ window.__sixScanHoldScrollActive = false; }catch{}
-            
-            // #1276: Snap to line grid on stop to prevent jumpy behavior
-            try{
-              const st = (editor && (editor.scrollTop||0)) || 0;
-              const lh = (LINE_HEIGHT || 1);
-              const snapped = Math.round(st / lh) * lh;
-              
-              // #1281: Use same Delta Sync logic for snap
-              const oldTopLine = Math.floor(st / lh);
-              const newTopLine = Math.floor(snapped / lh);
-              const delta = newTopLine - oldTopLine;
-              
-              if (Math.abs(snapped - st) > 0.01) {
-                editor.scrollTop = snapped;
-                if (delta !== 0) {
-                   const lines = _splitLines();
-                   const newRow = Math.max(0, Math.min(lines.length-1, caretRow + delta));
-                   if (newRow !== caretRow) {
-                     caretRow = newRow;
-                     const line = lines[caretRow] || '';
-                     const newCol = _colForVisual(line, _desiredVisualCol|0);
-                     _setCaret(caretRow, newCol, { suppressDesired: true });
-                   }
-                }
-              }
-            }catch{}
-
-            try{ updateGutter(); _repositionCaret(); _updatePosInfo(); }catch{}
-            
-            // #1282: Sync native selection to updated caret position on stop
-            // This ensures the next typed character is inserted at the correct visual location.
-            try{
-               const hold = editor.scrollTop;
-               _syncNativeSelectionToCaret();
-               if (Math.abs(editor.scrollTop - hold) > 1) editor.scrollTop = hold;
-            }catch{}
+        // Install global listeners idempotently (init may run multiple times).
+        // Without this, duplicated listeners can process one physical keydown multiple times.
+        try{
+          const prev = window.__sixScanHoldHandlers;
+          if (prev){
+            try{ window.removeEventListener('keydown', prev.keydown, true); }catch{}
+            try{ window.removeEventListener('keyup', prev.keyup, true); }catch{}
+            try{ window.removeEventListener('keyup', prev.altKeyUp, true); }catch{}
+            try{ window.removeEventListener('blur', prev.blur, true); }catch{}
+            try{ window.removeEventListener('keydown', prev.finalizeOtherKeyDown, true); }catch{}
           }
-        }, true); }catch{}
-        try{ window.addEventListener('blur', ()=>{ try{
+        }catch{}
+
+        const _altScrollKeyUp = (e)=>{
+          try{
+            const as = window._altScroll;
+            if (as && as.active && (e.key === as.key || e.key === 'Alt')){
+              as.active = false;
+              as.acc = 0; // reset accumulator
+              if (as.raf) cancelAnimationFrame(as.raf);
+              as.raf = null;
+              document.body.classList.remove('is-scrolling');
+              try{ window.__sixScanHoldScrollActive = false; }catch{}
+
+              // #1276: Snap to line grid on stop to prevent jumpy behavior
+              try{
+                const st = (editor && (editor.scrollTop||0)) || 0;
+                const lh = (LINE_HEIGHT || 1);
+                const snapped = Math.round(st / lh) * lh;
+
+                // #1281: Use same Delta Sync logic for snap
+                const oldTopLine = Math.floor(st / lh);
+                const newTopLine = Math.floor(snapped / lh);
+                const delta = newTopLine - oldTopLine;
+
+                if (Math.abs(snapped - st) > 0.01) {
+                  editor.scrollTop = snapped;
+                  if (delta !== 0) {
+                     const lines = _splitLines();
+                     const newRow = Math.max(0, Math.min(lines.length-1, caretRow + delta));
+                     if (newRow !== caretRow) {
+                       caretRow = newRow;
+                       const line = lines[caretRow] || '';
+                       const newCol = _colForVisual(line, _desiredVisualCol|0);
+                       _setCaret(caretRow, newCol, { suppressDesired: true });
+                     }
+                  }
+                }
+              }catch{}
+
+              try{ updateGutter(); _repositionCaret(); _updatePosInfo(); }catch{}
+
+              // #1282: Sync native selection to updated caret position on stop
+              // This ensures the next typed character is inserted at the correct visual location.
+              try{
+                 const hold = editor.scrollTop;
+                 _syncNativeSelectionToCaret();
+                 if (Math.abs(editor.scrollTop - hold) > 1) editor.scrollTop = hold;
+              }catch{}
+            }
+          }catch{}
+        };
+
+        const _scanHoldOnBlur = ()=>{ try{
           if (_scanHold.promotionTimer){ clearTimeout(_scanHold.promotionTimer); _scanHold.promotionTimer = null; }
           _scanHold.scrollActive = false;
           try{ document.body.classList.remove('is-scrolling'); }catch{}
@@ -16143,9 +16574,10 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
           if (_scanHold.raf){ cancelAnimationFrame(_scanHold.raf); _scanHold.raf=null; _scanHold.lastTs=0; }
           _scanHold.held.clear(); try{ window.__sixScanHoldHeld = null; }catch{}
           _scanHold.mode = null; _scanHold.scrollDir = 0; _scanHold.caretDir = 0; _scanHold.caretLastMove = 0; _scanHold.firstKeydownTs = 0; _scanHold.scrollTargetPx = 0;
-        }catch{} }, true); }catch{}
+        }catch{} };
+
         // If any other key is pressed while holding, finalize
-        try{ window.addEventListener('keydown', (e)=>{
+        const _scanHoldFinalizeOtherKeyDown = (e)=>{
           try{
             if (!e || !e.code) return;
             if (_scanHold.held.size === 0) return;
@@ -16158,7 +16590,23 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
             _scanHold.mode = null; _scanHold.scrollDir = 0;
             try{ updateGutter(); _repositionCaret(); }catch{}
           }catch{}
-        }, true); }catch{}
+        };
+
+        try{
+          window.__sixScanHoldHandlers = {
+            keydown: _scanHoldKeyDown,
+            keyup: _scanHoldKeyUp,
+            altKeyUp: _altScrollKeyUp,
+            blur: _scanHoldOnBlur,
+            finalizeOtherKeyDown: _scanHoldFinalizeOtherKeyDown,
+          };
+        }catch{}
+
+        try{ window.addEventListener('keydown', _scanHoldKeyDown, true); }catch{}
+        try{ window.addEventListener('keyup', _scanHoldKeyUp, true); }catch{}
+        try{ window.addEventListener('keyup', _altScrollKeyUp, true); }catch{}
+        try{ window.addEventListener('blur', _scanHoldOnBlur, true); }catch{}
+        try{ window.addEventListener('keydown', _scanHoldFinalizeOtherKeyDown, true); }catch{}
       }catch{}
 
       // Global fallback: when focus is not on the editor/cmdinput and no modal/popup is open,
@@ -16175,7 +16623,21 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
             }
           }catch{}
 
-          try{ if (typeof _scanHold === 'object' && _scanHold && _scanHold.held && e && e.code && _scanHold.held.has(e.code)){ try{ e.preventDefault(); e.stopPropagation(); }catch{} return; } }catch{}
+          try{
+            if (typeof _scanHold === 'object' && _scanHold && _scanHold.held && e){
+              const _effCode = (e.code && String(e.code)) || (
+                (e.key === 'j') ? 'KeyJ' :
+                (e.key === 'k') ? 'KeyK' :
+                (e.key === 'ArrowDown') ? 'ArrowDown' :
+                (e.key === 'ArrowUp') ? 'ArrowUp' :
+                ''
+              );
+              if (_effCode && _scanHold.held.has(_effCode)){
+                try{ e.preventDefault(); e.stopImmediatePropagation(); }catch{}
+                return;
+              }
+            }
+          }catch{}
           if (_globalKeyRouting) return;
           // If a modal is open, or enc popup is visible, do not steal
           const modalOpen = !!((_modalOverlay && _modalOverlay.style && _modalOverlay.style.display !== 'none') || document.getElementById('grepDialog') || (window._grepDialogOpen===true));
@@ -16219,7 +16681,7 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
                   const ev = new KeyboardEvent('keydown', evInit);
                   setTimeout(()=>{ try{ editor && editor.dispatchEvent && editor.dispatchEvent(ev); }catch{} }, 0);
                   try{ e.preventDefault(); }catch{}
-                  try{ e.stopPropagation(); }catch{}
+                  try{ e.stopImmediatePropagation(); }catch{}
                 } else {
                   // INSERT かつ印字/編集キー: フォーカスだけ移し、デフォルト処理でそのまま挿入させる
                   // → preventDefault しない
@@ -16230,7 +16692,16 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
           }
         }catch{}
       };
-      // Capture on both window and document to cover environments where one of them swallows events
+      // Capture on both window and document to cover environments where one of them swallows events.
+      // Install idempotently to avoid duplicate routing (init may run multiple times).
+      try{
+        const prev = window.__sixGlobalKeyRouterHandler;
+        if (prev){
+          try{ window.removeEventListener('keydown', prev, true); }catch{}
+          try{ document.removeEventListener('keydown', prev, true); }catch{}
+        }
+      }catch{}
+      try{ window.__sixGlobalKeyRouterHandler = _globalKeyRouter; }catch{}
       window.addEventListener('keydown', _globalKeyRouter, true);
       document.addEventListener('keydown', _globalKeyRouter, true);
     }catch{}
@@ -20371,12 +20842,13 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
       const themeBtn = document.createElement('button');
       themeBtn.type = 'button';
       themeBtn.id = 'overlayBtnTheme';
-      themeBtn.style.minWidth = '112px';
+      // Narrower than other 2-pill buttons (#1500+)
+      themeBtn.style.minWidth = '92px';
       themeBtn.style.border = '1px solid #2a3244';
       themeBtn.style.background = '#1a2030';
       themeBtn.style.color = '#e6e6e6';
       themeBtn.style.borderRadius = '6px';
-      themeBtn.style.padding = '4px 3px';
+      themeBtn.style.padding = '4px 1px';
       themeBtn.style.cursor = 'pointer';
       themeBtn.style.font = "12px/1.25 system-ui, -apple-system, 'Segoe UI', sans-serif";
       themeBtn.style.opacity = '0.92';
@@ -20396,9 +20868,12 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
       const themeLine = document.createElement('div');
       themeLine.style.display = 'flex';
       themeLine.style.justifyContent = 'center';
-      themeLine.style.gap = '6px';
+      themeLine.style.gap = '3px';
       const themeOff = pillBase('OFF', 'overlayBtnTheme_off');
       const themeOn  = pillBase('ON',  'overlayBtnTheme_on');
+      // Tighten pills to reduce overall button width.
+      try{ themeOff.style.padding = '1px 5px'; themeOn.style.padding = '1px 5px'; }catch{}
+      try{ themeOff.style.fontSize = '10px'; themeOn.style.fontSize = '10px'; }catch{}
       themeLine.appendChild(themeOff);
       themeLine.appendChild(themeOn);
       themeWrap.appendChild(themeTitle);
@@ -20752,6 +21227,13 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
   try{ _updateOverlayMarkdownVisual(); }catch{}
       // Initial position sync with scrollbars
       try{ _positionPaletteUI(); }catch{}
+      // Reposition palettes while scrolling (scrollbar appearance/overlay thickness can change).
+      try{
+        if (editor && !editor.__sixPaletteScrollWired){
+          editor.__sixPaletteScrollWired = true;
+          editor.addEventListener('scroll', ()=>{ try{ _schedulePositionPaletteUI(); }catch{} }, { passive:true });
+        }
+      }catch{}
       // Overlay palette opacity control: default highly transparent; hover undims only one (#925)
       try{
         const palBR = document.getElementById('overlayPalette');
@@ -20810,6 +21292,16 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
   }
 
   // Position palette toggle button (fixed) and overlay palette (absolute) to align with scrollbars
+  let _palettePosRaf = 0;
+  function _schedulePositionPaletteUI(){
+    try{
+      if (_palettePosRaf) return;
+      _palettePosRaf = requestAnimationFrame(()=>{
+        _palettePosRaf = 0;
+        try{ _positionPaletteUI(); }catch{}
+      });
+    }catch{}
+  }
   function _positionPaletteUI(){
     try{
       const toggleBtn = document.getElementById('paletteToggleBtn');
@@ -20818,25 +21310,32 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
       // Compute vertical scrollbar width and horizontal scrollbar height from editor
       const sbw = (function(){ try{ if (!editor) return 0; const w=(editor.offsetWidth|0)-(editor.clientWidth|0); return w>0?w:0; }catch{ return 0; } })();
       const sbh = (function(){ try{ if (!editor) return 0; const h=(editor.offsetHeight|0)-(editor.clientHeight|0); return h>0?h:0; }catch{ return 0; } })();
+      // Some environments use overlay scrollbars (no layout space => sbw/sbh can be 0) or timing can yield 0.
+      // If a scrollbar is actually present, apply a small guard so palettes don't sit under it.
+      const sbGuard = 12;
+      const hasVScroll = (function(){ try{ return !!editor && ((editor.scrollHeight|0) > (editor.clientHeight|0) + 1); }catch{ return false; } })();
+      const hasHScroll = (function(){ try{ return !!editor && ((editor.scrollWidth|0)  > (editor.clientWidth|0)  + 1); }catch{ return false; } })();
+      const sbwEff = Math.max(0, (sbw|0), (hasVScroll && (sbw|0)===0) ? sbGuard : 0);
+      const sbhEff = Math.max(0, (sbh|0), (hasHScroll && (sbh|0)===0) ? sbGuard : 0);
       // Palette container padding (keep in sync with pal.style.padding above)
       const palPad = 4;
       // Align toggle button: right edge should align to the right edge of the palette's rightmost inner button
       // → palette right edge aligns to scrollbar (sbw), inner button ends at (sbw + palPad) from viewport right.
       if (toggleBtn){
-        toggleBtn.style.right = ((sbw|0) + palPad) + 'px';
-        toggleBtn.style.bottom = (sbh|0) + 'px';
+        toggleBtn.style.right = ((sbwEff|0) + palPad) + 'px';
+        toggleBtn.style.bottom = (sbhEff|0) + 'px';
       }
       // Align bottom-right overlay with scrollbar (sbw) and above the toggle button
       if (palBR){
-        palBR.style.right = (sbw|0) + 'px';
+        palBR.style.right = (sbwEff|0) + 'px';
         let btnH = 28;
         try{ if (toggleBtn){ const r = toggleBtn.getBoundingClientRect(); if (r && r.height) btnH = Math.ceil(r.height); } }catch{}
         const gap = 0;
-        palBR.style.bottom = ((sbh|0) + btnH + gap) + 'px';
+        palBR.style.bottom = ((sbhEff|0) + btnH + gap) + 'px';
       }
       // Align top-right overlay with scrollbar (sbw) at the very top of the editor viewport
       if (palTR){
-        palTR.style.right = (sbw|0) + 'px';
+        palTR.style.right = (sbwEff|0) + 'px';
         palTR.style.top = '0px';
       }
     }catch{}
