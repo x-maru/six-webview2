@@ -186,6 +186,20 @@ body.ime-reduced-text #editor::-webkit-scrollbar-thumb:active,
 		var(--lineBaseFill, #0f1117);
 }
 
+/* Markdown-rich: thematic break (horizontal rule) in clean display (#1492) */
+#textLayer .md-line.md-hrline {
+	white-space: normal;
+}
+#textLayer .md-line.md-hrline .md-hr {
+	position: absolute;
+	left: 2rem;
+	right: 2rem;
+	top: 50%;
+	transform: translateY(-50%);
+	border-top: 3px solid var(--mdHrColor, rgba(235, 235, 235, 0.65));
+	box-sizing: border-box;
+}
+
 /* When markdown-rich view is active, hide textarea glyphs (keep input/caret logic). */
 body.md-rich #editor {
 	color: transparent !important;

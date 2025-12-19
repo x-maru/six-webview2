@@ -47,6 +47,13 @@ window.THEME = {
   // 本文文字色
   editorTextColor: "#004a0a",
 
+  // markdown清書モードの文字色・線色
+  md_FGColor: "black"
+
+  // markdown清書モードの背景色グラデーション
+  md_BGGradientStart: "white",
+  md_BGGradientEnd: "#fdfdfd",
+
   // 行背景(カーソル外)グラデーション
   lineGradientStart: "#f6faf6",
   lineGradientEnd: "#ebeeeb",

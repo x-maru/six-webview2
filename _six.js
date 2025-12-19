@@ -229,6 +229,23 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
       return LINE_HEIGHT;
     }catch{ return LINE_HEIGHT; }
   }
+
+  // GFM/CommonMark thematic break (horizontal rule)
+  // - Up to 3 leading spaces
+  // - 3+ of the same marker: '*', '-', '_'
+  // - Markers may be separated by spaces/tabs
+  // - No other characters on the line (besides spaces/tabs)
+  function _mdThematicBreakInfo(line){
+    try{
+      const s = String(line||'');
+      const m = s.match(/^[ ]{0,3}([*_-])(?:[\t ]*\1){2,}[\t ]*$/);
+      if (!m) return null;
+      const ch = m[1];
+      // For setext heading ambiguity: a contiguous "---" style line can be a setext underline when
+      // the previous line is a paragraph. We handle the disambiguation at render-time.
+      return { ch };
+    }catch{ return null; }
+  }
   function _mdRenderTextLayer(){
     try{
       if (!_mdRichActive()) return;
@@ -263,16 +280,32 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
         const srcText = (row>=0 && row<total) ? String(lines[row]||'') : '';
         const lv = _mdHeadingLevel(srcText);
         const isActiveRow = (row === (caretRow|0));
+        const tb = _mdThematicBreakInfo(srcText);
         const scale = _mdLineScale(srcText);
         const lh = _mdLineHeightPx(srcText);
         const fs = Math.max(6, Math.round(baseFontPx * scale));
 
-        // Hide markdown symbols for display (initially: ATX heading prefix)
+        // Hide markdown symbols for display.
         // - clean mode: always hide
         // - draft mode: hide on non-caret lines only (#1489)
+        const hideSymbols = !!_mdHideSymbolsForRow(isActiveRow);
         let text = srcText;
         let prefixLen = 0;
-        if (_mdHideSymbolsForRow(isActiveRow) && lv>=1 && lv<=6){
+
+        // Horizontal rule (thematic break): in clean display, draw a line and hide the source markers.
+        // NOTE: "---" is ambiguous with setext heading underline when preceded by non-blank text.
+        // We avoid rendering it as HR in that case (keeps behavior closer to GFM).
+        let renderHr = false;
+        if (hideSymbols && tb){
+          if (tb.ch !== '-'){
+            renderHr = true;
+          } else {
+            const prev = (row>0) ? String(lines[row-1]||'') : '';
+            if (!prev || prev.trim()==='') renderHr = true;
+          }
+        }
+
+        if (!renderHr && hideSymbols && lv>=1 && lv<=6){
           prefixLen = _mdHeadingPrefixLen(srcText)|0;
           if (prefixLen>0) text = srcText.slice(prefixLen);
         }
@@ -283,12 +316,28 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
           el.className = 'md-line';
           _mdTextInner.appendChild(el);
         }
+
+        // IME/heading rendering may set innerHTML; keep a shared flag to avoid overwriting HR.
+        let usedHtml = false;
+
+        // Horizontal rule rendering (clean display)
+        if (renderHr){
+          // Keep the rule anchored to the viewport (not affected by horizontal scroll transform on .md-inner)
+          try{ el.classList.add('md-hrline'); }catch{}
+          try{ el.style.transform = (hs ? `translateX(${hs}px)` : ''); }catch{}
+          try{ el.textContent = ''; }catch{}
+          try{ el.innerHTML = '<div class="md-hr"></div>'; }catch{}
+          usedHtml = true;
+        } else {
+          try{ el.classList.remove('md-hrline'); }catch{}
+          try{ el.style.transform = ''; }catch{}
+        }
+
         // IME: underline composition range in the rendered layer (textarea stays hidden).
         // This avoids full-viewport double rendering while still giving composition feedback.
-        let usedHtml = false;
         const headingCjkHtml = _mdHeadingCjkHtml(text, lv);
         try{
-          if (window && window._imeComposing===true && _mdImeRange && row>=0){
+          if (!usedHtml && window && window._imeComposing===true && _mdImeRange && row>=0){
             const sr = _mdImeRange.sRow|0;
             const er = _mdImeRange.eRow|0;
             if (row>=sr && row<=er){
@@ -3588,10 +3637,39 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
 
       // EOL marker
       if (!(window._imeComposing === true && row1 === (caretRow + 1))) {
-        _measureSpan.textContent = _exp(dispLine);
-        const xEndb = _measureSpan.getBoundingClientRect().width;
-        const xEnd = mdRich ? (xEndb * scale) : xEndb;
         let _hs=0; try{ _hs=(editor.scrollLeft||0); }catch{}
+        // If this row is rendered as a horizontal rule in clean display, place EOL at the rule's right edge.
+        let xEnd = 0;
+        let hrEol = false;
+        try{
+          if (mdRich){
+            const isActiveRow = (row1 === ((caretRow|0) + 1));
+            const hide = _mdHideSymbolsForRow(isActiveRow);
+            if (hide){
+              const tb = _mdThematicBreakInfo(line);
+              if (tb){
+                if (tb.ch !== '-'){
+                  hrEol = true;
+                } else {
+                  const prev = (idx>0) ? String(lines[idx-1]||'') : '';
+                  if (!prev || prev.trim()==='') hrEol = true;
+                }
+              }
+            }
+          }
+        }catch{ hrEol = false; }
+        if (hrEol){
+          let marginPx = 32;
+          try{ marginPx = (parseFloat(getComputedStyle(document.documentElement).fontSize)||16) * 2; }catch{}
+          let w = 0;
+          try{ w = (caretLayer && caretLayer.clientWidth) ? (caretLayer.clientWidth|0) : ((_listLayer && _listLayer.clientWidth) ? (_listLayer.clientWidth|0) : 0); }catch{}
+          const vx = Math.max(0, w - marginPx);
+          xEnd = (_hs + vx);
+        } else {
+          _measureSpan.textContent = _exp(dispLine);
+          const xEndb = _measureSpan.getBoundingClientRect().width;
+          xEnd = mdRich ? (xEndb * scale) : xEndb;
+        }
         const elE = document.createElement('div');
         elE.className='listchar-eol';
         let ffColor = 'var(--controlCharColorLF, yellow)';
