@@ -1850,6 +1850,10 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
   const _caretMoveIdleMs = 140; // threshold after last motion to resume blink
   // Desired visual column across vertical motions (j/k). Units: half-width columns with tabstop expansion.
   let _desiredVisualCol = null; // null until first set
+  // Desired X (px) within the current wrapped visual line across gj/gk motions.
+  // This is preserved across vertical visual-line moves so moving to a short wrapped segment and
+  // moving back can restore the original target column (Vim-like curswant).
+  let _desiredWrapXPx = null;
   let _suppressDesiredOnce = false; // one-shot suppression flag for _setCaret
   function _tabstopVal(){ try{ const v = Number(window && window.SIX_OPTIONS && window.SIX_OPTIONS.tabstop); if (!Number.isFinite(v) || v<1) return 8; return Math.min(64, Math.max(1, v|0)); }catch{ return 8; } }
   const _FULLW_RE = /[\u1100-\u115F\u2E80-\uA4CF\uAC00-\uD7A3\uF900-\uFAFF\uFE10-\uFE19\uFE30-\uFE6F\u3000-\u303F\uFF01-\uFF60\uFFE0-\uFFE6]/;
@@ -1888,6 +1892,43 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
   }
   function _currentVisualCol(){ try{ const line=(_splitLines()[caretRow]||''); return _visualWidthUpToLine(line, caretCol|0); }catch{ return 0; } }
   function _ensureDesired(){ if (_desiredVisualCol==null) _desiredVisualCol = _currentVisualCol(); }
+  function _ensureDesiredWrapX(){
+    try{
+      if (_desiredWrapXPx != null) return;
+      if (!_wrapEnabled || !_wrapEnabled()) return;
+      const lines = _splitLines();
+      const line = String(lines[caretRow]||'');
+      const c = _wrapEnsureCache(false);
+      const wPx = (c && Number.isFinite(c.wPx)) ? (c.wPx||80) : _wrapAvailWidthPx();
+      const xp = _wrapProbeXFromCol(line, caretCol|0, wPx);
+      if (Number.isFinite(xp)) _desiredWrapXPx = Math.max(0, xp);
+      else _desiredWrapXPx = 0;
+    }catch{ try{ if (_desiredWrapXPx==null) _desiredWrapXPx = 0; }catch{} }
+  }
+
+  // Raise wrap curswant based on the *current* caret position inside a wrapped line.
+  // Rule: do not decrease curswant; update only when current visual X is greater.
+  // Intended for the case: leaving a wrapped line via logical j/k.
+  function _maybeRaiseDesiredWrapXFromCurrentCaret(){
+    try{
+      if (!_wrapEnabled || !_wrapEnabled()) return;
+      // Avoid probe work on huge buffers.
+      try{ if (_editorTextLen() > 200000) return; }catch{}
+      const c = _wrapEnsureCache(false);
+      if (!c || !c.counts) return;
+      const r = caretRow|0;
+      // Only when current logical line actually wraps.
+      if (((c.counts[r]|0) <= 1)) return;
+      const lines = _splitLines();
+      const line = String(lines[r]||'');
+      const wPx = (c && Number.isFinite(c.wPx)) ? (c.wPx||80) : _wrapAvailWidthPx();
+      const x = _wrapProbeXFromCol(line, caretCol|0, wPx);
+      if (!Number.isFinite(x)) return;
+      const nx = Math.max(0, Number(x||0));
+      const prev = (_desiredWrapXPx == null) ? null : Number(_desiredWrapXPx||0);
+      if (prev == null || nx > (prev + 0.01)) _desiredWrapXPx = nx;
+    }catch{}
+  }
   // global mouse cursor visibility state
   let _cursorHidden = false;
   let _cursorForceHiddenUntil = 0; // キーボード操作後に「塗りつぶしcaret」を維持するためのガード時間
@@ -5268,6 +5309,60 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
       const x = (mr.left - pr.left);
       return Number.isFinite(x) ? Math.max(0, x) : null;
     }catch{ return null; }
+  }
+
+  // Pick a logical column for a target wrapped visual line (intra) by desired X (px) within that visual line.
+  // This uses the wrap probe so it matches native textarea soft-wrap behavior.
+  function _wrapColForIntraX(text, intra, desiredXPx, widthPx, cache){
+    try{
+      const s = String(text||'');
+      const len = s.length|0;
+      if (len <= 0) return 0;
+      const ww = Math.max(20, (widthPx||80));
+      const tgtIntra = Math.max(0, intra|0);
+      const desiredX = Math.max(0, Number(desiredXPx||0));
+
+      const heavy = (function(){ try{ return _editorTextLen() > 200000; }catch{ return false; } })();
+      if (heavy){
+        const c = cache || _wrapEnsureCache(false) || {};
+        const spaceW = (c && Number.isFinite(c.spaceW)) ? (c.spaceW||8) : _wrapSpaceWidthPx();
+        const colsPerLine = Math.max(1, Math.floor(ww / Math.max(1, spaceW))|0);
+        const start = Math.max(0, Math.min(len, (tgtIntra * colsPerLine)|0));
+        const end = Math.max(start, Math.min(len, ((tgtIntra+1) * colsPerLine)|0));
+        const wantCols = Math.max(0, Math.round(desiredX / Math.max(1, spaceW))|0);
+        return Math.max(start, Math.min(end, start + wantCols));
+      }
+
+      // Binary-search the [start,end] column range that maps to tgtIntra.
+      const _intraAt = (col)=>{ try{ return _wrapProbeIntraFromCol(s, col|0, ww)|0; }catch{ return 0; } };
+      let lo = 0, hi = len;
+      while (lo < hi){
+        const mid = (lo + hi) >> 1;
+        if (_intraAt(mid) >= tgtIntra) hi = mid; else lo = mid + 1;
+      }
+      const start = Math.max(0, Math.min(len, lo|0));
+      lo = start; hi = len;
+      while (lo < hi){
+        const mid = (lo + hi) >> 1;
+        if (_intraAt(mid) > tgtIntra) hi = mid; else lo = mid + 1;
+      }
+      const end = Math.max(start, Math.min(len, (lo-1)|0));
+
+      if (desiredX <= 0) return start;
+
+      const _xAt = (col)=>{ try{ const x = _wrapProbeXFromCol(s, col|0, ww); return Number.isFinite(x) ? (x||0) : 0; }catch{ return 0; } };
+      let a = start, b = end;
+      while (a < b){
+        const mid = (a + b) >> 1;
+        if (_xAt(mid) >= desiredX) b = mid; else a = mid + 1;
+      }
+      let cand = Math.max(start, Math.min(end, a|0));
+      const prev = Math.max(start, cand - 1);
+      const xCand = _xAt(cand);
+      const xPrev = _xAt(prev);
+      if (Math.abs(xPrev - desiredX) <= Math.abs(xCand - desiredX)) cand = prev;
+      return cand;
+    }catch{ return Math.max(0, Math.min((String(text||'').length|0), 0)); }
   }
   function _wrapEnabled(){
     try{
@@ -9322,14 +9417,35 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
   function _moveCaretLines(delta, opts){
     const lines = _splitLines();
     const newRow = Math.max(0, Math.min(lines.length-1, caretRow + delta));
-    _ensureDesired();
-    const line = lines[newRow] || '';
-    const newCol = _colForVisual(line, _desiredVisualCol|0);
+    // Wrap mode: use wrap-local visual X (from wrapped segment left edge) as curswant.
+    // This differs from Vim, but matches the requested behavior.
+    let newCol = 0;
+    try{
+      if (_wrapEnabled && _wrapEnabled()){
+        // Update wrap curswant from current caret if we are on a wrapped logical line (never decrease).
+        try{ _maybeRaiseDesiredWrapXFromCurrentCaret(); }catch{}
+        try{ _ensureDesiredWrapX(); }catch{}
+        const c = _wrapEnsureCache(false);
+        const wPx = (c && Number.isFinite(c.wPx)) ? (c.wPx||80) : _wrapAvailWidthPx();
+        const desiredX = (_desiredWrapXPx == null) ? 0 : Number(_desiredWrapXPx||0);
+        const lineS = String(lines[newRow]||'');
+        newCol = _wrapColForIntraX(lineS, 0, desiredX, wPx, c);
+      } else {
+        _ensureDesired();
+        const line = lines[newRow] || '';
+        newCol = _colForVisual(line, _desiredVisualCol|0);
+      }
+    }catch{
+      _ensureDesired();
+      const line = lines[newRow] || '';
+      newCol = _colForVisual(line, _desiredVisualCol|0);
+    }
     // commit without updating desired (keep it across j/k)
     const prevRow = caretRow|0;
     caretRow = newRow;
     _suppressDesiredOnce = true;
-    _setCaret(newRow, newCol, { suppressDesired: true });
+    // Preserve wrap curswant across vertical motions.
+    _setCaret(newRow, newCol, { suppressDesired: true, suppressWrapDesired: true });
     // EOF パッドスクロール試行 (NORMAL) #864/#867 共通ヘルパー利用
     if (delta>0 && newRow===prevRow && newRow===lines.length-1){
       if (_maybeScrollEofPadStep('normal-eof-pad-scroll')) return;
@@ -9339,6 +9455,50 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
     // motion log
     try{ _debugPush({ t:Date.now(), type:'motion', mode:_mode, kind:'lines', delta:delta|0, toR:caretRow|0, toC:caretCol|0 }); }catch{}
     try{ _anomalyMaybeEnd('lines-motion'); }catch{}
+  }
+
+  // Move by wrapped visual lines (screen lines) when wrap is enabled.
+  // When wrap is disabled, this falls back to logical-line motion (same as j/k).
+  function _moveCaretVisualLines(delta, opts){
+    try{
+      const d = (delta|0);
+      if (!d) return;
+      if (!_wrapEnabled || !_wrapEnabled()){ _moveCaretLines(d, opts); return; }
+      const c = _wrapEnsureCache(false) || _wrapEnsureCache(true);
+      if (!c || !c.prefix){ _moveCaretLines(d, opts); return; }
+
+      _ensureDesiredWrapX();
+      const desiredX = (_desiredWrapXPx == null) ? 0 : Number(_desiredWrapXPx||0);
+      const totalVis = (c.prefix && c.prefix.length) ? (c.prefix[c.prefix.length-1]|0) : (_totalLines()|0);
+      const curV1 = _wrapVisualLine1ForRowCol(caretRow|0, caretCol|0);
+      const targetV1 = Math.max(1, Math.min(Math.max(1, totalVis|0), (curV1|0) + d));
+      const info = _wrapRowFromVisualLine1(targetV1|0);
+      const lines = _splitLines();
+      const row = Math.max(0, Math.min((lines.length-1)|0, (info.row|0)));
+      let intra = Math.max(0, (info.intra|0));
+      try{ if (c.counts && c.counts.length){ intra = Math.max(0, Math.min(((c.counts[row]|0)-1)|0, intra|0)); } }catch{}
+      const line = String(lines[row]||'');
+      const wPx = (c && Number.isFinite(c.wPx)) ? (c.wPx||80) : _wrapAvailWidthPx();
+      const col = _wrapColForIntraX(line, intra|0, desiredX, wPx, c);
+
+      caretRow = row;
+      // Preserve wrap desired X across gj/gk; update desiredVisualCol normally.
+      _setCaret(row, col, { suppressWrapDesired: true });
+
+      // Update wrap curswant by the *current* visual X within the wrapped segment,
+      // but never decrease it. (If the segment is shorter, keep the previous curswant.)
+      try{
+        const curX = _wrapProbeXFromCol(line, caretCol|0, wPx);
+        if (Number.isFinite(curX)){
+          const prev = (_desiredWrapXPx == null) ? null : Number(_desiredWrapXPx||0);
+          const nx = Math.max(0, Number(curX||0));
+          if (prev == null || nx > (prev + 0.01)) _desiredWrapXPx = nx;
+        }
+      }catch{}
+
+      if (!(opts && opts.skipEnsure)) _ensureAfterMotion();
+      try{ _debugPush({ t:Date.now(), type:'motion', mode:_mode, kind:'vis-lines', delta:d, fromV1:(curV1|0), toV1:(targetV1|0), toR:(caretRow|0), toC:(caretCol|0) }); }catch{}
+    }catch{ try{ _moveCaretLines(delta, opts); }catch{} }
   }
   // VISUAL linewise 専用の縦移動（アンチバウンス対策 #871）
   let _visLineLastTargetRow = null;
@@ -9439,6 +9599,9 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
     const fromR = caretRow|0, fromC = caretCol|0;
     let nc = caretCol;
 
+    // Horizontal motion resets wrap curswant.
+    try{ _desiredWrapXPx = null; }catch{}
+
     // In markdown clean mode (md_draftedit=false), heading marker prefix is visually hidden.
     // Treat the hidden prefix as non-navigable for horizontal motions.
     let minCol = 0;
@@ -9480,6 +9643,11 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
         b.viewCol = caretCol|0;
         try{ if (editor && typeof editor.scrollTop === 'number') b.viewScrollTop = (editor.scrollTop|0); }catch{}
       }
+    }catch{}
+    try{
+      // Any explicit caret set (except gj/gk visual-line motions) resets wrap curswant.
+      const suppressWrap = !!(opt && (opt===true || opt.suppressWrapDesired));
+      if (!suppressWrap){ _desiredWrapXPx = null; }
     }catch{}
     try{
       const suppress = !!(opt && (opt===true || opt.suppressDesired));
@@ -12231,6 +12399,7 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
             // 表示
             section('表示', [
               [K(':set scrolloff=N'), sep(' スクロールオフ（上下余白行数） / '), K(':set scrolloff?'), sep(' 現在値表示 / '), K(':set so=N'), sep(' 省略形')],
+              [K(':set wrap'), sep(' 表示折り返し（改行は挿入しない） / '), K(':set nowrap'), sep(' 折り返し無効 / '), K(':set wrap!'), sep(' トグル / '), K(':set wrap?'), sep(' 状態表示')],
               [sep('既定値: セッション未保存時 scrolloff=3 （変更はセッションへ保存し次回復元）')]
             ]);
             // インデント
@@ -12263,6 +12432,9 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
               [K('h'), sep(' / '), K('←'), sep(' 左へ1文字')],
               [K('j'), sep(' / '), K('↓'), sep(' 下へ1行')],
               [K('k'), sep(' / '), K('↑'), sep(' 上へ1行')],
+              [K('gj'), sep(' 表示折り返し有効時: 見た目の1行下へ（visual line）')],
+              [K('gk'), sep(' 表示折り返し有効時: 見た目の1行上へ（visual line）')],
+              [K('g↓'), sep(' = '), K('gj'), sep(' / '), K('g↑'), sep(' = '), K('gk'), sep('（カウント対応。例: '), K('3gj'), sep('）')],
               [K('Alt+j'), sep(' / '), K('Alt+k'), sep('  スムーズスクロール（上/下）')],
               [K('l'), sep(' / '), K('→'), sep(' 右へ1文字')],
               [K('gg'), sep('  先頭へ')],
@@ -16129,6 +16301,11 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
 
             // #1292: If count > 30, force jump mode (bypass smooth scroll checks)
             if (count > 30) return 'jump';
+
+            // scrolloff=99999 (centering): always choose caret mode for discrete motions.
+            // This prevents having to traverse wrapped visual lines in scroll mode (e.g., requiring 3 presses
+            // to pass one wrapped logical line). Continuous hold behavior is handled by caret-loop + ensureScrolloff.
+            try{ if ((scrolloff|0) >= 99999) return 'caret'; }catch{}
             
             // #1297: If count > 1 (and <= 30), force caret mode to enable step-by-step animation
             // #1313: But if scrolloff is large (centering), we should prefer scroll mode immediately
@@ -16280,7 +16457,8 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
             // If we are in initial keydown (jump), count is > 20.
             
             const lines = _splitLines();
-            const newRow = Math.max(0, Math.min(lines.length-1, caretRow + (delta * count)));
+            const deltaSigned = (delta|0) * (count|0);
+            const newRow = Math.max(0, Math.min(lines.length-1, caretRow + (deltaSigned|0)));
 
             // Debug (rawkeys): confirm count usage and actual row delta
             try{
@@ -16308,12 +16486,12 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
                 return;
             }
 
-            _ensureDesired();
-            const line = lines[newRow] || '';
-            const newCol = _colForVisual(line, _desiredVisualCol|0);
-            caretRow = newRow;
-            _suppressDesiredOnce = true;
-            _setCaret(newRow, newCol, { suppressDesired: true });
+            // If we are currently in a wrapped logical line and we are about to leave it via j/k,
+            // raise wrap curswant to match the visible caret X (but never decrease).
+            try{ _maybeRaiseDesiredWrapXFromCurrentCaret(); }catch{}
+
+            // Delegate actual caret move to the shared motion helper so wrap-mode column policy stays consistent.
+            _moveCaretLines(deltaSigned|0, { skipEnsure:true });
             try{ _flagCaretMotion(); }catch{}
             
             // #1285: Detect if caret motion forces scrolling (scrolloff boundary)
@@ -16727,6 +16905,33 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
               try{ e.preventDefault(); e.stopImmediatePropagation(); }catch{}
               return;
             }
+
+            // Handle 'gj'/'gk' and 'g'+ArrowUp/Down (visual line motions) as a single command.
+            // This must run here because scan-hold captures j/k/arrow keydowns before the editor handler.
+            try{
+              if (_pendingNormal === 'g' && (_mode === 'NORMAL' || _mode === 'VISUAL')){
+                // Only non-modified keys participate in Vim-style 'g' prefix.
+                if (!(e.ctrlKey || e.altKey || e.metaKey)){
+                  const dir = (_effCode === 'KeyJ' || _effCode === 'ArrowDown') ? 1 : -1;
+                  _clearPending();
+                  const n = _consumeCount();
+                  const delta = (dir * (n|0))|0;
+                  try{ e.preventDefault(); e.stopImmediatePropagation(); }catch{}
+
+                  if (_mode === 'VISUAL' && _visualLinewise){
+                    // Linewise selection remains logical-line based.
+                    _visualLinewiseMoveLines(delta);
+                  } else {
+                    _moveCaretVisualLines(delta, { skipEnsure: true });
+                    try{ _flagCaretMotion(); }catch{}
+                    _ensureAfterMotion();
+                    _repositionCaret(); updateGutter();
+                    if (_mode === 'VISUAL'){ try{ _updateVisualSelection(); }catch{} }
+                  }
+                  return;
+                }
+              }
+            }catch{}
             
             // Mark as held BEFORE preventDefault so editor handler sees it
             _scanHold.held.add(_effCode);
@@ -17023,6 +17228,9 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
             const mode = _scanHold.mode;
             const wasScrolling = window.__sixScanHoldScrollActive; // Check before clearing
 
+            // Preserve direction for snap decisions (we clear caretDir/scrollDir below).
+            const dirFromKey = (_effCode === 'KeyJ' || _effCode === 'ArrowDown') ? 1 : -1;
+
             // #1299: If this is a command scroll (from step animation), ignore keyup and let it finish
             // #1303: But we MUST clear the held key state so it doesn't get stuck!
             if (_scanHold.commandScroll) {
@@ -17077,8 +17285,9 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
                      let snapped = st;
                      // Determine direction
                      let dir = 0;
-                     if (mode === 'scroll') dir = _scanHold.scrollDir;
-                     else if (mode === 'caret') dir = _scanHold.caretDir;
+                     if (mode === 'scroll') dir = (_scanHold.scrollDir||0);
+                     else if (mode === 'caret') dir = (dirFromKey|0);
+                     if (!dir) dir = (dirFromKey|0);
                      
                      if (dir > 0) snapped = Math.ceil(st / LINE_HEIGHT) * LINE_HEIGHT;
                      else if (dir < 0) snapped = Math.floor(st / LINE_HEIGHT) * LINE_HEIGHT;
@@ -17088,10 +17297,12 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
                      // This prevents "floor" from being off by 1 line when we are visually at the next line.
                      if (Math.abs(snapped - st) > 0.001) {
                          editor.scrollTop = snapped;
-                         
-                         // #1288: Update caretRow to match the snapped scrollTop
-                         // so the caret stays at the same visual offset.
-                         if (window.__sixScanHoldOffset != null) {
+
+                         // In CARET mode, scrolloff-driven recenters can flip __sixScanHoldScrollActive
+                         // even though we are not doing a true scroll-mode interaction.
+                         // Do NOT recompute caretRow from screen offset here; it can "bounce back" at
+                         // wrap boundaries (multiple visual lines per logical line).
+                         if (mode === 'scroll' && window.__sixScanHoldOffset != null) {
                              const lines = _splitLines();
                              let validRow = 0;
                              try{
