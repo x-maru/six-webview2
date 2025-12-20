@@ -126,6 +126,13 @@ body.md-rich #gutter {
 	font-feature-settings: "palt" 0, "halt" 0, "pkna" 0, "pwid" 0, "fwid" 0, "kern" 0; }
 #editor { caret-color: transparent; }
 
+/* Soft wrap (visual only) */
+body.wrap-on #editor {
+	white-space: pre-wrap;
+	word-break: break-all;
+	overflow-wrap: anywhere;
+}
+
 /* Use native textarea caret during IME composition (overlay caret may be suppressed for perf). */
 body.use-native-caret #editor { caret-color: var(--nativeCaretColor, yellow) !important; }
 body.use-native-caret #caretLayer .caret { display: none !important; }
