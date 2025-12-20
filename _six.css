@@ -8,7 +8,7 @@
 	--fontBase: 18px;        /* base font-size for UI (tabbar/cmdbar) */
 	--editorFontBase: 20px;  /* base font-size for editor/gutter at 100% */
 	/* EOF padding (in lines) */
-	--eofPadLines: 5;
+	--eofPadLines: 6;
 	/* Derived (used by editor only) */
 	--lh: calc(var(--lhBase) * var(--edScale) + var(--lhExtraBase) * var(--edScale));
 	/* Effective line-height after JS rounding; falls back to --lh */
@@ -131,6 +131,15 @@ body.wrap-on #editor {
 	white-space: pre-wrap;
 	word-break: break-all;
 	overflow-wrap: anywhere;
+	/* Reserve a little space so the vertical scrollbar doesn't cover glyphs */
+	padding-right: calc(2rem + var(--wrapRightInset, 1ch));
+}
+
+/* Keep overlay layers aligned with the reserved right inset */
+body.wrap-on #caretLayer,
+body.wrap-on #textLayer,
+body.wrap-on #textBgLayer {
+	right: var(--wrapRightInset, 1ch);
 }
 
 /* Use native textarea caret during IME composition (overlay caret may be suppressed for perf). */
@@ -230,6 +239,24 @@ body.ime-reduced-text #editor::-webkit-scrollbar-corner,
 	background: transparent;
 }
 
+/* Markdown-rich: vertically center text within tall heading lines (H1/H2) */
+#textLayer .md-line.md-h1,
+#textLayer .md-line.md-h2 {
+	display: flex;
+	align-items: center;
+}
+
+/* Soft wrap for markdown-rich overlay (match textarea wrapping) */
+body.wrap-on #textLayer,
+body.wrap-on #textLayer .md-line {
+	white-space: pre-wrap;
+	word-break: break-all;
+	overflow-wrap: anywhere;
+}
+body.wrap-on #textLayer .md-line.md-hrline {
+	white-space: normal;
+}
+
 /* Markdown-rich: clean (WYSIWYG) lines use dedicated monochrome-ish palette (#1493) */
 #textLayer .md-line.md-clean {
 	color: var(--mdCleanFg, yellow);
@@ -269,9 +296,27 @@ body.ime-reduced-text #editor::-webkit-scrollbar-corner,
 body.md-rich #editor {
 	color: transparent !important;
 	text-shadow: none !important;
+	overflow-x: hidden !important;
 }
+
+/* md-rich: wrapping is rendered in #textLayer; keep textarea unwrapped so scroll metrics stay logical-line based. */
+body.md-rich.wrap-on #editor {
+	white-space: pre !important;
+	word-break: normal !important;
+	overflow-wrap: normal !important;
+	overflow-x: hidden !important;
+}
+
+/* md-rich: never show horizontal scrollbar (it can cover the last line). */
+body.md-rich #editor::-webkit-scrollbar:horizontal { height: 0 !important; }
 body.md-rich #editor::selection {
 	background: transparent !important;
+}
+
+/* md-rich + wrap-on: show native selection highlight (wrap-aware) */
+body.md-rich.wrap-on #editor::selection {
+	background: var(--selBg, cyan) !important;
+	color: transparent !important;
 }
 
 /* Markdown-rich IME: draw underline inside #textLayer (textarea stays hidden to avoid double rendering). */
@@ -285,6 +330,14 @@ body.md-rich #editor::selection {
 /* Markdown-rich: make Japanese/CJK runs slightly bolder in headings (H2-H6) (#1486) */
 #textLayer .md-heading-cjk {
 	font-weight: var(--mdHeadingWeightH2_6_CJK, 640);
+}
+
+/* Markdown-rich VISUAL selection (rendered in textLayer) */
+#textLayer .md-sel {
+	background: var(--selBg, cyan);
+	color: var(--selFg, white);
+	-webkit-box-decoration-break: clone;
+	box-decoration-break: clone;
 }
 
 /* Control character overlay scaling & weight (#464) */

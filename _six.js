@@ -375,10 +375,36 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
       if (!_mdTextLayer || !_mdTextInner || !_mdBgLayer || !_mdBgInner) return;
       const lines = _splitLines();
       const total = lines.length|0;
-      const topLine1 = _topLine();
       const vis = _visibleLinesExact();
+      const topLine1 = _topLine();
       const start = Math.max(0, (topLine1|0) - 1);
       const want = Math.max(1, (vis|0));
+
+      // VISUAL selection range (offset-based) for md-rich rendering.
+      let _selStart = null;
+      let _selEnd = null;
+      try{
+        if (_visualActive && _mode === 'VISUAL'){
+          if (_visualLinewise){
+            const rs = Math.min(_visualAnchorR|0, caretRow|0);
+            const re = Math.max(_visualAnchorR|0, caretRow|0);
+            const sOff = _offsetFromRC(rs, 0)|0;
+            const lastLen = String(lines[re]||'').length|0;
+            const eOff = _offsetFromRC(re, lastLen)|0;
+            _selStart = Math.min(sOff, eOff)|0;
+            _selEnd = Math.max(sOff, eOff)|0;
+          } else {
+            const sOff = _offsetFromRC(_visualAnchorR|0, _visualAnchorC|0)|0;
+            const eOff = _offsetFromRC(caretRow|0, caretCol|0)|0;
+            _selStart = Math.min(sOff, eOff)|0;
+            _selEnd = Math.max(sOff, eOff)|0;
+          }
+          if (!(_selEnd > _selStart)){ _selStart = null; _selEnd = null; }
+        }
+      }catch{ _selStart = null; _selEnd = null; }
+      const wrapOn = (function(){ try{ return _wrapEnabled(); }catch{ return false; } })();
+      let wPx = 80;
+      try{ if (wrapOn) wPx = _wrapAvailWidthPx()|0; }catch{ wPx = 80; }
 
       // scroll remainder vs fixed grid (for subpixel alignment)
       let rem = 0;
@@ -389,6 +415,8 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
         if (Math.abs(rem) < 0.01) rem = 0;
       }catch{}
       try{ hs = (editor.scrollLeft||0); }catch{}
+      // md-rich+wrap: textarea is kept unwrapped for stable scroll metrics; ignore native horizontal scroll.
+      try{ if (wrapOn && _mdRichActive && _mdRichActive()) hs = 0; }catch{}
       try{ _mdTextInner.style.transform = `translate(${-hs}px, ${-rem}px)`; }catch{}
       // #1495: Keep background fixed during per-pixel smooth scroll; do NOT apply remainder compensation.
       // Also keep it unaffected by horizontal scrolling.
@@ -495,10 +523,38 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
         // Per-line display classes (clean palette + setext underline)
         try{ el.classList.toggle('md-clean', hideSymbols); }catch{}
         try{ el.classList.toggle('md-setext', (setextLv>0 && hideSymbols)); }catch{}
+        try{ el.classList.toggle('md-h1', (lv===1)); }catch{}
+        try{ el.classList.toggle('md-h2', (lv===2)); }catch{}
         try{ bg.classList.toggle('md-clean', hideSymbols); }catch{}
 
         // IME/heading rendering may set innerHTML; keep a shared flag to avoid overwriting HR.
         let usedHtml = false;
+
+        // VISUAL selection: render selection highlight inside the text layer (selectionBg/selectionFg).
+        // This avoids textarea selection drift under variable per-line heights.
+        try{
+          if (!usedHtml && _selStart != null && _selEnd != null && row>=0 && row<total){
+            const off0 = _offsetFromRC(row|0, 0)|0;
+            const off1 = (off0 + (String(srcText||'').length|0))|0; // exclude newline
+            const segS = Math.max(_selStart|0, off0|0);
+            const segE = Math.min(_selEnd|0, off1|0);
+            if (segE > segS && !renderHr && !renderSetextUnderlineRow){
+              // Map selection columns to displayed text (prefix hidden in clean display).
+              let c1 = (segS - off0)|0;
+              let c2 = (segE - off0)|0;
+              if (hideSymbols && prefixLen>0){ c1 = Math.max(0, c1 - (prefixLen|0)); c2 = Math.max(0, c2 - (prefixLen|0)); }
+              c1 = Math.max(0, Math.min((text.length|0), c1|0));
+              c2 = Math.max(c1, Math.min((text.length|0), c2|0));
+              if (c2 > c1){
+                const pre = text.slice(0, c1);
+                const mid = text.slice(c1, c2);
+                const post = text.slice(c2);
+                el.innerHTML = _mdEscHtml(pre) + '<span class="md-sel">' + _mdEscHtml(mid) + '</span>' + _mdEscHtml(post);
+                usedHtml = true;
+              }
+            }
+          }
+        }catch{}
 
         // Horizontal rule rendering (clean display)
         if (renderHr){
@@ -563,20 +619,30 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
           }
         }catch{}
 
+        let hPx = lh;
+        if (wrapOn){
+          try{
+            // Use the displayed text (after symbol hiding) for wrap measurement.
+            const disp = String(text||'');
+            const n0 = _wrapProbeLineCountStyled(disp, wPx|0, lh|0, fs|0);
+            const n = (Number.isFinite(n0) && (n0|0) > 0) ? (n0|0) : 1;
+            hPx = Math.max(1, n|0) * (lh|0);
+          }catch{ hPx = lh; }
+        }
         el.style.top = y + 'px';
-        el.style.height = lh + 'px';
+        el.style.height = hPx + 'px';
         el.style.lineHeight = lh + 'px';
         el.style.fontSize = fs + 'px';
         try{
           bg.style.top = y + 'px';
-          bg.style.height = lh + 'px';
+          bg.style.height = hPx + 'px';
         }catch{}
         try{
           if (lv === 1) el.style.fontWeight = 'var(--mdHeadingWeightH1, 750)';
           else if (lv >= 2 && lv <= 6) el.style.fontWeight = 'var(--mdHeadingWeightH2_6, 520)';
           else el.style.fontWeight = '';
         }catch{}
-        y += lh;
+        y += hPx;
       }
       for (let i=children.length-1; i>=want; i--){
         try{ _mdTextInner.removeChild(children[i]); }catch{}
@@ -590,6 +656,10 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
     try{
       const on = _mdRichActive();
       try{ document.body.classList.toggle('md-rich', on); }catch{}
+      // markdown mode forces wrap-on behavior; keep wrap visual state synced.
+      try{ _wrapApplyVisualState && _wrapApplyVisualState({ skipRender:true }); }catch{}
+      try{ _mdWrapInvalidateCache('md-apply'); _mdWrapEnsureCache(true); }catch{}
+      try{ _mdSyncEofPadComp(); }catch{}
       _mdEnsureTextLayer();
       if (_mdTextLayer){ _mdTextLayer.style.display = on ? '' : 'none'; }
       if (_mdBgLayer){ _mdBgLayer.style.display = on ? '' : 'none'; }
@@ -3689,8 +3759,9 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
       // IME未確定中はビジュアル選択のオーバーレイ描画を停止（計測抑制）
       try{ if (window._imeComposing===true){ _visSelClear(); return; } }catch{}
       const mdRich = !!(function(){ try{ return _mdRichActive(); }catch{ return false; } })();
-      const showForMdVisual = (mdRich && _visualActive && _mode==='VISUAL');
-      if (!_visCmdActive && !showForMdVisual){ _visSelClear(); return; }
+      // md-rich VISUAL selection is rendered inside #textLayer via spans (to support selectionFg
+      // and avoid textarea selection drift with variable per-line heights).
+      if (!_visCmdActive){ _visSelClear(); return; }
       _visSelEnsureLayer();
       _visSelClear();
 
@@ -3737,6 +3808,12 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
       }
       let _hs = 0; try{ _hs = (editor.scrollLeft||0); }catch{}
 
+      const wrapOn = (function(){ try{ return _wrapEnabled(); }catch{ return false; } })();
+      let wPx = 80;
+      try{ if (wrapOn) wPx = _wrapAvailWidthPx()|0; }catch{ wPx = 80; }
+      let baseFontPx = 16;
+      try{ baseFontPx = parseFloat(getComputedStyle(editor).fontSize)||baseFontPx; }catch{}
+
       let yAcc = 0;
       let topV1 = 0;
       try{ if (!mdRich && _wrapEnabled()){ topV1 = _topVisualLine1()|0; } }catch{}
@@ -3747,6 +3824,7 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
 
         let rowHeightPx = LINE_HEIGHT;
         let scale = 1;
+        let fontSizePx = Math.max(6, Math.round(baseFontPx));
         let hideSymbols = false;
         let prefixLen = 0;
         let dispText = lineSrc;
@@ -3757,6 +3835,7 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
             const info = _mdLineLayoutInfoAtRow(lines, r, (r === (caretRow|0)));
             rowHeightPx = (info && info.lineHeightPx) ? (info.lineHeightPx|0) : LINE_HEIGHT;
             scale = (info && info.scale) ? (+info.scale || 1) : 1;
+            fontSizePx = Math.max(6, Math.round(baseFontPx * (scale||1)));
             hideSymbols = !!(info && info.hideSymbols);
             try{ renderHr = _mdIsHrLineForDisplay(lineSrc, lines, r, (r === (caretRow|0))); }catch{ renderHr = false; }
             try{ renderSetextUnderlineRow = _mdIsSetextUnderlineRowForDisplay(lineSrc, lines, r, (r === (caretRow|0))); }catch{ renderSetextUnderlineRow = false; }
@@ -3787,35 +3866,65 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
           c2 = Math.max(c1, Math.min((dispText.length|0), c2|0));
 
           if (c2 > c1){
-            _measureSpan.textContent = dispText.slice(0, c1);
-            const x1b = _measureSpan.getBoundingClientRect().width;
-            _measureSpan.textContent = dispText.slice(0, c2);
-            const x2b = _measureSpan.getBoundingClientRect().width;
-            const x1 = mdRich ? (x1b * scale) : x1b;
-            const x2 = mdRich ? (x2b * scale) : x2b;
-            if (x2 > x1){
-              const el = document.createElement('div');
-              el.className = 'viscmdsel';
-              el.style.left = (x1 - _hs) + 'px';
-              if (!mdRich && _wrapEnabled()){
-                // Align to the visual start line of this logical row.
-                try{
-                  const vStart1 = _wrapVisualStartLine1ForRow(r|0);
-                  el.style.top = (((vStart1|0) - (topV1|0)) * LINE_HEIGHT) + 'px';
-                }catch{ el.style.top = yAcc + 'px'; }
-              } else {
-                el.style.top = yAcc + 'px';
+            if (mdRich && wrapOn){
+              // md-rich + wrap: draw per wrapped visual line using styled probe.
+              let intra1 = 0, intra2 = 0;
+              try{ intra1 = _wrapProbeIntraFromColStyled(dispText, c1|0, wPx|0, rowHeightPx|0, fontSizePx|0) | 0; }catch{ intra1 = 0; }
+              try{ intra2 = _wrapProbeIntraFromColStyled(dispText, c2|0, wPx|0, rowHeightPx|0, fontSizePx|0) | 0; }catch{ intra2 = intra1; }
+              intra1 = Math.max(0, intra1|0);
+              intra2 = Math.max(intra1, intra2|0);
+              for (let intra=intra1; intra<=intra2; intra++){
+                let x1 = 0;
+                let x2 = wPx;
+                try{ if (intra === intra1){ const xp = _wrapProbeXFromColStyled(dispText, c1|0, wPx|0, fontSizePx|0, rowHeightPx|0); if (Number.isFinite(xp)) x1 = Math.max(0, xp); } }catch{}
+                try{ if (intra === intra2){ const xp = _wrapProbeXFromColStyled(dispText, c2|0, wPx|0, fontSizePx|0, rowHeightPx|0); if (Number.isFinite(xp)) x2 = Math.max(0, xp); } }catch{}
+                if (!(x2 > x1)) continue;
+                const el = document.createElement('div');
+                el.className = 'viscmdsel';
+                el.style.left = (x1 - _hs) + 'px';
+                el.style.top = (yAcc + (intra|0) * (rowHeightPx|0)) + 'px';
+                el.style.width = Math.max(1, Math.round(x2 - x1)) + 'px';
+                el.style.height = Math.max(1, Math.round(rowHeightPx)) + 'px';
+                _visSelLayer.appendChild(el);
               }
-              el.style.width = Math.max(1, Math.round(x2 - x1)) + 'px';
-              el.style.height = Math.max(1, Math.round(mdRich ? rowHeightPx : LINE_HEIGHT)) + 'px';
-              _visSelLayer.appendChild(el);
+            } else {
+              _measureSpan.textContent = dispText.slice(0, c1);
+              const x1b = _measureSpan.getBoundingClientRect().width;
+              _measureSpan.textContent = dispText.slice(0, c2);
+              const x2b = _measureSpan.getBoundingClientRect().width;
+              const x1 = mdRich ? (x1b * scale) : x1b;
+              const x2 = mdRich ? (x2b * scale) : x2b;
+              if (x2 > x1){
+                const el = document.createElement('div');
+                el.className = 'viscmdsel';
+                el.style.left = (x1 - _hs) + 'px';
+                if (!mdRich && _wrapEnabled()){
+                  // Align to the visual start line of this logical row.
+                  try{
+                    const vStart1 = _wrapVisualStartLine1ForRow(r|0);
+                    el.style.top = (((vStart1|0) - (topV1|0)) * LINE_HEIGHT) + 'px';
+                  }catch{ el.style.top = yAcc + 'px'; }
+                } else {
+                  el.style.top = yAcc + 'px';
+                }
+                el.style.width = Math.max(1, Math.round(x2 - x1)) + 'px';
+                el.style.height = Math.max(1, Math.round(mdRich ? rowHeightPx : LINE_HEIGHT)) + 'px';
+                _visSelLayer.appendChild(el);
+              }
             }
           }
         }
 
         // In wrap mode we place rows by visual mapping (not by accumulated logical lines).
         if (mdRich){
-          yAcc += (rowHeightPx||LINE_HEIGHT);
+          if (wrapOn){
+            let n0 = 1;
+            try{ n0 = _wrapProbeLineCountStyled(dispText, wPx|0, rowHeightPx|0, fontSizePx|0) | 0; }catch{ n0 = 1; }
+            const n = (n0 && n0>0) ? (n0|0) : 1;
+            yAcc += Math.max(1, n) * (rowHeightPx||LINE_HEIGHT);
+          } else {
+            yAcc += (rowHeightPx||LINE_HEIGHT);
+          }
         } else if (!_wrapEnabled()){
           yAcc += LINE_HEIGHT;
         }
@@ -3991,11 +4100,123 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
       _yankFlashSegs = _yankFlashSegs.filter(s=> s && s.exp>now);
       if (_yankFlashSegs.length===0){ _yankFlashClear(); return; }
       _yankFlashEnsureLayer(); _yankFlashClear();
+      const mdRich = (function(){ try{ return _mdRichActive(); }catch{ return false; } })();
       const vis = _visibleLinesExact();
       const lines = _splitLines();
       let _hs = 0; try{ _hs = (editor.scrollLeft||0); }catch{}
       let col = 'yellow'; try{ if (window && window.THEME && window.THEME.yankFlashColor){ col = String(window.THEME.yankFlashColor||'yellow'); } }catch{}
       const wrapOn = (function(){ try{ return _wrapEnabled(); }catch{ return false; } })();
+
+      if (mdRich){
+        const topLine1 = _topLine()|0;
+        const startIdx = Math.max(0, (topLine1|0) - 1);
+        const endIdx = Math.min((lines.length|0) - 1, startIdx + (vis|0) - 1);
+        let wPx = 80;
+        try{ if (wrapOn) wPx = _wrapAvailWidthPx()|0; }catch{ wPx = 80; }
+        let baseFontPx = 16;
+        try{ baseFontPx = parseFloat(getComputedStyle(editor).fontSize)||baseFontPx; }catch{}
+
+        const _dispForRow = (row0, isActiveRow)=>{
+          const row = row0|0;
+          const srcText = (row>=0 && row<(lines.length|0)) ? String(lines[row]||'') : '';
+          const info = _mdLineLayoutInfoAtRow(lines, row, !!isActiveRow);
+          const lh = (info && info.lineHeightPx) ? (info.lineHeightPx|0) : LINE_HEIGHT;
+          const sc = (info && info.scale) ? (+info.scale || 1) : 1;
+          const fs = Math.max(6, Math.round(baseFontPx * sc));
+          const hideSymbols = !!(info && info.hideSymbols);
+          let dispText = srcText;
+          let prefixLen = 0;
+          let renderHr = false;
+          let renderSetextUnderlineRow = false;
+          if (hideSymbols){
+            try{ renderHr = _mdIsHrLineForDisplay(srcText, lines, row, !!isActiveRow); }catch{ renderHr = false; }
+            try{ renderSetextUnderlineRow = _mdIsSetextUnderlineRowForDisplay(srcText, lines, row, !!isActiveRow); }catch{ renderSetextUnderlineRow = false; }
+            if (!renderHr && !renderSetextUnderlineRow){
+              const lv0 = _mdHeadingLevel(srcText)|0;
+              if (lv0>=1 && lv0<=6) prefixLen = (_mdHeadingPrefixLen(srcText)|0);
+              if (prefixLen>0) dispText = srcText.slice(prefixLen);
+            }
+            if (renderHr || renderSetextUnderlineRow){ dispText = ''; prefixLen = 0; }
+          }
+          return { dispText, prefixLen, lh, fs, hideSymbols };
+        };
+
+        for (const seg of _yankFlashSegs){
+          const r = (seg.r|0);
+          if (r < startIdx || r > endIdx) continue;
+          const rowInfo = _dispForRow(r, (r === (caretRow|0)));
+          const dispText = String(rowInfo.dispText||'');
+          const lh = (rowInfo.lh|0) || LINE_HEIGHT;
+          const fs = (rowInfo.fs|0) || Math.max(6, Math.round(baseFontPx));
+          const srcLine = String(lines[r]||'');
+          let c1 = Math.max(0, Math.min((srcLine.length|0), seg.c1|0));
+          let c2 = Math.max(c1, Math.min((srcLine.length|0), seg.c2|0));
+          if (rowInfo.hideSymbols && (rowInfo.prefixLen|0) > 0){
+            c1 = Math.max(0, (c1|0) - (rowInfo.prefixLen|0));
+            c2 = Math.max(0, (c2|0) - (rowInfo.prefixLen|0));
+          }
+          c1 = Math.max(0, Math.min((dispText.length|0), c1|0));
+          c2 = Math.max(c1, Math.min((dispText.length|0), c2|0));
+          if (c2<=c1) continue;
+
+          // y offset by summing heights of rows from startIdx to r
+          let yAcc = 0;
+          for (let rr=startIdx; rr<r; rr++){
+            const inf = _dispForRow(rr, false);
+            const dtext = String(inf.dispText||'');
+            let hPx = (inf.lh|0) || LINE_HEIGHT;
+            if (wrapOn){
+              let n0 = 1;
+              try{ n0 = _wrapProbeLineCountStyled(dtext, wPx|0, (inf.lh|0)||LINE_HEIGHT, (inf.fs|0)||Math.max(6,Math.round(baseFontPx))) | 0; }catch{ n0 = 1; }
+              const n = (n0 && n0>0) ? (n0|0) : 1;
+              hPx = Math.max(1, n) * ((inf.lh|0)||LINE_HEIGHT);
+            }
+            yAcc += hPx;
+          }
+
+          if (!wrapOn){
+            _measureSpan.textContent = dispText.slice(0, c1);
+            const x1b = _measureSpan.getBoundingClientRect().width;
+            _measureSpan.textContent = dispText.slice(0, c2);
+            const x2b = _measureSpan.getBoundingClientRect().width;
+            const sc = (rowInfo.fs|0) ? ((rowInfo.fs|0) / Math.max(1, baseFontPx)) : 1;
+            const x1 = x1b * sc;
+            const x2 = x2b * sc;
+            if (!(x2 > x1)) continue;
+            const el = document.createElement('div');
+            el.className='yank-flash';
+            el.style.left=(x1 - _hs) + 'px';
+            el.style.top= yAcc + 'px';
+            el.style.width= Math.max(1, Math.round(x2 - x1)) + 'px';
+            el.style.height= Math.max(1, Math.round(lh)) + 'px';
+            try{ el.style.background = col; el.style.opacity = '0.35'; el.style.outline = '1px solid ' + col; el.style.outlineOffset='-1px'; }catch{}
+            _yankFlashLayer.appendChild(el);
+          } else {
+            let intra1 = 0, intra2 = 0;
+            try{ intra1 = _wrapProbeIntraFromColStyled(dispText, c1|0, wPx|0, lh|0, fs|0) | 0; }catch{ intra1 = 0; }
+            try{ intra2 = _wrapProbeIntraFromColStyled(dispText, c2|0, wPx|0, lh|0, fs|0) | 0; }catch{ intra2 = intra1; }
+            intra1 = Math.max(0, intra1|0);
+            intra2 = Math.max(intra1, intra2|0);
+            for (let intra=intra1; intra<=intra2; intra++){
+              let x1 = 0;
+              let x2 = wPx;
+              try{ if (intra === intra1){ const xp = _wrapProbeXFromColStyled(dispText, c1|0, wPx|0, fs|0, lh|0); if (Number.isFinite(xp)) x1 = Math.max(0, xp); } }catch{}
+              try{ if (intra === intra2){ const xp = _wrapProbeXFromColStyled(dispText, c2|0, wPx|0, fs|0, lh|0); if (Number.isFinite(xp)) x2 = Math.max(0, xp); } }catch{}
+              if (!(x2 > x1)) continue;
+              const el = document.createElement('div');
+              el.className='yank-flash';
+              el.style.left=(x1 - _hs) + 'px';
+              el.style.top= (yAcc + (intra|0) * (lh|0)) + 'px';
+              el.style.width= Math.max(1, Math.round(x2 - x1)) + 'px';
+              el.style.height= Math.max(1, Math.round(lh)) + 'px';
+              try{ el.style.background = col; el.style.opacity = '0.35'; el.style.outline = '1px solid ' + col; el.style.outlineOffset='-1px'; }catch{}
+              _yankFlashLayer.appendChild(el);
+            }
+          }
+        }
+        return;
+      }
+
       let topLine = 1;
       let endLine = 1;
       let topV1 = 1;
@@ -4470,7 +4691,7 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
       // Delegate per-row rendering to the unified row renderer.
       // For wrap mode, iterate logical rows that intersect the current visual viewport.
       try{
-        if (!_mdRichActive() && _wrapEnabled()){
+        if (_wrapEnabled()){
           const topV1 = _topVisualLine1();
           const endV1 = (topV1|0) + (vis|0) - 1;
           const sInfo = _wrapRowFromVisualLine1(topV1|0);
@@ -5353,6 +5574,80 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
     }catch{ return 0; }
   }
 
+  // Styled wrap probe helpers for markdown-rich (per-line font size/line-height)
+  function _wrapProbeLineCountStyled(text, widthPx, lineHeightPx, fontSizePx){
+    try{
+      const s = String(text||'');
+      if (s.length === 0) return 1;
+      const p = _wrapEnsureProbe();
+      if (!p) return null;
+      _wrapSyncProbeStyles();
+      if (Number.isFinite(fontSizePx) && (fontSizePx||0) > 0) p.style.fontSize = (fontSizePx||0) + 'px';
+      if (Number.isFinite(lineHeightPx) && (lineHeightPx||0) > 0) p.style.lineHeight = (lineHeightPx||0) + 'px';
+      p.style.width = Math.max(20, (widthPx||80)) + 'px';
+      p.textContent = s;
+      const h = p.getBoundingClientRect().height;
+      const lh = (Number.isFinite(lineHeightPx) && (lineHeightPx||0) > 0) ? (lineHeightPx||LINE_HEIGHT||1) : (LINE_HEIGHT||1);
+      if (!Number.isFinite(h) || h <= 0) return 1;
+      return Math.max(1, Math.round(h / lh));
+    }catch{ return null; }
+  }
+  function _wrapProbeIntraFromColStyled(text, col, widthPx, lineHeightPx, fontSizePx){
+    try{
+      const s = String(text||'');
+      const cc = Math.max(0, Math.min((s.length|0), (col|0)));
+      if (cc <= 0) return 0;
+      const p = _wrapEnsureProbe();
+      if (!p) return 0;
+      _wrapSyncProbeStyles();
+      if (Number.isFinite(fontSizePx) && (fontSizePx||0) > 0) p.style.fontSize = (fontSizePx||0) + 'px';
+      if (Number.isFinite(lineHeightPx) && (lineHeightPx||0) > 0) p.style.lineHeight = (lineHeightPx||0) + 'px';
+      p.style.width = Math.max(20, (widthPx||80)) + 'px';
+      p.textContent = s.slice(0, cc);
+      const h = p.getBoundingClientRect().height;
+      const lh = (Number.isFinite(lineHeightPx) && (lineHeightPx||0) > 0) ? (lineHeightPx||LINE_HEIGHT||1) : (LINE_HEIGHT||1);
+      if (!Number.isFinite(h) || h <= 0) return 0;
+      const linesUsed = Math.max(1, Math.round(h / lh));
+      return Math.max(0, (linesUsed|0) - 1);
+    }catch{ return 0; }
+  }
+  function _wrapProbeXFromColStyled(text, col, widthPx, fontSizePx, lineHeightPx){
+    try{
+      const s = String(text||'');
+      const cc = Math.max(0, Math.min((s.length|0), (col|0)));
+      const p = _wrapEnsureProbe();
+      if (!p) return null;
+      _wrapSyncProbeStyles();
+      if (Number.isFinite(fontSizePx) && (fontSizePx||0) > 0) p.style.fontSize = (fontSizePx||0) + 'px';
+      if (Number.isFinite(lineHeightPx) && (lineHeightPx||0) > 0) p.style.lineHeight = (lineHeightPx||0) + 'px';
+      p.style.width = Math.max(20, (widthPx||80)) + 'px';
+      // Build marker nodes once.
+      if (!_wrapProbeMarker || !_wrapProbeTextA || !_wrapProbeTextB || _wrapProbeMarker.parentNode !== p){
+        try{ while (p.firstChild) p.removeChild(p.firstChild); }catch{}
+        _wrapProbeTextA = document.createTextNode('');
+        _wrapProbeMarker = document.createElement('span');
+        _wrapProbeMarker.style.display = 'inline-block';
+        _wrapProbeMarker.style.width = '0px';
+        _wrapProbeMarker.style.height = '1px';
+        _wrapProbeMarker.style.overflow = 'hidden';
+        _wrapProbeMarker.style.padding = '0';
+        _wrapProbeMarker.style.margin = '0';
+        _wrapProbeMarker.style.border = '0';
+        _wrapProbeMarker.textContent = '\u200b';
+        _wrapProbeTextB = document.createTextNode('');
+        p.appendChild(_wrapProbeTextA);
+        p.appendChild(_wrapProbeMarker);
+        p.appendChild(_wrapProbeTextB);
+      }
+      _wrapProbeTextA.data = s.slice(0, cc);
+      _wrapProbeTextB.data = s.slice(cc);
+      const pr = p.getBoundingClientRect();
+      const mr = _wrapProbeMarker.getBoundingClientRect();
+      const x = (mr.left - pr.left);
+      return Number.isFinite(x) ? Math.max(0, x) : null;
+    }catch{ return null; }
+  }
+
   // Measure caret x-position (px from the start of the current visual wrapped line)
   // at a given logical column. This matches textarea soft-wrap behavior.
   // NOTE: Uses the wrap probe (offscreen div) with a zero-width marker.
@@ -5451,9 +5746,219 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
     try{
       const b = currentBuffer && currentBuffer();
       if (!b) return false;
-      // markdown-rich currently depends on a logical-line scroll grid; keep wrap off there.
-      if (b.markdown) return false;
+      // Spec (#1526): markdown mode always behaves like wrap=true (buffer option is ignored while markdown is on).
+      if (b.markdown) return true;
       return !!b.wrap;
+    }catch{ return false; }
+  }
+
+  // Markdown-rich wrap metrics (styled per line-height/font-size)
+  let _mdWrapCache = null;
+  function _mdWrapEnsureCache(force){
+    try{
+      if (!(_mdRichEnabled && _mdRichEnabled())) { _mdWrapCache = null; return null; }
+      if (!(_wrapEnabled && _wrapEnabled())) { _mdWrapCache = null; return null; }
+      const lines = _splitLines();
+      const b = currentBuffer && currentBuffer();
+      const tick = (b && Number.isFinite(b._changeTick)) ? (b._changeTick|0) : 0;
+      const wPx = _wrapAvailWidthPx();
+      const draft = !!(_mdDraftEditEnabled && _mdDraftEditEnabled());
+      const setextOn = !!(_mdSetextEnabled && _mdSetextEnabled());
+      const heavy = (function(){ try{ return _editorTextLen() > 200000; }catch{ return false; } })();
+      // In draft mode, symbol-hiding depends on the active row; keep wrap cache stable by treating all rows as raw.
+      const hideSymbolsDefault = (!draft);
+
+      const need = !!(force || !_mdWrapCache || _mdWrapCache.dirty || _mdWrapCache.wPx !== wPx || _mdWrapCache.lineCount !== (lines.length|0) || _mdWrapCache.tick !== tick || _mdWrapCache.hideSymbolsDefault !== hideSymbolsDefault || _mdWrapCache.setextOn !== setextOn);
+      if (!need) return _mdWrapCache;
+
+      let baseFontPx = 16;
+      try{ baseFontPx = parseFloat(getComputedStyle(editor).fontSize)||baseFontPx; }catch{}
+
+      const counts = new Array(lines.length|0);
+      const prefix = new Array((lines.length|0) + 1);
+      prefix[0] = 0;
+      let totalPx = 0;
+      for (let i=0;i<lines.length;i++){
+        const src = String(lines[i]||'');
+        // Compute display text for stable wrap measurement.
+        let disp = src;
+        try{
+          if (hideSymbolsDefault){
+            const isHr = _mdIsHrLineForDisplay(src, lines, i, false);
+            const isSetextU = _mdIsSetextUnderlineRowForDisplay(src, lines, i, false);
+            if (isHr || isSetextU){
+              disp = '';
+            } else {
+              const lv0 = _mdHeadingLevel(src)|0;
+              if (lv0>=1 && lv0<=6){
+                const p = _mdHeadingPrefixLen(src)|0;
+                if (p>0) disp = src.slice(p);
+              }
+            }
+          }
+        }catch{ disp = src; }
+
+        const info = (function(){ try{ return _mdLineLayoutInfoAtRow(lines, i, false); }catch{ return null; } })();
+        const lh = (info && info.lineHeightPx) ? (info.lineHeightPx|0) : (LINE_HEIGHT|0);
+        const sc = (info && info.scale) ? (+info.scale || 1) : 1;
+        const fs = Math.max(6, Math.round(baseFontPx * sc));
+
+        let n = 1;
+        if (!heavy){
+          const n0 = _wrapProbeLineCountStyled(disp, wPx|0, lh|0, fs|0);
+          if (Number.isFinite(n0) && (n0|0) > 0) n = (n0|0);
+        } else {
+          n = 1;
+        }
+        counts[i] = n;
+        prefix[i+1] = (prefix[i] + n);
+        try{ totalPx += (Math.max(1, (n|0)) * Math.max(1, (lh|0))); }catch{}
+      }
+      _mdWrapCache = { wPx, lineCount:(lines.length|0), tick, counts, prefix, totalPx:(totalPx|0), dirty:false, hideSymbolsDefault, setextOn, builtAt: Date.now() };
+      return _mdWrapCache;
+    }catch{ return _mdWrapCache; }
+  }
+  function _mdWrapInvalidateCache(_reason){
+    try{ if (_mdWrapCache) _mdWrapCache.dirty = true; }catch{}
+  }
+  function _mdWrapTotalVisLines(){
+    try{
+      const c = _mdWrapEnsureCache(false) || _mdWrapEnsureCache(true);
+      if (c && c.prefix && c.prefix.length) return (c.prefix[c.prefix.length-1]|0);
+    }catch{}
+    return _totalLines();
+  }
+  function _mdWrapRowFromVisualLine1(v1){
+    try{
+      const c = _mdWrapEnsureCache(false) || _mdWrapEnsureCache(true);
+      if (!c || !c.prefix) return { row: Math.max(0, Math.min((_totalLines()-1)|0, (v1|0)-1)), intra: 0 };
+      const vv = Math.max(1, v1|0);
+      const P = c.prefix;
+      let lo = 0, hi = (P.length-1)|0;
+      while (lo < hi){
+        const mid = ((lo + hi) >> 1);
+        if ((P[mid+1]|0) >= vv) hi = mid; else lo = mid + 1;
+      }
+      const row = Math.max(0, Math.min((c.lineCount-1)|0, lo|0));
+      const intra = Math.max(0, (vv - (P[row]|0) - 1));
+      return { row, intra };
+    }catch{ return { row: Math.max(0, (v1|0)-1), intra:0 }; }
+  }
+  function _mdWrapVisualLine1ForRowCol(row, col){
+    try{
+      const c = _mdWrapEnsureCache(false) || _mdWrapEnsureCache(true);
+      if (!c || !c.prefix || !c.counts) return (row|0)+1;
+      const lines = _splitLines();
+      const r = Math.max(0, Math.min((lines.length-1)|0, row|0));
+      const src = String(lines[r]||'');
+
+      let baseFontPx = 16;
+      try{ baseFontPx = parseFloat(getComputedStyle(editor).fontSize)||baseFontPx; }catch{}
+      const info = (function(){ try{ return _mdLineLayoutInfoAtRow(lines, r, true); }catch{ return null; } })();
+      const lh = (info && info.lineHeightPx) ? (info.lineHeightPx|0) : (LINE_HEIGHT|0);
+      const sc = (info && info.scale) ? (+info.scale || 1) : 1;
+      const fs = Math.max(6, Math.round(baseFontPx * sc));
+      const wPx = (c && Number.isFinite(c.wPx)) ? (c.wPx||80) : _wrapAvailWidthPx();
+
+      const adj = _mdWysiwygAdjust(src, col|0);
+      const dispLine = String(adj.line||'');
+      const cc = Math.max(0, Math.min((dispLine.length|0), (adj.col|0)));
+      let intra = 0;
+      try{ intra = _wrapProbeIntraFromColStyled(dispLine, cc|0, wPx|0, lh|0, fs|0) | 0; }catch{ intra = 0; }
+      intra = Math.max(0, Math.min(((c.counts[r]|0)-1)|0, intra|0));
+      return ((c.prefix[r]|0) + intra + 1);
+    }catch{ return (row|0)+1; }
+  }
+  function _mdWrapColForIntraXStyled(text, intra, desiredX, widthPx, lineHeightPx, fontSizePx){
+    try{
+      const s = String(text||'');
+      const ww = Math.max(20, (widthPx||80));
+      const tgtIntra = Math.max(0, intra|0);
+      const desired = Number(desiredX||0);
+      const len = (s.length|0);
+
+      const _intraAt = (col)=>{ try{ return _wrapProbeIntraFromColStyled(s, col|0, ww, lineHeightPx|0, fontSizePx|0) | 0; }catch{ return 0; } };
+      const _xAt = (col)=>{ try{ const x = _wrapProbeXFromColStyled(s, col|0, ww, fontSizePx|0, lineHeightPx|0); return Number.isFinite(x) ? (x||0) : 0; }catch{ return 0; } };
+
+      // Find segment [start,end] where intra==tgtIntra.
+      let lo = 0, hi = len;
+      while (lo < hi){
+        const mid = (lo + hi) >> 1;
+        if (_intraAt(mid) >= tgtIntra) hi = mid; else lo = mid + 1;
+      }
+      const start = Math.max(0, Math.min(len, lo|0));
+      lo = start; hi = len;
+      while (lo < hi){
+        const mid = (lo + hi) >> 1;
+        if (_intraAt(mid) > tgtIntra) hi = mid; else lo = mid + 1;
+      }
+      const end = Math.max(start, Math.min(len, (lo-1)|0));
+      if (!(desired > 0)) return start;
+
+      let a = start, b = end;
+      while (a < b){
+        const mid = (a + b) >> 1;
+        if (_xAt(mid) >= desired) b = mid; else a = mid + 1;
+      }
+      let cand = Math.max(start, Math.min(end, a|0));
+      const prev = Math.max(start, cand - 1);
+      const xCand = _xAt(cand);
+      const xPrev = _xAt(prev);
+      if (Math.abs(xPrev - desired) <= Math.abs(xCand - desired)) cand = prev;
+      return cand;
+    }catch{ return 0; }
+  }
+
+  function _eofPadLines(){
+    try{
+      const cs = window.getComputedStyle(document.documentElement);
+      const v = String(cs.getPropertyValue('--eofPadLines') || '').trim();
+      const n = parseInt(v, 10);
+      if (Number.isFinite(n) && n >= 0) return (n|0);
+    }catch{}
+    return 5;
+  }
+
+  function _mdScrollCompLines(){
+    try{ if (_mdRichEnabled && _mdRichEnabled() && _wrapEnabled && _wrapEnabled()) return (_mdEofPadExtraLines|0); }catch{}
+    return 0;
+  }
+
+  let _mdEofPadExtraLines = 0;
+  function _mdSyncEofPadComp(){
+    try{
+      if (!editor) return;
+      let extra = 0;
+      if (_mdRichEnabled && _mdRichEnabled() && _wrapEnabled && _wrapEnabled()){
+        const lines = _splitLines();
+        const linesTotal = (lines.length|0);
+        // Compute required extra scroll range in *pixels* (wrap + per-line line-height), then convert to LINE_HEIGHT units.
+        let totalPx = 0;
+        try{
+          const c = _mdWrapEnsureCache(false) || _mdWrapEnsureCache(true);
+          if (c && Number.isFinite(c.totalPx)) totalPx = (c.totalPx|0);
+        }catch{}
+        if (!(totalPx > 0)){
+          // Fallback: treat as simple visual-line count diff.
+          try{ totalPx = (_mdWrapTotalVisLines()|0) * (LINE_HEIGHT|0); }catch{ totalPx = linesTotal * (LINE_HEIGHT|0); }
+        }
+        const textPx = (linesTotal|0) * (LINE_HEIGHT|0);
+        const extraPx = Math.max(0, (totalPx|0) - (textPx|0));
+        extra = Math.max(0, Math.ceil(extraPx / Math.max(1, (LINE_HEIGHT|0))));
+      }
+      _mdEofPadExtraLines = extra|0;
+
+      // Expand textarea scroll range to match md-rich overlay total height.
+      // User-visible EOF padding stays at CSS --eofPadLines; extra is consumed as "content height" compensation.
+      const basePad = (_eofPadLines()|0);
+      const effPad = Math.max(0, (basePad|0) + (_mdEofPadExtraLines|0));
+      try{ editor.style.paddingBottom = `calc(${effPad} * var(--lhEff, var(--lh)))`; }catch{}
+    }catch{}
+  }
+  function _wrapUsesVisualScrollGrid(){
+    try{
+      // markdown-rich uses a logical-line scroll grid; do not switch to visual-line grid there.
+      return _wrapEnabled() && !_mdRichActive();
     }catch{ return false; }
   }
   function _wrapSpaceWidthPx(){
@@ -5577,7 +6082,7 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
   }
   function _scrollTopForTopLine1(topLine1){
     try{
-      if (!_wrapEnabled()) return Math.max(0, ((topLine1|0)-1) * LINE_HEIGHT);
+      if (!_wrapUsesVisualScrollGrid()) return Math.max(0, ((topLine1|0)-1) * LINE_HEIGHT);
       const c = _wrapEnsureCache(false);
       if (!c || !c.prefix) return Math.max(0, ((topLine1|0)-1) * LINE_HEIGHT);
       const r = Math.max(0, Math.min((c.lineCount-1)|0, (topLine1|0)-1));
@@ -5592,6 +6097,8 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
       try{ if (editor){ editor.style.whiteSpace = on ? 'pre-wrap' : 'pre'; } }catch{}
       // Keep cache consistent with current layout
       try{ _wrapInvalidateCache('apply'); _wrapEnsureCache(true); }catch{}
+      try{ _mdWrapInvalidateCache('wrap-apply'); _mdWrapEnsureCache(true); }catch{}
+      try{ _mdSyncEofPadComp(); }catch{}
 
       // Post-layout resync: during startup/session restore, editor.clientWidth can be 0 at the moment
       // we first apply wrap. Rebuild cache and rerender overlays after layout stabilizes.
@@ -5632,7 +6139,7 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
     // Return logical top line (1-based).
     // In wrap mode, textarea scrollTop is in visual lines; map back to logical line index.
     try{
-      if (_wrapEnabled()){
+      if (_wrapUsesVisualScrollGrid()){
         const v1 = _topVisualLine1();
         const info = _wrapRowFromVisualLine1(v1);
         return (info.row|0) + 1;
@@ -6107,8 +6614,10 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
             try{ if (_wrapEnabled()){ const c=_wrapEnsureCache(false); return (c && c.prefix) ? (c.prefix[c.prefix.length-1]|0) : _totalLines(); } }catch{}
             return _totalLines();
           })();
-          const baseMaxTop = Math.max(1, linesTotal - vis + 1);
-          const maxTopWithPad = Math.min(linesTotal, baseMaxTop + 1);
+          const mdComp = (_mdScrollCompLines()|0);
+          const totalForClamp = Math.max(1, (linesTotal|0) + (mdComp|0));
+          const baseMaxTop = Math.max(1, (totalForClamp|0) - vis + 1);
+          const maxTopWithPad = Math.max(1, baseMaxTop + (_eofPadLines()|0));
           top1 = Math.min(top1, maxTopWithPad);
           vs = (top1-1) * LINE_HEIGHT;
         }
@@ -7502,7 +8011,7 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
     // Wrap mode: compute vertical offset in visual lines.
     // Keep _topLine() logical for the rest of the codebase.
     try{
-      if (_wrapEnabled()){
+      if (_wrapUsesVisualScrollGrid()){
         const topV1 = _topVisualLine1();
         const caretV1 = _wrapVisualLine1ForRowCol(caretRow|0, caretCol|0);
         offsetLines = (caretV1|0) - (topV1|0);
@@ -7517,21 +8026,85 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
     if (offsetLines < 0) { edstripe.style.display='none'; return; }
     let topPx = offsetLines * LINE_HEIGHT;
     let rowHeightPx = LINE_HEIGHT;
-    if (_mdRichActive()){
-      try{
+    // markdown-rich: variable per-row line-height + wrap-aware intra-row Y.
+    let _mdCaretLineHeightPx = LINE_HEIGHT;
+    let _mdCaretFontSizePx = 0;
+    try{
+      if (_mdRichActive()){
         const lines = _splitLines();
+        const total = lines.length|0;
         const startIdx = Math.max(0, (topLine|0) - 1);
-        const targetIdx = Math.max(0, Math.min(lines.length-1, caretRow|0));
+        const targetIdx = Math.max(0, Math.min((total|0)-1, caretRow|0));
         if (targetIdx < startIdx){ edstripe.style.display='none'; return; }
+
+        let baseFontPx = 16;
+        try{ baseFontPx = parseFloat(getComputedStyle(editor).fontSize)||baseFontPx; }catch{}
+        const wrapOn = (function(){ try{ return _wrapEnabled(); }catch{ return false; } })();
+        let wPx = 80;
+        try{ if (wrapOn) wPx = _wrapAvailWidthPx()|0; }catch{ wPx = 80; }
+
+        const _dispTextForRow = (r0, isActiveRow)=>{
+          const r = (r0|0);
+          const srcText = (r>=0 && r<total) ? String(lines[r]||'') : '';
+          const info = _mdLineLayoutInfoAtRow(lines, r, !!isActiveRow);
+          const hideSymbols = !!(info && info.hideSymbols);
+          let disp = srcText;
+          if (hideSymbols){
+            let renderHr = false;
+            let renderSetextUnderlineRow = false;
+            try{ renderHr = _mdIsHrLineForDisplay(srcText, lines, r, !!isActiveRow); }catch{ renderHr = false; }
+            try{ renderSetextUnderlineRow = _mdIsSetextUnderlineRowForDisplay(srcText, lines, r, !!isActiveRow); }catch{ renderSetextUnderlineRow = false; }
+            if (renderSetextUnderlineRow) disp = '';
+            else if (renderHr) disp = '';
+            else {
+              const lv0 = _mdHeadingLevel(srcText)|0;
+              if (lv0>=1 && lv0<=6){
+                const p = (_mdHeadingPrefixLen(srcText)|0);
+                if (p>0) disp = srcText.slice(p);
+              }
+            }
+          }
+          return { disp, info };
+        };
+
         let y = 0;
         for (let r=startIdx; r<targetIdx; r++){
-          const infoR = _mdLineLayoutInfoAtRow(lines, r, false);
-          y += (infoR.lineHeightPx||LINE_HEIGHT);
+          const a = _dispTextForRow(r, false);
+          const infoR = a.info;
+          const lh = (infoR && infoR.lineHeightPx) ? (infoR.lineHeightPx|0) : LINE_HEIGHT;
+          const sc = (infoR && infoR.scale) ? (+infoR.scale || 1) : 1;
+          const fs = Math.max(6, Math.round(baseFontPx * sc));
+          let hPx = lh;
+          if (wrapOn){
+            try{
+              const n0 = _wrapProbeLineCountStyled(String(a.disp||''), wPx|0, lh|0, fs|0);
+              const n = (Number.isFinite(n0) && (n0|0) > 0) ? (n0|0) : 1;
+              hPx = Math.max(1, (n|0)) * (lh|0);
+            }catch{ hPx = lh; }
+          }
+          y += hPx;
         }
-        topPx = y;
-        rowHeightPx = (_mdLineLayoutInfoAtRow(lines, targetIdx, true).lineHeightPx||LINE_HEIGHT);
-      }catch{}
-    }
+
+        const t = _dispTextForRow(targetIdx, true);
+        const infoT = t.info;
+        _mdCaretLineHeightPx = (infoT && infoT.lineHeightPx) ? (infoT.lineHeightPx|0) : LINE_HEIGHT;
+        const scT = (infoT && infoT.scale) ? (+infoT.scale || 1) : 1;
+        _mdCaretFontSizePx = Math.max(6, Math.round(baseFontPx * scT));
+
+        // intra-row (wrapped) line index for caret
+        const srcLine0 = String(lines[targetIdx]||'');
+        const adj0 = _mdWysiwygAdjust(srcLine0, caretCol|0);
+        const dispLine = String(adj0.line||'');
+        const caretColVis0 = (adj0.col|0);
+        let intra = 0;
+        if (wrapOn){
+          try{ intra = _wrapProbeIntraFromColStyled(dispLine, caretColVis0|0, wPx|0, _mdCaretLineHeightPx|0, _mdCaretFontSizePx|0) | 0; }catch{ intra = 0; }
+          intra = Math.max(0, intra|0);
+        }
+        topPx = y + intra * (_mdCaretLineHeightPx|0);
+        rowHeightPx = _mdCaretLineHeightPx|0;
+      }
+    }catch{}
     // Subpixel remainder between scrollTop and line-height (e.g., due to DPI/zoom)
     // Align overlays (stripe/caret) with the text by canceling the remainder via translateY.
     // IMPORTANT: Use floor, not round. We define the logical top line with Math.floor(scrollTop/LINE_HEIGHT)+1
@@ -7744,14 +8317,17 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
       if (_wrapEnabled()){
         const c = _wrapEnsureCache(false);
         const wPx = (c && Number.isFinite(c.wPx)) ? (c.wPx||80) : _wrapAvailWidthPx();
-        const xp = _wrapProbeXFromCol(line, caretColVis|0, wPx);
+        const xp = _mdRichActive()
+          ? _wrapProbeXFromColStyled(line, caretColVis|0, wPx, (_mdCaretFontSizePx||Math.max(6, Math.round(FONT_SIZE)))|0, (_mdCaretLineHeightPx||LINE_HEIGHT)|0)
+          : _wrapProbeXFromCol(line, caretColVis|0, wPx);
         if (Number.isFinite(xp)) x = xp;
       }
     }catch{}
   // Make caret height match the full line box
   caret.style.top = topPx + 'px';
-  // Make caret height match the actual row height (markdown-rich can vary by line)
-  caret.style.height = Math.max(1, Math.round(_mdRichActive() ? rowHeightPx : LINE_HEIGHT)) + 'px';
+  // Make caret height match the actual row height (markdown-rich can vary by line).
+  // When wrap is active, caret is a single visual line (even in markdown).
+  caret.style.height = Math.max(1, Math.round((_mdRichActive() ? rowHeightPx : LINE_HEIGHT))) + 'px';
   // #1279: Disable sub-pixel compensation on caret element itself (handled by caretLayer)
   try{ caret.style.transform = ''; }catch{}
     // Determine character box width at caret (full-width aware), then shrink to 90%
@@ -7763,7 +8339,9 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
         if (_wrapEnabled()){
           const c = _wrapEnsureCache(false);
           const wPx = (c && Number.isFinite(c.wPx)) ? (c.wPx||80) : _wrapAvailWidthPx();
-          const xp2 = _wrapProbeXFromCol(line, (caretColVis+1)|0, wPx);
+          const xp2 = _mdRichActive()
+            ? _wrapProbeXFromColStyled(line, (caretColVis+1)|0, wPx, (_mdCaretFontSizePx||Math.max(6, Math.round(FONT_SIZE)))|0, (_mdCaretLineHeightPx||LINE_HEIGHT)|0)
+            : _wrapProbeXFromCol(line, (caretColVis+1)|0, wPx);
           if (Number.isFinite(xp2)) x2 = xp2;
         }
       }catch{}
@@ -7792,6 +8370,10 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
     if (!_caretWidthFixed){ try{ caret.style.setProperty('--caretWidth', cw + 'px'); }catch{} }
     // Auto horizontal scroll to keep caret visible (NORMAL/VISUAL guarded by wheel; INSERT always active)
     try{
+      const _mdWrapNoNativeHScroll = !!(function(){ try{ return (_mdRichEnabled && _mdRichEnabled()) && (_wrapEnabled && _wrapEnabled()); }catch{ return false; } })();
+      if (_mdWrapNoNativeHScroll){
+        try{ if (editor && (editor.scrollLeft|0) !== 0) editor.scrollLeft = 0; }catch{}
+      } else {
       if ((_mode === 'NORMAL' || _mode === 'VISUAL') && (Date.now() > _userHScrollGuardUntil)){
         const gw = (gutter && gutter.clientWidth) ? gutter.clientWidth : 0;
         const visW = Math.max(0, (viewport && viewport.clientWidth ? viewport.clientWidth : 0) - gw);
@@ -7827,6 +8409,7 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
         if (nextScroll !== hscroll){
           try{ editor.scrollLeft = nextScroll; }catch{}
         }
+      }
       }
     }catch{}
     // Position caret X adjusted by current horizontal scroll
@@ -8120,6 +8703,12 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
   function _updateVisualSelection(){
     if (!_visualActive){ _syncNativeSelectionToCaret(); return; }
     try{
+      const mdRich = (function(){ try{ return _mdRichActive(); }catch{ return false; } })();
+      if (mdRich){
+        // md-rich: keep native selection collapsed (native highlight is hidden by CSS and can
+        // cause scroll/selection side effects). Selection rendering is handled in _mdRenderTextLayer.
+        _syncNativeSelectionToCaret();
+      } else
       if (_visualLinewise){
         const rs = Math.min(_visualAnchorR, caretRow);
         const re = Math.max(_visualAnchorR, caretRow);
@@ -8135,6 +8724,7 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
         if (sOff <= eOff) editor.setSelectionRange(sOff, eOff); else editor.setSelectionRange(eOff, sOff);
       }
     }catch{}
+    try{ if ((function(){ try{ return _mdRichActive(); }catch{ return false; } })()){ _mdRenderTextLayer(); } }catch{}
     try{ _renderVisSelOverlay && _renderVisSelOverlay(); }catch{}
   }
   function _enterVisual(linewise){
@@ -8173,6 +8763,8 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
   }
   function _afterTextMutation(){
     // 強制同期順序: CaseA/B の EOF 削除/undo 直後に表示が旧状態で残る問題 (#614)
+    try{ _mdWrapInvalidateCache('text-mutation'); _mdWrapEnsureCache(false); }catch{}
+    try{ _mdSyncEofPadComp(); }catch{}
     // 1) caret を raw でクランプ
     try{ _clampCaret(); }catch{}
     // 2) ネイティブ selection を先に caret に合わせる (末尾 phantom 空行判定に利用されるため)
@@ -8891,16 +9483,27 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
     // but allow when explicitly requested (centerOnce) or forced by a caret-moving command
     try{ if (!force && !(opts && opts.centerOnce) && ((Date.now() - _lastBufferSwitchAt) < 800)) return; }catch{}
     try{ if (!force && (Date.now() < _scrollGuardUntil)) return; }catch{}
+
+    // md-rich: avoid smooth-scroll oscillation while typing; and when caret is at EOF,
+    // keep EOF padding preference stable.
+    try{
+      if (_mdRichActive && _mdRichActive() && _mode === 'INSERT'){
+        if (!(opts && Object.prototype.hasOwnProperty.call(opts, 'immediate'))) opts.immediate = true;
+        try{ if ((caretRow|0) + 1 === (_totalLines()|0)) opts.preferEOFPad = true; }catch{}
+      }
+    }catch{}
+
     const linesTotal = _totalLines();
     const vis = _visibleLinesExact();
     let topLine = _topLine();
     let caretLine1 = caretRow + 1;
     // Wrap mode: operate in visual line space for scrolling.
+    // NOTE: markdown-rich uses wrap for display but keeps logical-line scroll grid.
     let _wrapActive = false;
     let _topV1 = 1;
     let _linesTotalVis = linesTotal;
     try{
-      _wrapActive = _wrapEnabled();
+      _wrapActive = _wrapUsesVisualScrollGrid();
       if (_wrapActive){
         const c = _wrapEnsureCache(false);
         _topV1 = _topVisualLine1();
@@ -8915,11 +9518,13 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
     const centerOnce = opts.centerOnce || _centerScrolloffOnce;
     const big = scrolloff >= 99999;
     // Allow extra "virtual" page steps so EOF の下に N 行分の余白が見える
-    const baseMaxTop = Math.max(1, (_wrapActive ? (_linesTotalVis|0) : (linesTotal|0)) - vis + 1);
-    // 固定余白行数 (#865): CSS変数と同期して 5 行を許容 (#1258)
-    const _readEofPadLines = ()=>5;
-    const _eofPad = _readEofPadLines();
-    const maxTopWithPad = Math.min((_wrapActive ? (_linesTotalVis|0) : (linesTotal|0)), baseMaxTop + _eofPad);
+    // md-rich+wrap: use scroll-comp lines as *content height* compensation (not as visible EOF pad).
+    const mdComp = (_wrapActive ? 0 : (_mdScrollCompLines()|0));
+    const totalForClamp = (_wrapActive ? (_linesTotalVis|0) : ((linesTotal|0) + (mdComp|0)));
+    const baseMaxTop = Math.max(1, (totalForClamp|0) - vis + 1);
+    const _eofPad = _eofPadLines();
+    // NOTE: Do NOT cap by total lines; padding creates a virtual scroll range even when file < viewport.
+    const maxTopWithPad = Math.max(1, baseMaxTop + (_eofPad|0));
 
     // Special handling during VISUAL linewise selection: do minimal keep-in-view only (#869)
     // Avoid enforcing scrolloff margins so range can extend freely without auto recenters.
@@ -8979,7 +9584,7 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
       // Reduce the effective margin based on available lines (EOF also includes virtual pad).
       const so = Math.max(0, (scrolloff|0));
       const soUp = Math.min(so, Math.max(0, caretLine1 - 1));
-      const soDown = Math.min(so, Math.max(0, ((_wrapActive ? (_linesTotalVis|0) : (linesTotal|0)) - caretLine1) + (_eofPad|0)));
+      const soDown = Math.min(so, Math.max(0, ((totalForClamp|0) - (caretLine1|0)) + (_eofPad|0)));
 
       const topCmp2 = _wrapActive ? (_topV1|0) : (topLine|0);
       if (caretLine1 < topCmp2 + soUp){
@@ -9266,21 +9871,26 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
         let imeBase1 = 0;
         try{ imeBase1 = (window && Number.isFinite(window._imeReducedBaseLine1)) ? (window._imeReducedBaseLine1|0) : 0; }catch{ imeBase1 = 0; }
         const vis = _visibleLinesExact();
-        const top = _topLine();
         const total = _totalLines();
         const active1 = caretRow + 1;
-        const end = Math.min(total, top + vis - 1);
         const rows = [];
+        const wrapOn = (function(){ try{ return _wrapEnabled(); }catch{ return false; } })();
+        const top = _topLine();
+        const end = Math.min(total, (top|0) + (vis|0) - 1);
         for (let ln=top; ln<=end; ln++){
           const active = (ln === active1);
           rows.push({ ln, active });
         }
-        const drawn = end - top + 1;
-        const eofCount = Math.max(0, vis-drawn);
+        const drawn = (end - top + 1)|0;
+        const eofCount = Math.max(0, (vis|0) - drawn);
         const safeEofCount = Math.min(eofCount, 200);
         for (let i=0;i<safeEofCount; i++) rows.push({ ln:null, eof:true });
 
         const lines = _splitLines();
+        let baseFontPx = 16;
+        try{ baseFontPx = parseFloat(getComputedStyle(editor).fontSize)||baseFontPx; }catch{}
+        let wPx = 80;
+        try{ if (wrapOn) wPx = _wrapAvailWidthPx()|0; }catch{ wPx = 80; }
         const children = Array.from(gutter.children).filter(c => !c.classList.contains('gutter-stripe'));
         let y = 0;
         for (let i=0;i<rows.length; i++){
@@ -9290,15 +9900,50 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
           const idx0 = r.eof ? -1 : ((r.ln|0) - 1);
           const text = (idx0>=0 && idx0<lines.length) ? String(lines[idx0]||'') : '';
           let lh = LINE_HEIGHT;
-          if (r.eof) lh = LINE_HEIGHT;
-          else {
+          let hPx = LINE_HEIGHT;
+          if (r.eof){
+            lh = LINE_HEIGHT;
+            hPx = LINE_HEIGHT;
+          } else {
             const isActiveRow = ((idx0|0) === (caretRow|0));
-            lh = (_mdLineLayoutInfoAtRow(lines, idx0|0, isActiveRow).lineHeightPx||LINE_HEIGHT);
+            const info = _mdLineLayoutInfoAtRow(lines, idx0|0, isActiveRow);
+            lh = (info && info.lineHeightPx) ? (info.lineHeightPx|0) : LINE_HEIGHT;
+            const sc = (info && info.scale) ? (+info.scale || 1) : 1;
+            const fs = Math.max(6, Math.round(baseFontPx * sc));
+            // Use the displayed text (after symbol hiding) for wrap measurement.
+            let dispText = text;
+            try{
+              const hideSymbols = !!(info && info.hideSymbols);
+              if (hideSymbols){
+                let renderHr = false;
+                let renderSetextUnderlineRow = false;
+                try{ renderHr = _mdIsHrLineForDisplay(text, lines, idx0|0, isActiveRow); }catch{ renderHr = false; }
+                try{ renderSetextUnderlineRow = _mdIsSetextUnderlineRowForDisplay(text, lines, idx0|0, isActiveRow); }catch{ renderSetextUnderlineRow = false; }
+                if (renderSetextUnderlineRow) dispText = '';
+                else if (renderHr) dispText = '';
+                else {
+                  const lv0 = _mdHeadingLevel(text)|0;
+                  if (lv0>=1 && lv0<=6){
+                    const p = (_mdHeadingPrefixLen(text)|0);
+                    if (p>0) dispText = text.slice(p);
+                  }
+                }
+              }
+            }catch{}
+            hPx = lh;
+            if (wrapOn){
+              try{
+                const n0 = _wrapProbeLineCountStyled(String(dispText||''), wPx|0, lh|0, fs|0);
+                const n = (Number.isFinite(n0) && (n0|0) > 0) ? (n0|0) : 1;
+                hPx = Math.max(1, (n|0)) * (lh|0);
+              }catch{ hPx = lh; }
+            }
           }
           try{
             el.style.display = 'block';
-            el.style.height = lh + 'px';
-            el.style.lineHeight = lh + 'px';
+            el.style.height = hPx + 'px';
+            // Keep the number aligned within the first visual line of the block.
+            el.style.lineHeight = (r.eof ? (LINE_HEIGHT+'px') : (lh + 'px'));
             el.style.position = 'relative';
             el.style.zIndex = '1';
           }catch{}
@@ -9324,8 +9969,8 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
             }
             el.style.color = 'var(--gutterNumberColor, yellow)';
           }
-          // keep flow layout (no absolute) but accumulate height via inline height/lineHeight
-          y += lh;
+          // keep flow layout (no absolute) but accumulate actual painted height
+          y += hPx;
         }
         for (let i=rows.length; i<children.length; i++){
           try{ gutter.removeChild(children[i]); }catch{}
@@ -9337,7 +9982,10 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
           const rem = st - Math.floor(st/LINE_HEIGHT)*LINE_HEIGHT;
           const children2 = Array.from(gutter.children).filter(c => !c.classList.contains('gutter-stripe'));
           const first = children2[0];
-          if (first){ first.style.marginTop = Math.abs(rem) > 0.01 ? (-rem)+'px' : '0px'; }
+          if (first){
+            let mt = (Math.abs(rem) > 0.01) ? (-rem) : 0;
+            first.style.marginTop = (mt ? (mt + 'px') : '0px');
+          }
         }catch{}
         return;
       }
@@ -9548,6 +10196,80 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
       const d = (delta|0);
       if (!d) return;
       if (!_wrapEnabled || !_wrapEnabled()){ _moveCaretLines(d, opts); return; }
+
+      // Markdown-rich: use styled wrap metrics (per-line font/line-height) so j/k behave like gj/gk.
+      if (_mdRichEnabled && _mdRichEnabled()){
+        const c = _mdWrapEnsureCache(false) || _mdWrapEnsureCache(true);
+        if (!c || !c.prefix){ _moveCaretLines(d, opts); return; }
+
+        // Compute current visual-line index.
+        const totalVis = (c.prefix && c.prefix.length) ? (c.prefix[c.prefix.length-1]|0) : (_totalLines()|0);
+        const curV1 = _mdWrapVisualLine1ForRowCol(caretRow|0, caretCol|0);
+        const targetV1 = Math.max(1, Math.min(Math.max(1, totalVis|0), (curV1|0) + d));
+        const info = _mdWrapRowFromVisualLine1(targetV1|0);
+        const lines = _splitLines();
+        const row = Math.max(0, Math.min((lines.length-1)|0, (info.row|0)));
+        let intra = Math.max(0, (info.intra|0));
+        try{ if (c.counts && c.counts.length){ intra = Math.max(0, Math.min(((c.counts[row]|0)-1)|0, intra|0)); } }catch{}
+
+        // Preserve desired X across visual-line moves.
+        try{
+          if (_desiredWrapXPx == null){
+            let baseFontPx = 16;
+            try{ baseFontPx = parseFloat(getComputedStyle(editor).fontSize)||baseFontPx; }catch{}
+            const info0 = (function(){ try{ return _mdLineLayoutInfoAtRow(lines, caretRow|0, true); }catch{ return null; } })();
+            const lh0 = (info0 && info0.lineHeightPx) ? (info0.lineHeightPx|0) : (LINE_HEIGHT|0);
+            const sc0 = (info0 && info0.scale) ? (+info0.scale || 1) : 1;
+            const fs0 = Math.max(6, Math.round(baseFontPx * sc0));
+            const wPx0 = (c && Number.isFinite(c.wPx)) ? (c.wPx||80) : _wrapAvailWidthPx();
+            const src0 = String(lines[caretRow|0]||'');
+            const adj0 = _mdWysiwygAdjust(src0, caretCol|0);
+            const disp0 = String(adj0.line||'');
+            const col0 = Math.max(0, Math.min((disp0.length|0), (adj0.col|0)));
+            const x0 = _wrapProbeXFromColStyled(disp0, col0|0, wPx0|0, fs0|0, lh0|0);
+            if (Number.isFinite(x0)) _desiredWrapXPx = Math.max(0, Number(x0||0));
+          }
+        }catch{}
+        const desiredX = (_desiredWrapXPx == null) ? 0 : Number(_desiredWrapXPx||0);
+
+        // Map desiredX to a column within the target wrapped intra line.
+        let baseFontPx = 16;
+        try{ baseFontPx = parseFloat(getComputedStyle(editor).fontSize)||baseFontPx; }catch{}
+        const infoT = (function(){ try{ return _mdLineLayoutInfoAtRow(lines, row|0, true); }catch{ return null; } })();
+        const lhT = (infoT && infoT.lineHeightPx) ? (infoT.lineHeightPx|0) : (LINE_HEIGHT|0);
+        const scT = (infoT && infoT.scale) ? (+infoT.scale || 1) : 1;
+        const fsT = Math.max(6, Math.round(baseFontPx * scT));
+        const wPxT = (c && Number.isFinite(c.wPx)) ? (c.wPx||80) : _wrapAvailWidthPx();
+        const srcT = String(lines[row|0]||'');
+        const adjT = _mdWysiwygAdjust(srcT, 0);
+        const dispT = String(adjT.line||'');
+        const dispCol = _mdWrapColForIntraXStyled(dispT, intra|0, desiredX, wPxT|0, lhT|0, fsT|0);
+        // Convert display col back to source col (clean display hides heading markers).
+        let srcCol = dispCol|0;
+        try{ if (_mdWysiwygActive && _mdWysiwygActive()) srcCol = (dispCol|0) + (_mdHeadingPrefixLen(srcT)|0); }catch{}
+        srcCol = Math.max(0, Math.min((srcT.length|0), srcCol|0));
+
+        caretRow = row;
+        _setCaret(row, srcCol, { suppressWrapDesired: true });
+
+        // Update wrap curswant from current X, but never decrease.
+        try{
+          const adjC = _mdWysiwygAdjust(srcT, caretCol|0);
+          const dispC = String(adjC.line||'');
+          const colC = Math.max(0, Math.min((dispC.length|0), (adjC.col|0)));
+          const xC = _wrapProbeXFromColStyled(dispC, colC|0, wPxT|0, fsT|0, lhT|0);
+          if (Number.isFinite(xC)){
+            const prev = (_desiredWrapXPx == null) ? null : Number(_desiredWrapXPx||0);
+            const nx = Math.max(0, Number(xC||0));
+            if (prev == null || nx > (prev + 0.01)) _desiredWrapXPx = nx;
+          }
+        }catch{}
+
+        if (!(opts && opts.skipEnsure)) _ensureAfterMotion();
+        try{ _debugPush({ t:Date.now(), type:'motion', mode:_mode, kind:'md-vis-lines', delta:d, fromV1:(curV1|0), toV1:(targetV1|0), toR:(caretRow|0), toC:(caretCol|0) }); }catch{}
+        return;
+      }
+
       const c = _wrapEnsureCache(false) || _wrapEnsureCache(true);
       if (!c || !c.prefix){ _moveCaretLines(d, opts); return; }
 
@@ -9664,9 +10386,11 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
       if (caretRow !== lines.length-1) return false;
       const vis=_visibleLinesExact();
       const linesTotal=_totalLines();
-      const baseMaxTop=Math.max(1, linesTotal - vis + 1);
-      const eofPad=5; // 固定 (#865) -> 5 (#1258)
-      const maxTopWithPad=Math.min(linesTotal, baseMaxTop + eofPad);
+      const mdComp = (_mdScrollCompLines()|0);
+      const totalForClamp = Math.max(1, (linesTotal|0) + (mdComp|0));
+      const baseMaxTop=Math.max(1, (totalForClamp|0) - vis + 1);
+      const eofPad=_eofPadLines();
+      const maxTopWithPad=Math.max(1, baseMaxTop + (eofPad|0));
       const curTop=_topLine();
       if (curTop >= maxTopWithPad) return false;
       const nextTop=Math.min(maxTopWithPad, curTop + 1);
@@ -11769,7 +12493,18 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
       _insertSegDirty = false;
       // ensure native textarea caret matches overlay caret position
       try{ editor && editor.focus && editor.focus(); }catch{}
-      _syncNativeSelectionToCaret();
+      // md-rich: preserve scroll position if caret is already visible; setSelectionRange can scroll unexpectedly.
+      try{
+        const mdRich = (function(){ try{ return _mdRichActive && _mdRichActive(); }catch{ return false; } })();
+        const keepIfVisible = mdRich && (function(){ try{ return _isCaretVisible && _isCaretVisible(); }catch{ return false; } })();
+        const stHold = keepIfVisible ? ((editor && typeof editor.scrollTop==='number') ? editor.scrollTop : 0) : 0;
+        const slHold = keepIfVisible ? ((editor && typeof editor.scrollLeft==='number') ? editor.scrollLeft : 0) : 0;
+        _syncNativeSelectionToCaret();
+        if (keepIfVisible){
+          try{ _setEditorScrollTop(stHold, { immediate:true }); }catch{ try{ editor.scrollTop = stHold; }catch{} }
+          try{ editor.scrollLeft = slHold; }catch{}
+        }
+      }catch{ try{ _syncNativeSelectionToCaret(); }catch{} }
       try{ if (cmdfloat) cmdfloat.style.display='none'; }catch{}
   // Caret color remains baseline (IME visualization removed)
     } else {
@@ -13241,7 +13976,7 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
           // Wrap mode can produce a maxScroll that is not aligned to LINE_HEIGHT, causing a persistent
           // half-line offset at EOF when snapping is disabled. In that case, floor-snap even at EOF.
           let wrapActive = false;
-          try{ wrapActive = _wrapEnabled() && !_mdRichActive(); }catch{ wrapActive = false; }
+          try{ wrapActive = _wrapEnabled(); }catch{ wrapActive = false; }
 
           if (!atEof){
             const snapped = Math.round(st/LINE_HEIGHT)*LINE_HEIGHT;
@@ -13256,7 +13991,7 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
       try{
         // markdown-rich: suppress fixed-grid overlays (hlsearch/incprev/visSel/link) for now (#1472)
         try{
-          if (_mdRichActive()){
+          if (_mdRichActive() && !(function(){ try{ return _wrapEnabled(); }catch{ return false; } })()){
             const st0 = (editor.scrollTop||0);
             const maxScroll0 = editor.scrollHeight - editor.clientHeight;
             const atEof0 = (maxScroll0 - st0 <= 1.5);
@@ -14048,7 +14783,7 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
         }
       }catch{}
     });
-  window.addEventListener('resize', ()=>{ _syncEditorMetrics(); clampViewportExactLines(); try{ _wrapInvalidateCache('resize'); _wrapEnsureCache(true); }catch{} _exactLineLockAdjust(); ensureScrolloff(); _repositionCaret(); updateGutter(); _renderHlMatchesVisible(); _incPrevRefresh(); _renderVisSelOverlay(); });
+  window.addEventListener('resize', ()=>{ _syncEditorMetrics(); clampViewportExactLines(); try{ _wrapInvalidateCache('resize'); _wrapEnsureCache(true); }catch{} try{ _mdWrapInvalidateCache('resize'); _mdWrapEnsureCache(true); }catch{} try{ _mdSyncEofPadComp(); }catch{} _exactLineLockAdjust(); ensureScrolloff(); _repositionCaret(); updateGutter(); _renderHlMatchesVisible(); _incPrevRefresh(); _renderVisSelOverlay(); });
 
   editor.addEventListener('keydown', (e)=>{
       // Short guard: absorb any stray keydown right after modal close
@@ -14319,8 +15054,8 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
             let targetTop = currentTop + scrollDelta;
             const linesTotal = lines.length;
             const baseMaxTop = Math.max(1, linesTotal - vis + 1);
-            const eofPad = 5;
-            const maxTopWithPad = Math.min(linesTotal, baseMaxTop + eofPad);
+            const eofPad = _eofPadLines();
+            const maxTopWithPad = Math.max(1, baseMaxTop + (eofPad|0));
             targetTop = Math.max(0, Math.min((maxTopWithPad-1)*LINE_HEIGHT, targetTop));
             
             _setEditorScrollTop(targetTop, { forceAnimate: true });
@@ -14355,6 +15090,21 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
             }
           }catch{}
           // 他の移動キーは後段 setTimeout で同期
+
+          // markdown(md-rich)では↑↓も見た目行(visual-line)移動に統一
+          try{
+            if (_mdRichEnabled() && (e.key==='ArrowUp' || e.key==='ArrowDown')){
+              e.preventDefault(); e.stopPropagation();
+              const cnt = (_getCountArg()|0) || 1;
+              const delta = (e.key==='ArrowDown') ? (cnt|0) : -((cnt|0));
+              _moveCaretVisualLines(delta|0);
+              try{ _syncNativeSelectionToCaret(); }catch{}
+              try{ ensureScrolloff(); }catch{}
+              _repositionCaret(); updateGutter();
+              return;
+            }
+          }catch{}
+
           try{ _flagCaretMotion(); }catch{}
           // Defer until after the browser updates selection/caret
           setTimeout(()=>{
@@ -14602,8 +15352,28 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
         }
     // Motions extend selection
   const moveAndUpdate=(fn)=>{ fn(); try{ _flagCaretMotion(); }catch{} _ensureAfterMotion(); _repositionCaret(); updateGutter(); _updateVisualSelection(); };
-        if (e.key==='ArrowDown'){ e.preventDefault(); const n=_consumeCount(); if (_visualLinewise){ _visualLinewiseMoveLines(n); } else { moveAndUpdate(()=>_moveCaretLines(n, { skipEnsure:true })); } return; }
-        if (e.key==='ArrowUp'){ e.preventDefault(); const n=_consumeCount(); if (_visualLinewise){ _visualLinewiseMoveLines(-n); } else { moveAndUpdate(()=>_moveCaretLines(-n, { skipEnsure:true })); } return; }
+        if (e.key==='ArrowDown'){
+          e.preventDefault();
+          const n=_consumeCount();
+          if (_visualLinewise){
+            _visualLinewiseMoveLines(n);
+          } else {
+            const _md = (function(){ try{ return (_mdRichEnabled && _mdRichEnabled()); }catch{ return false; } })();
+            moveAndUpdate(()=> _md ? _moveCaretVisualLines(n, { skipEnsure:true }) : _moveCaretLines(n, { skipEnsure:true }));
+          }
+          return;
+        }
+        if (e.key==='ArrowUp'){
+          e.preventDefault();
+          const n=_consumeCount();
+          if (_visualLinewise){
+            _visualLinewiseMoveLines(-n);
+          } else {
+            const _md = (function(){ try{ return (_mdRichEnabled && _mdRichEnabled()); }catch{ return false; } })();
+            moveAndUpdate(()=> _md ? _moveCaretVisualLines(-n, { skipEnsure:true }) : _moveCaretLines(-n, { skipEnsure:true }));
+          }
+          return;
+        }
 
         // Alt+j/k smooth scroll
         if (e.altKey && (e.code==='KeyJ' || e.code==='KeyK')){
@@ -14681,11 +15451,12 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
           if (_visualLinewise){
             _visualLinewiseMoveLines(n);
           } else {
-            moveAndUpdate(()=>_moveCaretLines(n, { skipEnsure:true }));
+            const _md = (function(){ try{ return (_mdRichEnabled && _mdRichEnabled()); }catch{ return false; } })();
+            moveAndUpdate(()=> _md ? _moveCaretVisualLines(n, { skipEnsure:true }) : _moveCaretLines(n, { skipEnsure:true }));
             // If scrolloff is set to center (99999) and user is holding the key (auto-repeat),
             // animate viewport to keep caret centered during repeat.
             try{
-              if ((scrolloff||0) >= 99999 && !!e.repeat){
+              if ((scrolloff||0) >= 99999 && !!e.repeat && (_wrapUsesVisualScrollGrid && _wrapUsesVisualScrollGrid())){
                 const linesTotal = _totalLines();
                 const vis = _visibleLinesExact();
                 const baseMaxTop = Math.max(1, linesTotal - vis + 1);
@@ -14701,7 +15472,18 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
           }
           return;
         }
-        if (e.key==='k' || (e.key==='Process' && e.code==='KeyK')){ e.preventDefault(); try{ _debugPush({ t:Date.now(), type:'motion-exec', mode:_mode, key:'k', code:e.code, via:(e.key==='Process'?'Process/KeyK':'k') }); }catch{} const n=_consumeCount(); if (_visualLinewise){ _visualLinewiseMoveLines(-n); } else { moveAndUpdate(()=>_moveCaretLines(-n, { skipEnsure:true })); } return; }
+        if (e.key==='k' || (e.key==='Process' && e.code==='KeyK')){
+          e.preventDefault();
+          try{ _debugPush({ t:Date.now(), type:'motion-exec', mode:_mode, key:'k', code:e.code, via:(e.key==='Process'?'Process/KeyK':'k') }); }catch{}
+          const n=_consumeCount();
+          if (_visualLinewise){
+            _visualLinewiseMoveLines(-n);
+          } else {
+            const _md = (function(){ try{ return (_mdRichEnabled && _mdRichEnabled()); }catch{ return false; } })();
+            moveAndUpdate(()=> _md ? _moveCaretVisualLines(-n, { skipEnsure:true }) : _moveCaretLines(-n, { skipEnsure:true }));
+          }
+          return;
+        }
   // Guard against anomalous IME mapping (#523): accept 'h' when code is KeyH or Process/KeyH; always accept ArrowLeft
   if ((e.key==='h' && e.code==='KeyH' && (!_optStrictNormalIME || !_imeComposing)) || (e.key==='Process' && e.code==='KeyH' && (!_optStrictNormalIME || !_imeComposing)) || e.key==='ArrowLeft'){
     e.preventDefault(); try{ _debugPush({ t:Date.now(), type:'motion-exec', mode:_mode, key:e.key, code:e.code, via:(e.key==='ArrowLeft'?'ArrowLeft':(e.code==='KeyH'?(e.key==='Process'?'Process/KeyH':'KeyH'):'unknown')) }); }catch{} const n=_consumeCount(); moveAndUpdate(()=>_moveCaretCols(-n)); return; }
@@ -15654,8 +16436,8 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
     // Clamp targetTop
     const linesTotal = lines.length;
     const baseMaxTop = Math.max(1, linesTotal - vis + 1);
-    const eofPad = 5;
-    const maxTopWithPad = Math.min(linesTotal, baseMaxTop + eofPad);
+    const eofPad = _eofPadLines();
+    const maxTopWithPad = Math.max(1, baseMaxTop + (eofPad|0));
     targetTop = Math.max(0, Math.min((maxTopWithPad-1)*LINE_HEIGHT, targetTop));
     _setEditorScrollTop(targetTop, { forceAnimate: true });
     _repositionCaret(); updateGutter();
@@ -15794,7 +16576,7 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
     }catch{}
   }
 
-  if (e.key==='j' || e.key==='ArrowDown'){
+  if (e.key==='j' || e.key==='ArrowDown' || (e.key==='Process' && e.code==='KeyJ')){
     // #1253: Suppress default handling if scan-hold is active
     try{ const h=window.__sixScanHoldHeld; if(h && (h.has('KeyJ') || h.has('ArrowDown'))){ e.preventDefault(); return; } }catch{}
 
@@ -15813,21 +16595,23 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
       }
     }catch{}
 
-    e.preventDefault(); try{ _debugPush({ t:Date.now(), type:'motion-exec', mode:_mode, key:e.key, code:e.code, via:(e.key==='j'?'j':'ArrowDown') }); }catch{}
+    e.preventDefault(); try{ _debugPush({ t:Date.now(), type:'motion-exec', mode:_mode, key:(e.key==='Process'?'j':e.key), code:e.code, via:(e.key==='Process'?'Process/KeyJ':(e.key==='j'?'j':'ArrowDown')) }); }catch{}
     const countAccBefore = (_countAcc==null?null:(_countAcc|0));
     const fromRow = (caretRow|0);
     const n=_consumeCount();
     try{ if (_optRawKeys){ console.debug('[vert] normal j', { key:e.key, code:e.code, trusted:!!e.isTrusted, repeat:!!e.repeat, countAccBefore, countUsed:(n|0), fromRow:fromRow+1 }); } }catch{}
-    _moveCaretLines(n);
+    const _md = (function(){ try{ return (_mdRichEnabled && _mdRichEnabled()); }catch{ return false; } })();
+    if (_md) _moveCaretVisualLines(n);
+    else _moveCaretLines(n);
     try{ if (_optRawKeys){ console.debug('[vert] normal j result', { toRow:(caretRow|0)+1 }); } }catch{}
     try{ _flagCaretMotion(); }catch{}
     // If center-scroll mode and auto-repeat, smoothly follow caret during repeat
     try{
-      if ((scrolloff||0) >= 99999 && !!e.repeat){
+      if ((scrolloff||0) >= 99999 && !!e.repeat && (_wrapUsesVisualScrollGrid && _wrapUsesVisualScrollGrid())){
         const linesTotal = _totalLines();
         const vis = _visibleLinesExact();
         const baseMaxTop = Math.max(1, linesTotal - vis + 1);
-        const eofPad = 5; const maxTopWithPad = Math.min(linesTotal, baseMaxTop + eofPad);
+        const eofPad = _eofPadLines(); const maxTopWithPad = Math.max(1, baseMaxTop + (eofPad|0));
         const caretLine1 = (caretRow|0) + 1;
         let targetTop = Math.max(1, caretLine1 - Math.floor((vis||1)/2));
         if (caretLine1 === linesTotal) targetTop = Math.min(targetTop, maxTopWithPad);
@@ -15837,7 +16621,7 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
     }catch{}
     _repositionCaret(); updateGutter(); return;
   }
-  if (e.key==='k' || e.key==='ArrowUp'){
+  if (e.key==='k' || e.key==='ArrowUp' || (e.key==='Process' && e.code==='KeyK')){
     // #1253: Suppress default handling if scan-hold is active
     try{ const h=window.__sixScanHoldHeld; if(h && (h.has('KeyK') || h.has('ArrowUp'))){ e.preventDefault(); return; } }catch{}
 
@@ -15856,20 +16640,22 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
       }
     }catch{}
 
-    e.preventDefault(); try{ _debugPush({ t:Date.now(), type:'motion-exec', mode:_mode, key:e.key, code:e.code, via:(e.key==='k'?'k':'ArrowUp') }); }catch{}
+    e.preventDefault(); try{ _debugPush({ t:Date.now(), type:'motion-exec', mode:_mode, key:(e.key==='Process'?'k':e.key), code:e.code, via:(e.key==='Process'?'Process/KeyK':(e.key==='k'?'k':'ArrowUp')) }); }catch{}
     const countAccBefore = (_countAcc==null?null:(_countAcc|0));
     const fromRow = (caretRow|0);
     const n=_consumeCount();
     try{ if (_optRawKeys){ console.debug('[vert] normal k', { key:e.key, code:e.code, trusted:!!e.isTrusted, repeat:!!e.repeat, countAccBefore, countUsed:(n|0), fromRow:fromRow+1 }); } }catch{}
-    _moveCaretLines(-n);
+    const _md = (function(){ try{ return (_mdRichEnabled && _mdRichEnabled()); }catch{ return false; } })();
+    if (_md) _moveCaretVisualLines(-n);
+    else _moveCaretLines(-n);
     try{ if (_optRawKeys){ console.debug('[vert] normal k result', { toRow:(caretRow|0)+1 }); } }catch{}
     try{ _flagCaretMotion(); }catch{}
     try{
-      if ((scrolloff||0) >= 99999 && !!e.repeat){
+      if ((scrolloff||0) >= 99999 && !!e.repeat && (_wrapUsesVisualScrollGrid && _wrapUsesVisualScrollGrid())){
         const linesTotal = _totalLines();
         const vis = _visibleLinesExact();
         const baseMaxTop = Math.max(1, linesTotal - vis + 1);
-        const eofPad = 5; const maxTopWithPad = Math.min(linesTotal, baseMaxTop + eofPad);
+        const eofPad = _eofPadLines(); const maxTopWithPad = Math.max(1, baseMaxTop + (eofPad|0));
         const caretLine1 = (caretRow|0) + 1;
         let targetTop = Math.max(1, caretLine1 - Math.floor((vis||1)/2));
         if (caretLine1 === linesTotal) targetTop = Math.min(targetTop, maxTopWithPad);
@@ -16480,8 +17266,8 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
               }
             }catch{}
             const baseMaxTop = Math.max(1, (linesTotalEff|0) - vis + 1);
-            const _eofPad = 5; // Fixed pad matching ensureScrolloff
-            const maxTopWithPad = Math.min((linesTotalEff|0), baseMaxTop + _eofPad);
+            const _eofPad = _eofPadLines();
+            const maxTopWithPad = Math.max(1, baseMaxTop + (_eofPad|0));
 
             // #1219: Use pixel-based check for scrollability to handle fractional scrollTop
             // (caused by smooth scrolling) correctly.
