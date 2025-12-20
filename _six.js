@@ -3717,13 +3717,29 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
       if (!(selEnd>selStart)) return;
 
       const lines = _splitLines();
-      const topLine1 = _topLine();
       const vis = Math.max(1, _visibleLinesExact());
-      const startIdx = Math.max(0, (topLine1|0) - 1);
-      const endIdx = Math.min((lines.length|0) - 1, startIdx + vis - 1);
+      let startIdx = 0;
+      let endIdx = Math.min((lines.length|0) - 1, (vis|0) - 1);
+      // In wrap mode, viewport is in visual lines, so derive logical row bounds from visual top/bottom.
+      if (!mdRich && _wrapEnabled()){
+        try{
+          const topV1 = _topVisualLine1();
+          const endV1 = (topV1|0) + (vis|0) - 1;
+          const a = _wrapRowFromVisualLine1(topV1|0);
+          const b = _wrapRowFromVisualLine1(endV1|0);
+          startIdx = Math.max(0, (a && Number.isFinite(a.row) ? (a.row|0) : 0));
+          endIdx = Math.min((lines.length|0) - 1, (b && Number.isFinite(b.row) ? (b.row|0) : endIdx));
+        }catch{}
+      } else {
+        const topLine1 = _topLine();
+        startIdx = Math.max(0, (topLine1|0) - 1);
+        endIdx = Math.min((lines.length|0) - 1, startIdx + (vis|0) - 1);
+      }
       let _hs = 0; try{ _hs = (editor.scrollLeft||0); }catch{}
 
       let yAcc = 0;
+      let topV1 = 0;
+      try{ if (!mdRich && _wrapEnabled()){ topV1 = _topVisualLine1()|0; } }catch{}
       for (let r=startIdx; r<=endIdx; r++){
         const lineSrc = String(lines[r]||'');
         const off0 = _offsetFromRC(r, 0)|0;
@@ -3781,7 +3797,15 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
               const el = document.createElement('div');
               el.className = 'viscmdsel';
               el.style.left = (x1 - _hs) + 'px';
-              el.style.top = yAcc + 'px';
+              if (!mdRich && _wrapEnabled()){
+                // Align to the visual start line of this logical row.
+                try{
+                  const vStart1 = _wrapVisualStartLine1ForRow(r|0);
+                  el.style.top = (((vStart1|0) - (topV1|0)) * LINE_HEIGHT) + 'px';
+                }catch{ el.style.top = yAcc + 'px'; }
+              } else {
+                el.style.top = yAcc + 'px';
+              }
               el.style.width = Math.max(1, Math.round(x2 - x1)) + 'px';
               el.style.height = Math.max(1, Math.round(mdRich ? rowHeightPx : LINE_HEIGHT)) + 'px';
               _visSelLayer.appendChild(el);
@@ -3789,7 +3813,12 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
           }
         }
 
-        yAcc += (mdRich ? (rowHeightPx||LINE_HEIGHT) : LINE_HEIGHT);
+        // In wrap mode we place rows by visual mapping (not by accumulated logical lines).
+        if (mdRich){
+          yAcc += (rowHeightPx||LINE_HEIGHT);
+        } else if (!_wrapEnabled()){
+          yAcc += LINE_HEIGHT;
+        }
       }
     }catch{}
   }
@@ -3962,33 +3991,87 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
       _yankFlashSegs = _yankFlashSegs.filter(s=> s && s.exp>now);
       if (_yankFlashSegs.length===0){ _yankFlashClear(); return; }
       _yankFlashEnsureLayer(); _yankFlashClear();
-      const topLine = _topLine();
       const vis = _visibleLinesExact();
-      const endLine = topLine + vis - 1;
       const lines = _splitLines();
       let _hs = 0; try{ _hs = (editor.scrollLeft||0); }catch{}
       let col = 'yellow'; try{ if (window && window.THEME && window.THEME.yankFlashColor){ col = String(window.THEME.yankFlashColor||'yellow'); } }catch{}
+      const wrapOn = (function(){ try{ return _wrapEnabled(); }catch{ return false; } })();
+      let topLine = 1;
+      let endLine = 1;
+      let topV1 = 1;
+      let endV1 = 1;
+      let wPx = 80;
+      if (wrapOn){
+        try{ topV1 = _topVisualLine1()|0; }catch{ topV1 = 1; }
+        endV1 = (topV1|0) + (vis|0) - 1;
+        try{
+          const c = _wrapEnsureCache(false);
+          wPx = (c && Number.isFinite(c.wPx) ? (c.wPx|0) : (editor && (editor.clientWidth|0) ? (editor.clientWidth|0) : 80));
+        }catch{ wPx = (editor && (editor.clientWidth|0) ? (editor.clientWidth|0) : 80); }
+      } else {
+        topLine = _topLine();
+        endLine = (topLine|0) + (vis|0) - 1;
+      }
       for (const seg of _yankFlashSegs){
         const row1 = (seg.r|0) + 1;
-        if (row1 < topLine || row1 > endLine) continue;
         const line = String(lines[seg.r]||'');
         const c1 = Math.max(0, Math.min(line.length, seg.c1|0));
         const c2 = Math.max(c1, Math.min(line.length, seg.c2|0));
         if (c2<=c1) continue;
-        _measureSpan.textContent = line.slice(0, c1);
-        const x1 = _measureSpan.getBoundingClientRect().width;
-        _measureSpan.textContent = line.slice(0, c2);
-        const x2 = _measureSpan.getBoundingClientRect().width;
-        if (!(x2>x1)) continue;
-        const topPx = (row1 - topLine) * LINE_HEIGHT;
-        const el = document.createElement('div');
-        el.className='yank-flash';
-        el.style.left=(x1 - _hs) + 'px';
-        el.style.top= topPx + 'px';
-        el.style.width= Math.max(1, Math.round(x2 - x1)) + 'px';
-        el.style.height= Math.max(1, Math.round(LINE_HEIGHT)) + 'px';
-        try{ el.style.background = col; el.style.opacity = '0.35'; el.style.outline = '1px solid ' + col; el.style.outlineOffset='-1px'; }catch{}
-        _yankFlashLayer.appendChild(el);
+
+        if (!wrapOn){
+          if (row1 < (topLine|0) || row1 > (endLine|0)) continue;
+          _measureSpan.textContent = line.slice(0, c1);
+          const x1 = _measureSpan.getBoundingClientRect().width;
+          _measureSpan.textContent = line.slice(0, c2);
+          const x2 = _measureSpan.getBoundingClientRect().width;
+          if (!(x2>x1)) continue;
+          const topPx = (row1 - (topLine|0)) * LINE_HEIGHT;
+          const el = document.createElement('div');
+          el.className='yank-flash';
+          el.style.left=(x1 - _hs) + 'px';
+          el.style.top= topPx + 'px';
+          el.style.width= Math.max(1, Math.round(x2 - x1)) + 'px';
+          el.style.height= Math.max(1, Math.round(LINE_HEIGHT)) + 'px';
+          try{ el.style.background = col; el.style.opacity = '0.35'; el.style.outline = '1px solid ' + col; el.style.outlineOffset='-1px'; }catch{}
+          _yankFlashLayer.appendChild(el);
+          continue;
+        }
+
+        // wrap-on: map to visual line space (scrollTop grid is visual-line based)
+        let vStart1 = 1;
+        try{ vStart1 = _wrapVisualStartLine1ForRow(seg.r|0) | 0; }catch{ vStart1 = 1; }
+        // Determine wrapped intra range roughly by probe.
+        let intra1 = 0, intra2 = 0;
+        try{ intra1 = _wrapProbeIntraFromCol(line, c1|0, wPx|0) | 0; }catch{ intra1 = 0; }
+        try{ intra2 = _wrapProbeIntraFromCol(line, c2|0, wPx|0) | 0; }catch{ intra2 = intra1; }
+        intra1 = Math.max(0, intra1|0);
+        intra2 = Math.max(intra1, intra2|0);
+
+        for (let intra=intra1; intra<=intra2; intra++){
+          const v1 = (vStart1|0) + (intra|0);
+          if (v1 < (topV1|0) || v1 > (endV1|0)) continue;
+
+          let x1 = 0;
+          let x2 = wPx;
+          if (intra === intra1){
+            try{ const xp = _wrapProbeXFromCol(line, c1|0, wPx|0); if (Number.isFinite(xp)) x1 = Math.max(0, xp); }catch{}
+          }
+          if (intra === intra2){
+            try{ const xp = _wrapProbeXFromCol(line, c2|0, wPx|0); if (Number.isFinite(xp)) x2 = Math.max(0, xp); }catch{}
+          }
+          if (!(x2 > x1)) continue;
+
+          const topPx = ((v1|0) - (topV1|0)) * LINE_HEIGHT;
+          const el = document.createElement('div');
+          el.className='yank-flash';
+          el.style.left=(x1 - _hs) + 'px';
+          el.style.top= topPx + 'px';
+          el.style.width= Math.max(1, Math.round(x2 - x1)) + 'px';
+          el.style.height= Math.max(1, Math.round(LINE_HEIGHT)) + 'px';
+          try{ el.style.background = col; el.style.opacity = '0.35'; el.style.outline = '1px solid ' + col; el.style.outlineOffset='-1px'; }catch{}
+          _yankFlashLayer.appendChild(el);
+        }
       }
     }catch{}
   }
@@ -6105,6 +6188,7 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
       // ケース感度表示(検索時 A/a)をタブ切替時にも更新 (#955)
       try{ _updateOverlayCaseVisual(); }catch{}
       try{ _updateOverlayMarkdownVisual(); }catch{}
+      try{ _updateOverlayWrapVisual && _updateOverlayWrapVisual(); }catch{}
       try{ _mdApplyVisualState(); }catch{}
       try{ _wrapApplyVisualState({ skipRender:true }); }catch{}
       _updateHlsearchFull();
@@ -10905,16 +10989,19 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
     if (/^:set\s+wrap\s*$/i.test(cmd)){
       const b=currentBuffer(); if (b){ b.wrap = true; _schedulePersist('wrap'); }
       try{ _wrapApplyVisualState(); }catch{}
+      try{ _updateOverlayWrapVisual && _updateOverlayWrapVisual(); }catch{}
       toast('wrap: on', 900); return;
     }
     if (/^:set\s+nowrap\s*$/i.test(cmd)){
       const b=currentBuffer(); if (b){ b.wrap = false; _schedulePersist('wrap'); }
       try{ _wrapApplyVisualState(); }catch{}
+      try{ _updateOverlayWrapVisual && _updateOverlayWrapVisual(); }catch{}
       toast('wrap: off', 900); return;
     }
     if (/^:set\s+wrap!\s*$/i.test(cmd)){
       const b=currentBuffer(); if (b){ b.wrap = !b.wrap; _schedulePersist('wrap'); }
       try{ _wrapApplyVisualState(); }catch{}
+      try{ _updateOverlayWrapVisual && _updateOverlayWrapVisual(); }catch{}
       toast('wrap: ' + ((b&&b.wrap)?'on':'off'), 900); return;
     }
     if (/^:set\s+wrap\?\s*$/i.test(cmd)){
@@ -22065,6 +22152,58 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
       });
       palTR.appendChild(mdDraftBtn);
 
+      // Wrap button（右上パレット：バッファ毎設定） (#1524)
+      // 表示折り返し（改行は挿入しない）: :set wrap / :set nowrap / :set wrap!
+      const wrapBtn = document.createElement('button');
+      wrapBtn.type = 'button';
+      wrapBtn.id = 'overlayBtnWrap';
+      wrapBtn.style.minWidth = '100px';
+      wrapBtn.style.border = '1px solid #2a3244';
+      wrapBtn.style.background = '#1a2030';
+      wrapBtn.style.color = '#e6e6e6';
+      wrapBtn.style.borderRadius = '6px';
+      wrapBtn.style.padding = '4px 3px';
+      wrapBtn.style.cursor = 'pointer';
+      wrapBtn.style.font = "12px/1.25 system-ui, -apple-system, 'Segoe UI', sans-serif";
+      wrapBtn.style.opacity = '0.92';
+      wrapBtn.style.userSelect = 'none';
+      wrapBtn.style.outline = 'none';
+      attachHover(wrapBtn);
+      wrapBtn.addEventListener('contextmenu', (e)=>{ try{ e.preventDefault(); e.stopPropagation(); }catch{} });
+      wrapBtn.addEventListener('mousedown', (e)=>{ try{ lastFocusedEl = document.activeElement; e.preventDefault(); }catch{} });
+      const wrapWrap = document.createElement('div');
+      wrapWrap.style.display = 'flex';
+      wrapWrap.style.flexDirection = 'column';
+      wrapWrap.style.gap = '2px';
+      const wrapTitle = document.createElement('div');
+      wrapTitle.textContent = '折り返し';
+      wrapTitle.style.textAlign = 'center';
+      wrapTitle.style.fontWeight = '500';
+      const wrapLine = document.createElement('div');
+      wrapLine.style.display = 'flex';
+      wrapLine.style.justifyContent = 'center';
+      wrapLine.style.gap = '6px';
+      const wrapOff = pillBase('しない', 'overlayBtnWrap_off');
+      const wrapOn  = pillBase('する',  'overlayBtnWrap_on');
+      wrapLine.appendChild(wrapOff);
+      wrapLine.appendChild(wrapOn);
+      wrapWrap.appendChild(wrapTitle);
+      wrapWrap.appendChild(wrapLine);
+      wrapBtn.appendChild(wrapWrap);
+      wrapBtn.addEventListener('click', (e)=>{
+        try{ e.preventDefault(); e.stopPropagation(); }catch{}
+        try{
+          const b = currentBuffer();
+          if (b){ b.wrap = !b.wrap; _schedulePersist('wrap'); }
+        }catch{}
+        try{ _wrapApplyVisualState(); }catch{}
+        try{ _updateOverlayWrapVisual && _updateOverlayWrapVisual(); }catch{}
+        try{ const b = currentBuffer(); toast('wrap: ' + (b&&b.wrap?'on':'off'), 900); }catch{}
+        try{ if (lastFocusedEl && typeof lastFocusedEl.focus === 'function'){ lastFocusedEl.focus(); } }catch{}
+      });
+      // Place as the last item in top-right palette
+      palTR.appendChild(wrapBtn);
+
   // initialize visual state for hlsearch & list pills
   try{ _updateOverlayHlsearchVisual(); }catch{}
   try{ _updateOverlayListVisual(); }catch{}
@@ -22073,6 +22212,7 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
   try{ _updateOverlayShiftwidthVisual(); }catch{}
   try{ _updateOverlayCaseVisual(); }catch{}
   try{ _updateOverlayMarkdownVisual(); }catch{}
+  try{ _updateOverlayWrapVisual && _updateOverlayWrapVisual(); }catch{}
       // Initial position sync with scrollbars
       try{ _positionPaletteUI(); }catch{}
       // Reposition palettes while scrolling (scrollbar appearance/overlay thickness can change).
@@ -22364,6 +22504,28 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
           }
         }
       }catch{}
+    }catch{}
+  }
+
+  // Reflect current wrap state to overlay button
+  function _updateOverlayWrapVisual(){
+    try{
+      const off = document.getElementById('overlayBtnWrap_off');
+      const on  = document.getElementById('overlayBtnWrap_on');
+      if (!off || !on) return;
+      const gray = '#9aa0aa';
+      const green = '#49e26f';
+      off.style.background = 'transparent';
+      on.style.background  = 'transparent';
+      off.style.color = '#e6e6e6';
+      on .style.color = '#e6e6e6';
+      const b = currentBuffer();
+      const w = !!(b && b.wrap);
+      if (w){
+        on.style.background = green; on.style.color = '#000';
+      } else {
+        off.style.background = gray; off.style.color = '#000';
+      }
     }catch{}
   }
 
