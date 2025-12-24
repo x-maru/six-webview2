@@ -138,8 +138,14 @@ body.wrap-on #editor {
 /* Keep overlay layers aligned with the reserved right inset */
 body.wrap-on #caretLayer,
 body.wrap-on #textLayer,
+{
+	/* Match #editor's reserved right padding so wrap metrics and visuals stay in sync */
+	right: calc(2rem + var(--wrapRightInset, 1ch));
+}
+
+/* But keep background layer spanning full width (avoid black vertical bar on the right) */
 body.wrap-on #textBgLayer {
-	right: var(--wrapRightInset, 1ch);
+	right: 0;
 }
 
 /* Use native textarea caret during IME composition (overlay caret may be suppressed for perf). */
@@ -193,6 +199,11 @@ body.ime-reduced-text #editor::-webkit-scrollbar-corner,
 	pointer-events: none;
 	overflow: hidden;
 	z-index: 1; /* above active-line stripe, below textLayer */
+	/* Fill any leftover sub-line remainder area (viewport height not multiple of line height).
+	   md-bgline elements cover full rendered rows, but the remainder can otherwise show as a dark/black strip. */
+	background:
+		linear-gradient(to bottom, var(--lineGradStart, rgb(243,251,243)), var(--lineGradEnd, rgb(237,243,237))) 0 0 / 100% var(--lhEff, var(--lh)) repeat-y,
+		var(--lineBaseFill, #0f1117);
 }
 #textBgLayer .md-bgline {
 	position: absolute;
@@ -297,6 +308,8 @@ body.md-rich #editor {
 	color: transparent !important;
 	text-shadow: none !important;
 	overflow-x: hidden !important;
+	/* Stabilize wrap measurement: reserve scrollbar gutter so clientWidth doesn't oscillate */
+	scrollbar-gutter: stable;
 }
 
 /* md-rich: wrapping is rendered in #textLayer; keep textarea unwrapped so scroll metrics stay logical-line based. */
@@ -526,4 +539,4 @@ body.md-rich.wrap-on #editor::selection {
 }
 
 /* #1232: Hide caret during continuous scroll */
-body.is-scrolling .caret { display: none !important; }
+body.is-scrolling:not(.keep-caret) .caret { display: none !important; }

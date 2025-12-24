@@ -31,7 +31,8 @@ window.SIX_OPTIONS = {
   urllink: true,
   imeSwitchKey: 'direct',
   //imeSwitchKey: 'toggle',
-  jkScrollDirection: 'reverse'  // `Alt+j`がPageDown方向のスクロールになるのが'normal'(デフォルト)
+  jkScrollDirection: 'reverse', // `Alt+j`がPageDown方向のスクロールになるのが'normal'(デフォルト)
+  altScrollSpeedPxPerMs: 0.3    // `Alt+j`/`Alt+k`のスピード。0.5でだいたい500px/s
 };
 
 // Theme definition (色指定。基本的に全項目必須で、未定義時に代替は一切せず一律yellowとする)
@@ -163,9 +164,11 @@ window.EX1_THEME = {
 
   // 行背景(カーソル外)グラデーション
   lineGradientStart: "white",
-  lineGradientEnd: "#fbfbfb",
+//  lineGradientEnd: "#fbfbfb",
+  lineGradientEnd: "white",
   // 行番号背景(カーソル外)グラデーション
-  inactiveGutterGradientStart: "#fbfbfb",
+//  inactiveGutterGradientStart: "#fbfbfb",
+  inactiveGutterGradientStart: "#f0f0f0",
   inactiveGutterGradientEnd: "#f0f0f0",
   // 行番号 文字色(カーソル外)
 //  gutterNumberColor: "#808080",

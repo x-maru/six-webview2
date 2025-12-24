@@ -410,9 +410,19 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
       let rem = 0;
       let hs = 0;
       try{
-        const st = (editor.scrollTop||0);
+        const atEofEff = (typeof _mdAtEofEffective === 'function') ? !!_mdAtEofEffective() : false;
+        if (atEofEff){
+          // At effective EOF we intentionally do NOT snap scrollTop; therefore do NOT cancel remainder.
+          rem = 0;
+        } else {
+        // Render using effective scrollTop. Snap to grid only when scrolling has settled;
+        // while scrolling, keep per-pixel remainder so gutter/listchars align.
+        let snap = true;
+        try{ snap = !(_lastNativeScrollAt && (Date.now() - (_lastNativeScrollAt|0) <= 120)); }catch{}
+        let st = (typeof _mdEffectiveScrollTopPx === 'function') ? _mdEffectiveScrollTopPx({ snap }) : (editor.scrollTop||0);
         rem = st - Math.floor(st/LINE_HEIGHT)*LINE_HEIGHT;
         if (Math.abs(rem) < 0.01) rem = 0;
+        }
       }catch{}
       try{ hs = (editor.scrollLeft||0); }catch{}
       // md-rich+wrap: textarea is kept unwrapped for stable scroll metrics; ignore native horizontal scroll.
@@ -611,7 +621,8 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
         // #1495: Active line background is rendered by bg layer (not by edstripe under a transparent md-line).
         // This avoids 1-frame flicker during smooth scroll.
         try{
-          if (isActiveRow){
+          const hideActiveLine = !!(document && document.body && document.body.classList && document.body.classList.contains('alt-scrolling'));
+          if (isActiveRow && !hideActiveLine){
             if (_mode === 'INSERT') bg.style.background = 'linear-gradient(to bottom, var(--activeEditLineGradStart, yellow), var(--activeEditLineGradEnd, yellow))';
             else bg.style.background = 'linear-gradient(to bottom, var(--activeLineGradStart, rgb(231,255,231)), var(--activeLineGradEnd, rgb(219,243,219)))';
           } else {
@@ -722,7 +733,18 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
           }catch{}
           return;
         } }catch{}
-        try{ ensureScrolloff(); }catch{}
+        // keyup/click can call this, but after a pure horizontal motion (h/l) we must not
+        // allow ensureScrolloff() to adjust vertical scrollTop (it causes 1-line EOF bounce).
+        // Exception: in wrap mode that uses *visual* scroll grid, horizontal moves can change
+        // the caret's visual line and may require vertical adjustment.
+        try{
+          const until = (window && window.__sixSkipEnsureUntil) ? (window.__sixSkipEnsureUntil|0) : 0;
+          let skip = (until && Date.now() < until);
+          if (skip){
+            try{ if (typeof _wrapUsesVisualScrollGrid === 'function' && _wrapUsesVisualScrollGrid()) skip = false; }catch{}
+          }
+          if (!skip) ensureScrolloff();
+        }catch{}
         try{ _repositionCaret(); }catch{}
         try{ updateGutter(); }catch{}
       });
@@ -3634,6 +3656,18 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
       // During IME composition, do not run typing-guard/rAF scheduling here.
       try{ if (window._imeComposing===true || e.isComposing===true){ return; } }catch{}
 
+      // Standalone modifier keys must not cause any visual changes.
+      // Swallow them at the earliest capture stage so no downstream handler can trigger scroll/refresh.
+      try{
+        const k0 = String((e && e.key) || '');
+        if (k0 === 'Shift' || k0 === 'Control' || k0 === 'Alt' || k0 === 'Meta' || k0 === 'AltGraph'){
+          // If Alt-scroll is active, do NOT swallow here; release handling may rely on modifiers.
+          try{ const as = (window && window._altScroll); if (as && as.active) return; }catch{}
+          try{ e.preventDefault(); e.stopImmediatePropagation(); e.stopPropagation(); }catch{}
+          return;
+        }
+      }catch{}
+
       // タイピング中は重処理を抑止し、rAFでまとめて再描画（NORMAL/INSERTのみ、機能キー除外）
       try{
         const mode = (typeof _mode!== 'undefined')? _mode : 'NORMAL';
@@ -3674,6 +3708,16 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
       }catch{}
     }, true);
     window.addEventListener('keyup', (e)=>{
+      // Standalone modifier keys must not cause any visual changes.
+      // For Alt-scroll, allow Alt keyup to pass so it can stop the scroll.
+      try{
+        const k0 = String((e && e.key) || '');
+        if (k0 === 'Shift' || k0 === 'Control' || k0 === 'Alt' || k0 === 'Meta' || k0 === 'AltGraph'){
+          try{ const as = (window && window._altScroll); if (as && as.active && k0 === 'Alt') return; }catch{}
+          try{ e.preventDefault(); e.stopImmediatePropagation(); e.stopPropagation(); }catch{}
+          return;
+        }
+      }catch{}
       // Avoid allocating raw log objects unless rawkeys is enabled.
       try{
         if (_optRawKeys){
@@ -4348,6 +4392,9 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
   let _listRenderRaf = 0;
   let _listScrollRetryTimer = 0;
   let _listLastBeforeInput = null;
+  // Track the scrollLeft at which listchars were last fully rendered.
+  // Used to cheaply follow horizontal scrolling without full re-render.
+  let _listRenderedScrollLeft = 0;
   // In markdown draft mode, only the active (caret) row shows raw symbols.
   // Track active row to refresh listchars/EOL when the caret row changes.
   let _mdDraftLastActiveRow1ForList = null;
@@ -4355,6 +4402,18 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
     try{
       if (!_listLayer){ _listLayer = document.createElement('div'); _listLayer.className='listchars-layer'; _listLayer.style.position='absolute'; _listLayer.style.left='0'; _listLayer.style.top='0'; _listLayer.style.right='0'; _listLayer.style.bottom='0'; _listLayer.style.pointerEvents='none'; _listLayer.style.zIndex='1'; }
       if (_listLayer.parentNode !== caretLayer){ caretLayer.appendChild(_listLayer); }
+    }catch{}
+  }
+  function _listSyncHorizontalScroll(){
+    try{
+      if (!_optList) return;
+      if (!_listLayer) return;
+      // markdown-rich uses a different layout; listchars already uses hs=0.
+      const mdRich = !!(function(){ try{ return _mdRichActive(); }catch{ return false; } })();
+      if (mdRich) return;
+      const slNow = (editor && typeof editor.scrollLeft === 'number') ? (editor.scrollLeft||0) : 0;
+      const dx = (_listRenderedScrollLeft|0) - (slNow|0);
+      _listLayer.style.transform = (dx ? ('translateX(' + dx + 'px)') : '');
     }catch{}
   }
   function _listClear(){ try{ if(_listLayer){ while(_listLayer.firstChild){ _listLayer.removeChild(_listLayer.firstChild); } } }catch{} }
@@ -4395,15 +4454,21 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
           scale = info.scale || 1;
           rowHeightPx = info.lineHeightPx || LINE_HEIGHT;
         }catch{ scale = 1; rowHeightPx = LINE_HEIGHT; }
+        // Match md-rich text layer positioning: use the rendered row element's top.
         try{
           const startIdx = Math.max(0, (topLine|0) - 1);
-          const targetIdx = Math.max(0, Math.min(lines.length-1, idx|0));
-          let y = 0;
-          for (let r=startIdx; r<targetIdx; r++){
-            const infoR = _mdLineLayoutInfoAtRow(lines, r, (r === (caretRow|0)));
-            y += (infoR.lineHeightPx||LINE_HEIGHT);
+          const childIdx = ((idx|0) - (startIdx|0))|0;
+          if (_mdTextInner && _mdTextInner.children && childIdx >= 0 && childIdx < _mdTextInner.children.length){
+            const elRow = _mdTextInner.children[childIdx];
+            let t = 0;
+            try{ t = parseFloat((elRow && elRow.style && elRow.style.top) ? elRow.style.top : '0') || 0; }catch{ t = 0; }
+            if (!(t > 0)){
+              try{ t = (elRow && typeof elRow.offsetTop === 'number') ? (elRow.offsetTop||0) : 0; }catch{ t = 0; }
+            }
+            // NOTE: md-rich remainder compensation is applied at the container level (caretLayer).
+            // Avoid subtracting rem here, otherwise listchars will be shifted twice.
+            yTop = t;
           }
-          yTop = y;
         }catch{}
       } else {
         // wrap mode: compute yTop by mapping logical row start -> visual line start
@@ -4418,12 +4483,9 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
 
       // viewport culling
       try{
-        if (!mdRich && _wrapEnabled()){
-          if (yTop < -LINE_HEIGHT*2) return;
-          if (yTop > (editor && editor.clientHeight ? editor.clientHeight : 0) + LINE_HEIGHT*2) return;
-        } else {
-          if (row1 < topLine || row1 > endLine) return;
-        }
+        const vh = (editor && editor.clientHeight) ? (editor.clientHeight|0) : 0;
+        if (yTop < -LINE_HEIGHT*2) return;
+        if (yTop > (vh + LINE_HEIGHT*2)) return;
       }catch{}
 
       // Determine display line for listchars measurement in markdown-rich.
@@ -4488,7 +4550,7 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
           else sym='·';
           el.textContent = sym;
           try{ el.dataset.row = String(row1); }catch{}
-          let _hs=0; try{ _hs=(editor.scrollLeft||0); }catch{}
+          let _hs=0; try{ _hs = mdRich ? 0 : (editor.scrollLeft||0); }catch{}
           el.style.position='absolute'; el.style.left=(x1-_hs)+'px'; el.style.top=yTop+'px';
           el.style.height=(mdRich ? rowHeightPx : LINE_HEIGHT)+'px'; el.style.lineHeight=(mdRich ? rowHeightPx : LINE_HEIGHT)+'px';
           if (mdRich){ el.style.fontSize = Math.max(6, Math.round(baseFontPx * scale)) + 'px'; } else { el.style.fontSize='inherit'; }
@@ -4499,7 +4561,7 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
 
       // EOL marker
       if (!(window._imeComposing === true && row1 === (caretRow + 1))) {
-        let _hs=0; try{ _hs=(editor.scrollLeft||0); }catch{}
+        let _hs=0; try{ _hs = mdRich ? 0 : (editor.scrollLeft||0); }catch{}
         // If this row is rendered as a horizontal rule in clean display, place EOL at the rule's right edge.
         let xEnd = 0;
         let hrEol = false;
@@ -4652,7 +4714,11 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
     try{
       // #1234: Skip list chars rendering during continuous scroll
       if (document.body.classList.contains('is-scrolling')) {
-        _listClear();
+        // During continuous scroll (wheel / scan-hold), repeatedly clearing + re-rendering
+        // can cause visible flicker on whitespace markers. Instead, keep the last rendered
+        // DOM and just hide it until scrolling settles, then re-render once.
+        try{ _listEnsureLayer(); }catch{}
+        try{ if (_listLayer) _listLayer.style.visibility = 'hidden'; }catch{}
         // Ensure we re-render once scrolling settles; otherwise the layer can stay blank.
         try{
           if (!_listScrollRetryTimer){
@@ -4674,7 +4740,13 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
       // Large buffer throttle: listchars depends on splitLines() + many DOM nodes; skip for big docs regardless of mode.
       try{ if (_editorTextLen() > 200000){ _listClear(); return; } }catch{}
       if (!_optList){ _listClear(); return; }
-      _listEnsureLayer(); _listClear();
+      _listEnsureLayer();
+      // If we hid the layer during scrolling, restore it on the first stable render.
+      try{ if (_listLayer) _listLayer.style.visibility = ''; }catch{}
+      // Reset any horizontal-follow transform on full render.
+      try{ _listRenderedScrollLeft = (editor && typeof editor.scrollLeft === 'number') ? (editor.scrollLeft|0) : 0; }catch{ _listRenderedScrollLeft = 0; }
+      try{ if (_listLayer) _listLayer.style.transform = ''; }catch{}
+      _listClear();
       // Keep native textarea tab-size in sync with SIX_OPTIONS.tabstop
       try{
         const root = document.documentElement;
@@ -4687,6 +4759,19 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
       const realTotal = lines.length; // real EOF (exclude virtual pad lines)
       const vis = _visibleLinesExact();
       const topLine = _topLine();
+
+      // markdown-rich: follow _mdRenderTextLayer (logical rows; wrap is handled by md layer)
+      try{
+        if (_mdRichActive && _mdRichActive()){
+          // Ensure md row layout is up-to-date before positioning listchars.
+          try{ updateGutter && updateGutter({ force:true }); }catch{}
+          const endLine = (topLine|0) + (vis|0) - 1;
+          for (let row = (topLine|0); row <= (endLine|0); row++){
+            _renderListCharsRow(row, lines, topLine, realTotal);
+          }
+          return;
+        }
+      }catch{}
 
       // Delegate per-row rendering to the unified row renderer.
       // For wrap mode, iterate logical rows that intersect the current visual viewport.
@@ -5263,6 +5348,26 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
       const t = s.endsWith('/') ? s.slice(0,-1) : s;
       return t.substring(t.lastIndexOf('/')+1) || t;
     }catch{ return String(pathLike||''); }
+  }
+
+  function _inferMarkdownFromNamePath(name, path){
+    try{
+      const exts = ['.md','.markdown','.mdown','.mkd','.mkdn','.mdtxt'];
+      let base = '';
+      try{
+        if (path){
+          const u = new URL(String(path), _htmlBaseURL());
+          base = String(u.pathname||'');
+        }
+      }catch{ base = String(path||''); }
+      if (!base) base = String(name||'');
+      base = base.replace(/\\/g,'/');
+      base = base.split('/').pop() || base;
+      base = base.split('?')[0].split('#')[0];
+      const s = String(base||'').toLowerCase();
+      for (const e of exts){ if (s.endsWith(e)) return true; }
+      return false;
+    }catch{ return false; }
   }
 
   function _setTitle(){
@@ -5916,7 +6021,7 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
       const n = parseInt(v, 10);
       if (Number.isFinite(n) && n >= 0) return (n|0);
     }catch{}
-    return 5;
+    return 6;
   }
 
   function _mdScrollCompLines(){
@@ -5925,40 +6030,327 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
   }
 
   let _mdEofPadExtraLines = 0;
+  let _mdEofPadLastPbPx = -1;
+  let _mdEofPadLastExtraPx = 0;
+  function _mdEffectiveScrollTopPx(opts){
+    // md-rich + wrap-on: native scrollTop may enter compensation range (for scrollbar thumb).
+    // Rendering/mapping must use an effective scrollTop that hides compensation and stays grid-aligned.
+    try{
+      let st = (editor && typeof editor.scrollTop === 'number') ? (editor.scrollTop|0) : 0;
+      if (_mdRichActive && _mdRichActive() && _wrapEnabled && _wrapEnabled()){
+        try{
+          if (typeof _mdEffectiveMaxScrollPx === 'function'){
+            const eff = (_mdEffectiveMaxScrollPx()|0);
+            if (eff >= 0) st = Math.min(st|0, eff|0);
+          }
+        }catch{}
+        const snap = !(opts && opts.snap === false);
+        if (snap){
+          const lh = Math.max(1, (LINE_HEIGHT|0));
+          // Snap down to grid so we never reveal the hidden compensation region.
+          st = Math.floor((st|0) / lh) * lh;
+        }
+      }
+      return st|0;
+    }catch{ return (editor && (editor.scrollTop|0))|0; }
+  }
+
+  function _eofPadPx(){
+    try{ return Math.max(0, (_eofPadLines()|0) * Math.max(1, (LINE_HEIGHT|0))); }catch{ return 0; }
+  }
+
+  function _mdPinThumbPhysBottom(reason){
+    // md-rich + wrap-on: keep native scrollbar thumb at true bottom, while
+    // overlay rendering uses the effective scrollTop grid.
+    try{
+      if (!editor) return;
+      if (!(_mdRichActive && _mdRichActive())) return;
+      if (!(_wrapEnabled && _wrapEnabled())) return;
+      if (!(_wrapUsesVisualScrollGrid && !_wrapUsesVisualScrollGrid())) return;
+      try{ if (((caretRow|0) + 1) !== ((_totalLines()|0))) return; }catch{}
+      // Update wrap cache/padding before measuring max scroll.
+      try{ if (typeof _mdWrapEnsureCache === 'function') _mdWrapEnsureCache(true); }catch{}
+      try{ if (typeof _mdSyncEofPadComp === 'function') _mdSyncEofPadComp(); }catch{}
+      const physMax = Math.max(0, ((editor.scrollHeight||0) - (editor.clientHeight||0))|0);
+      const cur = (editor.scrollTop||0);
+      if (Math.abs(cur - physMax) > 0.5) editor.scrollTop = physMax;
+    }catch{}
+  }
+
+  function _mdEffectiveMaxScrollPx(){
+    try{
+      if (!editor) return 0;
+      const maxScroll = Math.max(0, (editor.scrollHeight||0) - (editor.clientHeight||0));
+      // md-rich + wrap-on: the native scroll range is expanded via paddingBottom (EOF pad + wrap/height compensation).
+      // The scrollbar thumb should be allowed to reach the true physical bottom.
+      // But the *effective* scrollTop used for mapping/rendering must clamp to a stable
+      // line-based maximum so that user-visible EOF padding is EXACTLY eofPadLines (+ remainder)
+      // and never becomes 5 lines or half-screen due to compensation drift.
+      try{
+        const mdLogicalWrap = !!(
+          (_mdRichActive && _mdRichActive()) &&
+          (_wrapEnabled && _wrapEnabled()) &&
+          (_wrapUsesVisualScrollGrid && !_wrapUsesVisualScrollGrid())
+        );
+        if (mdLogicalWrap){
+          const lh = Math.max(1, (LINE_HEIGHT|0));
+          const total = (_totalLines()|0);
+          const vis = (_visibleLinesExact()|0);
+          const eofPad = (_eofPadLines()|0);
+          const baseMaxTop = Math.max(1, (total|0) - (vis|0) + 1);
+          const maxTopWithPad = Math.max(1, (baseMaxTop|0) + (eofPad|0));
+          const effMaxByLines = Math.max(0, ((maxTopWithPad|0) - 1) * lh);
+          return Math.min((maxScroll|0), (effMaxByLines|0))|0;
+        }
+      }catch{}
+      return maxScroll|0;
+    }catch{ return 0; }
+  }
+
+  function _mdAtEofEffective(){
+    // md-rich(+wrap): decide EOF using effective max + effective scrollTop.
+    // If native scrollTop is in the compensation range, effective scrollTop is clamped.
+    try{
+      if (!editor) return false;
+      if (!(_mdRichActive && _mdRichActive())) return false;
+      let effMax = -1;
+      try{ if (typeof _mdEffectiveMaxScrollPx === 'function') effMax = (_mdEffectiveMaxScrollPx()|0); }catch{ effMax = -1; }
+      if (effMax < 0) effMax = Math.max(0, (editor.scrollHeight||0) - (editor.clientHeight||0));
+      let stEff = (editor.scrollTop||0);
+      try{ if (typeof _mdEffectiveScrollTopPx === 'function') stEff = _mdEffectiveScrollTopPx({ snap:false })|0; }catch{}
+      return ((effMax|0) - (stEff|0) <= 1.5);
+    }catch{ return false; }
+  }
+
+  // md EOF debug aggregation (avoid console spam + forced reflow)
+  let _mdEofDbg = null;
+  function _mdEofDbgEnabled(){
+    try{
+      const o = (window && window.SIX_OPTIONS) ? window.SIX_OPTIONS : null;
+      return !!(o && (o.DEBUG_MD_EOF || o.debugmdeof || o.DEBUG_MDEOF));
+    }catch{ return false; }
+  }
+  function _mdEofDbgInit(){
+    if (_mdEofDbg) return _mdEofDbg;
+    _mdEofDbg = {
+      lastSummaryAt: 0,
+      width: { n:0, lastW:-1, lastSb:-1, changes:0, last:{ cw:0, ow:0, sb:0, w:0 } },
+      eof: { n:0, lastExtraPx:-1, lastPb:-1, lastComp:-1, changes:0, last:null },
+      eofMeta: { enter:0, cond:0, err:0, lastErr:'' },
+      so: { n:0, changes:0, last:null, lastKey:'', lastTopNow:-1, lastCaret:-1, lastMaxTop:-1, lastMdComp:-1, lastSt:-1 },
+    };
+    return _mdEofDbg;
+  }
+  function _mdEofDbgMaybeSummary(){
+    try{
+      if (!_mdEofDbgEnabled()) return;
+      const d = _mdEofDbgInit();
+      const now = performance && performance.now ? performance.now() : Date.now();
+      if ((now - (d.lastSummaryAt||0)) < 1000) return;
+      d.lastSummaryAt = now;
+      // One compact line per second at most
+      try{
+        console.debug('[md-eof:summary]', {
+          width: { n:d.width.n|0, changes:d.width.changes|0, last:d.width.last },
+          eof:   { n:d.eof.n|0,   changes:d.eof.changes|0,   last: d.eof.last },
+          eofMeta: { enter:(d.eofMeta && d.eofMeta.enter)|0, cond:(d.eofMeta && d.eofMeta.cond)|0, err:(d.eofMeta && d.eofMeta.err)|0, lastErr:(d.eofMeta && d.eofMeta.lastErr)||'' },
+          so:    { n:d.so.n|0,    changes:d.so.changes|0,    last: d.so.last },
+        });
+      }catch{}
+    }catch{}
+  }
+  function _mdEofDbgWidthSample(cw, ow, sb, w){
+    try{
+      if (!_mdEofDbgEnabled()) return;
+      const d = _mdEofDbgInit();
+      d.width.n = (d.width.n|0) + 1;
+      const ww = (w|0);
+      const ss = (sb|0);
+      if (ww !== (d.width.lastW|0) || ss !== (d.width.lastSb|0)){
+        d.width.changes = (d.width.changes|0) + 1;
+        d.width.lastW = ww|0;
+        d.width.lastSb = ss|0;
+        d.width.last = { cw:(cw|0), ow:(ow|0), sb:(sb|0), w:(ww|0) };
+      }
+      _mdEofDbgMaybeSummary();
+    }catch{}
+  }
+  function _mdEofDbgEofSample(rec){
+    try{
+      if (!_mdEofDbgEnabled()) return;
+      const d = _mdEofDbgInit();
+      d.eof.n = (d.eof.n|0) + 1;
+      const extraPx = (rec && Number.isFinite(rec.extraPx)) ? (rec.extraPx|0) : -1;
+      const pb = (rec && Number.isFinite(rec.paddingBottomPx)) ? (rec.paddingBottomPx|0) : -1;
+      const comp = (rec && Number.isFinite(rec.mdCompLines)) ? (rec.mdCompLines|0) : -1;
+      if (extraPx !== (d.eof.lastExtraPx|0) || pb !== (d.eof.lastPb|0) || comp !== (d.eof.lastComp|0)){
+        d.eof.changes = (d.eof.changes|0) + 1;
+        d.eof.lastExtraPx = extraPx|0;
+        d.eof.lastPb = pb|0;
+        d.eof.lastComp = comp|0;
+        // Keep this small; detailed values can be inspected via window.sixDumpMdEof()
+        d.eof.last = { linesTotal: (rec.linesTotal|0), vis:(rec.vis|0), extraPx, paddingBottomPx:pb, mdCompLines:comp, scrollbarPx:(rec.scrollbarPx|0) };
+      }
+      _mdEofDbgMaybeSummary();
+    }catch{}
+  }
+
+  function _mdEofDbgScrolloffSample(rec){
+    try{
+      if (!_mdEofDbgEnabled()) return;
+      const d = _mdEofDbgInit();
+      d.so.n = (d.so.n|0) + 1;
+      const key = String((rec && rec.key) ? rec.key : '');
+      const topNow = (rec && Number.isFinite(rec.topNow)) ? (rec.topNow|0) : -1;
+      const caret = (rec && Number.isFinite(rec.caretLine1)) ? (rec.caretLine1|0) : -1;
+      const maxTop = (rec && Number.isFinite(rec.maxTopWithPad)) ? (rec.maxTopWithPad|0) : -1;
+      const mdComp = (rec && Number.isFinite(rec.mdComp)) ? (rec.mdComp|0) : -1;
+      const st = (rec && Number.isFinite(rec.stPx)) ? (rec.stPx|0) : -1;
+      if (
+        key !== String(d.so.lastKey||'') ||
+        topNow !== (d.so.lastTopNow|0) ||
+        caret !== (d.so.lastCaret|0) ||
+        maxTop !== (d.so.lastMaxTop|0) ||
+        mdComp !== (d.so.lastMdComp|0) ||
+        st !== (d.so.lastSt|0)
+      ){
+        d.so.changes = (d.so.changes|0) + 1;
+        d.so.lastKey = key;
+        d.so.lastTopNow = topNow|0;
+        d.so.lastCaret = caret|0;
+        d.so.lastMaxTop = maxTop|0;
+        d.so.lastMdComp = mdComp|0;
+        d.so.lastSt = st|0;
+        d.so.last = rec || null;
+      }
+      _mdEofDbgMaybeSummary();
+    }catch{}
+  }
+  // On-demand dump helpers for DevTools
+  try{
+    if (!window.sixDumpMdEof){
+      window.sixDumpMdEof = ()=>{ try{ console.log('[md-eof:dump]', _mdEofDbg); }catch{} };
+    }
+  }catch{}
+
   function _mdSyncEofPadComp(){
     try{
       if (!editor) return;
+      // Debug meta: did we enter / pass conditions / throw?
+      try{
+        if (_mdEofDbgEnabled && _mdEofDbgEnabled()){
+          const d = _mdEofDbgInit();
+          d.eofMeta.enter = ((d.eofMeta && d.eofMeta.enter)|0) + 1;
+        }
+      }catch{}
       let extra = 0;
+      let extraPx = 0;
+      let totalPx = 0;
+      let textPx = 0;
+      let wPx = 0;
+      let cacheTotalPx = 0;
+      let cacheWpx = 0;
+      let linesTotal = 0;
       if (_mdRichEnabled && _mdRichEnabled() && _wrapEnabled && _wrapEnabled()){
+        try{
+          if (_mdEofDbgEnabled && _mdEofDbgEnabled()){
+            const d = _mdEofDbgInit();
+            d.eofMeta.cond = ((d.eofMeta && d.eofMeta.cond)|0) + 1;
+          }
+        }catch{}
         const lines = _splitLines();
-        const linesTotal = (lines.length|0);
-        // Compute required extra scroll range in *pixels* (wrap + per-line line-height), then convert to LINE_HEIGHT units.
-        let totalPx = 0;
+        linesTotal = (lines.length|0);
+        // Compute required extra scroll range in *pixels* (wrap + per-row line-height), then convert to LINE_HEIGHT units.
+        // NOTE: In md-rich + wrap-on, the textarea is intentionally kept UNWRAPPED (see CSS: body.md-rich.wrap-on #editor).
+        // Therefore the native scroll range is logical-line based, and we must compensate for visual wrap lines.
+        totalPx = 0;
         try{
           const c = _mdWrapEnsureCache(false) || _mdWrapEnsureCache(true);
-          if (c && Number.isFinite(c.totalPx)) totalPx = (c.totalPx|0);
+          if (c){
+            if (Number.isFinite(c.totalPx)) totalPx = (c.totalPx|0);
+            if (Number.isFinite(c.wPx)) wPx = (c.wPx|0);
+            cacheTotalPx = (Number.isFinite(c.totalPx) ? (c.totalPx|0) : 0);
+            cacheWpx = (Number.isFinite(c.wPx) ? (c.wPx|0) : 0);
+          }
         }catch{}
         if (!(totalPx > 0)){
           // Fallback: treat as simple visual-line count diff.
           try{ totalPx = (_mdWrapTotalVisLines()|0) * (LINE_HEIGHT|0); }catch{ totalPx = linesTotal * (LINE_HEIGHT|0); }
         }
-        const textPx = (linesTotal|0) * (LINE_HEIGHT|0);
-        const extraPx = Math.max(0, (totalPx|0) - (textPx|0));
-        extra = Math.max(0, Math.ceil(extraPx / Math.max(1, (LINE_HEIGHT|0))));
+        textPx = (linesTotal|0) * (LINE_HEIGHT|0);
+        extraPx = Math.max(0, (totalPx|0) - (textPx|0));
+        // Track the pixel compensation separately so we can clamp the *visible* EOF pad to basePad lines.
+        _mdEofPadLastExtraPx = (extraPx|0);
+        // NOTE: mdCompLines will be derived from actual scrollHeight (below) to avoid drift.
+        extra = 0;
       }
       _mdEofPadExtraLines = extra|0;
 
       // Expand textarea scroll range to match md-rich overlay total height.
       // User-visible EOF padding stays at CSS --eofPadLines; extra is consumed as "content height" compensation.
       const basePad = (_eofPadLines()|0);
-      const effPad = Math.max(0, (basePad|0) + (_mdEofPadExtraLines|0));
-      try{ editor.style.paddingBottom = `calc(${effPad} * var(--lhEff, var(--lh)))`; }catch{}
-    }catch{}
+      if (_mdRichEnabled && _mdRichEnabled() && _wrapEnabled && _wrapEnabled()){
+        // Use pixel-precise padding to reduce clamp/jitter near EOF under variable row heights.
+        const pb = Math.max(0, ((basePad|0) * (LINE_HEIGHT|0)) + (extraPx|0));
+        try{
+          const pbI = (pb|0);
+          if ((_mdEofPadLastPbPx|0) !== (pbI|0)){
+            editor.style.paddingBottom = pbI + 'px';
+            _mdEofPadLastPbPx = pbI|0;
+            try{ _cachedVisibleCount = 0; }catch{}
+          }
+        }catch{}
+
+        // Derive md compensation lines from actual scroll range so ensureScrolloff clamp matches reality.
+        // This prevents “余白が増える/暴れる” caused by rounding and width feedback.
+        try{
+          const vis = _visibleLinesExact()|0;
+          const baseMaxTop = Math.max(1, (linesTotal|0) - (vis|0) + 1);
+          const maxTopWithPad = Math.max(1, (baseMaxTop|0) + (basePad|0));
+          const stMaxPx = Math.max(0, ((editor.scrollHeight||0) - (editor.clientHeight||0))|0);
+          const actualMaxTop = Math.max(1, (Math.floor(stMaxPx / Math.max(1, (LINE_HEIGHT|0)))|0) + 1);
+          const derivedExtra = Math.max(0, (actualMaxTop|0) - (maxTopWithPad|0));
+          _mdEofPadExtraLines = derivedExtra|0;
+        }catch{}
+
+        // Optional debug aggregation to DevTools console (throttled)
+        try{
+          if (_mdEofDbgEnabled()){
+            const vis = _visibleLinesExact()|0;
+            const sb = Math.max(0, ((editor.offsetWidth||0) - (editor.clientWidth||0))|0);
+            _mdEofDbgEofSample({
+              linesTotal: (linesTotal|0),
+              vis,
+              extraPx: (extraPx|0),
+              paddingBottomPx: (_mdEofPadLastPbPx|0),
+              mdCompLines: (_mdEofPadExtraLines|0),
+              scrollbarPx: (sb|0),
+            });
+          }
+        }catch{}
+      } else {
+        // Default: keep CSS-based EOF padding.
+        // Use px based on LINE_HEIGHT to keep pad lines consistent with motion grid.
+        try{ editor.style.paddingBottom = Math.max(0, (basePad|0) * (LINE_HEIGHT|0)) + 'px'; }catch{}
+        try{ _mdEofPadLastPbPx = -1; }catch{}
+        try{ _mdEofPadLastExtraPx = 0; }catch{}
+        try{ _cachedVisibleCount = 0; }catch{}
+      }
+    }catch(e){
+      try{
+        if (_mdEofDbgEnabled && _mdEofDbgEnabled()){
+          const d = _mdEofDbgInit();
+          d.eofMeta.err = ((d.eofMeta && d.eofMeta.err)|0) + 1;
+          try{ d.eofMeta.lastErr = String((e && (e.message||e))||''); }catch{ d.eofMeta.lastErr = 'err'; }
+          _mdEofDbgMaybeSummary();
+        }
+      }catch{}
+    }
   }
   function _wrapUsesVisualScrollGrid(){
     try{
       // markdown-rich uses a logical-line scroll grid; do not switch to visual-line grid there.
-      return _wrapEnabled() && !_mdRichActive();
+      return _wrapEnabled() && !(_mdRichEnabled && _mdRichEnabled());
     }catch{ return false; }
   }
   function _wrapSpaceWidthPx(){
@@ -5972,12 +6364,42 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
   function _wrapAvailWidthPx(){
     try{
       if (!editor) return 80;
+      // IMPORTANT (md-rich): wrapping is rendered in overlay layers, not the textarea.
+      // If we base width on clientWidth, scrollbar appearance changes cw and can cause a
+      // positive feedback loop: narrower width -> more wraps -> larger extraPx -> larger paddingBottom
+      // -> scrollbar appears -> width narrows further.
+      // To prevent “EOF余白が増殖”, use offsetWidth (includes scrollbar gutter) in md-rich.
       const cw = (editor.clientWidth||0);
-      const cs = getComputedStyle(editor);
-      const pl = parseFloat(cs.paddingLeft||'0')||0;
-      const pr = parseFloat(cs.paddingRight||'0')||0;
-      // Use exact inner content width to match native textarea wrapping.
-      return Math.max(20, (cw - pl - pr));
+      let basisW = cw;
+      try{
+        if (_mdRichActive && _mdRichActive() && _wrapEnabled && _wrapEnabled()){
+          const ow = (editor.offsetWidth||0);
+          if (ow > 0) basisW = ow;
+        }
+      }catch{}
+      // Cache paddings to reduce getComputedStyle churn (and avoid forced reflow in debug sessions)
+      let pl = 0;
+      let pr = 0;
+      try{
+        if (!_wrapAvailWidthPx._pad || (Date.now() - (_wrapAvailWidthPx._pad.at||0)) > 250){
+          const cs = getComputedStyle(editor);
+          _wrapAvailWidthPx._pad = { at: Date.now(), pl: (parseFloat(cs.paddingLeft||'0')||0), pr: (parseFloat(cs.paddingRight||'0')||0) };
+        }
+        pl = (_wrapAvailWidthPx._pad.pl||0);
+        pr = (_wrapAvailWidthPx._pad.pr||0);
+      }catch{}
+      const w = Math.max(20, (basisW - pl - pr));
+
+      // Optional debug aggregation: width + scrollbar (throttled)
+      try{
+        if (_mdEofDbgEnabled() && _mdRichActive && _mdRichActive() && _wrapEnabled && _wrapEnabled()){
+          const ow = (editor.offsetWidth||0);
+          const sb = Math.max(0, (ow - cw)|0);
+          _mdEofDbgWidthSample(cw|0, ow|0, sb|0, w|0);
+        }
+      }catch{}
+
+      return w;
     }catch{ return 80; }
   }
   function _wrapInvalidateCache(_reason){
@@ -6145,12 +6567,34 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
         return (info.row|0) + 1;
       }
     }catch{}
-    const st = (editor.scrollTop||0);
-    return Math.floor(st / LINE_HEIGHT) + 1;
+    let st = (editor.scrollTop||0);
+    // md-rich + wrap-on: map using effective, grid-aligned scrollTop.
+    try{ if (typeof _mdEffectiveScrollTopPx === 'function') st = _mdEffectiveScrollTopPx({ snap:true }); }catch{}
+    let top = Math.floor(st / LINE_HEIGHT) + 1;
+    return top|0;
   }
   function _visibleLinesExact(){
     if (_cachedVisibleCount) return _cachedVisibleCount;
-    try{ const h = editor.clientHeight || viewport.clientHeight; return Math.max(1, Math.floor(h/LINE_HEIGHT)); }catch{ return Math.max(1, Math.floor(viewport.clientHeight/LINE_HEIGHT)); }
+    try{
+      // md-rich: base on overlay viewport height (do not subtract textarea padding).
+      let h = (function(){
+        try{ if (_mdRichActive && _mdRichActive()) return (viewport && viewport.clientHeight) ? viewport.clientHeight : (editor.clientHeight||0); }catch{}
+        return editor.clientHeight || viewport.clientHeight;
+      })();
+      // non-md: exclude textarea padding.
+      try{
+        if (!(_mdRichActive && _mdRichActive()) && editor && window && window.getComputedStyle){
+          const cs = window.getComputedStyle(editor);
+          const pt = Math.max(0, Math.round(parseFloat(cs.paddingTop||'0')||0));
+          const pb = Math.max(0, Math.round(parseFloat(cs.paddingBottom||'0')||0));
+          const hh = (h|0) - (pt|0) - (pb|0);
+          if (hh > 0) h = hh;
+        }
+      }catch{}
+      return Math.max(1, Math.floor((h||0)/LINE_HEIGHT));
+    }catch{
+      return Math.max(1, Math.floor(viewport.clientHeight/LINE_HEIGHT));
+    }
   }
   function _needsHScrollReserve(){ return false; }
 
@@ -6460,6 +6904,8 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
   function _addBuffer(b){
     try{
       const text0 = String(b.text||'');
+      const markdownExplicit = (typeof b.markdown === 'boolean');
+      const markdownResolved = markdownExplicit ? !!b.markdown : _inferMarkdownFromNamePath(b && b.name, b && b.path);
       buffers.push({
         name: b.name||'(untitled)',
         path: b.path||null,
@@ -6488,7 +6934,8 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
         ignorecase: !!b.ignorecase,
         smartcase:  !!b.smartcase,
         // per-buffer markdown mode (planned feature) (#1471)
-        markdown: !!b.markdown,
+        markdown: markdownResolved,
+        _markdownAuto: !markdownExplicit,
         // per-buffer markdown edit style: true=draft (show symbols), false=WYSIWYG (hide symbols) (#1488)
         md_draftedit: (typeof b.md_draftedit === 'boolean') ? !!b.md_draftedit : true,
         // per-buffer markdown setext headings (default OFF) (#1493)
@@ -6531,6 +6978,16 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
         try{ editor && editor.focus && editor.focus(); }catch{}
         return;
       }
+
+      // If switching tabs while a scan-hold/view-scroll is active, keyup might not arrive.
+      // Cancel it here so we don't persist a hidden caret or inconsistent viewRow/viewScrollTop.
+      try{
+        if (window && window.__sixScanHoldHandlers && window.__sixScanHoldHandlers.blur){
+          window.__sixScanHoldHandlers.blur();
+        }
+      }catch{}
+      try{ document && document.body && document.body.classList && document.body.classList.remove('is-scrolling'); }catch{}
+      try{ document && document.body && document.body.classList && document.body.classList.remove('keep-caret'); }catch{}
       /* [switch] begin log removed */
       _lastBufferSwitchAt = Date.now();
       // Temporarily hide editor viewport to avoid a brief flicker to EOF when
@@ -6552,9 +7009,26 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
           prev.viewRow = caretRow|0;
           prev.viewCol = caretCol|0;
           try{
+            const mdLogicalWrap = !!(
+              (_mdRichActive && _mdRichActive()) &&
+              (_wrapEnabled && _wrapEnabled()) &&
+              (_wrapUsesVisualScrollGrid && !_wrapUsesVisualScrollGrid())
+            );
             const st = (editor.scrollTop||0)|0;
-            prev.viewScrollTop = Math.round(Math.max(0, st)/LINE_HEIGHT)*LINE_HEIGHT;
-          }catch{ prev.viewScrollTop = (editor.scrollTop||0)|0; }
+            if (mdLogicalWrap && typeof _mdEffectiveScrollTopPx === 'function'){
+              // Save effective scrollTop so restoring does not land inside the compensation tail.
+              const eff = _mdEffectiveScrollTopPx({ snap:true })|0;
+              prev.viewScrollTop = Math.max(0, eff|0);
+              // Also remember whether the native thumb was at the physical bottom.
+              try{
+                const physMax = Math.max(0, ((editor.scrollHeight||0) - (editor.clientHeight||0))|0);
+                prev._mdPhysBottom = ((physMax - (st|0)) <= Math.max(2, (LINE_HEIGHT|0)));
+              }catch{ prev._mdPhysBottom = false; }
+            } else {
+              prev.viewScrollTop = Math.round(Math.max(0, st)/LINE_HEIGHT)*LINE_HEIGHT;
+              prev._mdPhysBottom = false;
+            }
+          }catch{ prev.viewScrollTop = (editor.scrollTop||0)|0; try{ prev._mdPhysBottom = false; }catch{} }
           // Save VISUAL selection snapshot, if active
           if (_visualActive){
             prev.savedMode = 'VISUAL';
@@ -6598,6 +7072,20 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
       }
 
       _setCaret(vr, vc);
+
+      // md-rich + wrap-on: ensure paddingBottom compensation is synced BEFORE applying scrollTop,
+      // otherwise restoring a saved EOF/bottom view can briefly show a huge blank tail.
+      try{
+        const mdLogicalWrap = !!(
+          (_mdRichActive && _mdRichActive()) &&
+          (_wrapEnabled && _wrapEnabled()) &&
+          (_wrapUsesVisualScrollGrid && !_wrapUsesVisualScrollGrid())
+        );
+        if (mdLogicalWrap){
+          try{ _mdWrapEnsureCache && _mdWrapEnsureCache(true); }catch{}
+          try{ _mdSyncEofPadComp && _mdSyncEofPadComp(); }catch{}
+        }
+      }catch{}
       // Validate viewport: if saved scrollTop does not include the caret (e.g., corrupted to EOF),
       // compute a safe fallback that centers the caret within the viewport to avoid "G-like" jumps (#359/#360)
       try{
@@ -6614,7 +7102,10 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
             try{ if (_wrapEnabled()){ const c=_wrapEnsureCache(false); return (c && c.prefix) ? (c.prefix[c.prefix.length-1]|0) : _totalLines(); } }catch{}
             return _totalLines();
           })();
-          const mdComp = (_mdScrollCompLines()|0);
+          const mdComp = (function(){
+            try{ return (_mdRichActive && _mdRichActive()) ? 0 : (_mdScrollCompLines()|0); }
+            catch{ return 0; }
+          })();
           const totalForClamp = Math.max(1, (linesTotal|0) + (mdComp|0));
           const baseMaxTop = Math.max(1, (totalForClamp|0) - vis + 1);
           const maxTopWithPad = Math.max(1, baseMaxTop + (_eofPadLines()|0));
@@ -6639,10 +7130,33 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
           // IME未確定中はスクロール/再配置の連続適用を停止（強制リフロー回避）
           try{ if (window._imeComposing===true){ return; } }catch{}
           try{ clampViewportExactLines(); }catch{}
+          // md-rich: wrap metrics depend on the final viewport width and overlay insets.
+          // After tab switch/layout, width can settle over a few frames; rebuild caches here so
+          // short lines are not misclassified as wrapped and gutter/text stay in sync.
+          try{
+            if (_mdRichActive && _mdRichActive() && _wrapEnabled && _wrapEnabled()){
+              try{ _mdWrapInvalidateCache && _mdWrapInvalidateCache('switch-post'); }catch{}
+              try{ _mdWrapEnsureCache && _mdWrapEnsureCache(true); }catch{}
+              try{ _mdSyncEofPadComp && _mdSyncEofPadComp(); }catch{}
+              try{ _mdRenderTextLayer && _mdRenderTextLayer(); }catch{}
+            }
+          }catch{}
           // Re-assert saved caret/viewport to defeat any early-frame overrides (#715)
           try{ _setCaret(vr, vc); }catch{}
           try{ _setEditorScrollTop(Math.max(0, vsSnap), { immediate:true }); }catch{}
           try{ _repositionCaret(); updateGutter(); }catch{}
+          // If this buffer was previously at physical bottom (thumb pinned), restore that
+          // after compensation has been synced so the thumb stays at the end without exposing the tail.
+          try{
+            const mdLogicalWrap = !!(
+              (_mdRichActive && _mdRichActive()) &&
+              (_wrapEnabled && _wrapEnabled()) &&
+              (_wrapUsesVisualScrollGrid && !_wrapUsesVisualScrollGrid())
+            );
+            if (mdLogicalWrap && b && b._mdPhysBottom){
+              try{ _mdPinThumbPhysBottom && _mdPinThumbPhysBottom('switch:restore'); }catch{}
+            }
+          }catch{}
           // Keep native selection aligned with caret; do not let this change scroll position
           try{ const stKeep = (editor && typeof editor.scrollTop==='number') ? editor.scrollTop : 0; _syncNativeSelectionToCaret(); if (editor) _setEditorScrollTop(stKeep, { immediate:true }); }catch{}
           // Persist the restored viewport to the buffer as the new baseline
@@ -7914,7 +8428,21 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
     const t = (hasBomChar ? txt.slice(1) : txt).replace(/\r\n?/g,'\n');
     editor.value = t;
     if (buffers.length===0){ _addBuffer({ name: name||null, path: doc||null, text: t, modified:false, enc:'utf-8', ff, bom: hasBomChar }); }
-  else { const b=currentBuffer(); b.name = name||b.name; b.path = doc||b.path; b.text = t; b.savedText = t; b._changeTick=0; b._savedTick=0; b.modified=false; b.enc='utf-8'; b.ff=ff; b.bom=hasBomChar; }
+  else {
+      const b=currentBuffer();
+      b.name = name||b.name; b.path = doc||b.path; b.text = t; b.savedText = t; b._changeTick=0; b._savedTick=0; b.modified=false; b.enc='utf-8'; b.ff=ff; b.bom=hasBomChar;
+      try{
+        if (b && b._markdownAuto){
+          const next = _inferMarkdownFromNamePath(b.name, b.path);
+          if (b.markdown !== !!next){
+            b.markdown = !!next;
+            if (b.markdown && typeof b.md_draftedit !== 'boolean') b.md_draftedit = true;
+            try{ _updateOverlayMarkdownVisual(); }catch{}
+            try{ _mdApplyVisualState && _mdApplyVisualState(); }catch{}
+          }
+        }
+      }catch{}
+    }
     _setTitle(); _renderTabbar();
     // Ensure initial view is at top (avoid unintended 'G'-like position)
     try{
@@ -7935,7 +8463,20 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
     const t = (hasBomChar ? txt.slice(1) : txt).replace(/\r\n?/g,'\n');
     editor.value = t;
     if (buffers.length===0){ _addBuffer({ name: name||null, path: doc||null, text: t, modified:false, enc:'utf-8', ff, bom: hasBomChar }); }
-  else { const b=currentBuffer(); if(name) b.name = name; b.path = doc; b.text = t; b.savedText = t; b._changeTick=0; b._savedTick=0; b.modified=false; b.enc='utf-8'; b.ff=ff; b.bom=hasBomChar; }
+  else {
+      const b=currentBuffer(); if(name) b.name = name; b.path = doc; b.text = t; b.savedText = t; b._changeTick=0; b._savedTick=0; b.modified=false; b.enc='utf-8'; b.ff=ff; b.bom=hasBomChar;
+      try{
+        if (b && b._markdownAuto){
+          const next = _inferMarkdownFromNamePath(b.name, b.path);
+          if (b.markdown !== !!next){
+            b.markdown = !!next;
+            if (b.markdown && typeof b.md_draftedit !== 'boolean') b.md_draftedit = true;
+            try{ _updateOverlayMarkdownVisual(); }catch{}
+            try{ _mdApplyVisualState && _mdApplyVisualState(); }catch{}
+          }
+        }
+      }catch{}
+    }
     _setTitle(); _renderTabbar();
       try{
         caretRow=0; caretCol=0; try{ _setEditorScrollTop(0, { immediate:true }); }catch{}; _centerScrolloffOnce=false; _scrollGuardUntil = Date.now() + 800;
@@ -7961,11 +8502,29 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
   function clampViewportExactLines(){
     // Measure the actual text area height (textarea), not the wrapper,
     // to keep visible-lines count consistent with what the user sees.
-    let h = editor.clientHeight || viewport.clientHeight;
+    // md-rich: use overlay viewport height; do not subtract textarea padding (paddingBottom can
+    // be large due to scroll compensation, and subtracting it causes a black unrendered area).
+    let h = (function(){
+      try{ if (_mdRichActive && _mdRichActive()) return (viewport && viewport.clientHeight) ? viewport.clientHeight : (editor.clientHeight||0); }catch{}
+      return editor.clientHeight || viewport.clientHeight;
+    })();
+    // non-md: exclude textarea padding so visible lines reflect the actual content box.
+    try{
+      if (!(_mdRichActive && _mdRichActive()) && editor && window && window.getComputedStyle){
+        const cs = window.getComputedStyle(editor);
+        const pt = Math.max(0, Math.round(parseFloat(cs.paddingTop||'0')||0));
+        const pb = Math.max(0, Math.round(parseFloat(cs.paddingBottom||'0')||0));
+        const hh = (h|0) - (pt|0) - (pb|0);
+        if (hh > 0) h = hh;
+      }
+    }catch{}
     if (_needsHScrollReserve()) h -= HSCROLL_RESERVE;
     const raw = h / LINE_HEIGHT;
-    // Prefer rounding to nearest line to avoid off-by-one jitter
-    const lines = Math.max(1, Math.round(raw));
+    // Visible *full* lines in the viewport.
+    // md-rich expects "N lines + partial" at EOF padding; rounding up can make EOF pad look like 6->5 lines.
+    // Keep non-md behavior unchanged to avoid jitter regressions.
+    const isMd = (function(){ try{ return (_mdRichActive && _mdRichActive()); }catch{ return false; } })();
+    const lines = Math.max(1, isMd ? Math.floor(raw + 1e-6) : Math.round(raw));
     // Wrapper padding adjustment is unnecessary since scrolling is on the textarea
     try{ if (viewport && viewport.style) viewport.style.paddingBottom = '0px'; }catch{}
     _cachedVisibleCount = lines;
@@ -7995,6 +8554,10 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
     
     opts = opts||{};
 
+    // Alt+j/k view scroll: hide active-line visuals during scrolling for smoothness.
+    // (Stripe and gutter-stripe can jitter due to line-boundary delta sync.)
+    const _altScrolling = !!(document && document.body && document.body.classList && document.body.classList.contains('alt-scrolling'));
+
     // #1494: In markdown clean display, prevent horizontal caret moves on HR/setext underline lines.
     try{
       const changed = _mdClampCaretForSpecialCleanLines();
@@ -8018,9 +8581,24 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
       }
     }catch{}
 
-    // #1284: Use fixed screen offset during continuous scroll to prevent jitter/flicker
-    if (window && window.__sixScanHoldScrollActive && typeof window.__sixScanHoldOffset === 'number') {
+    // #1284: Use fixed screen offset during continuous scroll to prevent jitter/flicker.
+    // md-rich + wrap-on uses a logical scroll grid; fixed-offset rendering can make the caret
+    // appear to "teleport" between scrolloff boundaries. Disable it in that mode.
+    try{
+      const mdLogicalWrap = !!(
+        (_mdRichEnabled && _mdRichEnabled()) &&
+        (_wrapEnabled && _wrapEnabled()) &&
+        (_wrapUsesVisualScrollGrid && !_wrapUsesVisualScrollGrid())
+      );
+      if (!mdLogicalWrap){
+        if (window && window.__sixScanHoldScrollActive && typeof window.__sixScanHoldOffset === 'number') {
+          offsetLines = window.__sixScanHoldOffset + 1;
+        }
+      }
+    }catch{
+      if (window && window.__sixScanHoldScrollActive && typeof window.__sixScanHoldOffset === 'number') {
         offsetLines = window.__sixScanHoldOffset + 1;
+      }
     }
 
     if (offsetLines < 0) { edstripe.style.display='none'; return; }
@@ -8112,17 +8690,43 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
     // By flooring consistently we always translate relative to the same grid origin used by _topLine()/ensureScrolloff.
     let rem = 0;
     try{
-      const st = (editor.scrollTop||0);
+      let st = (editor.scrollTop||0);
+      // md-rich(+wrap): keep remainder aligned to the same effective scrollTop as the md text layer.
+      try{
+        if (_mdRichActive && _mdRichActive() && typeof _mdEffectiveScrollTopPx === 'function'){
+          const snap = !(_lastNativeScrollAt && (Date.now() - (_lastNativeScrollAt|0) <= 120));
+          st = _mdEffectiveScrollTopPx({ snap });
+        }
+      }catch{}
       rem = st - Math.floor(st/LINE_HEIGHT)*LINE_HEIGHT;
       // Guard against tiny negative floating residues (e.g., -0.5px at certain zoom ratios)
       if (Math.abs(rem) < 0.01) rem = 0;
+      try{
+        const atEofEff = (typeof _mdAtEofEffective === 'function') ? !!_mdAtEofEffective() : false;
+        if (atEofEff || (opts && opts.noSnap)) rem = 0;
+      }catch{}
     }catch{}
     
     // #1275: During View Scroll (Alt+j/k) or Continuous Scroll (Hold j/k), keep active line background static on screen
     // Do not apply sub-pixel remainder compensation to avoid jitter against moving text.
     const isViewScroll = (window && window._altScroll && window._altScroll.active) || (window && window.__sixScanHoldScrollActive);
+    const isAltViewScroll = !!(window && window._altScroll && window._altScroll.active);
+
+    // If Alt-scroll is active, hide stripe backgrounds immediately.
+    if (isAltViewScroll || _altScrolling){
+      try{ edstripe.style.display = 'none'; }catch{}
+      try{
+        const gStripe0 = gutter && gutter.querySelector ? gutter.querySelector('.gutter-stripe') : null;
+        if (gStripe0) gStripe0.style.display = 'none';
+      }catch{}
+    }
     
     if (topPx >= 0 && topPx < viewport.clientHeight) {
+      // If Alt-scroll is active, keep stripe hidden.
+      if (isAltViewScroll || _altScrolling){
+        edstripe.style.display='none';
+        try{ edstripe.style.transform = ''; }catch{}
+      } else
       if (_mdRichActive()){
         // #1495: active line background is painted in the markdown background layer; keep edstripe hidden.
         edstripe.style.display='none';
@@ -8161,7 +8765,10 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
         gStripe.style.pointerEvents = 'none';
         gutter.appendChild(gStripe);
       }
-      if (topPx >= 0 && topPx < viewport.clientHeight) {
+      if (isAltViewScroll || _altScrolling){
+        gStripe.style.display = 'none';
+      }
+      else if (topPx >= 0 && topPx < viewport.clientHeight) {
         gStripe.style.display = '';
         gStripe.style.top = topPx + 'px';
         gStripe.style.height = rowHeightPx + 'px';
@@ -8696,8 +9303,24 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
   }
   function _syncNativeSelectionToCaret(){
     try{
+      let st = 0, sl = 0;
+      try{ st = (editor && typeof editor.scrollTop === 'number') ? (editor.scrollTop|0) : 0; }catch{}
+      try{ sl = (editor && typeof editor.scrollLeft === 'number') ? (editor.scrollLeft|0) : 0; }catch{}
       const off = _offsetFromRC(caretRow, caretCol);
-      editor.setSelectionRange(off, off);
+      try{
+        const s0 = (editor && typeof editor.selectionStart === 'number') ? (editor.selectionStart|0) : -1;
+        const e0 = (editor && typeof editor.selectionEnd === 'number') ? (editor.selectionEnd|0) : -1;
+        if ((s0|0) === (off|0) && (e0|0) === (off|0)){
+          // Even if selection is already correct, still restore scroll if a prior operation changed it.
+          try{ if (editor && typeof editor.scrollTop === 'number') editor.scrollTop = st; }catch{}
+          try{ if (editor && typeof editor.scrollLeft === 'number') editor.scrollLeft = sl; }catch{}
+          return;
+        }
+      }catch{}
+      // Prefer direct assignment over setSelectionRange to reduce scroll/select churn near EOF.
+      try{ editor.selectionStart = editor.selectionEnd = (off|0); }catch{ try{ editor.setSelectionRange(off, off); }catch{} }
+      try{ if (editor && typeof editor.scrollTop === 'number') editor.scrollTop = st; }catch{}
+      try{ if (editor && typeof editor.scrollLeft === 'number') editor.scrollLeft = sl; }catch{}
     }catch{}
   }
   function _updateVisualSelection(){
@@ -9335,6 +9958,72 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
   // Prefer not to scroll on the very first motion after a buffer switch when caret is already visible (#415 case1)
   let _preferNoScrollOnceAfterSwitch = false;
 
+  function _mdEnsureCaretInViewPx(opts){
+    // Markdown-rich uses variable per-line heights; logical-line visibility checks can disagree
+    // with actual rendered caret position. Use DOM rects to ensure caret ends up on-screen.
+    try{
+      if (!_mdRichActive || !_mdRichActive()) return false;
+      if (!editor || !viewport || !caretLayer) return false;
+      // Ensure caret DOM reflects current caretRow/caretCol and scrollTop before measuring.
+      try{ _repositionCaret({ force:true }); }catch{}
+      const caretEl = caretLayer.querySelector && caretLayer.querySelector('.caret');
+      if (!caretEl) return false;
+      const vp = viewport.getBoundingClientRect();
+      const cr = caretEl.getBoundingClientRect();
+
+      // margin: approximate scrolloff in pixels (cap to avoid extreme values like 99999)
+      // opts.marginPx can override (e.g., for 'G' EOF jump we want full EOF pad visible)
+      let marginPx = (LINE_HEIGHT||1);
+      try{
+        if (opts && typeof opts.marginPx === 'number' && isFinite(opts.marginPx)){
+          marginPx = Math.max(0, opts.marginPx|0);
+        } else {
+          const so = (scrolloff|0);
+          const soClamped = Math.max(0, Math.min(10, so));
+          marginPx = Math.max(2, soClamped * (LINE_HEIGHT||1));
+        }
+      }catch{}
+
+      let deltaPx = 0;
+      if (cr.top < (vp.top + marginPx)){
+        deltaPx = cr.top - (vp.top + marginPx);
+      } else if (cr.bottom > (vp.bottom - marginPx)){
+        deltaPx = cr.bottom - (vp.bottom - marginPx);
+      }
+      if (Math.abs(deltaPx) < 0.5) return false;
+
+      let maxScroll = Math.max(0, (editor.scrollHeight||0) - (editor.clientHeight||0));
+      try{
+        // md-rich + wrap-on: respect effective max (hide extra compensation region)
+        if (typeof _mdEffectiveMaxScrollPx === 'function'){
+          const eff = _mdEffectiveMaxScrollPx()|0;
+          if (eff >= 0) maxScroll = Math.min(maxScroll|0, eff|0);
+        }
+      }catch{}
+      // Work in effective scroll space; native scrollTop may be in compensation range.
+      let stEff0 = (editor.scrollTop||0);
+      try{ if (typeof _mdEffectiveScrollTopPx === 'function') stEff0 = _mdEffectiveScrollTopPx({ snap:false })|0; }catch{}
+      let next = (stEff0|0) + deltaPx;
+      // Keep alignment stable, but avoid over-snapping during key repeat / tiny deltas.
+      try{
+        const lh = (LINE_HEIGHT||1);
+        const moving = !!(document && document.body && document.body.classList && document.body.classList.contains('moving-caret'));
+        const noSnap = !!(moving || (opts && opts.noSnap));
+        if (!noSnap && lh > 0){
+          // If correction is tiny, don't snap; rounding can amplify rect jitter into a full-line scroll.
+          const tiny = Math.abs(deltaPx) < (lh * 0.45);
+          if (!tiny){
+            if (deltaPx < 0) next = Math.floor((next||0) / lh) * lh;
+            else next = Math.ceil((next||0) / lh) * lh;
+          }
+        }
+      }catch{}
+      next = Math.max(0, Math.min(maxScroll, next));
+      try{ _setEditorScrollTop(next, Object.assign({ immediate:true }, opts||{})); }catch{ editor.scrollTop = next; }
+      return true;
+    }catch{ return false; }
+  }
+
   function _isCaretVisible(){
     try{
       const top = _topLine();
@@ -9356,16 +10045,89 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
     const merged = Object.assign({ force:true }, opts||{});
     try{ if (_wrapEnabled && _wrapEnabled()) merged.immediate = true; }catch{}
     ensureScrolloff(merged);
+
+    // md-rich + wrap-on: caret can move by visual lines within the same logical row.
+    // Line-based ensureScrolloff (caretRow/topLine) can then fail to enforce scrolloff until
+    // a logical-row boundary is crossed. Use DOM-rect based correction to keep the caret within
+    // the scrolloff margin in pixels.
+    try{
+      const mdLogicalWrap = !!(
+        (_mdRichActive && _mdRichActive()) &&
+        (_wrapEnabled && _wrapEnabled()) &&
+        (_wrapUsesVisualScrollGrid && !_wrapUsesVisualScrollGrid())
+      );
+      if (mdLogicalWrap && typeof _mdEnsureCaretInViewPx === 'function'){
+        // During scan-hold, rely on line-based ensureScrolloff only.
+        // Pixel-based correction can fight with the logical grid and cause boundary "teleport".
+        try{
+          const held = (window && window.__sixScanHoldHeld);
+          if (held && held.size > 0) return;
+        }catch{}
+        const so = (scrolloff|0);
+        const vis = (typeof _visibleLinesExact === 'function') ? (_visibleLinesExact()|0) : 0;
+        let marginPx = 0;
+        if (so >= 99999){
+          // center mode: keep roughly centered
+          try{ marginPx = Math.max(0, Math.floor(((viewport && viewport.clientHeight) ? viewport.clientHeight : 0) / 2) - (LINE_HEIGHT|0)); }catch{ marginPx = 0; }
+        } else {
+          // normal scrolloff: convert to pixels (no clamp)
+          marginPx = Math.max(0, so) * (LINE_HEIGHT||1);
+          // Keep margin physically satisfiable within the viewport to avoid oscillation.
+          try{
+            const maxMarginLines = Math.max(0, Math.floor(((vis|0) - 1) / 2));
+            const maxMarginPx = (maxMarginLines|0) * (LINE_HEIGHT||1);
+            if ((marginPx|0) > (maxMarginPx|0)) marginPx = maxMarginPx|0;
+          }catch{}
+          // If scrolloff is larger than half of the viewport, treat as center-ish
+          try{
+            if (vis > 0 && so > Math.floor(vis/2)){
+              marginPx = Math.max(0, Math.floor(((viewport && viewport.clientHeight) ? viewport.clientHeight : 0) / 2) - (LINE_HEIGHT|0));
+            }
+          }catch{}
+        }
+        _mdEnsureCaretInViewPx({ marginPx: marginPx|0, keepCaret:true });
+      }
+    }catch{}
   }
   // Smooth scrolling helper: animate editor.scrollTop per-pixel.
   let __six_scroll_anim = null;
   let __six_scroll_target = null;
+  // Keep caret visible during programmatic scroll adjustments (e.g. scrolloff enforcement).
+  // scheduleScrollRender and CSS use this to avoid hiding caret while scrolling.
+  let _keepCaretUntil = 0;
   function _setEditorScrollTop(targetPx, opts){
     try{
       opts = opts || {};
       if (!editor) return;
       const cur = (editor.scrollTop||0);
+
+      // Some programmatic scrolls should keep the caret visible even while we treat the UI as "scrolling".
+      try{
+        if (opts && opts.keepCaret){
+          _keepCaretUntil = Date.now() + 220;
+          try{ document.body.classList.add('keep-caret'); }catch{}
+        }
+      }catch{}
+
+      // If the last user input was a horizontal motion (h/l/ArrowLeft/ArrowRight),
+      // never animate vertical scrollTop adjustments. Animation here manifests as
+      // the scrollbar thumb "walking" one line at a time after ggG+hl at EOF.
+      try{
+        const lk = (typeof _lastKeydownForAnom==='object' && _lastKeydownForAnom && _lastKeydownForAnom.key) ? String(_lastKeydownForAnom.key) : '';
+        const lc = (typeof _lastKeydownForAnom==='object' && _lastKeydownForAnom && _lastKeydownForAnom.code) ? String(_lastKeydownForAnom.code) : '';
+        const isHoriz = (lk==='h' || lk==='l' || lk==='ArrowLeft' || lk==='ArrowRight' || (lk==='Process' && (lc==='KeyH' || lc==='KeyL')));
+        if (isHoriz && !(opts && opts.forceAnimate)) opts.immediate = true;
+      }catch{}
+
       targetPx = Math.max(0, Math.round(targetPx||0));
+      // md-rich + wrap-on: clamp to effective max so extra compensation px
+      // does not become visible as additional EOF blank lines.
+      try{
+        if (!(opts && opts.physical)){
+          const effMax = _mdEffectiveMaxScrollPx ? (_mdEffectiveMaxScrollPx()|0) : -1;
+          if (effMax >= 0) targetPx = Math.min(targetPx|0, effMax|0);
+        }
+      }catch{}
       if (Math.abs(targetPx - cur) < 0.5){ 
         editor.scrollTop = targetPx; 
         if (__six_scroll_anim) { cancelAnimationFrame(__six_scroll_anim); __six_scroll_anim = null; }
@@ -9394,12 +10156,13 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
 
       // Decide whether to animate or set immediately.
       const lastKey = (typeof _lastKeydownForAnom==='object' && _lastKeydownForAnom && _lastKeydownForAnom.key) ? String(_lastKeydownForAnom.key) : null;
-      const isHJKL = !!(lastKey && (lastKey === 'h' || lastKey === 'j' || lastKey === 'k' || lastKey === 'l'));
+      const lastCode = (typeof _lastKeydownForAnom==='object' && _lastKeydownForAnom && _lastKeydownForAnom.code) ? String(_lastKeydownForAnom.code) : null;
+      const isJK = !!(lastKey && (lastKey === 'j' || lastKey === 'k' || lastKey === 'ArrowUp' || lastKey === 'ArrowDown' || (lastKey === 'Process' && (lastCode === 'KeyJ' || lastCode === 'KeyK'))));
       const vis = (typeof _visibleLinesExact === 'function') ? (_visibleLinesExact()||1) : 1;
       const deltaPx = Math.abs(targetPx - cur);
       const deltaLines = Math.max(0, Math.round(deltaPx / (LINE_HEIGHT||1)));
       // Jump commands that exceed viewport should not animate (except hjkl which always animates)
-      if (!isHJKL && !(opts && opts.forceAnimate) && deltaLines > (vis||1)){
+      if (!isJK && !(opts && opts.forceAnimate) && deltaLines > (vis||1)){
         // Ensure we don't leave the "is-scrolling" flag stuck from a previous animation.
         try{ document.body.classList.remove('is-scrolling'); }catch{}
         editor.scrollTop = targetPx; return;
@@ -9446,6 +10209,9 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
             __six_scroll_target = null;
             editor.scrollTop = to; 
             try{ document.body.classList.remove('is-scrolling'); }catch{}
+
+            // Restore listchars right after continuous scroll ends.
+            try{ if (typeof _scheduleListCharsRender === 'function') _scheduleListCharsRender('scan-hold-stop'); }catch{}
             try{ _repositionCaret(); updateGutter(); }catch{}
           }
         }catch(e){ 
@@ -9495,6 +10261,36 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
 
     const linesTotal = _totalLines();
     const vis = _visibleLinesExact();
+    const atLogicalEOF = (((caretRow|0) + 1) === (linesTotal|0));
+
+    // md-rich + wrap-on uses logical scroll grid with extra scroll-range compensation.
+    // Navigation-only commands (G/j/k) don't mutate text, so the compensation can go stale
+    // unless we refresh it here (throttled) when it matters (near EOF / explicit EOF jump).
+    try{
+      if (
+        _mdRichActive && _mdRichActive() &&
+        _wrapEnabled && _wrapEnabled() &&
+        _wrapUsesVisualScrollGrid && !_wrapUsesVisualScrollGrid() &&
+        _mdSyncEofPadComp
+      ){
+        const now = (performance && performance.now) ? performance.now() : Date.now();
+        const last = ensureScrolloff._mdEofSyncAt || 0;
+        // Only when explicitly requested (EOF jump) or when we're close enough to EOF
+        // that clamp/maxTop depends on mdCompLines.
+        const caretL1 = (caretRow|0) + 1;
+        const nearEOF = caretL1 >= ((linesTotal|0) - Math.max(2, Math.floor((vis|0) / 2)));
+        // Avoid treating generic `force` as a reason to recompute (j/k repeats can call ensureScrolloff often).
+        // Only recompute on explicit EOF-related requests.
+        const explicit = !!(opts && (opts.preferEOFPad || opts.centerOnce));
+        const looksStale = ((_mdEofPadExtraLines|0) === 0) || ((_mdEofPadLastPbPx|0) < 0);
+        const wants = explicit || (nearEOF && looksStale);
+        if (wants && (now - last) >= 120){
+          ensureScrolloff._mdEofSyncAt = now;
+          try{ _mdSyncEofPadComp(); }catch{}
+        }
+      }
+    }catch{}
+
     let topLine = _topLine();
     let caretLine1 = caretRow + 1;
     // Wrap mode: operate in visual line space for scrolling.
@@ -9517,14 +10313,48 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
     }catch{ _wrapActive=false; }
     const centerOnce = opts.centerOnce || _centerScrolloffOnce;
     const big = scrolloff >= 99999;
-    // Allow extra "virtual" page steps so EOF の下に N 行分の余白が見える
-    // md-rich+wrap: use scroll-comp lines as *content height* compensation (not as visible EOF pad).
-    const mdComp = (_wrapActive ? 0 : (_mdScrollCompLines()|0));
-    const totalForClamp = (_wrapActive ? (_linesTotalVis|0) : ((linesTotal|0) + (mdComp|0)));
+    // Allow extra "virtual" page steps so EOF の下に N 行分の余白が見える。
+    // md-rich + wrap-on はピクセル補正（paddingBottom）でスクロールレンジを拡張しており、
+    // 行数ベースの clamp に補正行を足すと過剰に下へ行ける計算になってブレる。
+    const totalForClamp = (_wrapActive ? (_linesTotalVis|0) : (linesTotal|0));
     const baseMaxTop = Math.max(1, (totalForClamp|0) - vis + 1);
     const _eofPad = _eofPadLines();
     // NOTE: Do NOT cap by total lines; padding creates a virtual scroll range even when file < viewport.
     const maxTopWithPad = Math.max(1, baseMaxTop + (_eofPad|0));
+
+    // EOF bottom lock:
+    // When the native scrollbar is already at (or very near) the physical bottom and EOF padding is enabled,
+    // do not auto-adjust scrollTop upward just to satisfy scrolloff/centering.
+    // This prevents: (a) "k 1回でthumbが下端を離れる" (②), and (b) near-EOF 1-line oscillation.
+    // Allow explicit center/eof jump requests to bypass this.
+    try{
+      if (!(_visualActive) && !(_suppressScrollDuringModal) && !(_scrolloffPaused) && (_eofPad|0) > 0 && !(opts && (opts.centerOnce || opts.eofToBottom)) && !big){
+        // During scan-hold (key held), allow normal scrolloff enforcement.
+        // Otherwise, starting from physical bottom can keep the thumb pinned and delay upward scrolling
+        // until the caret hits the topmost visible line, which looks like a jump.
+        let bypassBottomLock = false;
+        try{
+          const held = (window && window.__sixScanHoldHeld);
+          bypassBottomLock = !!(held && held.size > 0);
+        }catch{ bypassBottomLock = false; }
+
+        if (!bypassBottomLock){
+          const stNow = (editor && typeof editor.scrollTop === 'number') ? +editor.scrollTop : 0;
+          const physMax = Math.max(0, ((editor && editor.scrollHeight) ? (editor.scrollHeight|0) : 0) - ((editor && editor.clientHeight) ? (editor.clientHeight|0) : 0));
+          const nearBottomPx = Math.max(2, ((LINE_HEIGHT|0) * 2));
+          const nearPhysBottom = ((physMax - stNow) <= nearBottomPx);
+          if (nearPhysBottom){
+            const topCmpLock = _wrapActive ? (_topV1|0) : (topLine|0);
+            const caretInViewLock = ((caretLine1|0) >= (topCmpLock|0) && (caretLine1|0) <= ((topCmpLock|0) + (vis|0) - 1));
+            if (caretInViewLock){
+              // Keep overlays in sync when callers expect a caret render.
+              if (force){ try{ _repositionCaret(); }catch{} }
+              return;
+            }
+          }
+        }
+      }
+    }catch{}
 
     // Special handling during VISUAL linewise selection: do minimal keep-in-view only (#869)
     // Avoid enforcing scrolloff margins so range can extend freely without auto recenters.
@@ -9556,7 +10386,40 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
     }
 
     let scrolled = false;
-    if (big || centerOnce || scrolloff >= Math.floor(vis/2)){
+
+    // Explicit: scroll to absolute bottom so all EOF pad is visible.
+    // Used by commands like 'G' (EOF jump). Keep separate from preferEOFPad, which is also
+    // used in INSERT mode to stabilize EOF padding without forcing a bottom jump.
+    if (opts && opts.eofToBottom && atLogicalEOF){
+      // For 'G': show full EOF padding (eofPad lines) regardless of scrolloff.
+      // Use line-based maxTopWithPad so md-rich compensation never becomes visible as extra blanks.
+      try{
+        const mdLogicalWrap = !!(
+          (_mdRichActive && _mdRichActive()) &&
+          (_wrapEnabled && _wrapEnabled()) &&
+          (_wrapUsesVisualScrollGrid && !_wrapUsesVisualScrollGrid())
+        );
+        if (mdLogicalWrap){
+          // Refresh compensation and drive to *physical* bottom so thumb reaches the end,
+          // while effective scrollTop hides extraPx and keeps only eofPad visible.
+          try{ _mdSyncEofPadComp && _mdSyncEofPadComp(); }catch{}
+          const physMax = Math.max(0, ((editor.scrollHeight||0) - (editor.clientHeight||0))|0);
+          _setEditorScrollTop(physMax, Object.assign({}, opts||{}, { immediate:true, keepCaret:true, physical:true }));
+          try{ _mdPinThumbPhysBottom('ensure:eofToBottom'); }catch{}
+        } else {
+          const targetPx = Math.max(0, ((maxTopWithPad|0) - 1) * (LINE_HEIGHT|0));
+          _setEditorScrollTop(targetPx, Object.assign({}, opts||{}, { immediate:true }));
+        }
+      }catch{
+        try{ _setEditorScrollTop(999999999, Object.assign({}, opts||{}, { immediate:true })); }catch{}
+      }
+      _centerScrolloffOnce = false;
+      return;
+    } else
+    // Heuristic: treat *very* large scrolloff as "center" behavior.
+    // IMPORTANT: do not trigger this when scrolloff equals half the viewport (e.g. 10 of 20 lines),
+    // otherwise a single 'k' from EOF can unexpectedly detach the scrollbar thumb from the bottom.
+    if (big || centerOnce || scrolloff > Math.floor(vis/2)){
       let targetTop = Math.max(1, caretLine1 - Math.floor(vis/2));
       // When explicitly requested (e.g., 'G'), prefer showing EOF pad
       if (opts.preferEOFPad && caretLine1 === (_wrapActive ? (_linesTotalVis|0) : (linesTotal|0))){
@@ -9565,7 +10428,7 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
       // clamp within pad range
       targetTop = Math.min(targetTop, maxTopWithPad);
       const prevTopLine = _wrapActive ? _topVisualLine1() : _topLine();
-      _setEditorScrollTop((targetTop-1) * LINE_HEIGHT, opts);
+      _setEditorScrollTop((targetTop-1) * LINE_HEIGHT, Object.assign({}, opts||{}, { keepCaret:true }));
       scrolled = true;
       // If caret was already visible and we only scrolled due to centerOnce/preferEOFPad for EOF, avoid introducing visual gap by snapping back when delta is small (#424)
       try{
@@ -9583,8 +10446,18 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
       // Near BOF/EOF, it may be impossible to satisfy full scrolloff.
       // Reduce the effective margin based on available lines (EOF also includes virtual pad).
       const so = Math.max(0, (scrolloff|0));
-      const soUp = Math.min(so, Math.max(0, caretLine1 - 1));
-      const soDown = Math.min(so, Math.max(0, ((totalForClamp|0) - (caretLine1|0)) + (_eofPad|0)));
+      let soUp = Math.min(so, Math.max(0, caretLine1 - 1));
+      let soDown = Math.min(so, Math.max(0, ((totalForClamp|0) - (caretLine1|0)) + (_eofPad|0)));
+
+      // If scrolloff is too large relative to the viewport, upper/lower margins overlap
+      // (e.g. vis=20, so=10) and strict enforcement can oscillate: top constraint triggers,
+      // then bottom constraint triggers, resulting in a perceived "teleport" between margins.
+      // Degrade margins to a stable maximum that always leaves at least 1 line of slack.
+      try{
+        const maxMargin = Math.max(0, Math.floor(((vis|0) - 1) / 2));
+        if ((soUp|0) > (maxMargin|0)) soUp = maxMargin|0;
+        if ((soDown|0) > (maxMargin|0)) soDown = maxMargin|0;
+      }catch{}
 
       const topCmp2 = _wrapActive ? (_topV1|0) : (topLine|0);
       if (caretLine1 < topCmp2 + soUp){
@@ -9593,6 +10466,17 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
            // #1239: If scan-hold is active (caret mode), use smooth scroll instead of jump
            const sh = window._scanHold;
            if (window.__sixScanHoldHeld && window.__sixScanHoldHeld.size > 0 && sh && sh.mode === 'caret' && !sh.stepAnimation) {
+               // md-rich + wrap-on (logical scroll grid): do NOT switch to scan-hold scroll mode.
+               // Switching modes can pin caretRow and desync posInfo/active-row background.
+               try{
+                 if ((_mdRichEnabled && _mdRichEnabled()) && _wrapEnabled && _wrapEnabled() && _wrapUsesVisualScrollGrid && !_wrapUsesVisualScrollGrid()){
+                   _setEditorScrollTop((newTop-1)*LINE_HEIGHT, { immediate:true, keepCaret:true });
+                   scrolled = true;
+                   // Continue normal flow (no scan-hold scroll mode)
+                   // (caller will render caret/gutter)
+                   return;
+                 }
+               }catch{}
                // Switch to scroll mode logic temporarily or just animate here?
                // Better to let the scroll loop handle it if possible, but we are in caret mode.
                // We can manually trigger a smooth scroll step.
@@ -9639,7 +10523,7 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
                }
                scrolled = true; 
            } else {
-               _setEditorScrollTop((newTop-1)*LINE_HEIGHT, (sh && sh.stepAnimation) ? { immediate: true } : opts); scrolled = true; 
+               _setEditorScrollTop((newTop-1)*LINE_HEIGHT, (sh && sh.stepAnimation) ? { immediate: true, keepCaret:true } : Object.assign({}, opts||{}, { keepCaret:true })); scrolled = true; 
            }
         }
       } else if (caretLine1 > topCmp2 + vis - soDown - 1){
@@ -9653,6 +10537,14 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
            // #1239: Smooth scroll transition for scan-hold
            const sh = window._scanHold;
            if (window.__sixScanHoldHeld && window.__sixScanHoldHeld.size > 0 && sh && sh.mode === 'caret' && !sh.stepAnimation) {
+               // md-rich + wrap-on (logical scroll grid): avoid switching to scan-hold scroll mode.
+               try{
+                 if ((_mdRichEnabled && _mdRichEnabled()) && _wrapEnabled && _wrapEnabled() && _wrapUsesVisualScrollGrid && !_wrapUsesVisualScrollGrid()){
+                   _setEditorScrollTop((newTop-1)*LINE_HEIGHT, { immediate:true, keepCaret:true });
+                   scrolled = true;
+                   return;
+                 }
+               }catch{}
                const currentSt = (editor.scrollTop||0);
                const targetSt = (newTop-1)*LINE_HEIGHT;
                const diff = targetSt - currentSt;
@@ -9679,7 +10571,7 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
                    }
                }
            } else {
-               _setEditorScrollTop((newTop-1)*LINE_HEIGHT, (sh && sh.stepAnimation) ? { immediate: true } : opts); scrolled = true;
+               _setEditorScrollTop((newTop-1)*LINE_HEIGHT, (sh && sh.stepAnimation) ? { immediate: true, keepCaret:true } : Object.assign({}, opts||{}, { keepCaret:true })); scrolled = true;
            }
         }
       }
@@ -9702,11 +10594,71 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
       topLine = _topLine();
       if (topLine > maxTop){ _setEditorScrollTop((maxTop-1)*LINE_HEIGHT, {}); }
     }
+
+    // md-rich debug: sample ensureScrolloff behavior (aggregated, throttled)
+    try{
+      if (_mdEofDbgEnabled && _mdEofDbgEnabled() && _mdRichActive && _mdRichActive() && _wrapEnabled && _wrapEnabled()){
+        const st = (editor && typeof editor.scrollTop === 'number') ? (editor.scrollTop|0) : 0;
+        const topNow2 = (function(){ try{ return (_wrapActive ? (_topVisualLine1()|0) : (_topLine()|0)); }catch{ return -1; } })();
+        const rec = {
+          key: [
+            'md',
+            (_wrapActive?'wrapV':'wrapL'),
+            (force?'F':'-'),
+            (centerOnce?'C':'-'),
+            (opts && opts.preferEOFPad?'E':'-'),
+            (scrolled?'S':'-'),
+          ].join(''),
+          stPx: st|0,
+          topNow: topNow2|0,
+          topLine: (topLine|0),
+          caretLine1: (caretLine1|0),
+          linesTotal: (linesTotal|0),
+          vis: (vis|0),
+          scrolloff: (scrolloff|0),
+          mdComp: (mdComp|0),
+          eofPad: (_eofPad|0),
+          totalForClamp: (totalForClamp|0),
+          baseMaxTop: (baseMaxTop|0),
+          maxTopWithPad: (maxTopWithPad|0),
+        };
+        if (typeof _mdEofDbgScrolloffSample === 'function') _mdEofDbgScrolloffSample(rec);
+      }
+    }catch{}
     // スクロール位置を行境界にスナップして、丸め誤差での1行ズレを防止。
     // EOFジャンプ（preferEOFPad）直後は切り上げよりも切り捨て優先で半行余白を排除 (#424/#429)
     try{
       // アニメーションスクロール中はスナップによるキャンセルを回避 (#1200)
       if (__six_scroll_anim) return;
+
+      // md-rich + wrap-on: keep physical/effective separation.
+      // When native scrollTop is in the compensation range (for scrollbar thumb), snapping by
+      // writing editor.scrollTop would clamp to effective max and cause a sudden viewport jump.
+      // Rendering already uses effective scrollTop, so skip physical snapping here.
+      try{
+        const mdLogicalWrap = !!(
+          (_mdRichEnabled && _mdRichEnabled()) &&
+          (_wrapEnabled && _wrapEnabled()) &&
+          (_wrapUsesVisualScrollGrid && !_wrapUsesVisualScrollGrid())
+        );
+        if (mdLogicalWrap && typeof _mdEffectiveMaxScrollPx === 'function'){
+          const stP = (editor && typeof editor.scrollTop === 'number') ? +editor.scrollTop : 0;
+          const effMax = +(_mdEffectiveMaxScrollPx()|0);
+          if (stP > (effMax + 0.5)) return;
+        }
+      }catch{}
+
+      // markdown-off + wrap-on: browser clamp at physical EOF may be non-aligned to LINE_HEIGHT.
+      // If ensureScrolloff didn't scroll, snapping here causes a visible "25% line" jump near EOF.
+      try{
+        const mdNow = (function(){ try{ return _mdRichActive && _mdRichActive(); }catch{ return false; } })();
+        const wrapNow = (function(){ try{ return _wrapEnabled && _wrapEnabled(); }catch{ return false; } })();
+        if (!mdNow && wrapNow && !scrolled){
+          const stE = (editor.scrollTop||0);
+          const maxE = (editor.scrollHeight||0) - (editor.clientHeight||0);
+          if ((maxE - stE) <= 1.5) return;
+        }
+      }catch{}
 
       const stCur = (editor.scrollTop||0);
       const atEOFJump = !!(opts && opts.preferEOFPad && caretLine1 === linesTotal);
@@ -9722,6 +10674,20 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
           try{
             if (window && window._imeComposing===true) return;
             if (__six_scroll_anim) return;
+
+            // Same guard as above (compensation range): don't pull physical scrollTop down.
+            try{
+              const mdLogicalWrap2 = !!(
+                (_mdRichEnabled && _mdRichEnabled()) &&
+                (_wrapEnabled && _wrapEnabled()) &&
+                (_wrapUsesVisualScrollGrid && !_wrapUsesVisualScrollGrid())
+              );
+              if (mdLogicalWrap2 && typeof _mdEffectiveMaxScrollPx === 'function'){
+                const stP2 = (editor && typeof editor.scrollTop === 'number') ? +editor.scrollTop : 0;
+                const effMax2 = +(_mdEffectiveMaxScrollPx()|0);
+                if (stP2 > (effMax2 + 0.5)) return;
+              }
+            }catch{}
             const st1 = (editor.scrollTop||0);
             const flo1 = Math.floor(st1/LINE_HEIGHT)*LINE_HEIGHT;
             if (Math.abs(flo1 - st1) > 0.01){
@@ -9732,6 +10698,7 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
         });
       }
     }catch{}
+
   }
 
   // Snap editor.scrollTop to the line grid conservatively (don't force bottom clamp if caret is visible),
@@ -9862,6 +10829,7 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
     // Markdown rich mode: render per-line heights + text layer (visible region only)
     try{
       if (_mdRichActive()){
+        const hideActiveLine = !!(document && document.body && document.body.classList && document.body.classList.contains('alt-scrolling'));
         try{ _mdRenderTextLayer(); }catch{}
         // In large buffers, the editor may temporarily reduce textarea content during IME composition (#1416).
         // In that state, the gutter can still show correct *absolute* line numbers if we know
@@ -9878,7 +10846,7 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
         const top = _topLine();
         const end = Math.min(total, (top|0) + (vis|0) - 1);
         for (let ln=top; ln<=end; ln++){
-          const active = (ln === active1);
+          const active = (!hideActiveLine) && (ln === active1);
           rows.push({ ln, active });
         }
         const drawn = (end - top + 1)|0;
@@ -9893,10 +10861,12 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
         try{ if (wrapOn) wPx = _wrapAvailWidthPx()|0; }catch{ wPx = 80; }
         const children = Array.from(gutter.children).filter(c => !c.classList.contains('gutter-stripe'));
         let y = 0;
+        let lastEl = null;
         for (let i=0;i<rows.length; i++){
           const r = rows[i];
           let el = children[i];
           if (!el){ el = document.createElement('div'); gutter.appendChild(el); }
+          lastEl = el;
           const idx0 = r.eof ? -1 : ((r.ln|0) - 1);
           const text = (idx0>=0 && idx0<lines.length) ? String(lines[idx0]||'') : '';
           let lh = LINE_HEIGHT;
@@ -9972,14 +10942,43 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
           // keep flow layout (no absolute) but accumulate actual painted height
           y += hPx;
         }
+
+        // If we are showing EOF filler rows, make the last filler row absorb the sub-line remainder.
+        // This avoids the bottom "half line" of the gutter showing the base gutter background.
+        try{
+          const vpH = (viewport && viewport.clientHeight) ? (viewport.clientHeight|0) : ((editor && editor.clientHeight) ? (editor.clientHeight|0) : 0);
+          const remPx = Math.max(0, (vpH|0) - (y|0));
+          const lastIsEof = !!(rows.length && rows[rows.length-1] && rows[rows.length-1].eof);
+          if (remPx > 0 && lastIsEof && lastEl){
+            const baseH = LINE_HEIGHT|0;
+            lastEl.style.height = (baseH + (remPx|0)) + 'px';
+            lastEl.style.lineHeight = (LINE_HEIGHT + 'px');
+          }
+        }catch{}
+
         for (let i=rows.length; i<children.length; i++){
           try{ gutter.removeChild(children[i]); }catch{}
         }
         // Subpixel alignment guard (same as normal mode)
         try{
           gutter.style.transform = '';
-          const st = (editor.scrollTop||0);
-          const rem = st - Math.floor(st/LINE_HEIGHT)*LINE_HEIGHT;
+          let st = (editor.scrollTop||0);
+          try{
+            const atEofEff = (typeof _mdAtEofEffective === 'function') ? !!_mdAtEofEffective() : false;
+            const noSnap = !!(opts && opts.noSnap);
+            if (!atEofEff && !noSnap){
+              const snap = !(_lastNativeScrollAt && (Date.now() - (_lastNativeScrollAt|0) <= 120));
+              if (typeof _mdEffectiveScrollTopPx === 'function') st = _mdEffectiveScrollTopPx({ snap });
+            } else {
+              if (typeof _mdEffectiveScrollTopPx === 'function') st = _mdEffectiveScrollTopPx({ snap:false });
+            }
+          }catch{}
+          let rem = st - Math.floor(st/LINE_HEIGHT)*LINE_HEIGHT;
+          try{
+            const atEofEff2 = (typeof _mdAtEofEffective === 'function') ? !!_mdAtEofEffective() : false;
+            const noSnap2 = !!(opts && opts.noSnap);
+            if (atEofEff2 || noSnap2) rem = 0;
+          }catch{}
           const children2 = Array.from(gutter.children).filter(c => !c.classList.contains('gutter-stripe'));
           const first = children2[0];
           if (first){
@@ -10199,18 +11198,22 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
 
       // Markdown-rich: use styled wrap metrics (per-line font/line-height) so j/k behave like gj/gk.
       if (_mdRichEnabled && _mdRichEnabled()){
-        const c = _mdWrapEnsureCache(false) || _mdWrapEnsureCache(true);
-        if (!c || !c.prefix){ _moveCaretLines(d, opts); return; }
+        const heavy = (function(){ try{ return _editorTextLen() > 200000; }catch{ return false; } })();
+        // For heavy buffers, prefer the normal wrap path (no full md wrap cache build).
+        if (!heavy){
+          const c = _mdWrapEnsureCache(false) || _mdWrapEnsureCache(true);
+          // If cache is not ready, fall through to the normal wrap path (still visual-line motion).
+          if (c && c.prefix){
 
-        // Compute current visual-line index.
-        const totalVis = (c.prefix && c.prefix.length) ? (c.prefix[c.prefix.length-1]|0) : (_totalLines()|0);
-        const curV1 = _mdWrapVisualLine1ForRowCol(caretRow|0, caretCol|0);
-        const targetV1 = Math.max(1, Math.min(Math.max(1, totalVis|0), (curV1|0) + d));
-        const info = _mdWrapRowFromVisualLine1(targetV1|0);
-        const lines = _splitLines();
-        const row = Math.max(0, Math.min((lines.length-1)|0, (info.row|0)));
-        let intra = Math.max(0, (info.intra|0));
-        try{ if (c.counts && c.counts.length){ intra = Math.max(0, Math.min(((c.counts[row]|0)-1)|0, intra|0)); } }catch{}
+            // Compute current visual-line index.
+            const totalVis = (c.prefix && c.prefix.length) ? (c.prefix[c.prefix.length-1]|0) : (_totalLines()|0);
+            const curV1 = _mdWrapVisualLine1ForRowCol(caretRow|0, caretCol|0);
+            const targetV1 = Math.max(1, Math.min(Math.max(1, totalVis|0), (curV1|0) + d));
+            const info = _mdWrapRowFromVisualLine1(targetV1|0);
+            const lines = _splitLines();
+            const row = Math.max(0, Math.min((lines.length-1)|0, (info.row|0)));
+            let intra = Math.max(0, (info.intra|0));
+            try{ if (c.counts && c.counts.length){ intra = Math.max(0, Math.min(((c.counts[row]|0)-1)|0, intra|0)); } }catch{}
 
         // Preserve desired X across visual-line moves.
         try{
@@ -10265,9 +11268,11 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
           }
         }catch{}
 
-        if (!(opts && opts.skipEnsure)) _ensureAfterMotion();
-        try{ _debugPush({ t:Date.now(), type:'motion', mode:_mode, kind:'md-vis-lines', delta:d, fromV1:(curV1|0), toV1:(targetV1|0), toR:(caretRow|0), toC:(caretCol|0) }); }catch{}
-        return;
+            if (!(opts && opts.skipEnsure)) _ensureAfterMotion();
+            try{ _debugPush({ t:Date.now(), type:'motion', mode:_mode, kind:'md-vis-lines', delta:d, fromV1:(curV1|0), toV1:(targetV1|0), toR:(caretRow|0), toC:(caretCol|0) }); }catch{}
+            return;
+          }
+        }
       }
 
       const c = _wrapEnsureCache(false) || _wrapEnsureCache(true);
@@ -10386,7 +11391,11 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
       if (caretRow !== lines.length-1) return false;
       const vis=_visibleLinesExact();
       const linesTotal=_totalLines();
-      const mdComp = (_mdScrollCompLines()|0);
+      // md-rich: do NOT expose compensation range as visible EOF pad.
+      const mdComp = (function(){
+        try{ return (_mdRichActive && _mdRichActive()) ? 0 : (_mdScrollCompLines()|0); }
+        catch{ return 0; }
+      })();
       const totalForClamp = Math.max(1, (linesTotal|0) + (mdComp|0));
       const baseMaxTop=Math.max(1, (totalForClamp|0) - vis + 1);
       const eofPad=_eofPadLines();
@@ -11734,7 +12743,7 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
 
     // :set markdown / :set nomarkdown / :set markdown! / :set markdown?
     if (/^:set\s+markdown\s*$/i.test(cmd)){
-      const b=currentBuffer(); if (b){ b.markdown=true; if (typeof b.md_draftedit !== 'boolean') b.md_draftedit = true; _schedulePersist('markdown'); _schedulePersist('md_draftedit'); }
+      const b=currentBuffer(); if (b){ b.markdown=true; b._markdownAuto=false; if (typeof b.md_draftedit !== 'boolean') b.md_draftedit = true; _schedulePersist('markdown'); _schedulePersist('md_draftedit'); }
       try{ _updateOverlayMarkdownVisual(); }catch{}
       try{ _mdApplyVisualState && _mdApplyVisualState(); }catch{}
       try{ _repositionCaret(); }catch{}
@@ -11743,7 +12752,7 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
       toast('markdown: on', 900); return;
     }
     if (/^:set\s+nomarkdown\s*$/i.test(cmd)){
-      const b=currentBuffer(); if (b){ b.markdown=false; _schedulePersist('markdown'); }
+      const b=currentBuffer(); if (b){ b.markdown=false; b._markdownAuto=false; _schedulePersist('markdown'); }
       try{ _updateOverlayMarkdownVisual(); }catch{}
       try{ _mdApplyVisualState && _mdApplyVisualState(); }catch{}
       try{ _repositionCaret(); }catch{}
@@ -11752,7 +12761,7 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
       toast('markdown: off', 900); return;
     }
     if (/^:set\s+markdown!\s*$/i.test(cmd)){
-      const b=currentBuffer(); if (b){ b.markdown=!b.markdown; if (b.markdown && typeof b.md_draftedit !== 'boolean') b.md_draftedit = true; _schedulePersist('markdown'); _schedulePersist('md_draftedit'); }
+      const b=currentBuffer(); if (b){ b.markdown=!b.markdown; b._markdownAuto=false; if (b.markdown && typeof b.md_draftedit !== 'boolean') b.md_draftedit = true; _schedulePersist('markdown'); _schedulePersist('md_draftedit'); }
       try{ _updateOverlayMarkdownVisual(); }catch{}
       try{ _mdApplyVisualState && _mdApplyVisualState(); }catch{}
       try{ _repositionCaret(); }catch{}
@@ -13849,15 +14858,33 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
       active: false,
       raf: null,
       dir: 0,
-      speed: 3,
+      // Time-based speed so perceived speed stays stable even if frames drop.
+      // Unit: px per ms. (0.5 => ~500px/s)
+      speedPxPerMs: 0.5,
       key: null,
+      lastTs: 0,
       loop: null
     };
     window._altScroll = _altScroll;
-    _altScroll.loop = () => {
+    _altScroll.loop = (ts) => {
       if (!_altScroll.active) return;
       const cur = editor.scrollTop;
-      const next = cur + (_altScroll.dir * _altScroll.speed);
+      // requestAnimationFrame passes a DOMHighResTimeStamp; fall back if missing.
+      const nowTs = (typeof ts === 'number' && Number.isFinite(ts)) ? ts : (performance && performance.now ? performance.now() : Date.now());
+      let dt = 16;
+      if (_altScroll.lastTs > 0){
+        dt = Math.max(1, Math.min(80, nowTs - (_altScroll.lastTs||0)));
+      }
+      _altScroll.lastTs = nowTs;
+      // Prefer live option so changes in _six.customize take effect immediately.
+      let sp = (typeof _altScroll.speedPxPerMs === 'number' && Number.isFinite(_altScroll.speedPxPerMs)) ? _altScroll.speedPxPerMs : 0.5;
+      try{
+        const o = window.SIX_OPTIONS || {};
+        const v = (typeof o.altScrollSpeedPxPerMs === 'number') ? o.altScrollSpeedPxPerMs : parseFloat(o.altScrollSpeedPxPerMs);
+        if (Number.isFinite(v) && v > 0) sp = v;
+      }catch{}
+      const stepPx = Math.max(1, sp * dt);
+      const next = cur + (_altScroll.dir * stepPx);
       const max = editor.scrollHeight - editor.clientHeight;
       let nextClamped = next;
       if (next < 0) nextClamped = 0;
@@ -13886,15 +14913,13 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
              _setCaret(caretRow, newCol, { suppressDesired: true });
            }
         }
-
-        // Force synchronous update of overlays to prevent flickering
-        // In md-rich, update textLayer (via updateGutter) before moving stripe/caret.
-        try{ updateGutter(); _repositionCaret(); }catch{}
       }
 
       if (!document.body.classList.contains('is-scrolling')) document.body.classList.add('is-scrolling');
       // Reuse scan-hold flag to suppress ensureScrolloff and scroll snapping
       try{ window.__sixScanHoldScrollActive = true; }catch{}
+      // Hide heavy active-line visuals during Alt scroll for smoothness.
+      try{ document.body.classList.add('alt-scrolling'); }catch{}
       
       _altScroll.raf = requestAnimationFrame(_altScroll.loop);
     };
@@ -13955,22 +14980,162 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
   }catch{}
   // Unified scroll handler: snap to line grid and render once per frame
   let _scrollRAF = 0;
+  let _scrollSettleTimer = 0;
+  let _lastNativeScrollAt = 0;
+  // Track last native scroll offsets to detect horizontal-only scroll events.
+  // This prevents vertical snap from fighting horizontal auto-scroll (e.g. h/l at EOF).
+  let _snapLastST = 0;
+  let _snapLastSL = 0;
+  let _snapLastInited = false;
+  // Track last scroll offsets at the event level too (before RAF) so we can avoid
+  // clearing heavy overlays (listchars) for horizontal-only scrollLeft changes.
+  let _evtLastST = 0;
+  let _evtLastSL = 0;
+  let _evtLastInited = false;
+  function _scrollSettleCheck(){
+    try{
+      const sh = (window && window.__sixScanHoldScrollActive);
+      const as = (window && window._altScroll && window._altScroll.active);
+      const animActive = (typeof __six_scroll_anim !== 'undefined' && __six_scroll_anim);
+      if (sh || as || animActive){
+        try{ if (_scrollSettleTimer) clearTimeout(_scrollSettleTimer); }catch{}
+        _scrollSettleTimer = setTimeout(_scrollSettleCheck, 90);
+        return;
+      }
+      try{ if (document && document.body) document.body.classList.remove('is-scrolling'); }catch{}
+      try{ if (document && document.body && Date.now() >= (_keepCaretUntil|0)) document.body.classList.remove('keep-caret'); }catch{}
+      try{ _lastNativeScrollAt = 0; }catch{}
+
+      // Final overlay sync after scroll settles. During the scroll RAF we may skip caret updates,
+      // and relying on a later input can leave the caret invisible (notably after large jumps).
+      try{ updateGutter(); }catch{}
+      try{ _repositionCaret(); }catch{}
+      try{ _updatePosInfo(); }catch{}
+    }catch{}
+    try{ if (typeof _scheduleListCharsRender === 'function') _scheduleListCharsRender('scrollend'); }catch{}
+  }
   const scheduleScrollRender = ()=>{
     // IME composition can fire frequent scroll events (e.g., scrollLeft auto-follow).
     // Avoid scheduling/cancelling RAF on every event; we don't need overlay syncing while composing.
     try{ if (window && window._imeComposing===true){ return; } }catch{}
+
+    // Detect horizontal-only scroll at the event level.
+    // (This is what happens when h/l causes the textarea to auto scrollLeft.)
+    let _evtMostlyHorizontal = false;
+    try{
+      const stNow = (editor && typeof editor.scrollTop === 'number') ? +editor.scrollTop : 0;
+      const slNow = (editor && typeof editor.scrollLeft === 'number') ? +editor.scrollLeft : 0;
+      if (_evtLastInited){
+        const dst = Math.abs(stNow - (+_evtLastST||0));
+        const dsl = Math.abs(slNow - (+_evtLastSL||0));
+        _evtMostlyHorizontal = (dst <= 0.5 && dsl > 0.5);
+      } else {
+        _evtLastInited = true;
+      }
+      _evtLastST = stNow;
+      _evtLastSL = slNow;
+    }catch{}
+
+    // Horizontal-only scroll: keep listchars by shifting the layer instead of clearing+full rerender.
+    if (_evtMostlyHorizontal){
+      try{ _listSyncHorizontalScroll && _listSyncHorizontalScroll(); }catch{}
+    }
+
+    // Treat vertical native scroll as continuous scrolling for a short window.
+    // Horizontal-only scrollLeft changes should NOT clear listchars or toggle is-scrolling.
+    if (!_evtMostlyHorizontal){
+      try{
+        try{ _lastNativeScrollAt = Date.now(); }catch{}
+        if (document && document.body && document.body.classList){
+          if (!document.body.classList.contains('is-scrolling')) document.body.classList.add('is-scrolling');
+        }
+        // Do not clear listchars nodes on every scroll event; hide them to avoid flicker and
+        // re-render once when scrolling settles.
+        try{ if (_optList){ _listEnsureLayer && _listEnsureLayer(); if (_listLayer) _listLayer.style.visibility = 'hidden'; } }catch{}
+        try{ if (_scrollSettleTimer) clearTimeout(_scrollSettleTimer); }catch{}
+        _scrollSettleTimer = setTimeout(_scrollSettleCheck, 70);
+      }catch{}
+    }
+
     try{ if (_scrollRAF) cancelAnimationFrame(_scrollRAF); }catch{}
     _scrollRAF = requestAnimationFrame(()=>{
       try{
         // During IME composition, keep this RAF handler lightweight to avoid IME lag on larger buffers.
         try{ if (window && window._imeComposing===true){ return; } }catch{}
 
+        // If scan-hold / view-scroll / scrolloff wants caret visible, maintain a CSS hint.
+        try{
+          const sh0 = (window && window.__sixScanHoldScrollActive);
+          const as0 = (window && window._altScroll && window._altScroll.active);
+          const keep0 = !!(sh0 || as0 || (Date.now() < (_keepCaretUntil|0)));
+          if (keep0) document.body.classList.add('keep-caret');
+          else document.body.classList.remove('keep-caret');
+        }catch{}
+
         // #1225: Skip scroll snapping during scan-hold smooth scroll to prevent fighting 1px updates
         const sh = (window && window.__sixScanHoldScrollActive);
-        if (Date.now() >= _zoomGuardUntil && !sh){
-          const st = (editor.scrollTop||0);
-          const maxScroll = editor.scrollHeight - editor.clientHeight;
-          const atEof = (maxScroll - st <= 1.5);
+
+        // If a horizontal-motion hold is active, pin scrollTop and skip snapping.
+        // This prevents 1-line EOF bounce on h/l/ArrowLeft/ArrowRight (wrap-off).
+        try{
+          const until = window.__sixHoldScrollTopUntil;
+          if (until && Date.now() < (until|0)){
+            const holdTop = +window.__sixHoldScrollTop;
+            if (editor && typeof editor.scrollTop === 'number' && Number.isFinite(holdTop)){
+              const curTop = +editor.scrollTop;
+              if (Math.abs(curTop - holdTop) > 0.01) editor.scrollTop = holdTop;
+            }
+            return;
+          }
+        }catch{}
+        // Detect horizontal-only scroll: scrollLeft changed but scrollTop did not.
+        // In that case, do not apply vertical grid snapping (it can cause 1-line EOF bounce).
+        let _mostlyHorizontal = false;
+        try{
+          const stNow = (editor && typeof editor.scrollTop === 'number') ? +editor.scrollTop : 0;
+          const slNow = (editor && typeof editor.scrollLeft === 'number') ? +editor.scrollLeft : 0;
+          if (_snapLastInited){
+            const dst = Math.abs(stNow - (+_snapLastST||0));
+            const dsl = Math.abs(slNow - (+_snapLastSL||0));
+            _mostlyHorizontal = (dst <= 0.5 && dsl > 0.5);
+          } else {
+            _snapLastInited = true;
+          }
+          _snapLastST = stNow;
+          _snapLastSL = slNow;
+        }catch{}
+
+        if (_mostlyHorizontal){
+          try{ _listSyncHorizontalScroll && _listSyncHorizontalScroll(); }catch{}
+        }
+
+        if (Date.now() >= _zoomGuardUntil && !sh && !_mostlyHorizontal){
+          // md-rich + wrap-on: clamp to effective max so extra compensation does not become visible
+          let mdEffMax = -1;
+          let mdActive = false;
+          try{ mdActive = !!(_mdRichActive && _mdRichActive()); }catch{ mdActive = false; }
+          try{ if (mdActive && typeof _mdEffectiveMaxScrollPx === 'function') mdEffMax = (_mdEffectiveMaxScrollPx()|0); }catch{ mdEffMax = -1; }
+
+          const stRaw = (editor.scrollTop||0);
+          let stEff = (stRaw|0);
+          try{
+            const wrapNow = (function(){ try{ return _wrapEnabled && _wrapEnabled(); }catch{ return false; } })();
+            if (mdEffMax >= 0 && mdActive && wrapNow && typeof _mdEffectiveScrollTopPx === 'function'){
+              stEff = _mdEffectiveScrollTopPx({ snap:false })|0;
+              stEff = Math.max(0, Math.min((stEff|0), (mdEffMax|0)));
+            } else if (mdEffMax >= 0){
+              stEff = Math.min((stRaw|0), (mdEffMax|0));
+            }
+          }catch{
+            if (mdEffMax >= 0) stEff = Math.min((stRaw|0), (mdEffMax|0));
+          }
+          let maxScrollEff = editor.scrollHeight - editor.clientHeight;
+          if (mdEffMax >= 0) maxScrollEff = Math.min(maxScrollEff|0, mdEffMax|0);
+          const atEof = (maxScrollEff - stEff <= 1.5);
+
+          // If we are inside the md compensation range, do not snap or clamp the native scrollTop.
+          // Rendering/mapping uses effective scrollTop elsewhere.
+          const inMdCompRange = (mdEffMax >= 0 && stRaw > (mdEffMax + 0.5));
 
           // #1259: Default: disable snapping at EOF to avoid fighting browser clamping.
           // Wrap mode can produce a maxScroll that is not aligned to LINE_HEIGHT, causing a persistent
@@ -13978,12 +15143,10 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
           let wrapActive = false;
           try{ wrapActive = _wrapEnabled(); }catch{ wrapActive = false; }
 
-          if (!atEof){
-            const snapped = Math.round(st/LINE_HEIGHT)*LINE_HEIGHT;
-            if (Math.abs(snapped - st) > 0.25){ editor.scrollTop = snapped; }
-          } else if (wrapActive){
-            const snapped = Math.floor(st/LINE_HEIGHT)*LINE_HEIGHT;
-            if (Math.abs(snapped - st) > 0.25){ editor.scrollTop = snapped; }
+          if (!atEof && !inMdCompRange){
+            let snapped = Math.round(stRaw/LINE_HEIGHT)*LINE_HEIGHT;
+            try{ snapped = Math.max(0, Math.min(maxScrollEff, snapped)); }catch{}
+            if (Math.abs(snapped - stRaw) > 0.25){ editor.scrollTop = snapped; }
           }
         }
       }catch(e){ try{ console.error('[scroll-snap] error:', e); }catch{} }
@@ -13993,14 +15156,18 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
         try{
           if (_mdRichActive() && !(function(){ try{ return _wrapEnabled(); }catch{ return false; } })()){
             const st0 = (editor.scrollTop||0);
-            const maxScroll0 = editor.scrollHeight - editor.clientHeight;
+            let maxScroll0 = editor.scrollHeight - editor.clientHeight;
+            try{
+              if (typeof _mdEffectiveMaxScrollPx === 'function'){
+                const eff0 = (_mdEffectiveMaxScrollPx()|0);
+                if (eff0 >= 0) maxScroll0 = Math.min(maxScroll0|0, eff0|0);
+              }
+            }catch{}
             const atEof0 = (maxScroll0 - st0 <= 1.5);
             // IMPORTANT: update textLayer first (active-row background transparency), then move stripe/caret.
             // Otherwise the stripe can briefly show through the previous row (1-frame flicker) during smooth scroll.
             updateGutter({ inactive:false, noSnap: atEof0 });
             _repositionCaret();
-            // listchars overlay: keep in sync on scroll in md-rich too (#1485)
-            try{ if (_optList && !(window && window._imeComposing===true)) { _renderListChars(); } }catch{}
             _updatePosInfo();
             try{
               const b = currentBuffer();
@@ -14021,25 +15188,31 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
         const isScrolling = document.body.classList.contains('is-scrolling');
         const sh = (window && window.__sixScanHoldScrollActive);
         const as = (window && window._altScroll && window._altScroll.active);
+        // For performance, allow hiding caret during Alt+j/k scroll.
+        const keepCaret = !!(sh || (Date.now() < (_keepCaretUntil|0)));
         
-        if (isScrolling && !as) {
-            _repositionCaret({ skipCaret: true });
-            // Skip heavy overlays during fast scroll
+        if (isScrolling) {
+          if (keepCaret) _repositionCaret();
+          else _repositionCaret({ skipCaret: true });
+          // Skip heavy overlays during fast scroll
         } else {
-            _repositionCaret(); 
-            _renderHlMatchesVisible(); _incPrevRefresh(); _renderVisSelOverlay(); try{ _renderLinkHover(); }catch{}
+          _repositionCaret(); 
+          _renderHlMatchesVisible(); _incPrevRefresh(); _renderVisSelOverlay(); try{ _renderLinkHover(); }catch{}
         }
         
         // Ensure gutter is updated (inactive during scan-hold)
         // #1262: Pass noSnap=true if we are at EOF to prevent updateGutter from snapping
         const st = (editor.scrollTop||0);
-        const maxScroll = editor.scrollHeight - editor.clientHeight;
+        let maxScroll = editor.scrollHeight - editor.clientHeight;
+        try{
+          if (_mdRichActive && _mdRichActive() && typeof _mdEffectiveMaxScrollPx === 'function'){
+            const eff = (_mdEffectiveMaxScrollPx()|0);
+            if (eff >= 0) maxScroll = Math.min(maxScroll|0, eff|0);
+          }
+        }catch{}
         const atEof = (maxScroll - st <= 1.5);
-        updateGutter({ inactive: (sh && !as), noSnap: (sh || atEof) });
-
-        // listchars overlay: update on scroll frames only.
-        // Avoid re-rendering on mere caret moves to prevent flicker (#1406).
-        try{ if (_optList && !(window && window._imeComposing===true)) { _renderListChars(); } }catch{}
+        // During scan-hold / Alt+jk, keep active-row visuals lightweight.
+        updateGutter({ inactive: (sh || as), noSnap: (sh || as || atEof) });
 
         _updatePosInfo();
         // Persist current buffer's view state (scroll and caret) on every scroll frame
@@ -14481,14 +15654,33 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
         }
       }catch{}
     });
+    // Noisy selection events can fire even when offsets do not change (e.g., modifier key repeats).
+    // Track last observed selection to avoid redundant heavy overlay/gutter updates.
+    let _lastSelectS = -1;
+    let _lastSelectE = -1;
+    let _lastSelectDir = '';
     // selection change — keep overlay caret in sync in all modes
     // In VISUAL mode, prefer tracking the moving edge of the selection (the end farther from the anchor)
     editor.addEventListener('select', ()=>{
+      let _selChanged = true;
       try{
         // Guard: ignore transient selection changes during protected windows (e.g., right after save)
         try{ if (Date.now() < _selGuardUntil) return; }catch{}
         // IME composition can cause noisy selection churn; keep this handler light.
         try{ if (window && window._imeComposing===true) return; }catch{}
+        // Ignore redundant events where selection did not actually change.
+        try{
+          const sNow = (editor.selectionStart|0);
+          const eNow = (editor.selectionEnd|0);
+          const dNow = String(editor.selectionDirection||'');
+          if (sNow === (_lastSelectS|0) && eNow === (_lastSelectE|0) && dNow === String(_lastSelectDir||'')){
+            _selChanged = false;
+            return;
+          }
+          _lastSelectS = sNow|0;
+          _lastSelectE = eNow|0;
+          _lastSelectDir = dNow;
+        }catch{}
         // md-rich single-click: native textarea hit-testing can be off; wait for mouseup/click correction.
         try{
           if (_mdMouseClickPendingAdjust && _mdRichActive()){
@@ -14538,7 +15730,7 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
           caretRow = rc.r; caretCol = rc.c;
         }
       }catch{}
-      _repositionCaret(); updateGutter(); _updatePosInfo();
+      if (_selChanged !== false){ _repositionCaret(); updateGutter(); _updatePosInfo(); }
     });
   editor.addEventListener('keyup', (e)=>{
     const isComp = !!(window && window._imeComposing===true);
@@ -14811,6 +16003,15 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
           if (heldSet && heldSet.has && heldSet.has(e.code)){ try{ e.preventDefault(); e.stopPropagation(); }catch{} return; }
         }
       }catch{}
+
+      // Standalone modifier keys must not cause any visual changes (no scroll, no re-render).
+      // These events are generated when the user presses Ctrl/Shift/Alt/Meta alone.
+      try{
+        if (e && (e.key==='Shift' || e.key==='Control' || e.key==='Alt' || e.key==='Meta' || e.key==='AltGraph')){
+          try{ e.stopImmediatePropagation(); e.stopPropagation(); }catch{}
+          return;
+        }
+      }catch{}
     // Globally consume Ctrl+U to avoid Edge opening view-source window (#447)
     if (e && e.ctrlKey && !e.altKey && !e.metaKey && (e.key==='u' || e.key==='U')){ try{ e.preventDefault(); e.stopPropagation(); }catch{} return; }
     try{ if (_optDebugKeys) _debugPush({ t:Date.now(), type:'keydown', mode:_mode, key:e.key, code:e.code, keyCode:e.keyCode, which:e.which, ctrl:e.ctrlKey, alt:e.altKey, meta:e.metaKey, isComp:_imeComposing }); }catch{}
@@ -15002,6 +16203,13 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
 
               as.active = true;
               as.key = e.key;
+              // Options: allow tuning Alt-scroll speed (px/ms)
+              try{
+                const o = window.SIX_OPTIONS || {};
+                const v = (typeof o.altScrollSpeedPxPerMs === 'number') ? o.altScrollSpeedPxPerMs : parseFloat(o.altScrollSpeedPxPerMs);
+                if (Number.isFinite(v) && v > 0) as.speedPxPerMs = v;
+              }catch{}
+              as.lastTs = 0;
               // #1269: Support jkScrollDirection option
               const opts = window.SIX_OPTIONS || {};
               const mode = opts.jkScrollDirection || 'normal'; // 'normal' or 'reverse'
@@ -15014,6 +16222,7 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
               as.dir = dir;
               as.acc = 0;
               document.body.classList.add('is-scrolling');
+              try{ document.body.classList.add('alt-scrolling'); }catch{}
               try{ window.__sixScanHoldScrollActive = true; }catch{}
               if (as.loop) as.raf = requestAnimationFrame(as.loop);
             }
@@ -15512,8 +16721,10 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
             let targetRow = Math.max(0, Math.min(_totalLines()-1, (mcount>0? (mcount-1) : 0)));
             const newCol = Math.min(caretCol, _lineLen(targetRow));
             _setCaret(targetRow, newCol);
-            ensureScrolloff({centerOnce:true});
-            _repositionCaret(); updateGutter(); _updateVisualSelection();
+            ensureScrolloff({ force:true });
+            _repositionCaret(); updateGutter();
+            try{ _mdEnsureCaretInViewPx(); }catch{}
+            _updateVisualSelection();
             return;
           } else {
             _pendingNormal = 'g';
@@ -15602,17 +16813,43 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
           else { targetRow = Math.max(0, total-1); }
           const newCol = Math.min(caretCol, _lineLen(targetRow));
           _setCaret(targetRow, newCol);
-          ensureScrolloff({centerOnce:true, preferEOFPad:true});
-          _repositionCaret(); updateGutter(); _updateVisualSelection();
+          try{ if (_mdRichActive && _mdRichActive() && _wrapEnabled && _wrapEnabled()) _mdSyncEofPadComp(); }catch{}
+          ensureScrolloff({ force:true, preferEOFPad:true, eofToBottom:true });
+          _repositionCaret(); updateGutter();
+          // md-rich + wrap-on: EOF jump is handled by ensureScrolloff(eofToBottom) + physical thumb pin.
+          // Avoid _mdEnsureCaretInViewPx here; it operates in effective space and can detach the thumb.
+          _updateVisualSelection();
+
+          // md-rich + wrap-on: resync wrap cache/padding and pin the native thumb to the true bottom.
+          try{
+            if (_mdRichActive && _mdRichActive() && _wrapEnabled && _wrapEnabled()){
+              const pin = ()=>{ try{ _mdPinThumbPhysBottom('visual:G'); }catch{} };
+              pin();
+              try{ if (window.requestAnimationFrame) requestAnimationFrame(pin); }catch{}
+              setTimeout(pin, 0);
+              setTimeout(pin, 60);
+            }
+          }catch{}
+
           // Reinforce alignment and snap scrollTop to exact line grid over a few frames
           // to eradicate rare leading blank / half-line drift after large jumps (#423/#424)
           try{
             const snapAndResync = ()=>{
               try{
+                // md-rich + wrap-on: do not snap native scrollTop (it would move the scrollbar thumb up).
+                try{ if (_mdRichActive && _mdRichActive() && _wrapEnabled && _wrapEnabled()){
+                  _repositionCaret(); updateGutter();
+                  try{ _mdPinThumbPhysBottom('visual:G:reinforce'); }catch{}
+                  return;
+                } }catch{}
                 const st0 = (editor.scrollTop||0);
-                const st1 = Math.round(st0/LINE_HEIGHT)*LINE_HEIGHT;
+                const st1 = Math.floor(st0/LINE_HEIGHT)*LINE_HEIGHT;
                 if (Math.abs(st1 - st0) > 0.25){ editor.scrollTop = st1; }
                 _repositionCaret(); updateGutter();
+                try{
+                  const mp = _eofPadPx()|0;
+                  _mdEnsureCaretInViewPx({ marginPx: mp|0, keepCaret:true });
+                }catch{}
               }catch{}
             };
             const reinforce = ()=>{ try{ snapAndResync(); }catch{} };
@@ -16598,6 +17835,7 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
     e.preventDefault(); try{ _debugPush({ t:Date.now(), type:'motion-exec', mode:_mode, key:(e.key==='Process'?'j':e.key), code:e.code, via:(e.key==='Process'?'Process/KeyJ':(e.key==='j'?'j':'ArrowDown')) }); }catch{}
     const countAccBefore = (_countAcc==null?null:(_countAcc|0));
     const fromRow = (caretRow|0);
+    const fromCol = (caretCol|0);
     const n=_consumeCount();
     try{ if (_optRawKeys){ console.debug('[vert] normal j', { key:e.key, code:e.code, trusted:!!e.isTrusted, repeat:!!e.repeat, countAccBefore, countUsed:(n|0), fromRow:fromRow+1 }); } }catch{}
     const _md = (function(){ try{ return (_mdRichEnabled && _mdRichEnabled()); }catch{ return false; } })();
@@ -16673,8 +17911,51 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
     }
   }
   // Guard anomalous IME mapping (#523): require KeyH/KeyL for h/l, allow arrow keys as usual
-  if ((e.key==='h' && e.code==='KeyH' && (!_optStrictNormalIME || !_imeComposing)) || e.key==='ArrowLeft'){ e.preventDefault(); try{ _debugPush({ t:Date.now(), type:'motion-exec', mode:_mode, key:e.key, code:e.code, via:(e.code==='KeyH'?'KeyH':'ArrowLeft') }); }catch{} const n=_consumeCount(); _moveCaretCols(-n); try{ _flagCaretMotion(); }catch{} _repositionCaret(); return; }
-  if ((e.key==='l' && e.code==='KeyL' && (!_optStrictNormalIME || !_imeComposing)) || e.key==='ArrowRight'){ e.preventDefault(); try{ _debugPush({ t:Date.now(), type:'motion-exec', mode:_mode, key:e.key, code:e.code, via:(e.code==='KeyL'?'KeyL':'ArrowRight') }); }catch{} const n=_consumeCount(); _moveCaretCols(n); try{ _flagCaretMotion(); }catch{} _repositionCaret(); return; }
+  if ((e.key==='h' && e.code==='KeyH' && (!_optStrictNormalIME || !_imeComposing)) || e.key==='ArrowLeft'){
+    e.preventDefault();
+    try{ _debugPush({ t:Date.now(), type:'motion-exec', mode:_mode, key:e.key, code:e.code, via:(e.code==='KeyH'?'KeyH':'ArrowLeft') }); }catch{}
+    // Horizontal motion: suppress ensureScrolloff on subsequent keyup-triggered render.
+    // (Wrap visual-grid mode is handled inside _requestCaretRender.)
+    try{ window.__sixSkipEnsureUntil = Date.now() + 240; }catch{}
+    // Horizontal motion must not cause any vertical scroll jitter when wrap is off.
+    let _stHold = null;
+    try{ if (!_wrapEnabled || !_wrapEnabled()){ _stHold = (editor && typeof editor.scrollTop === 'number') ? +editor.scrollTop : 0; } }catch{}
+    const n=_consumeCount();
+    _moveCaretCols(-n);
+    try{ _flagCaretMotion(); }catch{}
+    _repositionCaret();
+    try{
+      if (_stHold != null && editor && typeof editor.scrollTop === 'number'){
+        const now = +editor.scrollTop;
+        if (Math.abs(now - (+_stHold||0)) > 0.01) editor.scrollTop = (+_stHold||0);
+        // Short guard to suppress any async scroll snap/selection-induced vertical adjustments.
+        window.__sixHoldScrollTop = (+_stHold||0);
+        window.__sixHoldScrollTopUntil = Date.now() + 140;
+      }
+    }catch{}
+    return;
+  }
+  if ((e.key==='l' && e.code==='KeyL' && (!_optStrictNormalIME || !_imeComposing)) || e.key==='ArrowRight'){
+    e.preventDefault();
+    try{ _debugPush({ t:Date.now(), type:'motion-exec', mode:_mode, key:e.key, code:e.code, via:(e.code==='KeyL'?'KeyL':'ArrowRight') }); }catch{}
+    try{ window.__sixSkipEnsureUntil = Date.now() + 240; }catch{}
+    // Horizontal motion must not cause any vertical scroll jitter when wrap is off.
+    let _stHold = null;
+    try{ if (!_wrapEnabled || !_wrapEnabled()){ _stHold = (editor && typeof editor.scrollTop === 'number') ? +editor.scrollTop : 0; } }catch{}
+    const n=_consumeCount();
+    _moveCaretCols(n);
+    try{ _flagCaretMotion(); }catch{}
+    _repositionCaret();
+    try{
+      if (_stHold != null && editor && typeof editor.scrollTop === 'number'){
+        const now = +editor.scrollTop;
+        if (Math.abs(now - (+_stHold||0)) > 0.01) editor.scrollTop = (+_stHold||0);
+        window.__sixHoldScrollTop = (+_stHold||0);
+        window.__sixHoldScrollTopUntil = Date.now() + 140;
+      }
+    }catch{}
+    return;
+  }
   // delete: x (delete char(s) under cursor / join newline)
   if (e.key==='x' && !e.ctrlKey && !e.metaKey && !e.altKey){ e.preventDefault(); const n=_consumeCount(); _doDeleteX(n); ensureScrolloff(); _repositionCaret(); updateGutter(); return; }
   // >> / << — indent/outdent current and following N-1 lines by shiftwidth
@@ -16936,7 +18217,8 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
           _countAcc = null;
           // Clear paused scrolloff state set by recent search/substitute so jump can recenter
           _scrolloffPaused = false; _scrolloffPauseAnchorR = -1; _scrolloffPauseAnchorC = -1;
-          caretRow = 0; _centerScrolloffOnce = true; ensureScrolloff({centerOnce:true}); _repositionCaret(); updateGutter();
+          caretRow = 0; ensureScrolloff({ force:true }); _repositionCaret(); updateGutter();
+          try{ _mdEnsureCaretInViewPx(); }catch{}
         } else {
           _pendingNormal = 'g';
           if (_pendingTimer) clearTimeout(_pendingTimer);
@@ -16952,14 +18234,36 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
         caretRow = Math.max(0, _totalLines()-1);
         // clamp caretCol to EOL of last line to avoid stale column causing b to stall
         try{ const len = _lineLen(caretRow); if (caretCol>len) caretCol=len; }catch{}
-        _centerScrolloffOnce = true; ensureScrolloff({centerOnce:true, preferEOFPad:true}); _repositionCaret(); updateGutter();
+        ensureScrolloff({ force:true, preferEOFPad:true, eofToBottom:true });
+        _repositionCaret(); updateGutter();
+        // md-rich + wrap-on: handled by ensureScrolloff(eofToBottom) + physical thumb pin.
+
+        // md-rich + wrap-on: resync wrap cache/padding and pin the native thumb to the true bottom.
+        try{
+          if (_mdRichActive && _mdRichActive() && _wrapEnabled && _wrapEnabled()){
+            const pin = ()=>{ try{ _mdPinThumbPhysBottom('normal:G'); }catch{} };
+            pin();
+            try{ if (window.requestAnimationFrame) requestAnimationFrame(pin); }catch{}
+            setTimeout(pin, 0);
+            setTimeout(pin, 60);
+          }
+        }catch{}
+
         // Reinforce: snap scrollTop to exact line grid over a few frames so
         // leading blank / half-line drift cannot persist after a large jump (#423/#424)
         try{
           const snapAndResync = ()=>{
             try{
+              // md-rich + wrap-on: do not snap native scrollTop (it would move the scrollbar thumb up).
+              try{ if (_mdRichActive && _mdRichActive() && _wrapEnabled && _wrapEnabled()){
+                // If IME composition starts right after the jump, do not keep forcing expensive UI resync.
+                if (window && window._imeComposing===true) return;
+                _repositionCaret(); updateGutter();
+                try{ _mdPinThumbPhysBottom('normal:G:reinforce'); }catch{}
+                return;
+              } }catch{}
               const st0 = (editor.scrollTop||0);
-              const st1 = Math.round(st0/LINE_HEIGHT)*LINE_HEIGHT;
+              const st1 = Math.floor(st0/LINE_HEIGHT)*LINE_HEIGHT;
               if (Math.abs(st1 - st0) > 0.25){ editor.scrollTop = st1; }
               // If IME composition starts right after the jump, do not keep forcing expensive UI resync.
               if (window && window._imeComposing===true) return;
@@ -17121,15 +18425,29 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
         // Expose for ensureScrolloff
         window._scanHold = _scanHold;
 
+        const _scanHoldUsesVisualGrid = ()=>{
+          try{ return !!(_wrapUsesVisualScrollGrid && _wrapUsesVisualScrollGrid()); }catch{ return false; }
+        };
+
         window._scanHoldTriggerScroll = (dir, idealOffset) => {
             if (!_scanHold) return;
             if (_scanHold.mode === 'scroll') return; // already scrolling
+
+            // md-rich + wrap-on (logical scroll grid): never switch to scan-hold scroll mode.
+            try{
+              const mdLogicalWrap = !!(
+                (_mdRichEnabled && _mdRichEnabled()) &&
+                (_wrapEnabled && _wrapEnabled()) &&
+                (_wrapUsesVisualScrollGrid && !_wrapUsesVisualScrollGrid())
+              );
+              if (mdLogicalWrap) return;
+            }catch{}
 
             // Revert caret to safe position (undo the move that caused violation)
             const curTopV1 = Math.round((editor.scrollTop||0)/LINE_HEIGHT) + 1;
             let safeRow = (curTopV1 - 1) + (idealOffset|0);
             try{
-              if (_wrapEnabled && _wrapEnabled()){
+              if (_scanHoldUsesVisualGrid()){
                 const safeV1 = Math.max(1, (curTopV1|0) + (idealOffset|0));
                 const info = _wrapRowFromVisualLine1(safeV1);
                 if (info && Number.isFinite(info.row)) safeRow = (info.row|0);
@@ -17145,7 +18463,7 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
             // Keep the same convention as _repositionCaret():
             // window.__sixScanHoldOffset is (offsetLines - 1) and offsetLines is 0-based.
             try{
-              if (_wrapEnabled && _wrapEnabled()) _scanHold.initialScreenOffset = ((idealOffset|0) - 1);
+              if (_scanHoldUsesVisualGrid()) _scanHold.initialScreenOffset = ((idealOffset|0) - 1);
               else _scanHold.initialScreenOffset = idealOffset;
             }catch{ _scanHold.initialScreenOffset = idealOffset; }
             _scanHold.mode = 'scroll';
@@ -17155,7 +18473,8 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
             _scanHold.continuous = true;
             try{ window.__sixScanHoldScrollActive = true; }catch{}
             try{ document.body.classList.add('is-scrolling'); }catch{}
-            try{ const c = caretLayer.querySelector('.caret'); if(c) c.style.display='none'; }catch{}
+            // Do not hide caret via inline style; it can get stuck across mode switches.
+            // CSS handles visibility (and keep-caret can override).
             
             if (_scanHold.raf) cancelAnimationFrame(_scanHold.raf);
             _scanHold.raf = requestAnimationFrame(_scanHoldScrollLoop);
@@ -17168,6 +18487,19 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
             const vis = _visibleLinesExact();
             const topLine = _topLine();
             const linesTotal = _totalLines();
+
+            // md-rich + wrap-on usually keeps a logical-line scroll grid (visual wrap is for rendering).
+            // In that mode, scan-hold "scroll" mode (which relies on visual-line ↔ row mapping)
+            // can pin/teleport caretRow and desync posInfo/active-row background.
+            // Always use caret mode; scrolloff enforcement is handled by ensureScrolloff.
+            try{
+              const mdLogicalWrap = !!(
+                (_mdRichEnabled && _mdRichEnabled()) &&
+                (_wrapEnabled && _wrapEnabled()) &&
+                (_wrapUsesVisualScrollGrid && !_wrapUsesVisualScrollGrid())
+              );
+              if (mdLogicalWrap) return 'caret';
+            }catch{}
             
             // #1245: Peek at pending count to predict true destination
             const count = (_countAcc==null?1:_countAcc);
@@ -17246,7 +18578,7 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
             // In wrap mode, compare in visual-line space.
             let wouldBeCaretLine1 = (caretRow + (delta * count)) + 1;
             try{
-              if (_wrapEnabled && _wrapEnabled()){
+              if (_scanHoldUsesVisualGrid()){
                 const lines = _splitLines();
                 const wouldRow = Math.max(0, Math.min((lines.length-1)|0, (caretRow + (delta * count))|0));
                 const line = lines[wouldRow] || '';
@@ -17260,7 +18592,7 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
             // Allow extra "virtual" page steps so EOF pad is visible
             let linesTotalEff = linesTotal;
             try{
-              if (_wrapEnabled && _wrapEnabled()){
+              if (_scanHoldUsesVisualGrid()){
                 const c = _wrapEnsureCache(false);
                 if (c && c.prefix && c.prefix.length) linesTotalEff = (c.prefix[c.prefix.length-1]|0);
               }
@@ -17323,6 +18655,7 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
           try{
             const countAccBefore = (_countAcc==null?null:(_countAcc|0));
             const beforeRow = (caretRow|0);
+            const beforeCol = (caretCol|0);
             const count = _consumeCount();
             // #1293: If count > 20, it's a jump. Do not multiply by delta again if count is already signed?
             // Actually _consumeCount returns positive integer.
@@ -17331,7 +18664,8 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
             
             const lines = _splitLines();
             const deltaSigned = (delta|0) * (count|0);
-            const newRow = Math.max(0, Math.min(lines.length-1, caretRow + (deltaSigned|0)));
+            const mdOn = (function(){ try{ return (_mdRichEnabled && _mdRichEnabled()); }catch{ return false; } })();
+            const newRow = mdOn ? (caretRow|0) : Math.max(0, Math.min(lines.length-1, caretRow + (deltaSigned|0)));
 
             // Debug (rawkeys): confirm count usage and actual row delta
             try{
@@ -17348,24 +18682,31 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
               }
             }catch{}
             
-            // #1254: Optimization: if caret doesn't move (e.g. at EOF), skip heavy lifting
+            // #1254: Optimization: if caret doesn't move (e.g. at boundary), skip heavy lifting
             // to prevent CPU spin/freeze when holding key at boundary.
-            if (newRow === caretRow) {
-                _scanHold.caretLastMove = performance.now();
-                // #1255: Do NOT call _ensureAfterMotion() here.
-                // If we didn't move, we don't need to check scrolloff or force render.
-                // Calling it causes a loop of ensureScrolloff -> scroll mode -> stuck -> caret mode -> ensureScrolloff...
-                // which freezes the browser if scrolloff is large or at EOF.
-                return;
+            // NOTE: In markdown, j/k behaves like gj/gk (visual-line). That can move within the same logical row,
+            // so we must not early-return based on row alone.
+            if (!mdOn && newRow === caretRow) {
+              _scanHold.caretLastMove = performance.now();
+              // #1255: Do NOT call _ensureAfterMotion() here.
+              return;
             }
 
             // If we are currently in a wrapped logical line and we are about to leave it via j/k,
             // raise wrap curswant to match the visible caret X (but never decrease).
             try{ _maybeRaiseDesiredWrapXFromCurrentCaret(); }catch{}
 
-            // Delegate actual caret move to the shared motion helper so wrap-mode column policy stays consistent.
-            _moveCaretLines(deltaSigned|0, { skipEnsure:true });
+            // Delegate actual caret move to the shared motion helper so policies stay consistent.
+            // Markdown spec: j/k behaves like gj/gk (visual line).
+            if (mdOn) _moveCaretVisualLines(deltaSigned|0, { skipEnsure:true });
+            else _moveCaretLines(deltaSigned|0, { skipEnsure:true });
             try{ _flagCaretMotion(); }catch{}
+
+            // If we didn't move (boundary), stop here to avoid scrolloff loops.
+            if ((caretRow|0) === (beforeRow|0) && (caretCol|0) === (beforeCol|0)){
+              _scanHold.caretLastMove = performance.now();
+              return;
+            }
             
             // #1285: Detect if caret motion forces scrolling (scrolloff boundary)
             // If so, enable static overlay mode to prevent flicker during continuous caret scroll.
@@ -17378,11 +18719,23 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
             
             if (Math.abs(postScrollTop - preScrollTop) > 0.5) {
                 // Scrolling occurred. Enable static overlay mode if not already active.
-                if (!window.__sixScanHoldScrollActive) {
-                    try{ window.__sixScanHoldScrollActive = true; }catch{}
-                    try{ document.body.classList.add('is-scrolling'); }catch{}
-                    // #1369: Clear hover link highlight on scroll start
-                    try{ if (_hoverLink) _clearLinkHover(); }catch{}
+                // md-rich+wrap-on (logical scroll grid) is sensitive to fixed-offset rendering; it can
+                // make the caret look "pinned" at the scrolloff boundary during k/j hold.
+                let mdLogicalWrap = false;
+                try{
+                  mdLogicalWrap = !!(
+                    (_mdRichEnabled && _mdRichEnabled()) &&
+                    (_wrapEnabled && _wrapEnabled()) &&
+                    (_wrapUsesVisualScrollGrid && !_wrapUsesVisualScrollGrid())
+                  );
+                }catch{ mdLogicalWrap = false; }
+                if (!mdLogicalWrap){
+                  if (!window.__sixScanHoldScrollActive) {
+                      try{ window.__sixScanHoldScrollActive = true; }catch{}
+                      try{ document.body.classList.add('is-scrolling'); }catch{}
+                      // #1369: Clear hover link highlight on scroll start
+                      try{ if (_hoverLink) _clearLinkHover(); }catch{}
+                  }
                 }
             }
             
@@ -17393,7 +18746,7 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
                 // #1286: Use floor-based top line to match _topLine() and Alt+j behavior.
                 const currentTopV1 = Math.floor(postScrollTop/LINE_HEIGHT) + 1;
                 try{
-                  if (_wrapEnabled && _wrapEnabled()){
+                  if (_wrapUsesVisualScrollGrid && _wrapUsesVisualScrollGrid()){
                     const caretV1 = _wrapVisualLine1ForRowCol(caretRow|0, caretCol|0);
                     _scanHold.initialScreenOffset = ((caretV1|0) - (currentTopV1|0) - 1);
                   } else {
@@ -17443,6 +18796,15 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
             if (dir !== 0){
               try{
                 const cur = (editor && (editor.scrollTop||0)) || 0;
+
+                // Respect effective EOF clamp in md-rich + wrap-on (hide compensation range).
+                let maxScrollEff = ((editor && editor.scrollHeight) ? (editor.scrollHeight - editor.clientHeight) : 0);
+                try{
+                  if (_mdRichActive && _mdRichActive() && _wrapEnabled && _wrapEnabled() && typeof _mdEffectiveMaxScrollPx === 'function'){
+                    const eff = (_mdEffectiveMaxScrollPx()|0);
+                    if (eff >= 0) maxScrollEff = Math.min(maxScrollEff|0, eff|0);
+                  }
+                }catch{}
                 
                 // #1215: Use fixed 3px step per frame for smooth scrolling.
                 // No wait, max speed (RAF frequency).
@@ -17481,6 +18843,7 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
                          if (dir > 0) snapped = Math.ceil(st / LINE_HEIGHT) * LINE_HEIGHT;
                          else if (dir < 0) snapped = Math.floor(st / LINE_HEIGHT) * LINE_HEIGHT;
                          else snapped = Math.round(st / LINE_HEIGHT) * LINE_HEIGHT;
+                         try{ snapped = Math.max(0, Math.min(maxScrollEff|0, snapped|0)); }catch{}
                          editor.scrollTop = snapped;
                        }catch{}
                        try{ updateGutter(); }catch{}
@@ -17512,7 +18875,7 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
                          if (dir > 0) snapped = Math.ceil(st / LINE_HEIGHT) * LINE_HEIGHT;
                          else if (dir < 0) snapped = Math.floor(st / LINE_HEIGHT) * LINE_HEIGHT;
                          else snapped = Math.round(st / LINE_HEIGHT) * LINE_HEIGHT;
-                         
+                         try{ snapped = Math.max(0, Math.min(maxScrollEff|0, snapped|0)); }catch{}
                          editor.scrollTop = snapped;
                        }catch{}
                        try{ updateGutter(); }catch{}
@@ -17536,7 +18899,7 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
                 }
                 
                 const newSt = Math.max(0, cur + (dir * scrollPx));
-                editor.scrollTop = newSt;
+                try{ editor.scrollTop = Math.max(0, Math.min(maxScrollEff|0, newSt|0)); }catch{ editor.scrollTop = newSt; }
 
                 // #1313: Check stopping flag during continuous scroll too
                 if (_scanHold.continuous && _scanHold.stopping) {
@@ -17552,7 +18915,7 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
                          if (dir > 0) snapped = Math.ceil(st / LINE_HEIGHT) * LINE_HEIGHT;
                          else if (dir < 0) snapped = Math.floor(st / LINE_HEIGHT) * LINE_HEIGHT;
                          else snapped = Math.round(st / LINE_HEIGHT) * LINE_HEIGHT;
-                         
+                         try{ snapped = Math.max(0, Math.min(maxScrollEff|0, snapped|0)); }catch{}
                          editor.scrollTop = snapped;
                        }catch{}
                        try{ updateGutter(); }catch{}
@@ -17700,7 +19063,7 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
                   // target = newTop + initialOffset
                   let targetCaretRow = 0;
                   try{
-                    if (_wrapEnabled && _wrapEnabled()){
+                      if (_wrapUsesVisualScrollGrid && _wrapUsesVisualScrollGrid()){
                       const targetV1 = (visTopV1|0) + ((_scanHold.initialScreenOffset||0)|0) + 1;
                       const info = _wrapRowFromVisualLine1(targetV1);
                       targetCaretRow = Math.max(0, Math.min(lines.length-1, (info && Number.isFinite(info.row)) ? (info.row|0) : 0));
@@ -18180,7 +19543,7 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
                              let validRow = 0;
                              try{
                                const newTopV1 = Math.floor(snapped / LINE_HEIGHT) + 1;
-                               if (_wrapEnabled && _wrapEnabled()){
+                               if (_wrapUsesVisualScrollGrid && _wrapUsesVisualScrollGrid()){
                                  // __sixScanHoldOffset is (offsetLines - 1)
                                  const targetV1 = (newTopV1|0) + ((window.__sixScanHoldOffset|0) + 1);
                                  const info = _wrapRowFromVisualLine1(targetV1);
@@ -18210,10 +19573,28 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
             try{ window.__sixScanHoldScrollActive = false; }catch{}
             try{ window.__sixScanHoldOffset = null; }catch{}
             try{ document.body.classList.remove('is-scrolling'); }catch{}
-            
-            // #1256: Ensure UI is restored
-            try{ updateGutter(); }catch{}
-            try{ _repositionCaret(); }catch{}
+
+            // #1256/#152x: Finalize sync after hold
+            // - scan-hold中は固定オフセット描画や is-scrolling により、表示同期が一部抑止されうる
+            // - 終了時に scrolloff/md-rich レイヤ/posInfo を強制再同期してズレの残留を防ぐ
+            try{
+              if (
+                (_mdRichActive && _mdRichActive()) &&
+                (_wrapEnabled && _wrapEnabled()) &&
+                (_wrapUsesVisualScrollGrid && !_wrapUsesVisualScrollGrid()) &&
+                (typeof _mdSyncEofPadComp === 'function')
+              ){
+                _mdSyncEofPadComp();
+              }
+            }catch{}
+            try{ if (typeof clampViewportExactLines === 'function') clampViewportExactLines(); }catch{}
+            try{
+              const atEOF = (typeof _totalLines === 'function') ? (((caretRow|0)+1) === (_totalLines()|0)) : false;
+              ensureScrolloff({ force:true, immediate:true, keepCaret:true, preferEOFPad: !!atEOF });
+            }catch{}
+            try{ updateGutter({ force:true }); }catch{}
+            try{ _repositionCaret({ force:true }); }catch{}
+            try{ _updatePosInfo(); }catch{}
 
             // Clear state
             _scanHold.mode = null;
@@ -18245,7 +19626,9 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
               as.acc = 0; // reset accumulator
               if (as.raf) cancelAnimationFrame(as.raf);
               as.raf = null;
+              as.lastTs = 0;
               document.body.classList.remove('is-scrolling');
+              try{ document.body.classList.remove('alt-scrolling'); }catch{}
               try{ window.__sixScanHoldScrollActive = false; }catch{}
 
               // #1276: Snap to line grid on stop to prevent jumpy behavior
@@ -18295,6 +19678,13 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
           if (_scanHold.raf){ cancelAnimationFrame(_scanHold.raf); _scanHold.raf=null; _scanHold.lastTs=0; }
           _scanHold.held.clear(); try{ window.__sixScanHoldHeld = null; }catch{}
           _scanHold.mode = null; _scanHold.scrollDir = 0; _scanHold.caretDir = 0; _scanHold.caretLastMove = 0; _scanHold.firstKeydownTs = 0; _scanHold.scrollTargetPx = 0;
+
+          // Finalize sync on blur (avoid leaving overlay/posInfo stale)
+          try{ if (typeof clampViewportExactLines === 'function') clampViewportExactLines(); }catch{}
+          try{ ensureScrolloff({ force:true, immediate:true, keepCaret:true }); }catch{}
+          try{ updateGutter({ force:true }); }catch{}
+          try{ _repositionCaret({ force:true }); }catch{}
+          try{ _updatePosInfo(); }catch{}
         }catch{} };
 
         // If any other key is pressed while holding, finalize
@@ -18309,7 +19699,9 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
             if (_scanHold.raf){ cancelAnimationFrame(_scanHold.raf); _scanHold.raf=null; _scanHold.lastTs=0; }
             _scanHold.held.clear(); try{ window.__sixScanHoldHeld = null; }catch{}
             _scanHold.mode = null; _scanHold.scrollDir = 0;
-            try{ updateGutter(); _repositionCaret(); }catch{}
+            try{ if (typeof clampViewportExactLines === 'function') clampViewportExactLines(); }catch{}
+            try{ ensureScrolloff({ force:true, immediate:true, keepCaret:true }); }catch{}
+            try{ updateGutter({ force:true }); _repositionCaret({ force:true }); _updatePosInfo(); }catch{}
           }catch{}
         };
 
@@ -22864,6 +24256,7 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
           const b = currentBuffer();
           if (b){
             b.markdown = !b.markdown;
+            b._markdownAuto = false;
             if (b.markdown && typeof b.md_draftedit !== 'boolean') b.md_draftedit = true;
             _schedulePersist('markdown');
             if (b.markdown) _schedulePersist('md_draftedit');
@@ -26856,6 +28249,27 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
         // hide boot sentinel if present
         try{ const bw = document.getElementById('bootwarn'); if (bw) bw.style.display='none'; }catch{}
         setTimeout(()=>{ try{ editor.focus(); }catch{} }, 0);
+
+        // Post-boot recovery: ensure caret is visible after session restore / immediate restart.
+        // Some paths can leave is-scrolling set or postpone caret positioning until the first key.
+        try{
+          const _bootCaretFix = ()=>{
+            try{ if (window && window._imeComposing===true) return; }catch{}
+            try{ document.body.classList.remove('is-scrolling'); }catch{}
+            try{ document.body.classList.remove('keep-caret'); }catch{}
+            try{ window.__sixScanHoldScrollActive = false; }catch{}
+            try{ _repositionCaret({ force:true }); }catch{ try{ _repositionCaret(); }catch{} }
+            try{ updateGutter(); }catch{}
+            try{ _updatePosInfo && _updatePosInfo(); }catch{}
+          };
+          if (window.requestAnimationFrame){
+            requestAnimationFrame(()=>{ _bootCaretFix(); });
+            requestAnimationFrame(()=>{ _bootCaretFix(); });
+          }
+          setTimeout(_bootCaretFix, 80);
+          setTimeout(_bootCaretFix, 240);
+        }catch{}
+
         try{ console.debug && console.debug('[six] boot done'); }catch{}
       });
     }catch(e){
