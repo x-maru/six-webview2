@@ -3619,6 +3619,7 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
       const nlen = Math.max(0, len|0);
       _incPrevLastStart = (startOff|0);
       _incPrevLastLen = nlen;
+
       // compute row/col from absolute offset
       const rc = _rcFromOffset(startOff|0);
       const r = rc.r|0, c = rc.c|0;
@@ -3627,6 +3628,145 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
       const fullText = String(editor.value||'');
       const seg = fullText.slice(startOff, startOff + nlen);
       const hasNL = /\n/.test(seg);
+
+      // Y position must match caret/stripe positioning.
+      // In wrap mode, scrolling is in visual-line space, so (row - topLine) is insufficient
+      // when the viewport starts in the middle of a wrapped logical row.
+      const _incMdRich = (function(){ try{ return !!(_mdRichActive && _mdRichActive()); }catch{ return false; } })();
+      const _incWrapOn = (function(){ try{ return !!(_wrapEnabled && _wrapEnabled()); }catch{ return false; } })();
+      let _incUseWrapV = false;
+      let _incTopLine1 = 1;
+      let _incTopV1 = 1;
+      try{
+        _incUseWrapV = !_incMdRich && !!(_wrapUsesVisualScrollGrid && _wrapUsesVisualScrollGrid());
+        if (_incUseWrapV) _incTopV1 = _topVisualLine1()|0;
+        _incTopLine1 = _topLine()|0;
+      }catch{ _incUseWrapV=false; _incTopLine1 = _topLine()|0; _incTopV1 = 1; }
+
+      // md-rich: compute y by accumulating per-row pixel heights (variable line-height + wrap)
+      // from logical topLine to target row, same idea as _repositionCaret.
+      let _incMdBaseFontPx = 16;
+      let _incMdWrapWidthPx = 80;
+      try{ if (_incMdRich){ _incMdBaseFontPx = parseFloat(getComputedStyle(editor).fontSize)||_incMdBaseFontPx; } }catch{}
+      try{ if (_incMdRich && _incWrapOn){ _incMdWrapWidthPx = _wrapAvailWidthPx()|0; } }catch{ _incMdWrapWidthPx = 80; }
+      const _incMdDispInfoAtRow = (row0)=>{
+        try{
+          const rr = (row0|0);
+          const total = (lines.length|0);
+          const srcText = (rr>=0 && rr<total) ? String(lines[rr]||'') : '';
+          const isActiveRow = (rr === (caretRow|0));
+          const info = (typeof _mdLineLayoutInfoAtRow === 'function') ? _mdLineLayoutInfoAtRow(lines, rr, !!isActiveRow) : null;
+          const hideSymbols = !!(info && info.hideSymbols);
+          const rowHeightPx = (info && info.lineHeightPx) ? (info.lineHeightPx|0) : (LINE_HEIGHT|0);
+          const scale = (info && info.scale) ? (+info.scale || 1) : 1;
+          const fontSizePx = Math.max(6, Math.round((_incMdBaseFontPx||16) * (scale||1)));
+          let disp = srcText;
+          let prefixLen = 0;
+          if (hideSymbols){
+            let renderHr = false;
+            let renderSetextUnderlineRow = false;
+            try{ renderHr = _mdIsHrLineForDisplay(srcText, lines, rr, !!isActiveRow); }catch{ renderHr = false; }
+            try{ renderSetextUnderlineRow = _mdIsSetextUnderlineRowForDisplay(srcText, lines, rr, !!isActiveRow); }catch{ renderSetextUnderlineRow = false; }
+            if (renderHr || renderSetextUnderlineRow){
+              disp = '';
+              prefixLen = 0;
+            } else {
+              try{
+                const lv0 = _mdHeadingLevel(srcText)|0;
+                if (lv0>=1 && lv0<=6){
+                  prefixLen = (_mdHeadingPrefixLen(srcText)|0);
+                  if (prefixLen>0) disp = srcText.slice(prefixLen);
+                }
+              }catch{}
+            }
+          }
+          return { srcText, disp, prefixLen:(prefixLen|0), hideSymbols:!!hideSymbols, rowHeightPx:(rowHeightPx|0), fontSizePx:(fontSizePx|0) };
+        }catch{ return { srcText:'', disp:'', prefixLen:0, hideSymbols:false, rowHeightPx:(LINE_HEIGHT|0), fontSizePx:Math.max(6, Math.round(_incMdBaseFontPx||16)) }; }
+      };
+      const _incMdRowBlockHeightPx = (row0)=>{
+        try{
+          const m = _incMdDispInfoAtRow(row0|0);
+          const lh = Math.max(1, (m.rowHeightPx|0));
+          if (_incWrapOn){
+            let n0 = 1;
+            try{ n0 = _wrapProbeLineCountStyled(String(m.disp||''), (_incMdWrapWidthPx|0), lh|0, (m.fontSizePx|0))|0; }catch{ n0 = 1; }
+            const n = (n0 && (n0|0) > 0) ? (n0|0) : 1;
+            return (Math.max(1, n|0) * (lh|0))|0;
+          }
+          return lh|0;
+        }catch{ return (LINE_HEIGHT|0); }
+      };
+      const _incMdRowStartYpx = (row0)=>{
+        try{
+          const topLine1 = (_incTopLine1|0);
+          const startIdx = Math.max(0, (topLine1|0) - 1);
+          const targetIdx = (row0|0);
+          if (targetIdx < startIdx) return -999999;
+          let y = 0;
+          for (let rr=startIdx; rr<targetIdx; rr++) y += (_incMdRowBlockHeightPx(rr)|0);
+          return (y|0);
+        }catch{ return (((((row0|0)+1) - (_incTopLine1|0))|0) * (LINE_HEIGHT|0))|0; }
+      };
+
+      const _incMdMeasureXpx = (row0, col0)=>{
+        try{
+          const m = _incMdDispInfoAtRow(row0|0);
+          const disp = String(m.disp||'');
+          if (!disp && (disp.length|0) === 0) return 0;
+          let cc = Math.max(0, col0|0);
+          try{ if (m.hideSymbols && (m.prefixLen|0) > 0) cc = Math.max(0, (cc|0) - (m.prefixLen|0)); }catch{}
+          cc = Math.max(0, Math.min((disp.length|0), cc|0));
+          const lh = Math.max(1, (m.rowHeightPx|0));
+          const fs = Math.max(6, (m.fontSizePx|0));
+          // Use a large width when wrap is off so marker X isn't affected by wrapping.
+          const wPx = _incWrapOn ? (_incMdWrapWidthPx|0) : 1000000;
+          const xp = _wrapProbeXFromColStyled(disp, cc|0, wPx|0, fs|0, lh|0);
+          if (Number.isFinite(xp)) return Math.max(0, xp);
+        }catch{}
+        // Fallback: measure with normal span (may be off for scaled headings)
+        try{
+          const s = String(lines[row0|0]||'');
+          _measureSpan.textContent = s.slice(0, Math.max(0, col0|0));
+          const x = _measureSpan.getBoundingClientRect().width;
+          return Number.isFinite(x) ? Math.max(0, x) : 0;
+        }catch{ return 0; }
+      };
+      const _incTopPxForRowCol = (row0, col0)=>{
+        try{
+          if (_incMdRich){
+            const m = _incMdDispInfoAtRow(row0|0);
+            const lh = Math.max(1, (m.rowHeightPx|0));
+            const y0 = _incMdRowStartYpx(row0|0)|0;
+            if (!_incWrapOn) return y0|0;
+            const disp = String(m.disp||'');
+            let cc = Math.max(0, col0|0);
+            try{ if (m.hideSymbols && (m.prefixLen|0) > 0) cc = Math.max(0, (cc|0) - (m.prefixLen|0)); }catch{}
+            cc = Math.max(0, Math.min((disp.length|0), cc|0));
+            let intra = 0;
+            try{ intra = _wrapProbeIntraFromColStyled(disp, cc|0, (_incMdWrapWidthPx|0), lh|0, (m.fontSizePx|0))|0; }catch{ intra = 0; }
+            intra = Math.max(0, intra|0);
+            return (y0 + (intra|0) * (lh|0))|0;
+          }
+          if (_incUseWrapV){
+            const v1 = _wrapVisualLine1ForRowCol(row0|0, col0|0);
+            return (((v1|0) - (_incTopV1|0))|0) * (LINE_HEIGHT|0);
+          }
+          const row1 = (row0|0) + 1;
+          return (((row1|0) - (_incTopLine1|0))|0) * (LINE_HEIGHT|0);
+        }catch{
+          const row1 = (row0|0) + 1;
+          return (((row1|0) - (_topLine()|0))|0) * (LINE_HEIGHT|0);
+        }
+      };
+      const _incHeightPxForRow = (row0)=>{
+        try{
+          if (_incMdRich){
+            const m = _incMdDispInfoAtRow(row0|0);
+            return Math.max(1, Math.round(Math.max(1, (m.rowHeightPx|0))));
+          }
+        }catch{}
+        return Math.max(1, Math.round(LINE_HEIGHT));
+      };
       if (hasNL){
         // Multi-line highlight: clear existing single-line element
         try{ if (_incPrevEl && _incPrevEl.parentNode){ _incPrevEl.parentNode.removeChild(_incPrevEl); } }catch{}
@@ -3635,8 +3775,6 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
         try{ _incPrevExtra.forEach(el=>{ try{ if (el && el.parentNode){ el.parentNode.removeChild(el); } }catch{} }); }catch{}
         _incPrevExtra=[];
         const parts = seg.split('\n');
-        const topLine = _topLine();
-        let curRow = r;
         // First line offset/col: c
         for (let i=0;i<parts.length;i++){
           const part = parts[i];
@@ -3644,14 +3782,20 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
           const isFirst = (i===0);
           const startCol = isFirst ? c : 0;
           // measure x positions within this row
-          const rowLine = String(lines[row]||'');
-          _measureSpan.textContent = rowLine.slice(0, startCol);
-          const x1 = _measureSpan.getBoundingClientRect().width;
-          _measureSpan.textContent = rowLine.slice(0, startCol + part.length);
-          const x2 = _measureSpan.getBoundingClientRect().width;
-          const row1 = row + 1;
-          const offsetLines = row1 - topLine;
-          const topPx = offsetLines * LINE_HEIGHT;
+          let x1 = 0, x2 = 0;
+          if (_incMdRich){
+            // Map raw columns into md display columns when symbols are hidden (e.g. headings).
+            x1 = _incMdMeasureXpx(row|0, startCol|0);
+            x2 = _incMdMeasureXpx(row|0, (startCol|0) + (String(part||'').length|0));
+          } else {
+            const rowLine = String(lines[row]||'');
+            _measureSpan.textContent = rowLine.slice(0, startCol);
+            x1 = _measureSpan.getBoundingClientRect().width;
+            _measureSpan.textContent = rowLine.slice(0, startCol + part.length);
+            x2 = _measureSpan.getBoundingClientRect().width;
+          }
+          const topPx = _incTopPxForRowCol(row|0, startCol|0);
+          if (!(Number.isFinite(x2) && Number.isFinite(x1) && (x2 > x1))) continue;
           // create element
           const el = document.createElement('div');
           el.className = 'incprev';
@@ -3659,7 +3803,7 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
           el.style.left = (x1 - _hs) + 'px';
           el.style.top = topPx + 'px';
           el.style.width = Math.max(1, Math.round(x2 - x1)) + 'px';
-          el.style.height = Math.max(1, Math.round(LINE_HEIGHT)) + 'px';
+          el.style.height = _incHeightPxForRow(row|0) + 'px';
           try{ caretLayer.appendChild(el); }catch{}
           _incPrevExtra.push(el);
         }
@@ -3668,10 +3812,16 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
       // limit to single line box for preview; clamp highlight width within this line
       const endCol = Math.min(line.length, c + nlen);
       // measure x positions
-      _measureSpan.textContent = line.slice(0, c);
-      const x1 = _measureSpan.getBoundingClientRect().width;
-      _measureSpan.textContent = line.slice(0, endCol);
-      let x2 = _measureSpan.getBoundingClientRect().width;
+      let x1 = 0, x2 = 0;
+      if (_incMdRich){
+        x1 = _incMdMeasureXpx(r|0, c|0);
+        x2 = _incMdMeasureXpx(r|0, endCol|0);
+      } else {
+        _measureSpan.textContent = line.slice(0, c);
+        x1 = _measureSpan.getBoundingClientRect().width;
+        _measureSpan.textContent = line.slice(0, endCol);
+        x2 = _measureSpan.getBoundingClientRect().width;
+      }
       if (!(x2 > x1)){
         // zero-length or unmeasurable width → hide preview (caret移動のみ)
             // Zoom popup と統一 (#930)
@@ -3680,10 +3830,7 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
         return;
       }
       // compute top (relative to current viewport top line)
-      const row1 = r + 1;
-      const topLine = _topLine();
-      const offsetLines = row1 - topLine;
-      const topPx = offsetLines * LINE_HEIGHT;
+      const topPx = _incTopPxForRowCol(r|0, c|0);
       if (topPx < -LINE_HEIGHT || topPx > (viewport.clientHeight + LINE_HEIGHT)){
         // offscreen; still show after ensureScrolloff/_repositionCaret re-runs
       }
@@ -3696,7 +3843,7 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
   _incPrevEl.style.left = (x1 - _hs) + 'px';
       _incPrevEl.style.top = topPx + 'px';
       _incPrevEl.style.width = Math.max(1, Math.round(x2 - x1)) + 'px';
-      _incPrevEl.style.height = Math.max(1, Math.round(LINE_HEIGHT)) + 'px';
+      _incPrevEl.style.height = _incHeightPxForRow(r|0) + 'px';
     }catch{ _incPrevHide(); }
   }
 
