@@ -3699,30 +3699,56 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
       _incPrevEl.style.height = Math.max(1, Math.round(LINE_HEIGHT)) + 'px';
     }catch{ _incPrevHide(); }
   }
+
+  // Parse '/pat/flags' or '?pat?flags' while preserving whitespace-only patterns.
+  // Important: Do not trim the pattern; trailing whitespace can be meaningful (e.g. searching for ' ' or '　').
+  function _parseSlashSearchCmdPreserveWS(s){
+    try{
+      let v = String(s||'');
+      // cmdinput may include an optional leading ':' and spaces.
+      v = v.replace(/^\s*:\s*/, '');
+      v = v.replace(/^\s*/, '');
+      const ch = v[0];
+      if (ch !== '/' && ch !== '?') return null;
+      const rest = v.slice(1); // preserve as-is
+      let pat = rest;
+      let flagsGiven = '';
+      // Support optional trailing delimiter + flags, e.g. /foo/i or ?bar?i.
+      // Use the last delimiter occurrence as the flags separator ONLY when the tail looks like flags.
+      const last = rest.lastIndexOf(ch);
+      if (last >= 0){
+        const tail = rest.slice(last+1);
+        if (/^[A-Za-z]*\s*$/.test(tail)){
+          flagsGiven = tail.trim();
+          pat = rest.slice(0, last);
+        }
+      }
+      return { forward: (ch === '/'), dir: (ch === '/' ? 'fwd' : 'bwd'), pat: String(pat||''), flagsGiven: String(flagsGiven||'') };
+    }catch{ return null; }
+  }
+
   function _incPrevUpdateForCmdValue(v){
     try{
       // IME未確定中は :s 等のプレビュー更新を停止（計測・レイアウト負荷を抑制）
       try{ if (window._imeComposing===true){ _incPrevHide(); return false; } }catch{}
       const s = String(v||'');
-      // Accept "/pat" or "?pat" with optional trailing "/i" or "?i" for flags during typing
-      // Examples: "/foo", "/foo/i", "?bar", "?bar?i" (case-insensitive)
-      const mF = s.match(/^\s*:?\s*\/(.*?)(?:\/(?:([A-Za-z]*))?)?\s*$/);
-      const mB = (!mF) ? s.match(/^\s*:?\s*\?(.*?)(?:\?(?:([A-Za-z]*))?)?\s*$/) : null;
-  // Also accept :s, %:s, and :'<'','>'s incremental preview on the search part (before replacement)
-  const mS = (!mF && !mB) ? s.match(/^\s*:?(?:('<,'>))?(%?)\s*s\/(.*?)(?:\/|$)/i) : null;
-      if (!mF && !mB && !mS){ _incPrevHide(); return false; }
-      const dir = mF ? 'fwd' : (mB ? 'bwd' : 'fwd');
-      const forward = !!mF;
+      // Accept "/pat" or "?pat" with optional trailing "/i" or "?i" for flags during typing.
+      // Preserve whitespace-only patterns (e.g. '/ ' or '/　').
+      const mSQ = _parseSlashSearchCmdPreserveWS(s);
+      // Also accept :s, %:s, and :'<'','>'s incremental preview on the search part (before replacement)
+      const mS = (!mSQ) ? s.match(/^\s*:?(?:('<,'>))?(%?)\s*s\/(.*?)(?:\/|$)/i) : null;
+      if (!mSQ && !mS){ _incPrevHide(); return false; }
+      const dir = mSQ ? String(mSQ.dir||'fwd') : 'fwd';
+      const forward = !!(mSQ && mSQ.forward);
       // Determine pattern text from /, ?, or :s
       let pat = '';
-      if (forward){ pat = String(mF[1]||''); }
-      else if (mB){ pat = String(mB[1]||''); }
+      if (mSQ){ pat = String(mSQ.pat||''); }
       else if (mS){ pat = String(mS[3]||''); }
         // ユーザ入力の \n / \t を実際の改行・TABへ展開（直前がさらにバックスラッシュの場合はリテラル保持） (#692)
         try{
           pat = pat.replace(/(?<!\\)\\n/g,'\n').replace(/(?<!\\)\\t/g,'\t');
         }catch{ /* lookbehind 非対応環境では単純置換（副作用で \\n が展開される場合あり） */ try{ pat = pat.replace(/\\n/g,'\n').replace(/\\t/g,'\t'); }catch{} }
-      const flagsGiven = String((mF?mF[2]:(mB?mB[2]:''))||'');
+      const flagsGiven = String((mSQ ? mSQ.flagsGiven : '')||'');
       // Case sensitivity (preview): honor /i or /I; else buffer ignorecase(+smartcase)
       let needI = false;
       if (/i/.test(flagsGiven)){ needI = true; }
@@ -5201,13 +5227,16 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
 
   function _searchHistoryMaybePush(s){
     try{
-      // Normalize: trim and ensure starts with '/' or '?'
-      let v = String(s||'').trim();
-      if (!v) return;
-      // Allow optional leading ':'
-      v = v.replace(/^:\s*/, '');
-    // Require '/pat' or '?pat' with non-empty pattern (flags optional)
-    if (!/^[\/?].+/.test(v)) return;
+      // Normalize: accept '/pat' or '?pat' (optional leading ':'), while preserving whitespace patterns.
+      let v0 = String(s||'');
+      v0 = v0.replace(/^\s*:\s*/, '');
+      v0 = v0.replace(/^\s*/, '');
+      const parsed = _parseSlashSearchCmdPreserveWS(v0);
+      if (!parsed) return;
+      const pat = String(parsed.pat||'');
+      // Require non-empty pattern (can be whitespace)
+      if (pat.length === 0) return;
+      const v = (parsed.forward ? '/' : '?') + pat + (parsed.flagsGiven ? ((parsed.forward?'/':'?') + parsed.flagsGiven) : '');
       // Move-to-end unique
       const i = _searchHistory.indexOf(v);
       if (i >= 0) _searchHistory.splice(i, 1);
@@ -12941,12 +12970,11 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
     // '/' and '?' — regex search with optional trailing flags (e.g., /foo/i)
     // Accept both '/...' and ':/...' (cmdinput may prefix ':')
     try{
-      const mF = cmd && cmd.match(/^:?\s*\/(.*?)(?:\/([A-Za-z]*))?\s*$/);
-      const mB = (!mF && cmd) ? cmd.match(/^:?\s*\?(.*?)(?:\?([A-Za-z]*))?\s*$/) : null;
-      if (mF || mB){
-        const forward = !!mF;
-        let pat = String((forward?mF[1]:mB[1])||'');
-        const flagsGiven = String((forward?mF[2]:mB[2])||'');
+      const parsedSQ = _parseSlashSearchCmdPreserveWS(cmd);
+      if (parsedSQ){
+        const forward = !!parsedSQ.forward;
+        let pat = String(parsedSQ.pat||'');
+        const flagsGiven = String(parsedSQ.flagsGiven||'');
         // ユーザ入力の \n / \t を実際の改行・TABへ展開（直前がさらにバックスラッシュの場合はリテラル保持） (#692)
         try{
           pat = pat.replace(/(?<!\\)\\n/g,'\n').replace(/(?<!\\)\\t/g,'\t');
@@ -21529,11 +21557,13 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
         if (e.key==='Enter'){
           e.preventDefault(); e.stopPropagation();
           _incPrevHide();
-          const raw = cmdinput.value.trim();
-          // If this is a search (/ or ?), push to search history (not cmd history)
+          const rawFull = String(cmdinput.value||'');
+          const raw = rawFull.trim();
+          // If this is a search (/ or ?), push to search history (not cmd history).
+          // Preserve whitespace-only patterns (e.g. '/ ' or '/　') by using the untrimmed value.
           try{
-            const normCmd = (raw.startsWith(':')?raw:(':'+raw));
-            if (/^:\s*[\/?].+/.test(normCmd)){
+            const normCmd = (rawFull.startsWith(':')?rawFull:(':'+rawFull));
+            if (/^:\s*[\/?]/.test(normCmd)){
               // store normalized '/...' or '? ...' form
               const store = normCmd.replace(/^:\s*/, '');
               _searchHistoryMaybePush(store);
