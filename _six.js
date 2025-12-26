@@ -11147,7 +11147,10 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
     // This prevents: (a) "k 1回でthumbが下端を離れる" (②), and (b) near-EOF 1-line oscillation.
     // Allow explicit center/eof jump requests to bypass this.
     try{
-      if (!(_visualActive) && !(_suppressScrollDuringModal) && !(_scrolloffPaused) && (_eofPad|0) > 0 && !(opts && (opts.centerOnce || opts.eofToBottom)) && !big){
+      // Apply EOF bottom-lock even in VISUAL.
+      // Otherwise, extending a selection near EOF (e.g. scrolloff=10) can trigger an upward 1-line
+      // adjustment that hides one EOF pad line and looks like a spurious scroll.
+      if (!(_suppressScrollDuringModal) && !(_scrolloffPaused) && (_eofPad|0) > 0 && !(opts && (opts.centerOnce || opts.eofToBottom)) && !big){
         // During scan-hold (key held), allow normal scrolloff enforcement ONLY when moving away from
         // the physical bottom (i.e. holding K/ArrowUp). For J/ArrowDown at EOF, bypassing the lock
         // causes ensureScrolloff to attempt impossible downward adjustments, which can trigger
@@ -11198,7 +11201,7 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
 
     // Special handling during VISUAL linewise selection: do minimal keep-in-view only (#869)
     // Avoid enforcing scrolloff margins so range can extend freely without auto recenters.
-    if (_visualActive && _visualLinewise && !force && !centerOnce){
+    if (_visualActive && _visualLinewise && !centerOnce){
       // IME composition: keep-in-view is skipped to avoid reflows; rely on post-composition correction
       try{ if (window && window._imeComposing===true) return; }catch{}
       // Bring caret into view only when it would go off-screen; allow EOF pad visibility.
@@ -11217,10 +11220,52 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
         const maxTop = maxTopWithPad;
         const topNow = _wrapActive ? _topVisualLine1() : topLine;
         if (topNow > maxTop){ _setEditorScrollTop((maxTop-1)*LINE_HEIGHT, {}); }
-        const stCur = (editor.scrollTop||0);
-        const snapped = Math.floor(stCur/LINE_HEIGHT)*LINE_HEIGHT;
-        if (Math.abs(snapped - stCur) > 0.01){ _setEditorScrollTop(snapped, { immediate:true }); }
-        if (window.requestAnimationFrame){ requestAnimationFrame(()=>{ try{ const st1=(editor.scrollTop||0); const flo1=Math.floor(st1/LINE_HEIGHT)*LINE_HEIGHT; if (Math.abs(flo1-st1)>0.01){ _setEditorScrollTop(flo1, { immediate:true }); } _repositionCaret(); updateGutter(); }catch{} }); }
+        // markdown-off + wrap-on: near physical EOF, scrollTop can be clamped to a non-grid max.
+        // Floor-snapping there would move the remainder to the TOP and hide 1 EOF pad line.
+        let skipSnapAtPhysEof = false;
+        try{
+          const mdNow = (function(){ try{ return _mdRichActive && _mdRichActive(); }catch{ return false; } })();
+          const wrapNow = (function(){ try{ return _wrapEnabled && _wrapEnabled(); }catch{ return false; } })();
+          if (!mdNow && wrapNow){
+            const stE = (editor.scrollTop||0);
+            const maxE = (editor.scrollHeight||0) - (editor.clientHeight||0);
+            if ((maxE - stE) <= 1.5) skipSnapAtPhysEof = true;
+          }
+        }catch{ skipSnapAtPhysEof = false; }
+
+        if (!skipSnapAtPhysEof){
+          const stCur = (editor.scrollTop||0);
+          const snapped = Math.floor(stCur/LINE_HEIGHT)*LINE_HEIGHT;
+          if (Math.abs(snapped - stCur) > 0.01){ _setEditorScrollTop(snapped, { immediate:true }); }
+        } else {
+          try{ _syncTiledBgRemainder && _syncTiledBgRemainder(); }catch{}
+        }
+
+        if (window.requestAnimationFrame){
+          requestAnimationFrame(()=>{
+            try{
+              // Same physical-EOF no-snap guard as above.
+              let skip2 = false;
+              try{
+                const mdNow2 = (function(){ try{ return _mdRichActive && _mdRichActive(); }catch{ return false; } })();
+                const wrapNow2 = (function(){ try{ return _wrapEnabled && _wrapEnabled(); }catch{ return false; } })();
+                if (!mdNow2 && wrapNow2){
+                  const stE2 = (editor.scrollTop||0);
+                  const maxE2 = (editor.scrollHeight||0) - (editor.clientHeight||0);
+                  if ((maxE2 - stE2) <= 1.5) skip2 = true;
+                }
+              }catch{ skip2 = false; }
+              if (!skip2){
+                const st1=(editor.scrollTop||0);
+                const flo1=Math.floor(st1/LINE_HEIGHT)*LINE_HEIGHT;
+                if (Math.abs(flo1-st1)>0.01){ _setEditorScrollTop(flo1, { immediate:true }); }
+              } else {
+                try{ _syncTiledBgRemainder && _syncTiledBgRemainder(); }catch{}
+              }
+              _repositionCaret(); updateGutter();
+            }catch{}
+          });
+        }
       }catch{}
       return;
     }
