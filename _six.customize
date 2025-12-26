@@ -37,8 +37,10 @@ window.SIX_OPTIONS = {
 
 // Theme definition (色指定。基本的に全項目必須で、未定義時に代替は一切せず一律yellowとする)
 window.THEME = {
-  bodyBGColor: "#0b0d12",
-  lineBaseFill: "#0f1117",
+//  bodyBGColor: "#0b0d12",
+  bodyBGColor: "#c0c0c0",    // タブ切替時に一瞬全面塗り潰し状態で見える色
+//  lineBaseFill: "#0f1117",
+  lineBaseFill: "red",
 
   // [NORMAL]/[INSERT]/[VISUAL] text color
   modeNormalFGColor: "#e0e0e0",

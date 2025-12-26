@@ -13,6 +13,8 @@
 	--lh: calc(var(--lhBase) * var(--edScale) + var(--lhExtraBase) * var(--edScale));
 	/* Effective line-height after JS rounding; falls back to --lh */
 	--lhEff: var(--lh);
+	/* Align tiled line backgrounds when scrollTop has a fractional remainder */
+	--scrollRemY: 0px;
 	--gw: calc(var(--gwBase) * var(--edScale));
 	/* Incremental preview (search/replace highlight) */
 	--incPreviewBg: rgba(128,192,255,0.35);
@@ -88,7 +90,7 @@ body { font: var(--fontBase, 18px)/20px Consolas, 'Courier New', monospace; over
 	flex: 1;
     /* Per-line vertical gradient (top->bottom) repeated every line height, layered over base fill */
 	background:
-		linear-gradient(to bottom, var(--lineGradStart, rgb(243,251,243)), var(--lineGradEnd, rgb(237,243,237))) 0 0 / 100% var(--lhEff, var(--lh)) repeat-y,
+		linear-gradient(to bottom, var(--lineGradStart, rgb(243,251,243)), var(--lineGradEnd, rgb(237,243,237))) 0 var(--scrollRemY, 0px) / 100% var(--lhEff, var(--lh)) repeat-y,
 		var(--lineBaseFill, #0f1117);
 	overflow: hidden;
 }
@@ -102,7 +104,7 @@ body.md-rich #editorViewport {
 #gutter { width: var(--gw); flex: 0 0 var(--gw);
 	/* Base: per-line tiled inactive gradient to avoid per-row repaint flicker */
 	background:
-		linear-gradient(to bottom, var(--inactiveGutterGradStart, rgb(235,239,235)), var(--inactiveGutterGradEnd, rgb(219,227,219))) 0 0 / 100% var(--lhEff, var(--lh)) repeat-y,
+		linear-gradient(to bottom, var(--inactiveGutterGradStart, rgb(235,239,235)), var(--inactiveGutterGradEnd, rgb(219,227,219))) 0 var(--scrollRemY, 0px) / 100% var(--lhEff, var(--lh)) repeat-y,
 		linear-gradient(var(--gutterGradientStart, #141821), var(--gutterGradientEnd, #0f1117));
 	color: var(--gutterNumberColor, #57607a); text-align:right; padding-right: 0; box-sizing:border-box;
 	font-size: calc(var(--editorFontBase, 20px) * var(--edScale));

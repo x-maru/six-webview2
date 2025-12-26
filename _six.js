@@ -380,6 +380,10 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
       const start = Math.max(0, (topLine1|0) - 1);
       const want = Math.max(1, (vis|0));
 
+      // Base font size in px (already includes zoom via CSS computed values)
+      let baseFontPx = 16;
+      try{ baseFontPx = parseFloat(getComputedStyle(editor).fontSize)||baseFontPx; }catch{}
+
       // VISUAL selection range (offset-based) for md-rich rendering.
       let _selStart = null;
       let _selEnd = null;
@@ -431,10 +435,6 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
       // #1495: Keep background fixed during per-pixel smooth scroll; do NOT apply remainder compensation.
       // Also keep it unaffected by horizontal scrolling.
       try{ _mdBgInner.style.transform = ''; }catch{}
-
-      // Base font size (already includes zoom)
-      let baseFontPx = 16;
-      try{ baseFontPx = parseFloat(getComputedStyle(editor).fontSize)||baseFontPx; }catch{}
 
       const children = Array.from(_mdTextInner.children);
       const bgChildren = Array.from(_mdBgInner.children);
@@ -1344,6 +1344,112 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
   let _lastLinesForSnap = 0;
   // session persistence
   const _SESSION_KEY = 'six.session.v1';
+
+  // Debug (opt-in): minimal restore/persist tracing to DevTools Console.
+  // Enable by setting: localStorage.setItem('six.debug.restore','1')
+  function _dbgRestoreEnabled(){
+    try{
+      const o = (window && window.SIX_OPTIONS) ? window.SIX_OPTIONS : null;
+      if (o && (o.debugRestore===true || o.debugSessionRestore===true)) return true;
+    }catch{}
+    try{
+      const v = String((localStorage && localStorage.getItem('six.debug.restore'))||'').trim().toLowerCase();
+      return (v==='1' || v==='true' || v==='on' || v==='yes');
+    }catch{}
+    return false;
+  }
+  function _dbgRestore(tag, data){
+    try{ if (!_dbgRestoreEnabled()) return; }catch{ return; }
+    try{
+      // Keep output compact to avoid console spam.
+      console.log('[six][restore]', String(tag||''), data||'');
+    }catch{}
+  }
+  function _dbgViewportSnapshot(){
+    try{
+      const lh = Math.max(1, (LINE_HEIGHT|0));
+      const st = (editor && typeof editor.scrollTop==='number') ? (editor.scrollTop|0) : 0;
+      const sh = (editor && typeof editor.scrollHeight==='number') ? (editor.scrollHeight|0) : 0;
+      const ch = (editor && typeof editor.clientHeight==='number') ? (editor.clientHeight|0) : 0;
+      const physMax = Math.max(0, (sh - ch)|0);
+      let pb = null;
+      try{
+        const cs = editor ? window.getComputedStyle(editor) : null;
+        const v = cs ? parseFloat(String(cs.getPropertyValue('padding-bottom')||'0')) : 0;
+        if (Number.isFinite(v)) pb = Math.round(v);
+      }catch{}
+      return {
+        lh,
+        st,
+        stMod: (lh>0 ? ((st|0) % (lh|0)) : null),
+        sh,
+        ch,
+        physMax,
+        maxMod: (lh>0 ? ((physMax|0) % (lh|0)) : null),
+        pb
+      };
+    }catch{ return {}; }
+  }
+
+  // Compute a robust restore scrollTop for the given buffer.
+  // Priority: wrap logical anchor (markdown-off+wrap-on visual grid) > LINE_HEIGHT anchor > raw px.
+  function _restoreScrollTopForBuffer(b, opts){
+    try{
+      opts = opts || {};
+      if (!b) return { st: 0, why: 'no-buffer' };
+      let st = Number.isFinite(b.viewScrollTop) ? (b.viewScrollTop|0) : 0;
+      const mdNow = (function(){ try{ return _mdRichActive && _mdRichActive(); }catch{ return false; } })();
+      const wrapNow = (function(){ try{ return _wrapEnabled && _wrapEnabled(); }catch{ return false; } })();
+      const usesVisual = (function(){ try{ return _wrapUsesVisualScrollGrid && _wrapUsesVisualScrollGrid(); }catch{ return false; } })();
+      const lhNow = Math.max(1, (LINE_HEIGHT|0));
+
+      // (0) pinned-bottom-at-EOF: keep exact saved scrollTop.
+      // This must override wrap-anchor restores, because physical max scrollTop may not be
+      // line-grid-aligned under wrap-on (native reflow) and snapping loses 1 visible pad line.
+      try{
+        if (!opts.noPinnedBottomAtEof && b.viewPinnedBottomAtEof){
+          return { st: Math.max(0, st|0), why: 'pinned-eof', pinned: true };
+        }
+      }catch{}
+
+      // (A) wrap-on + markdown-off: restore by logical top-row/intra anchor
+      try{
+        if (!mdNow && wrapNow && usesVisual && !opts.noWrapAnchor && typeof _wrapVisualStartLine1ForRow === 'function' && typeof _wrapEnsureCache === 'function'){
+          const topRow = Number.isFinite(b.viewTopRow) ? (b.viewTopRow|0) : -1;
+          const topIntra = Number.isFinite(b.viewTopIntra) ? (b.viewTopIntra|0) : 0;
+          if ((topRow|0) >= 0){
+            const c = _wrapEnsureCache(!!opts.forceWrapCache);
+            let intra = topIntra|0;
+            try{
+              if (c && c.counts && c.counts[topRow|0] != null){
+                const maxIntra = Math.max(0, (c.counts[topRow|0]|0) - 1);
+                if ((intra|0) > (maxIntra|0)) intra = maxIntra|0;
+              } else {
+                intra = Math.max(0, intra|0);
+              }
+            }catch{}
+            const v1 = Math.max(1, (_wrapVisualStartLine1ForRow(topRow|0)|0) + (intra|0));
+            st = Math.max(0, (v1 - 1) * lhNow);
+            return { st: st|0, why: 'wrap-anchor', topRow: topRow|0, intra: intra|0, v1: v1|0 };
+          }
+        }
+      }catch{}
+
+      // (B) if LINE_HEIGHT changed, restore by saved top line anchor
+      try{
+        if (!opts.noLineHeightAnchor){
+          const top1Saved = Number.isFinite(b.viewTopLine1) ? (b.viewTopLine1|0) : 0;
+          const lhSaved = Number.isFinite(b.viewLineHeightPx) ? (b.viewLineHeightPx|0) : 0;
+          if ((top1Saved|0) > 0 && (lhSaved|0) > 0 && (lhSaved|0) !== (lhNow|0)){
+            st = Math.max(0, ((top1Saved|0) - 1) * lhNow);
+            return { st: st|0, why: 'lh-anchor', top1: top1Saved|0, lhSaved: lhSaved|0, lhNow: lhNow|0 };
+          }
+        }
+      }catch{}
+
+      return { st: Math.max(0, st|0), why: 'raw-px' };
+    }catch{ return { st: 0, why: 'err' }; }
+  }
   let _persistTimer = null;
   // Update normal (restored) bounds cache on demand
   function _updateNormalBoundsFromWindow(){
@@ -1430,9 +1536,53 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
       // with the temporary (often clamped-to-BOF) caret/scroll positions.
       try{ if (b && b._restoreViewPending){ return; } }catch{}
       b.viewRow = caretRow | 0; b.viewCol = caretCol | 0;
-      // snap to line grid for stability
-      const st = (editor && typeof editor.scrollTop==='number') ? (editor.scrollTop|0) : 0;
-    try{ b.viewScrollTop = Math.round(Math.max(0, st)/LINE_HEIGHT)*LINE_HEIGHT; }catch{ b.viewScrollTop = Math.max(0, st); }
+      // Persist scrollTop.
+      // NOTE: markdown-off + wrap-on + EOF pad: when pinned to physical bottom, the max scrollTop
+      // can be non-grid-aligned. Flooring here creates a thumb gap and effectively hides 1 pad line.
+      const st = (editor && typeof editor.scrollTop==='number') ? +editor.scrollTop : 0;
+      let pinnedBottomAtEof = false;
+      let physMax = 0;
+      try{
+        const mdNow = (function(){ try{ return _mdRichActive && _mdRichActive(); }catch{ return false; } })();
+        const eofPad = (typeof _eofPadLines === 'function') ? (_eofPadLines()|0) : 0;
+        const atEof = (((caretRow|0) + 1) === ((_totalLines()|0)));
+        physMax = Math.max(0, ((editor.scrollHeight||0) - (editor.clientHeight||0))|0);
+        // Tolerate larger deltas: under wrap-on the physical max scrollTop may be non-grid-aligned
+        // and can differ by up to ~1-2 lines depending on subpixel/rounding and host resize timing.
+        const nearBottom = ((physMax - st) <= Math.max(2, Math.floor(Math.max(1, (LINE_HEIGHT|0)) * 2)));
+        // Persist pinned-bottom-at-EOF for markdown-off with EOF pad, regardless of wrap.
+        // (wrap-off also needs this, otherwise restore will floor-snap and leave a thumb gap)
+        if (!mdNow && (eofPad|0) > 0 && atEof && nearBottom){
+          pinnedBottomAtEof = true;
+        }
+      }catch{}
+      try{ b.viewPinnedBottomAtEof = !!pinnedBottomAtEof; }catch{}
+      if (pinnedBottomAtEof){
+        b.viewScrollTop = (physMax|0);
+      } else {
+        // snap to line grid for stability
+        try{ b.viewScrollTop = Math.floor(Math.max(0, st)/LINE_HEIGHT)*LINE_HEIGHT; }catch{ b.viewScrollTop = Math.max(0, st); }
+      }
+      // Also persist a line-based viewport anchor so restore remains stable even if LINE_HEIGHT changes.
+      try{
+        const lh = Math.max(1, (LINE_HEIGHT|0));
+        b.viewLineHeightPx = lh|0;
+        b.viewTopLine1 = (Math.floor(Math.max(0, (b.viewScrollTop|0)) / lh) + 1)|0;
+      }catch{}
+
+      // Wrap-on (markdown-off): also persist a logical top-row anchor derived from the visual-line scroll grid.
+      // This makes restore stable even when wrapping changes slightly across restarts.
+      try{
+        const mdNow = (function(){ try{ return _mdRichActive && _mdRichActive(); }catch{ return false; } })();
+        const wrapNow = (function(){ try{ return _wrapEnabled && _wrapEnabled(); }catch{ return false; } })();
+        const usesVisual = (function(){ try{ return _wrapUsesVisualScrollGrid && _wrapUsesVisualScrollGrid(); }catch{ return false; } })();
+        if (!mdNow && wrapNow && usesVisual && typeof _wrapRowFromVisualLine1 === 'function'){
+          const v1 = (Math.floor(Math.max(0, (b.viewScrollTop|0)) / Math.max(1, (LINE_HEIGHT|0))) + 1)|0;
+          const rc = _wrapRowFromVisualLine1(v1|0) || { row:0, intra:0 };
+          b.viewTopRow = (rc.row|0);
+          b.viewTopIntra = (rc.intra|0);
+        }
+      }catch{}
     }catch{}
   }
   function _collectSessionPayload(opts={}){
@@ -1549,6 +1699,11 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
           viewRow: Number.isFinite(b.viewRow)?(b.viewRow|0):0,
           viewCol: Number.isFinite(b.viewCol)?(b.viewCol|0):0,
           viewScrollTop: Number.isFinite(b.viewScrollTop)?(b.viewScrollTop|0):0,
+          viewPinnedBottomAtEof: !!(b && b.viewPinnedBottomAtEof),
+          viewTopLine1: Number.isFinite(b.viewTopLine1)?(b.viewTopLine1|0):0,
+          viewLineHeightPx: Number.isFinite(b.viewLineHeightPx)?(b.viewLineHeightPx|0):0,
+          viewTopRow: Number.isFinite(b.viewTopRow)?(b.viewTopRow|0):0,
+          viewTopIntra: Number.isFinite(b.viewTopIntra)?(b.viewTopIntra|0):0,
           edScale: (Number.isFinite(b.edScale) ? b.edScale : 1),
           savedMode: b.savedMode||'NORMAL',
           savedVisual: (b.savedVisual ? { linewise: !!b.savedVisual.linewise, anchorR: b.savedVisual.anchorR|0, anchorC: b.savedVisual.anchorC|0, caretR: b.savedVisual.caretR|0, caretC: b.savedVisual.caretC|0 } : null),
@@ -1593,6 +1748,22 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
     try{
       // Default to lite payload to keep IME / typing responsive even with many open files.
       // Full text is still persisted for modified buffers; unmodified file-backed buffers reload on restore.
+      try{
+        const b = (typeof currentBuffer==='function') ? currentBuffer() : null;
+        _dbgRestore('persist:now', {
+          hint: (typeof window!=='undefined' && window.__sixPersistHint) ? String(window.__sixPersistHint||'') : '',
+          idx: (currentIdx|0),
+          vr: b ? (b.viewRow|0) : null,
+          vc: b ? (b.viewCol|0) : null,
+          vs: b ? (b.viewScrollTop|0) : null,
+          top1: b ? (b.viewTopLine1|0) : null,
+          lh: b ? (b.viewLineHeightPx|0) : null,
+          topRow: b ? (b.viewTopRow|0) : null,
+          topIntra: b ? (b.viewTopIntra|0) : null,
+          vp: _dbgViewportSnapshot()
+        });
+        try{ window.__sixPersistHint = ''; }catch{}
+      }catch{}
       const p = _collectSessionPayload({ lite:true });
           try {
               localStorage.setItem(_SESSION_KEY, JSON.stringify(p));
@@ -1665,6 +1836,7 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
       }catch{}
       let j; try{ j = JSON.parse(localStorage.getItem(_SESSION_KEY)); }catch(e){ try{ localStorage.removeItem(_SESSION_KEY); }catch{} return false; }
       if (!j || !Array.isArray(j.buffers)) return false; 
+      try{ _dbgRestore('session:loaded', { active:(j.active|0), n:(j.buffers.length|0), when:(j.when||0), scrolloff:(j.scrolloff|0) }); }catch{}
       // Attempt window restore (best-effort). Requires host support in WebView2.
       try{ _restoreWindowFromSession(j.windowState); }catch{}
       // Restore scrolloff if present; otherwise fall back to default 3 (#473)
@@ -1768,6 +1940,13 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
           b.viewRow = Number.isFinite(it&&it.viewRow)?(it.viewRow|0):0;
           b.viewCol = Number.isFinite(it&&it.viewCol)?(it.viewCol|0):0;
           b.viewScrollTop = Number.isFinite(it&&it.viewScrollTop)?(it.viewScrollTop|0):0;
+          try{ b.viewPinnedBottomAtEof = !!(it && it.viewPinnedBottomAtEof); }catch{ b.viewPinnedBottomAtEof = false; }
+          // restore extra viewport anchor (optional; older sessions may not have)
+          try{ b.viewTopLine1 = Number.isFinite(it&&it.viewTopLine1) ? (it.viewTopLine1|0) : (Math.floor(Math.max(0, (b.viewScrollTop|0)) / Math.max(1, (LINE_HEIGHT|0))) + 1)|0; }catch{ b.viewTopLine1 = 1; }
+          try{ b.viewLineHeightPx = Number.isFinite(it&&it.viewLineHeightPx) ? (it.viewLineHeightPx|0) : (LINE_HEIGHT|0); }catch{ b.viewLineHeightPx = (LINE_HEIGHT|0); }
+          // restore wrap-mode anchor (optional)
+          try{ b.viewTopRow = Number.isFinite(it&&it.viewTopRow) ? (it.viewTopRow|0) : 0; }catch{ b.viewTopRow = 0; }
+          try{ b.viewTopIntra = Number.isFinite(it&&it.viewTopIntra) ? (it.viewTopIntra|0) : 0; }catch{ b.viewTopIntra = 0; }
           // If this buffer is going to be reloaded (lite restore), preserve the intended view
           // and prevent early clamping from overwriting it.
           try{
@@ -1776,6 +1955,11 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
               b._restoreViewRow = b.viewRow|0;
               b._restoreViewCol = b.viewCol|0;
               b._restoreViewScrollTop = b.viewScrollTop|0;
+              try{ b._restoreViewPinnedBottomAtEof = !!b.viewPinnedBottomAtEof; }catch{}
+              try{ b._restoreViewTopLine1 = b.viewTopLine1|0; }catch{}
+              try{ b._restoreViewLineHeightPx = b.viewLineHeightPx|0; }catch{}
+              try{ b._restoreViewTopRow = b.viewTopRow|0; }catch{}
+              try{ b._restoreViewTopIntra = b.viewTopIntra|0; }catch{}
             }
           }catch{}
           // restore saved mode/visual
@@ -1898,11 +2082,98 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
                     if (hadRestorePending){
                       const rr = Number.isFinite(b._restoreViewRow) ? (b._restoreViewRow|0) : 0;
                       const rc = Number.isFinite(b._restoreViewCol) ? (b._restoreViewCol|0) : 0;
-                      const rst = Number.isFinite(b._restoreViewScrollTop) ? (b._restoreViewScrollTop|0) : 0;
+                      let rst = Number.isFinite(b._restoreViewScrollTop) ? (b._restoreViewScrollTop|0) : 0;
+                      const pinBottomAtEof = !!(b && b._restoreViewPinnedBottomAtEof);
+                      // Wrap-on (markdown-off): prefer restoring by logical top-row/intra anchor.
+                      try{
+                        const mdNow = (function(){ try{ return _mdRichActive && _mdRichActive(); }catch{ return false; } })();
+                        const wrapNow = (function(){ try{ return _wrapEnabled && _wrapEnabled(); }catch{ return false; } })();
+                        const usesVisual = (function(){ try{ return _wrapUsesVisualScrollGrid && _wrapUsesVisualScrollGrid(); }catch{ return false; } })();
+                        const topRow = Number.isFinite(b._restoreViewTopRow) ? (b._restoreViewTopRow|0) : -1;
+                        const topIntra = Number.isFinite(b._restoreViewTopIntra) ? (b._restoreViewTopIntra|0) : 0;
+                        if (!mdNow && wrapNow && usesVisual && (topRow|0) >= 0 && typeof _wrapVisualStartLine1ForRow === 'function' && typeof _wrapEnsureCache === 'function'){
+                          const c = _wrapEnsureCache(false);
+                          let intra = topIntra|0;
+                          try{
+                            if (c && c.counts && c.counts[topRow|0] != null){
+                              const maxIntra = Math.max(0, (c.counts[topRow|0]|0) - 1);
+                              if ((intra|0) > (maxIntra|0)) intra = maxIntra|0;
+                            } else {
+                              intra = Math.max(0, intra|0);
+                            }
+                          }catch{}
+                          const v1 = Math.max(1, (_wrapVisualStartLine1ForRow(topRow|0)|0) + (intra|0));
+                          rst = Math.max(0, (v1 - 1) * Math.max(1, (LINE_HEIGHT|0)));
+                        }
+                      }catch{}
+                      // If LINE_HEIGHT changed since save, prefer top-line anchor for restoring scrollTop.
+                      try{
+                        const top1Saved = Number.isFinite(b._restoreViewTopLine1) ? (b._restoreViewTopLine1|0) : 0;
+                        const lhSaved = Number.isFinite(b._restoreViewLineHeightPx) ? (b._restoreViewLineHeightPx|0) : 0;
+                        const lhNow = Math.max(1, (LINE_HEIGHT|0));
+                        if ((top1Saved|0) > 0 && (lhSaved|0) > 0 && (lhNow|0) > 0 && (lhSaved|0) !== (lhNow|0)){
+                          rst = Math.max(0, ((top1Saved|0) - 1) * (lhNow|0));
+                        }
+                      }catch{}
                       _setCaret(rr, rc);
                       try{ _setEditorScrollTop(Math.max(0, rst|0), { immediate:true }); }catch{}
                       b.viewRow = rr|0; b.viewCol = rc|0; b.viewScrollTop = rst|0;
+                      try{ b.viewPinnedBottomAtEof = !!pinBottomAtEof; }catch{}
+                      try{
+                        const lh = Math.max(1, (LINE_HEIGHT|0));
+                        b.viewLineHeightPx = lh|0;
+                        b.viewTopLine1 = (Math.floor(Math.max(0, (b.viewScrollTop|0)) / lh) + 1)|0;
+                      }catch{}
+                      try{
+                        const mdNow = (function(){ try{ return _mdRichActive && _mdRichActive(); }catch{ return false; } })();
+                        const wrapNow = (function(){ try{ return _wrapEnabled && _wrapEnabled(); }catch{ return false; } })();
+                        const usesVisual = (function(){ try{ return _wrapUsesVisualScrollGrid && _wrapUsesVisualScrollGrid(); }catch{ return false; } })();
+                        if (!mdNow && wrapNow && usesVisual && typeof _wrapRowFromVisualLine1 === 'function'){
+                          const v1 = (Math.floor(Math.max(0, (b.viewScrollTop|0)) / Math.max(1, (LINE_HEIGHT|0))) + 1)|0;
+                          const rci = _wrapRowFromVisualLine1(v1|0) || { row:0, intra:0 };
+                          b.viewTopRow = (rci.row|0);
+                          b.viewTopIntra = (rci.intra|0);
+                        }
+                      }catch{}
                       b._restoreViewPending = false;
+
+                      // If this view was saved as "pinned to bottom at EOF", re-apply the pin now
+                      // that the real text/layout is available. This prevents thumb gaps after restart.
+                      try{
+                        if (pinBottomAtEof){
+                          ensureScrolloff({ force:true, preferEOFPad:true, eofToBottom:true, keepCaret:true, immediate:true });
+                        }
+                      }catch{}
+
+                      // Now that real text is present, stabilize wrap/eof-pad metrics so no later
+                      // generic post-switch applyScroll/ensureScrolloff path re-centers the view.
+                      try{ clampViewportExactLines && clampViewportExactLines(); }catch{}
+                      try{ if (_syncEofPadGridComp) _syncEofPadGridComp(); }catch{}
+                      try{
+                        if (_wrapEnabled && _wrapEnabled() && !(_mdRichActive && _mdRichActive())){
+                          _wrapInvalidateCache && _wrapInvalidateCache('lite-reload');
+                          _wrapEnsureCache && _wrapEnsureCache(true);
+                          _syncEofPadGridComp && _syncEofPadGridComp();
+                        }
+                      }catch{}
+                      try{
+                        if (_mdRichActive && _mdRichActive()){
+                          _mdWrapInvalidateCache && _mdWrapInvalidateCache('lite-reload');
+                          _mdWrapEnsureCache && _mdWrapEnsureCache(true);
+                          _mdSyncEofPadComp && _mdSyncEofPadComp();
+                          _mdRenderTextLayer && _mdRenderTextLayer();
+                        }
+                      }catch{}
+                      try{ _repositionCaret && _repositionCaret({ force:true }); }catch{}
+                      try{ updateGutter && updateGutter({ force:true }); }catch{}
+                      try{
+                        const stKeep2 = (editor && typeof editor.scrollTop==='number') ? editor.scrollTop : 0;
+                        _syncNativeSelectionToCaret && _syncNativeSelectionToCaret();
+                        if (editor) _setEditorScrollTop(stKeep2, { immediate:true });
+                      }catch{}
+                      try{ _scrollGuardUntil = Date.now() + 1400; }catch{}
+                      try{ _skipEnsureOnceAfterSwitch = true; }catch{}
+                      try{ _preferNoScrollOnceAfterSwitch = true; }catch{}
                     }
                   }catch{}
                   _repositionCaret(); updateGutter();
@@ -1925,8 +2196,37 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
         // clearing currentIdx so _switchToBuffer performs a full restore without
         // persisting a bogus pre-switch state.
         currentIdx = -1;
+        try{
+          const bb0 = (act>=0 && act<buffers.length) ? buffers[act] : null;
+          if (bb0){
+            _dbgRestore('session:active', { idx:(act|0), vr:(bb0.viewRow|0), vc:(bb0.viewCol|0), vs:(bb0.viewScrollTop|0), top1:(bb0.viewTopLine1|0), lh:(bb0.viewLineHeightPx|0), topRow:(bb0.viewTopRow|0), topIntra:(bb0.viewTopIntra|0) });
+          }
+        }catch{}
         _switchToBuffer(act);
         _setTitle(); _renderTabbar();
+
+        // Session restore + window restore can trigger host-driven resizes shortly after boot.
+        // When the viewport height changes while near EOF, browsers often keep the bottom anchored,
+        // which shifts scrollTop (top line jumps) and can expose a half-row. Remember the intended
+        // restored view and re-apply it during the early resize window.
+        try{
+          const bb = (act>=0 && act<buffers.length) ? buffers[act] : null;
+          if (bb){
+            window.__sixSessionRestore = {
+              at: Date.now(),
+              until: Date.now() + 6500,
+              idx: act|0,
+              vr: Number.isFinite(bb.viewRow) ? (bb.viewRow|0) : 0,
+              vc: Number.isFinite(bb.viewCol) ? (bb.viewCol|0) : 0,
+              vs: Number.isFinite(bb.viewScrollTop) ? (bb.viewScrollTop|0) : 0,
+              top1: Number.isFinite(bb.viewTopLine1) ? (bb.viewTopLine1|0) : 0,
+              lh: Number.isFinite(bb.viewLineHeightPx) ? (bb.viewLineHeightPx|0) : (LINE_HEIGHT|0),
+              topRow: Number.isFinite(bb.viewTopRow) ? (bb.viewTopRow|0) : 0,
+              topIntra: Number.isFinite(bb.viewTopIntra) ? (bb.viewTopIntra|0) : 0,
+              pinBottomAtEof: !!(bb && bb.viewPinnedBottomAtEof),
+            };
+          }
+        }catch{}
       }
       return buffers.length>0;
     }catch{ return false; }
@@ -2424,13 +2724,13 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
                 try{ const dispPref = (function(){ try{ const b=_ensureSlash(_fileBaseURL); if (b && b.protocol==='file:' && b.host && b.host.toLowerCase()==='wsl.localhost'){ const body=String(_fileTypedDirRaw||'').replace(/^\/+/, ''); return '//'+b.host+'/' + body; } }catch{} return String(_fileTypedDirRaw||''); })(); _fileAutoPrefillOnNextRender = { base: String(_fileBaseURL), typed: dispPref, desiredName: prevSeg }; }catch{}
                 // 可能ならディレクトリ一覧を遅延取得
                 try{
-                  const reqKey = (function(){ try{ return _ensureSlash(_fileBaseURL)?.toString()||null; }catch{ return null; } })();
+                  const reqKey = (function(){ try{ return _ensureSlashKey(_fileBaseURL); }catch{ return null; } })();
                   if (typeof _listDirEntriesWithQuickRetry==='function'){
                     // 計測開始（スタブフォールバック経路での永続 "(loading...)" ハング対策 #825）
                     try{ window._fileLastListStartTs = Date.now(); }catch{}
                     _fileLoading = true;
                     _listDirEntriesWithQuickRetry(_fileBaseURL).then(list=>{
-                      try{ const curKey=_ensureSlash(_fileBaseURL)?.toString()||null; if (!reqKey || curKey===reqKey){ _fileEntries=Array.isArray(list)? list: []; if (_filePopupVisible && _filePopupVisible()) _filePopupRender&&_filePopupRender(); console.debug('[parentNav stub fallback done]', { entries:_fileEntries.length }); } }catch{}
+                      try{ const curKey=_ensureSlashKey(_fileBaseURL); if (!reqKey || curKey===reqKey){ _fileEntries=Array.isArray(list)? list: []; if (_filePopupVisible && _filePopupVisible()) _filePopupRender&&_filePopupRender(); console.debug('[parentNav stub fallback done]', { entries:_fileEntries.length }); } }catch{}
                     }).finally(()=>{ _fileLoading=false; try{ if (_filePopupVisible && _filePopupVisible()) _filePopupRender&&_filePopupRender(); }catch{} });
                   } else {
                     console.debug('[parentNav stub fallback pending listFn]');
@@ -4965,7 +5265,7 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
       // Normalize optional leading ':'
       if (!/^\s*:/.test(v)) v = ':' + v;
 
-      // Search prompts: /... or ?... (cmdinput may include leading ':')
+      // Search prompts: /... or ? ... (cmdinput may include leading ':')
       if (/^:\s*[\/?].+/.test(v) || /^\s*[\/?].+/.test(String(s||'').trim())) return true;
 
       // Implemented ex-commands (broad-but-safe match based on runCommand handlers)
@@ -5301,6 +5601,7 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
       // Compute caret vertical offset: center font box within line box
       const off = (LINE_HEIGHT - FONT_SIZE) / 2;
       _caretYOffset = Number.isFinite(off) ? Math.max(0, off) : 0;
+      try{ _syncEofPadGridComp && _syncEofPadGridComp(); }catch{}
     }catch{}
   }
 
@@ -5452,7 +5753,7 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
       if (!baseName) return null;
       // Bust directory cache once to avoid stale size/mtime right after save/load
       try{
-        const key = (function(){ try{ return _ensureSlash(parent)?.toString()||null; }catch{ return null; } })();
+        const key = (function(){ try{ return _ensureSlashKey(parent); }catch{ return null; } })();
         if (key && _dirCache && _dirCache.delete){ _dirCache.delete(key); }
       }catch{}
       const list = await _listDirEntriesWithQuickRetry(parent);
@@ -6059,6 +6360,173 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
     try{ return Math.max(0, (_eofPadLines()|0) * Math.max(1, (LINE_HEIGHT|0))); }catch{ return 0; }
   }
 
+  function _dbgEofPadEnabled(){
+    try{ return String(localStorage.getItem('six.debug.eofpad')||'') === '1'; }catch{ return false; }
+  }
+  function _dbgPadBottomPx(){
+    try{
+      if (!editor) return -1;
+      const cs = window.getComputedStyle(editor);
+      const pb = parseFloat(String(cs.getPropertyValue('padding-bottom')||'0'));
+      return Number.isFinite(pb) ? (Math.round(pb)|0) : -1;
+    }catch{ return -1; }
+  }
+  function _dbgEofPad(tag, obj){
+    try{ if (!_dbgEofPadEnabled()) return; console.debug('[six][eofpad]', String(tag||''), obj||{}); }catch{}
+  }
+
+  // markdown-off + wrap-on: keep physical maxScrollTop aligned to the line grid.
+  // Wrapped layout can produce a scroll range whose max is NOT a multiple of LINE_HEIGHT,
+  // which causes a visible half-row at the top when pinned to bottom, and can hide ~1 pad line.
+  // Add a tiny (0..LINE_HEIGHT-1) pixel compensation to paddingBottom so:
+  //   (scrollHeight - clientHeight) % LINE_HEIGHT === 0
+  // This does NOT add an extra full pad line; it only fills the remainder.
+  let _eofPadGridLastPbPx = -1;
+  let _eofPadGridLastBasePx = -1;
+  let _eofPadGridLastLh = -1;
+  // markdown-off + wrap-on: If the textarea value ends with '\n', the browser renders
+  // a real final empty line. If we also add eofPadLines lines of padding, the user
+  // sees (eofPadLines+1) blank lines at EOF. Compensate by subtracting 1 line of pad
+  // when such a trailing empty line is present.
+  let _eofPadGridImplicitExtraLine = 0; // 0/1 (derived from editor.value)
+  function _syncEofPadGridComp(){
+    try{
+      if (!editor) return;
+      // md-rich uses its own pixel-precise padding logic.
+      try{ if (_mdRichActive && _mdRichActive()) return; }catch{}
+
+      // If we were pinned to physical bottom before adjusting paddingBottom,
+      // keep pinned after the adjustment. This prevents a bottom thumb gap.
+      let wasAtBottom = false;
+      let physMaxBefore = 0;
+      let stBefore = 0;
+      try{
+        stBefore = (editor.scrollTop||0);
+        physMaxBefore = Math.max(0, ((editor.scrollHeight||0) - (editor.clientHeight||0))|0);
+        wasAtBottom = Math.abs((stBefore|0) - (physMaxBefore|0)) <= 1.5;
+      }catch{}
+
+      const wrapNow = (function(){ try{ return _wrapEnabled && _wrapEnabled(); }catch{ return false; } })();
+      const basePadRaw = (typeof _eofPadLines === 'function') ? (_eofPadLines()|0) : 0;
+      // Derive implicit trailing empty line from the actual textarea text.
+      // (Logic layer _splitLines() may hide it, but the textarea still renders it.)
+      try{
+        const tNow = String(editor.value||'');
+        _eofPadGridImplicitExtraLine = (tNow.endsWith('\n') && (tNow.length > 0)) ? 1 : 0;
+      }catch{ _eofPadGridImplicitExtraLine = 0; }
+      // Apply 1-line compensation whenever pad is enabled.
+      // This fixes markdown-off + wrap-off showing (eofPadLines+1) blanks at EOF
+      // when the buffer ends with a final '\n' (the textarea renders a real empty line).
+      const basePad = ((basePadRaw|0) <= 0) ? (basePadRaw|0) : Math.max(0, (basePadRaw|0) - ((_eofPadGridImplicitExtraLine|0) ? 1 : 0));
+      const lh = (typeof LINE_HEIGHT === 'number' && LINE_HEIGHT > 0) ? (LINE_HEIGHT|0) : 20;
+
+      if ((basePadRaw|0) <= 0){
+        // Restore CSS-driven padding when pad is disabled.
+        try{
+          if ((_eofPadGridLastPbPx|0) !== -1){
+            editor.style.paddingBottom = '';
+            _eofPadGridLastPbPx = -1;
+            _eofPadGridLastBasePx = -1;
+            _eofPadGridLastLh = -1;
+            _eofPadGridImplicitExtraLine = 0;
+            try{ _cachedVisibleCount = 0; }catch{}
+          }
+        }catch{}
+        return;
+      }
+
+      const basePx = Math.max(0, (basePad|0) * (lh|0));
+
+      // wrap-off: only override paddingBottom when we need the implicit-extra-line compensation.
+      // Otherwise, keep the CSS-driven padding to minimize churn.
+      if (!wrapNow){
+        const need = !!((_eofPadGridImplicitExtraLine|0) && (basePadRaw|0) > 0);
+        if (!need){
+          try{
+            if ((_eofPadGridLastPbPx|0) !== -1){
+              editor.style.paddingBottom = '';
+              _eofPadGridLastPbPx = -1;
+              _eofPadGridLastBasePx = -1;
+              _eofPadGridLastLh = -1;
+              _eofPadGridImplicitExtraLine = 0;
+              try{ _cachedVisibleCount = 0; }catch{}
+            }
+          }catch{}
+          return;
+        }
+        // Apply the reduced base padding (no grid remainder compensation needed).
+        try{
+          const targetPb = (basePx|0);
+          if ((_eofPadGridLastPbPx|0) !== (targetPb|0) || (_eofPadGridLastLh|0) !== (lh|0)){
+            editor.style.paddingBottom = (targetPb|0) + 'px';
+            _eofPadGridLastPbPx = targetPb|0;
+            _eofPadGridLastBasePx = targetPb|0;
+            _eofPadGridLastLh = lh|0;
+            try{ _cachedVisibleCount = 0; }catch{}
+            try{ _dbgEofPad('grid:set-wrapoff', { basePadRaw:(basePadRaw|0), basePad:(basePad|0), implicit:(_eofPadGridImplicitExtraLine|0), targetPb:(targetPb|0), lh:(lh|0) }); }catch{}
+          }
+        }catch{}
+        // Preserve physical-bottom pin if we were already there.
+        try{
+          if (wasAtBottom){
+            const physMaxAfter = Math.max(0, ((editor.scrollHeight||0) - (editor.clientHeight||0))|0);
+            if (Math.abs((editor.scrollTop||0) - (physMaxAfter|0)) > 0.5){
+              editor.scrollTop = physMaxAfter;
+              try{ _dbgEofPad('grid:pin-wrapoff', { stBefore:(stBefore|0), physBefore:(physMaxBefore|0), physAfter:(physMaxAfter|0), lh:(lh|0) }); }catch{}
+            }
+          }
+        }catch{}
+        return;
+      }
+
+      // Pin base padding to integer px so compensation is stable.
+      // IMPORTANT: When paddingBottom already includes a previous compensation, the measured
+      // scrollHeight/clientHeight yields an aligned max (rem=0), and naively using that would
+      // remove the compensation, causing oscillation and half-row glitches on restart.
+      // Compute remainder against the *baseline* max by subtracting current extra padding.
+      try{
+        if ((_eofPadGridLastBasePx|0) !== (basePx|0) || (_eofPadGridLastLh|0) !== (lh|0)){
+          editor.style.paddingBottom = (basePx|0) + 'px';
+          _eofPadGridLastBasePx = basePx|0;
+          _eofPadGridLastLh = lh|0;
+          // base change invalidates last target
+          _eofPadGridLastPbPx = -1;
+        }
+      }catch{}
+
+      const pm0 = Math.max(0, ((editor.scrollHeight||0) - (editor.clientHeight||0))|0);
+      let curPb = basePx|0;
+      try{
+        const cs = window.getComputedStyle(editor);
+        const pb = parseFloat(String(cs.getPropertyValue('padding-bottom')||'0'));
+        if (Number.isFinite(pb)) curPb = Math.max(0, Math.round(pb));
+      }catch{}
+      const extraPb = Math.max(0, (curPb|0) - (basePx|0));
+      const pmBase = Math.max(0, (pm0|0) - (extraPb|0));
+      let rem = 0;
+      try{ rem = (pmBase % (lh|0))|0; if (rem < 0) rem = (rem + (lh|0))|0; }catch{ rem = 0; }
+      const comp = (rem === 0) ? 0 : ((lh|0) - rem);
+      const targetPb = (basePx + comp)|0;
+      if ((_eofPadGridLastPbPx|0) !== (targetPb|0)){
+        editor.style.paddingBottom = (targetPb|0) + 'px';
+        _eofPadGridLastPbPx = targetPb|0;
+        try{ _cachedVisibleCount = 0; }catch{}
+        try{ _dbgEofPad('grid:set', { basePadRaw:(basePadRaw|0), basePad:(basePad|0), implicit:(_eofPadGridImplicitExtraLine|0), basePx:(basePx|0), comp:(comp|0), targetPb:(targetPb|0), pm0:(pm0|0), pmBase:(pmBase|0), rem:(rem|0), lh:(lh|0) }); }catch{}
+
+        // Re-pin to bottom only if we were already there.
+        try{
+          if (wasAtBottom){
+            const physMaxAfter = Math.max(0, ((editor.scrollHeight||0) - (editor.clientHeight||0))|0);
+            if (Math.abs((editor.scrollTop||0) - (physMaxAfter|0)) > 0.5){
+              editor.scrollTop = physMaxAfter;
+              try{ _dbgEofPad('grid:pin', { stBefore:(stBefore|0), physBefore:(physMaxBefore|0), physAfter:(physMaxAfter|0), lh:(lh|0) }); }catch{}
+            }
+          }
+        }catch{}
+      }
+    }catch{}
+  }
+
   function _mdPinThumbPhysBottom(reason){
     // md-rich + wrap-on: keep native scrollbar thumb at true bottom, while
     // overlay rendering uses the effective scrollTop grid.
@@ -6328,14 +6796,9 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
             });
           }
         }catch{}
-      } else {
-        // Default: keep CSS-based EOF padding.
-        // Use px based on LINE_HEIGHT to keep pad lines consistent with motion grid.
-        try{ editor.style.paddingBottom = Math.max(0, (basePad|0) * (LINE_HEIGHT|0)) + 'px'; }catch{}
-        try{ _mdEofPadLastPbPx = -1; }catch{}
-        try{ _mdEofPadLastExtraPx = 0; }catch{}
-        try{ _cachedVisibleCount = 0; }catch{}
       }
+      // NOTE: The non-md else branch that used to set paddingBottom here has been removed.
+      // markdown-off + wrap-on now relies exclusively on _syncEofPadGridComp() for paddingBottom.
     }catch(e){
       try{
         if (_mdEofDbgEnabled && _mdEofDbgEnabled()){
@@ -6893,7 +7356,7 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
       try{
         if (selectName){ const idx = entries.findIndex(e=>e && e.name===selectName); if (idx>=0) _fileSel = idx; }
       }catch{}
-      try{ const curKey = _ensureSlash(_fileBaseURL)?.toString()||null; _fileStableEntries = entries.slice(); _fileStableBaseKey = curKey; }catch{}
+      try{ const curKey = _ensureSlashKey(_fileBaseURL); _fileStableEntries = entries.slice(); _fileStableBaseKey = curKey; }catch{}
       _fileInvalid = false; _fileLoading = false; if (_filePopupVisible()) _filePopupRender();
       return true;
     }catch{
@@ -6954,6 +7417,12 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
         viewRow: 0,
         viewCol: 0,
         viewScrollTop: 0,
+        // Extra viewport anchor for robust session restore across LINE_HEIGHT changes
+        viewTopLine1: 1,
+        viewLineHeightPx: 0,
+        // Wrap-on (markdown-off): persist logical top-row anchor derived from visual scroll grid
+        viewTopRow: 0,
+        viewTopIntra: 0,
         // persist VISUAL selection across tabs
         savedVisual: null,
         // external modification tracking (mtime/size established when buffer becomes unmodified after save/load)
@@ -7025,10 +7494,28 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
                 prev._mdPhysBottom = ((physMax - (st|0)) <= Math.max(2, (LINE_HEIGHT|0)));
               }catch{ prev._mdPhysBottom = false; }
             } else {
-              prev.viewScrollTop = Math.round(Math.max(0, st)/LINE_HEIGHT)*LINE_HEIGHT;
+              prev.viewScrollTop = Math.floor(Math.max(0, st)/LINE_HEIGHT)*LINE_HEIGHT;
               prev._mdPhysBottom = false;
             }
           }catch{ prev.viewScrollTop = (editor.scrollTop||0)|0; try{ prev._mdPhysBottom = false; }catch{} }
+          // Record a line-based anchor as well (robust against LINE_HEIGHT changes across restarts)
+          try{
+            const lh = Math.max(1, (LINE_HEIGHT|0));
+            prev.viewLineHeightPx = lh|0;
+            prev.viewTopLine1 = (Math.floor(Math.max(0, (prev.viewScrollTop|0)) / lh) + 1)|0;
+          }catch{}
+          // Wrap-on (markdown-off): record logical top-row/intra derived from visual scroll grid.
+          try{
+            const mdNow = (function(){ try{ return _mdRichActive && _mdRichActive(); }catch{ return false; } })();
+            const wrapNow = (function(){ try{ return _wrapEnabled && _wrapEnabled(); }catch{ return false; } })();
+            const usesVisual = (function(){ try{ return _wrapUsesVisualScrollGrid && _wrapUsesVisualScrollGrid(); }catch{ return false; } })();
+            if (!mdNow && wrapNow && usesVisual && typeof _wrapRowFromVisualLine1 === 'function'){
+              const v1 = (Math.floor(Math.max(0, (prev.viewScrollTop|0)) / Math.max(1, (LINE_HEIGHT|0))) + 1)|0;
+              const rc = _wrapRowFromVisualLine1(v1|0) || { row:0, intra:0 };
+              prev.viewTopRow = (rc.row|0);
+              prev.viewTopIntra = (rc.intra|0);
+            }
+          }catch{}
           // Save VISUAL selection snapshot, if active
           if (_visualActive){
             prev.savedMode = 'VISUAL';
@@ -7048,6 +7535,7 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
       // 2) Switch current index
       currentIdx = i;
       const b = buffers[i];
+      const restorePendingAtSwitch = !!(b && b._restoreViewPending);
       // 3) Load text into editor
       editor.value = String(b.text||'');
       // Apply wrap state early (affects scroll model)
@@ -7060,6 +7548,26 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
       let vr = Number.isFinite(b.viewRow) ? (b.viewRow|0) : 0;
       let vc = Number.isFinite(b.viewCol) ? (b.viewCol|0) : 0;
       let vs = Number.isFinite(b.viewScrollTop) ? (b.viewScrollTop|0) : 0;
+
+      // Freeze restore anchors from session/buffer state to avoid feedback loops.
+      // (If we update b.viewTopRow during restore, recomputation would chase itself and drift upward.)
+      const _restoreAnch = {
+        viewScrollTop: Number.isFinite(b.viewScrollTop) ? (b.viewScrollTop|0) : (vs|0),
+        viewTopRow: Number.isFinite(b.viewTopRow) ? (b.viewTopRow|0) : 0,
+        viewTopIntra: Number.isFinite(b.viewTopIntra) ? (b.viewTopIntra|0) : 0,
+        viewTopLine1: Number.isFinite(b.viewTopLine1) ? (b.viewTopLine1|0) : 0,
+        viewLineHeightPx: Number.isFinite(b.viewLineHeightPx) ? (b.viewLineHeightPx|0) : (LINE_HEIGHT|0)
+      };
+
+      // Compute restore scrollTop robustly (wrap anchors / LINE_HEIGHT changes).
+      // Do NOT override explicit jumpTo.
+      if (!(options && options.jumpTo)){
+        try{
+          const r = _restoreScrollTopForBuffer(_restoreAnch, { forceWrapCache:false });
+          vs = Math.max(0, (r && Number.isFinite(r.st) ? (r.st|0) : (vs|0)));
+          _dbgRestore('switch:restoreTarget', { idx:(i|0), why:(r&&r.why)||'?', vr:(vr|0), vc:(vc|0), vs:(vs|0), extra:(r||null) });
+        }catch{}
+      }
 
       if (options && options.jumpTo){
           vr = options.jumpTo.row | 0;
@@ -7086,37 +7594,33 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
           try{ _mdSyncEofPadComp && _mdSyncEofPadComp(); }catch{}
         }
       }catch{}
-      // Validate viewport: if saved scrollTop does not include the caret (e.g., corrupted to EOF),
-      // compute a safe fallback that centers the caret within the viewport to avoid "G-like" jumps (#359/#360)
+      try{ _syncEofPadGridComp && _syncEofPadGridComp(); }catch{}
+      // Prepare a shared restore scroll target so both the immediate restore and the later
+      // applyScroll() reinforcement use the same intent (avoid jumping away after a special-case).
+      let restoreSt = (function(){ try{ const n=Math.max(0, vs); return Math.floor(n/LINE_HEIGHT)*LINE_HEIGHT; }catch{ return Math.max(0, vs|0); } })();
+      let restoreScrollOpts = { immediate:true };
+      let restorePinnedBottomAtEof = false;
+      // Special case: markdown-off + wrap-on + EOF pad + caret at EOF.
+      // Prefer restoring to the physical max AFTER compensation to avoid a clamped non-grid top half-row.
       try{
-        const vis = Math.max(1, _visibleLinesExact());
-        const caretLine1 = (function(){
-          try{ return _wrapEnabled() ? _wrapVisualLine1ForRowCol(vr|0, vc|0) : ((vr|0)+1); }catch{ return (vr|0)+1; }
-        })();
-        const savedTop1 = Math.floor(Math.max(0, vs)/LINE_HEIGHT) + 1;
-        const savedBottom1 = savedTop1 + vis - 1;
-        // If caret would be off-screen with saved vs, recalc vs from caret
-        if (caretLine1 < savedTop1 || caretLine1 > savedBottom1){
-          let top1 = Math.max(1, caretLine1 - Math.floor(vis/2));
-          const linesTotal = (function(){
-            try{ if (_wrapEnabled()){ const c=_wrapEnsureCache(false); return (c && c.prefix) ? (c.prefix[c.prefix.length-1]|0) : _totalLines(); } }catch{}
-            return _totalLines();
-          })();
-          const mdComp = (function(){
-            try{ return (_mdRichActive && _mdRichActive()) ? 0 : (_mdScrollCompLines()|0); }
-            catch{ return 0; }
-          })();
-          const totalForClamp = Math.max(1, (linesTotal|0) + (mdComp|0));
-          const baseMaxTop = Math.max(1, (totalForClamp|0) - vis + 1);
-          const maxTopWithPad = Math.max(1, baseMaxTop + (_eofPadLines()|0));
-          top1 = Math.min(top1, maxTopWithPad);
-          vs = (top1-1) * LINE_HEIGHT;
+        const mdNowR = (function(){ try{ return _mdRichActive && _mdRichActive(); }catch{ return false; } })();
+        const wrapNowR = (function(){ try{ return _wrapEnabled && _wrapEnabled(); }catch{ return false; } })();
+        const eofPadR = (typeof _eofPadLines === 'function') ? (_eofPadLines()|0) : 0;
+        const atEofR = ((vr|0) + 1) === ((_totalLines()|0));
+        if (!mdNowR && wrapNowR && (eofPadR|0) > 0 && atEofR){
+          const physMax = Math.max(0, ((editor.scrollHeight||0) - (editor.clientHeight||0))|0);
+          restoreSt = (physMax|0);
+          restoreScrollOpts = { immediate:true, keepCaret:true, physical:true };
+          restorePinnedBottomAtEof = true;
         }
       }catch{}
-      // Snap scrollTop to exact line boundary to keep background gradient/gutter aligned
-      const vsSnap = (function(){ try{ const n=Math.max(0, vs); return Math.round(n/LINE_HEIGHT)*LINE_HEIGHT; }catch{ return Math.max(0, vs|0); } })();
-  // Restore viewport scroll top (validated)
-  try{ _setEditorScrollTop(Math.max(0, vsSnap), { immediate:true }); }catch{}
+
+      // Session says "pinned at EOF": this must survive the later grid-snap and baseline writeback.
+      try{ if (b && b.viewPinnedBottomAtEof) restorePinnedBottomAtEof = true; }catch{}
+
+      // Restore viewport scroll top (initial)
+      try{ _setEditorScrollTop(Math.max(0, restoreSt|0), restoreScrollOpts); }
+      catch{ try{ _setEditorScrollTop(Math.max(0, restoreSt|0), { immediate:true }); }catch{} }
       // Do NOT recentre on switch; keep exact previous viewport
       _centerScrolloffOnce = false;
   _repositionCaret(); updateGutter();
@@ -7129,7 +7633,20 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
         const applyScroll = ()=>{
           // IME未確定中はスクロール/再配置の連続適用を停止（強制リフロー回避）
           try{ if (window._imeComposing===true){ return; } }catch{}
+          // Lite-restore reload path: while the buffer's real text/view is restored asynchronously,
+          // do not run the generic post-switch reinforcement. It can mis-detect off-screen and
+          // recenter/jump once the reload completes quickly.
+          if (restorePendingAtSwitch){
+            try{ if (vp) vp.style.visibility = prevVis; }catch{}
+            return;
+          }
           try{ clampViewportExactLines(); }catch{}
+          // After layout settles, re-sync EOF padding grid compensation.
+          // Without this, a grid-aligned saved scrollTop can be clamped to a non-grid physical max,
+          // producing a half-row at the top and shifting the restored view.
+          try{ _syncEofPadGridComp && _syncEofPadGridComp(); }catch{}
+          // Rebuild wrap cache now that viewport metrics are final.
+          try{ if (_wrapEnabled && _wrapEnabled() && !(_mdRichActive && _mdRichActive())){ _wrapInvalidateCache && _wrapInvalidateCache('switch-post'); _wrapEnsureCache && _wrapEnsureCache(true); } }catch{}
           // md-rich: wrap metrics depend on the final viewport width and overlay insets.
           // After tab switch/layout, width can settle over a few frames; rebuild caches here so
           // short lines are not misclassified as wrapped and gutter/text stay in sync.
@@ -7143,8 +7660,80 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
           }catch{}
           // Re-assert saved caret/viewport to defeat any early-frame overrides (#715)
           try{ _setCaret(vr, vc); }catch{}
-          try{ _setEditorScrollTop(Math.max(0, vsSnap), { immediate:true }); }catch{}
+
+          // Recompute restore scrollTop after caches/layout are stable (wrap-on + markdown-off case).
+          // This is critical because initial restore can run before editor width/font metrics are final,
+          // which changes wrap counts and would otherwise shift the top logical line.
+          if (!(options && options.jumpTo)){
+            try{
+              const r2 = _restoreScrollTopForBuffer(_restoreAnch, { forceWrapCache:true });
+              const nextSt = Math.max(0, (r2 && Number.isFinite(r2.st) ? (r2.st|0) : (restoreSt|0)));
+              if (Math.abs((nextSt|0) - (restoreSt|0)) >= Math.max(1, (LINE_HEIGHT|0))){
+                _dbgRestore('switch:recompute', { idx:(i|0), from:(restoreSt|0), to:(nextSt|0), why:(r2&&r2.why)||'?', extra:(r2||null), vp:_dbgViewportSnapshot() });
+                restoreSt = nextSt|0;
+                restoreScrollOpts = { immediate:true };
+              }
+            }catch{}
+          }
+          // Validate viewport now that wrap metrics and EOF padding are stable.
+          // This avoids false "caret off-screen" detection during the first pass (which can
+          // recenter the view on restart).
+          try{
+            const vis2 = Math.max(1, _visibleLinesExact());
+            let caretLine1 = ((vr|0) + 1);
+            try{
+              if (_wrapEnabled && _wrapEnabled()){
+                // Force build to avoid stale width-based wraps on restore.
+                _wrapEnsureCache && _wrapEnsureCache(true);
+                caretLine1 = (_wrapVisualLine1ForRowCol(vr|0, vc|0)|0);
+              }
+            }catch{ caretLine1 = ((vr|0) + 1); }
+            const savedTop1 = (Math.floor(Math.max(0, (restoreSt|0)) / Math.max(1, (LINE_HEIGHT|0))) + 1)|0;
+            const savedBottom1 = (savedTop1 + (vis2|0) - 1)|0;
+            if ((caretLine1|0) < (savedTop1|0) || (caretLine1|0) > (savedBottom1|0)){
+              let top1 = Math.max(1, (caretLine1|0) - Math.floor((vis2|0)/2));
+              // Clamp within total+pad range
+              const linesTotal = (function(){
+                try{
+                  if (_wrapEnabled && _wrapEnabled()){
+                    const c=_wrapEnsureCache(false);
+                    return (c && c.prefix) ? (c.prefix[c.prefix.length-1]|0) : (_totalLines()|0);
+                  }
+                }catch{}
+                return (_totalLines()|0);
+              })();
+              const totalForClamp = Math.max(1, (linesTotal|0));
+              const baseMaxTop = Math.max(1, (totalForClamp|0) - (vis2|0) + 1);
+              const maxTopWithPad = Math.max(1, (baseMaxTop|0) + ((_eofPadLines && _eofPadLines())|0));
+              top1 = Math.min(top1, maxTopWithPad);
+              restoreSt = Math.max(0, (top1-1) * (LINE_HEIGHT|0));
+              restoreScrollOpts = { immediate:true };
+            }
+          }catch{}
+          try{ _setEditorScrollTop(Math.max(0, restoreSt|0), restoreScrollOpts); }catch{ try{ _setEditorScrollTop(Math.max(0, restoreSt|0), { immediate:true }); }catch{} }
+          // Final grid snap (markdown-off): prevent half-row at top if browser clamps scrollTop to a non-grid max.
+          try{
+            const mdNow = (function(){ try{ return _mdRichActive && _mdRichActive(); }catch{ return false; } })();
+            if (!mdNow && (LINE_HEIGHT|0) > 0 && editor && typeof editor.scrollTop === 'number'){
+              // When restoring a pinned EOF view under wrap-on + EOF pad, physMax is often non-grid-aligned.
+              // Snapping DOWN hides 1 pad line and creates the observed thumb gap. Keep physical bottom.
+              if (restorePinnedBottomAtEof){
+                try{ _syncEofPadGridComp && _syncEofPadGridComp(); }catch{}
+                const physMax = Math.max(0, ((editor.scrollHeight||0) - (editor.clientHeight||0))|0);
+                _setEditorScrollTop(physMax|0, { immediate:true, keepCaret:true, physical:true });
+              } else {
+                const lh = Math.max(1, (LINE_HEIGHT|0));
+                const stCur = (editor.scrollTop|0);
+                const stSnap = Math.floor(Math.max(0, stCur) / lh) * lh;
+                if (Math.abs((stCur|0) - (stSnap|0)) > 0){
+                  _dbgRestore('switch:snap', { idx:(i|0), from:(stCur|0), to:(stSnap|0), vp:_dbgViewportSnapshot() });
+                  _setEditorScrollTop(stSnap|0, { immediate:true, physical:true });
+                }
+              }
+            }
+          }catch{}
           try{ _repositionCaret(); updateGutter(); }catch{}
+          try{ _dbgRestore('switch:applied', { idx:(i|0), st:(editor&&editor.scrollTop)|0, vr:(caretRow|0), vc:(caretCol|0), vp:_dbgViewportSnapshot() }); }catch{}
           // If this buffer was previously at physical bottom (thumb pinned), restore that
           // after compensation has been synced so the thumb stays at the end without exposing the tail.
           try{
@@ -7164,27 +7753,40 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
           try{
             if (!(b && b._restoreViewPending)){
               const st = (editor.scrollTop||0)|0;
-              const stSnap = Math.round(Math.max(0, st)/LINE_HEIGHT)*LINE_HEIGHT;
-              b.viewScrollTop = stSnap; b.viewRow = caretRow|0; b.viewCol = caretCol|0;
+              let stSave = 0;
+              if (restorePinnedBottomAtEof){
+                stSave = Math.max(0, ((editor.scrollHeight||0) - (editor.clientHeight||0))|0);
+                try{ b.viewPinnedBottomAtEof = true; }catch{}
+              } else {
+                stSave = Math.floor(Math.max(0, st)/LINE_HEIGHT)*LINE_HEIGHT;
+              }
+              b.viewScrollTop = (stSave|0); b.viewRow = caretRow|0; b.viewCol = caretCol|0;
+              try{
+                const lh = Math.max(1, (LINE_HEIGHT|0));
+                b.viewLineHeightPx = lh|0;
+                b.viewTopLine1 = (Math.floor(Math.max(0, (b.viewScrollTop|0)) / lh) + 1)|0;
+              }catch{}
             }
           }catch{}
         };
         // Force immediate apply once more for jumpTo cases to fix 1-line offset glitch
-        if (options && options.jumpTo) { applyScroll(); }
+        if (!restorePendingAtSwitch && options && options.jumpTo) { applyScroll(); }
 
         if (window.requestAnimationFrame){
           requestAnimationFrame(()=>{
-            applyScroll();
+            if (!restorePendingAtSwitch) applyScroll();
             // Reveal viewport after one more frame to avoid exposing any transient EOF clamp
             requestAnimationFrame(()=>{ try{ if (vp) vp.style.visibility = prevVis; }catch{} });
           });
         }
         // 未確定中はタイマー群を抑止
         if (!(window._imeComposing===true)){
-          setTimeout(applyScroll, 0);
-          setTimeout(applyScroll, 80);
-          // Add one more delayed reinforcement to defeat late layout/scroll listeners
-          setTimeout(applyScroll, 180);
+          if (!restorePendingAtSwitch){
+            setTimeout(applyScroll, 0);
+            setTimeout(applyScroll, 80);
+            // Add one more delayed reinforcement to defeat late layout/scroll listeners
+            setTimeout(applyScroll, 180);
+          }
           // Fallback: ensure viewport visibility is restored even if rAF doesn't fire (#715)
           setTimeout(()=>{ try{ if (vp) vp.style.visibility = prevVis; }catch{} }, 120);
         } else {
@@ -7202,8 +7804,31 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
       // Also record immediately (in case no scroll events fire)
       try{
         if (!(b && b._restoreViewPending)){
-          const st = (editor.scrollTop||0)|0; const stSnap = Math.round(Math.max(0, st)/LINE_HEIGHT)*LINE_HEIGHT;
-          b.viewScrollTop = stSnap; b.viewRow = caretRow|0; b.viewCol = caretCol|0;
+          const st = (editor.scrollTop||0)|0;
+          let stSnap = 0;
+          try{
+            const mdLogicalWrap = !!(
+              (_mdRichActive && _mdRichActive()) &&
+              (_wrapEnabled && _wrapEnabled()) &&
+              (_wrapUsesVisualScrollGrid && !_wrapUsesVisualScrollGrid())
+            );
+            if (mdLogicalWrap && typeof _mdEffectiveScrollTopPx === 'function'){
+              stSnap = Math.max(0, (_mdEffectiveScrollTopPx({ snap:true })|0));
+            } else {
+              if (restorePinnedBottomAtEof){
+                stSnap = Math.max(0, ((editor.scrollHeight||0) - (editor.clientHeight||0))|0);
+                try{ b.viewPinnedBottomAtEof = true; }catch{}
+              } else {
+                stSnap = Math.floor(Math.max(0, st) / Math.max(1, (LINE_HEIGHT|0))) * Math.max(1, (LINE_HEIGHT|0));
+              }
+            }
+          }catch{ stSnap = Math.max(0, st|0); }
+          b.viewScrollTop = (stSnap|0); b.viewRow = caretRow|0; b.viewCol = caretCol|0;
+          try{
+            const lh = Math.max(1, (LINE_HEIGHT|0));
+            b.viewLineHeightPx = lh|0;
+            b.viewTopLine1 = (Math.floor(Math.max(0, (b.viewScrollTop|0)) / lh) + 1)|0;
+          }catch{}
         }
       }catch{}
       _setTitle(); _renderTabbar();
@@ -7277,7 +7902,7 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
                   const meta1 = await _statFileMeta(bb.path);
                   if (meta1){ return; } // まだ存在 → 削除なし
                   // 再度キャッシュ破棄後にもう一度（_statFileMeta 内部で破棄済だが念のため二重防御）
-                  try{ const parent = _dirnameURL(bb.path); const key = (function(){ try{ return _ensureSlash(parent)?.toString()||null; }catch{ return null; } })(); if (key && _dirCache && _dirCache.delete){ _dirCache.delete(key); } }catch{}
+                  try{ const parent = _dirnameURL(bb.path); const key = (function(){ try{ return _ensureSlashKey(parent); }catch{ return null; } })(); if (key && _dirCache && _dirCache.delete){ _dirCache.delete(key); } }catch{}
                   const meta2 = await _statFileMeta(bb.path);
                   if (!meta2 && hasBaseline){
                     const label = bb.path ? _prettyFileUrlLabel(bb.path) : (bb.name||'(untitled)');
@@ -7360,7 +7985,7 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
           /* [ext-check] miss meta log removed */
           try{
             const parent = _dirnameURL(b.path);
-            const key = (function(){ try{ return _ensureSlash(parent)?.toString()||null; }catch{ return null; } })();
+            const key = (function(){ try{ return _ensureSlashKey(parent); }catch{ return null; } })();
             if (key && _dirCache && _dirCache.delete){ _dirCache.delete(key); }
           }catch{}
           try{ meta = await _statFileMeta(b.path); }catch{}
@@ -7392,7 +8017,7 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
             const after = currentBuffer();
             if (after===b && !after.modified){
               // リロード直後はキャッシュを捨ててメタを再取得
-              try{ const parent = _dirnameURL(b.path); const k = (function(){ try{ return _ensureSlash(parent)?.toString()||null; }catch{ return null; } })(); if (k && _dirCache && _dirCache.delete){ _dirCache.delete(k); } }catch{}
+              try{ const parent = _dirnameURL(b.path); const k = (function(){ try{ return _ensureSlashKey(parent); }catch{ return null; } })(); if (k && _dirCache && _dirCache.delete){ _dirCache.delete(k); } }catch{}
               const meta2 = await _statFileMeta(b.path);
               if (meta2){
                 if (typeof meta2.mtime === 'number') b._extMtime = meta2.mtime;
@@ -7510,10 +8135,10 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
                 // 仕様 #348: 一覧走査の完了タイミングでは入力欄へ反映しない
               });
             } else {
-              const reqKey = (function(){ try{ return _ensureSlash(_fileBaseURL)?.toString()||null; }catch{ return null; } })();
+              const reqKey = (function(){ try{ return _ensureSlashKey(_fileBaseURL); }catch{ return null; } })();
               _listDirEntriesWithQuickRetry(_fileBaseURL).then(list2=>{
                 try{
-                  const curKey = _ensureSlash(_fileBaseURL)?.toString()||null;
+                  const curKey = _ensureSlashKey(_fileBaseURL);
                   if (!reqKey || curKey===reqKey){
                     _fileEntries = Array.isArray(list2) ? list2 : [];
                     if (Array.isArray(list2) && list2.length>0){ _fileStableEntries = list2.slice(); _fileStableBaseKey = curKey; }
@@ -7589,7 +8214,7 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
             // サブディレクトリ降下直後の自動補完を次回レンダで実行するためフラグセット（親移動時は除外） (#810)
             try{
               if (!it._up){
-                const baseStr = (function(){ try{ return _ensureSlash(nextBase)?.toString()||null; }catch{ return null; } })();
+                const baseStr = (function(){ try{ return _ensureSlashKey(nextBase); }catch{ return null; } })();
                 _fileAutoPrefillOnNextRender = { base: baseStr, typed: String(_fileTypedDirRaw||'') };
               }
             }catch{}
@@ -8124,7 +8749,7 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
           else {
             try{
               const parent = _dirnameURL(uProbe.toString());
-              const key = (function(){ try{ return _ensureSlash(parent)?.toString()||null; }catch{ return null; } })();
+              const key = (function(){ try{ return _ensureSlashKey(parent); }catch{ return null; } })();
               const fname = (function(){ try{ return _basename(uProbe.pathname||''); }catch{ return null; } })();
               let present = false;
               if (key && fname && typeof _dirCache!=='undefined' && _dirCache && _dirCache.get){
@@ -8509,11 +9134,15 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
       return editor.clientHeight || viewport.clientHeight;
     })();
     // non-md: exclude textarea padding so visible lines reflect the actual content box.
+    // NOTE: EOF padding is implemented via paddingBottom and is part of what the user sees.
+    // If we subtract it here, visible-lines is under-counted near EOF and session restore
+    // may incorrectly recenter the viewport ("即時終了→再起動で表示範囲がズレる").
     try{
       if (!(_mdRichActive && _mdRichActive()) && editor && window && window.getComputedStyle){
         const cs = window.getComputedStyle(editor);
         const pt = Math.max(0, Math.round(parseFloat(cs.paddingTop||'0')||0));
-        const pb = Math.max(0, Math.round(parseFloat(cs.paddingBottom||'0')||0));
+        let pb = Math.max(0, Math.round(parseFloat(cs.paddingBottom||'0')||0));
+        try{ if ((typeof _eofPadLines === 'function') && ((_eofPadLines()|0) > 0)) pb = 0; }catch{}
         const hh = (h|0) - (pt|0) - (pb|0);
         if (hh > 0) h = hh;
       }
@@ -9128,6 +9757,16 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
       // Persist session after modifications (debounced)
       _schedulePersist('modify');
 
+      // Non-md + wrap-on: sync EOF pad grid compensation after text mutations.
+      // This keeps physMax grid-aligned and prevents thumb-bottom gaps after edits at EOF.
+      try{
+        const mdNow = (function(){ try{ return _mdRichActive && _mdRichActive(); }catch{ return false; } })();
+        const wrapNow = (function(){ try{ return _wrapEnabled && _wrapEnabled(); }catch{ return false; } })();
+        if (!mdNow && wrapNow && (typeof _syncEofPadGridComp === 'function')){
+          _syncEofPadGridComp();
+        }
+      }catch{}
+
       // After line deletions near EOF, browser layout timing can leave scrollTop at a half-line
       // value momentarily, showing a "leading half-row" at the top (#436). Detect line count
       // reductions and, when near EOF, floor-snap scrollTop now and on next frame.
@@ -9388,6 +10027,7 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
     // 強制同期順序: CaseA/B の EOF 削除/undo 直後に表示が旧状態で残る問題 (#614)
     try{ _mdWrapInvalidateCache('text-mutation'); _mdWrapEnsureCache(false); }catch{}
     try{ _mdSyncEofPadComp(); }catch{}
+    try{ _syncEofPadGridComp && _syncEofPadGridComp(); }catch{}
     // 1) caret を raw でクランプ
     try{ _clampCaret(); }catch{}
     // 2) ネイティブ selection を先に caret に合わせる (末尾 phantom 空行判定に利用されるため)
@@ -9400,6 +10040,47 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
     // 5) ガター更新と listchars 再描画（caret オーバーレイ位置確定後の最終状態）
     try{ updateGutter(); }catch{}
     try{ if (_optList && _editorTextLen() <= 200000){ _renderListChars(); } }catch{}
+
+    // 6) markdown-off + wrap-on + EOF pad: keep the view physically pinned to the bottom.
+    // In Chromium, selection/layout updates after a mutation can occur *after* this function returns,
+    // changing scrollHeight/clientHeight and leaving us ~1 line above the physical bottom.
+    // Re-pin across a short window to stabilize the visible EOF padding.
+    try{
+      const mdNow = (function(){ try{ return _mdRichActive && _mdRichActive(); }catch{ return false; } })();
+      const wrapNow = (function(){ try{ return _wrapEnabled && _wrapEnabled(); }catch{ return false; } })();
+      if (!mdNow && wrapNow){
+        const eofPad = (typeof _eofPadLines === 'function') ? (_eofPadLines()|0) : 0;
+        if ((eofPad|0) > 0){
+          const total = (typeof _totalLines === 'function') ? (_totalLines()|0) : 0;
+          const atEOF = ((total|0) > 0) && ((caretRow|0) >= ((total|0) - 1));
+          if (atEOF && editor && typeof editor.scrollTop === 'number'){
+            const lh = (typeof LINE_HEIGHT === 'number' && LINE_HEIGHT > 0) ? LINE_HEIGHT : 20;
+            // Enable a short-lived "bottom stick" window unconditionally at EOF.
+            // (Even if we are exactly at the bottom now, the physical max can grow a moment later.)
+            try{ window.__sixEofBottomStickUntil = Date.now() + 620; }catch{}
+            const pin = ()=>{
+              try{
+                const pm = Math.max(0, ((editor.scrollHeight||0) - (editor.clientHeight||0)));
+                const cur = +editor.scrollTop;
+                const diff = (pm - cur);
+                // Only force if still near bottom (avoid surprising big jumps).
+                if (diff > 0.5 && diff <= (lh * 6 + 2)){
+                  _setEditorScrollTop(pm, { immediate:true, keepCaret:true, physical:true });
+                  try{ _syncTiledBgRemainder && _syncTiledBgRemainder(); }catch{}
+                }
+              }catch{}
+            };
+            // Reinforce across several frames/timeouts to catch late reflow/selection scroll.
+            pin();
+            try{ if (window && window.requestAnimationFrame) requestAnimationFrame(()=>{ try{ pin(); requestAnimationFrame(pin); }catch{} }); }catch{}
+            try{ setTimeout(pin, 0); }catch{}
+            try{ setTimeout(pin, 60); }catch{}
+            try{ setTimeout(pin, 160); }catch{}
+            try{ setTimeout(pin, 320); }catch{}
+          }
+        }
+      }
+    }catch{}
   }
   function _makeSnapshot(){
     const b=currentBuffer();
@@ -10227,6 +10908,107 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
       __six_scroll_anim = requestAnimationFrame(step);
     }catch(e){ try{ editor.scrollTop = Math.max(0, Math.round(targetPx||0)); }catch{} }
   }
+
+  // Prepare a stable scroll/view state for session persistence right before quitting.
+  // Motivation: Immediate quit right after a large jump (e.g. `G`) can happen while
+  // smooth-scroll animation is still in-flight, so capturing editor.scrollTop can
+  // persist a transient value and cause a shifted viewport on next launch.
+  function _prepareViewStateForImmediateQuit(tag){
+    try{
+      try{ _dbgRestore('quit:begin', { tag:String(tag||''), mode: (typeof _mode!=='undefined'?String(_mode):null), md: (function(){ try{ return _mdRichActive && _mdRichActive(); }catch{ return false; } })(), wrap: (function(){ try{ return _wrapEnabled && _wrapEnabled(); }catch{ return false; } })(), caretRow:(caretRow|0), caretCol:(caretCol|0), vp:_dbgViewportSnapshot() }); }catch{}
+      // 1) Finalize any in-flight smooth scroll so scrollTop represents the intended target.
+      try{
+        if (__six_scroll_anim && typeof __six_scroll_target === 'number' && Number.isFinite(__six_scroll_target)){
+          try{ cancelAnimationFrame(__six_scroll_anim); }catch{}
+          __six_scroll_anim = null;
+          const t = Math.max(0, Math.round(__six_scroll_target||0));
+          __six_scroll_target = null;
+          try{ document.body.classList.remove('is-scrolling'); }catch{}
+          try{ editor && (editor.scrollTop = t); }catch{}
+          try{ _repositionCaret(); updateGutter(); }catch{}
+        }
+      }catch{}
+
+      // 2) Refresh EOF padding compensation when it can affect max scroll range.
+      try{
+        const mdNow = (function(){ try{ return _mdRichActive && _mdRichActive(); }catch{ return false; } })();
+        const wrapNow = (function(){ try{ return _wrapEnabled && _wrapEnabled(); }catch{ return false; } })();
+        const eofPad = (typeof _eofPadLines === 'function') ? (_eofPadLines()|0) : 0;
+        if (wrapNow && (eofPad|0) > 0){
+          if (mdNow){
+            // md-rich + wrap-on uses logical grid with extra compensation.
+            try{
+              if (_wrapUsesVisualScrollGrid && !_wrapUsesVisualScrollGrid()){
+                if (typeof _mdSyncEofPadComp === 'function') _mdSyncEofPadComp();
+              }
+            }catch{}
+          } else {
+            // markdown-off: physical grid compensation
+            try{ if (typeof _syncEofPadGridComp === 'function') _syncEofPadGridComp(); }catch{}
+          }
+          // Force layout read so scrollHeight/clientHeight reflect updated padding.
+          try{ void (editor && editor.scrollHeight); }catch{}
+        }
+      }catch{}
+
+      // 3) Compute stable scrollTop: prefer effective max for md-rich, else physical max.
+      let st = 0;
+      try{ st = (editor && typeof editor.scrollTop === 'number') ? +editor.scrollTop : 0; }catch{ st = 0; }
+      try{
+        const mdNow = (function(){ try{ return _mdRichActive && _mdRichActive(); }catch{ return false; } })();
+        if (mdNow && typeof _mdEffectiveMaxScrollPx === 'function'){
+          const effMax = _mdEffectiveMaxScrollPx()|0;
+          if ((effMax|0) >= 0) st = Math.min(st, effMax|0);
+        } else {
+          const physMax = Math.max(0, (((editor && editor.scrollHeight) ? (editor.scrollHeight|0) : 0) - ((editor && editor.clientHeight) ? (editor.clientHeight|0) : 0))|0);
+          st = Math.min(st, physMax|0);
+        }
+      }catch{}
+      st = Math.max(0, Math.round(st||0));
+
+      // 4) Snap to line grid for stability (non-md). If very close to bottom, pin to bottom.
+      try{
+        const mdNow = (function(){ try{ return _mdRichActive && _mdRichActive(); }catch{ return false; } })();
+        if (!mdNow && (LINE_HEIGHT|0) > 0){
+          const lh = (LINE_HEIGHT|0) || 1;
+          const physMax = Math.max(0, (((editor && editor.scrollHeight) ? (editor.scrollHeight|0) : 0) - ((editor && editor.clientHeight) ? (editor.clientHeight|0) : 0))|0);
+          if ((physMax - st) <= Math.max(2, Math.floor(lh * 0.6))) st = physMax;
+          else st = Math.floor(st / lh) * lh;
+        }
+      }catch{}
+      st = Math.max(0, st|0);
+
+      // 5) Write into active buffer state (avoid overwriting lite-restore pending state).
+      try{
+        const b = (typeof currentBuffer === 'function') ? currentBuffer() : null;
+        if (!b) return;
+        try{ if (b && b._restoreViewPending){ return; } }catch{}
+        b.viewRow = caretRow | 0;
+        b.viewCol = caretCol | 0;
+        b.viewScrollTop = st|0;
+        try{
+          const lh = Math.max(1, (LINE_HEIGHT|0));
+          b.viewLineHeightPx = lh|0;
+          b.viewTopLine1 = (Math.floor(Math.max(0, (b.viewScrollTop|0)) / lh) + 1)|0;
+        }catch{}
+        // Wrap-on (markdown-off): also update logical top-row/intra anchor.
+        try{
+          const mdNow = (function(){ try{ return _mdRichActive && _mdRichActive(); }catch{ return false; } })();
+          const wrapNow = (function(){ try{ return _wrapEnabled && _wrapEnabled(); }catch{ return false; } })();
+          const usesVisual = (function(){ try{ return _wrapUsesVisualScrollGrid && _wrapUsesVisualScrollGrid(); }catch{ return false; } })();
+          if (!mdNow && wrapNow && usesVisual && typeof _wrapRowFromVisualLine1 === 'function'){
+            const v1 = (Math.floor(Math.max(0, (b.viewScrollTop|0)) / Math.max(1, (LINE_HEIGHT|0))) + 1)|0;
+            const rc = _wrapRowFromVisualLine1(v1|0) || { row:0, intra:0 };
+            b.viewTopRow = (rc.row|0);
+            b.viewTopIntra = (rc.intra|0);
+          }
+        }catch{}
+        try{ b._quitPersistTag = String(tag||''); }catch{}
+        try{ _dbgRestore('quit:saved', { tag:String(tag||''), vr:(b.viewRow|0), vc:(b.viewCol|0), vs:(b.viewScrollTop|0), top1:(b.viewTopLine1|0), lh:(b.viewLineHeightPx|0), topRow:(b.viewTopRow|0), topIntra:(b.viewTopIntra|0), vp:_dbgViewportSnapshot() }); }catch{}
+      }catch{}
+    }catch{}
+  }
+
   function ensureScrolloff(opts={}){
     // IME composition: skip auto scroll adjustments unless explicitly forced
     try{ if (window && window._imeComposing===true && !(opts && opts.force)){ try{ window.SIX_IME_METRICS && (window.SIX_IME_METRICS.composingCalls.ensure++); }catch{} return; } }catch{}
@@ -10262,6 +11044,30 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
     const linesTotal = _totalLines();
     const vis = _visibleLinesExact();
     const atLogicalEOF = (((caretRow|0) + 1) === (linesTotal|0));
+
+    // Non-md + EOF pad: sync implicit trailing-empty-line compensation, and for wrap-on
+    // keep physical maxScrollTop aligned to the line grid.
+    // This must happen before any eofToBottom/preferEOFPad decisions, otherwise a
+    // bottom-pin can be snapped up by _setEditorScrollTop and leave a thumb gap.
+    try{
+      const mdNow = (function(){ try{ return _mdRichActive && _mdRichActive(); }catch{ return false; } })();
+      const wrapNow = (function(){ try{ return _wrapEnabled && _wrapEnabled(); }catch{ return false; } })();
+      const eofPad = (typeof _eofPadLines==='function') ? (_eofPadLines()|0) : 0;
+      const want = !!(opts && (opts.eofToBottom || opts.preferEOFPad)) || atLogicalEOF;
+      if (!mdNow && (eofPad|0) > 0 && want){
+        try{ _syncEofPadGridComp && _syncEofPadGridComp(); }catch{}
+      }
+    }catch{}
+
+    // Non-md: ensure EOF pad compensation is synced when at logical EOF.
+    // Navigation commands (G/j/k) don't call _touchBufferModified, so paddingBottom may be stale.
+    try{
+      const mdNow0 = (function(){ try{ return _mdRichActive && _mdRichActive(); }catch{ return false; } })();
+      const eofPad0 = (typeof _eofPadLines==='function') ? (_eofPadLines()|0) : 0;
+      if (!mdNow0 && (eofPad0|0) > 0 && atLogicalEOF && (typeof _syncEofPadGridComp === 'function')){
+        _syncEofPadGridComp();
+      }
+    }catch{}
 
     // md-rich + wrap-on uses logical scroll grid with extra scroll-range compensation.
     // Navigation-only commands (G/j/k) don't mutate text, so the compensation can go stale
@@ -10320,7 +11126,20 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
     const baseMaxTop = Math.max(1, (totalForClamp|0) - vis + 1);
     const _eofPad = _eofPadLines();
     // NOTE: Do NOT cap by total lines; padding creates a virtual scroll range even when file < viewport.
-    const maxTopWithPad = Math.max(1, baseMaxTop + (_eofPad|0));
+    // In wrap-on + markdown-off, the *physical* scroll range can exceed any line-count-based estimate
+    // (native soft wraps, delayed reflow after mutations). If we clamp using a stale estimate, we can
+    // end up 1 line short at EOF (thumb gap) right after `o`.
+    // Always ensure the line-based maximum is at least the physical max scroll range.
+    let maxTopWithPad = Math.max(1, baseMaxTop + (_eofPad|0));
+    try{
+      const mdNow = (function(){ try{ return _mdRichActive && _mdRichActive(); }catch{ return false; } })();
+      const wrapNow = (function(){ try{ return _wrapEnabled && _wrapEnabled(); }catch{ return false; } })();
+      if (!mdNow && wrapNow && (_eofPad|0) > 0 && editor && (LINE_HEIGHT|0) > 0){
+        const physMaxPx = Math.max(0, ((editor.scrollHeight||0) - (editor.clientHeight||0))|0);
+        const physMaxTopLine1 = (Math.floor(physMaxPx / (LINE_HEIGHT|0)) + 1)|0;
+        if ((physMaxTopLine1|0) > (maxTopWithPad|0)) maxTopWithPad = physMaxTopLine1|0;
+      }
+    }catch{}
 
     // EOF bottom lock:
     // When the native scrollbar is already at (or very near) the physical bottom and EOF padding is enabled,
@@ -10329,13 +11148,22 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
     // Allow explicit center/eof jump requests to bypass this.
     try{
       if (!(_visualActive) && !(_suppressScrollDuringModal) && !(_scrolloffPaused) && (_eofPad|0) > 0 && !(opts && (opts.centerOnce || opts.eofToBottom)) && !big){
-        // During scan-hold (key held), allow normal scrolloff enforcement.
-        // Otherwise, starting from physical bottom can keep the thumb pinned and delay upward scrolling
-        // until the caret hits the topmost visible line, which looks like a jump.
+        // During scan-hold (key held), allow normal scrolloff enforcement ONLY when moving away from
+        // the physical bottom (i.e. holding K/ArrowUp). For J/ArrowDown at EOF, bypassing the lock
+        // causes ensureScrolloff to attempt impossible downward adjustments, which can trigger
+        // scan-hold scroll-mode promotion and produce a caret "jump loop" near EOF.
         let bypassBottomLock = false;
         try{
           const held = (window && window.__sixScanHoldHeld);
-          bypassBottomLock = !!(held && held.size > 0);
+          const sh = (window && window._scanHold);
+          // scan-hold marks the key as held even for a single keydown.
+          // Do NOT bypass the EOF bottom lock in scan-hold *caret* mode; doing so can
+          // shrink visible EOF padding by ~1 line as soon as hold/repeat starts.
+          // Only bypass when scan-hold is explicitly in scroll mode (content scrolling).
+          const kHeld = !!(held && held.size > 0 && (held.has('KeyK') || held.has('ArrowUp')));
+          const scanHoldScrollMode = !!(sh && sh.mode === 'scroll' && sh.scrollActive);
+          const movingUp = !!(sh && (sh.scrollDir|0) < 0);
+          bypassBottomLock = !!(kHeld && scanHoldScrollMode && movingUp);
         }catch{ bypassBottomLock = false; }
 
         if (!bypassBottomLock){
@@ -10346,7 +11174,19 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
           if (nearPhysBottom){
             const topCmpLock = _wrapActive ? (_topV1|0) : (topLine|0);
             const caretInViewLock = ((caretLine1|0) >= (topCmpLock|0) && (caretLine1|0) <= ((topCmpLock|0) + (vis|0) - 1));
-            if (caretInViewLock){
+
+            // If the caret is approaching the upper scrolloff margin, we must allow scrolling
+            // even when currently pinned near the physical bottom.
+            let violatesTopMargin = false;
+            try{
+              const so = Math.max(0, (scrolloff|0));
+              let soUp = Math.min(so, Math.max(0, (caretLine1|0) - 1));
+              const maxMargin = Math.max(0, Math.floor(((vis|0) - 1) / 2));
+              if ((soUp|0) > (maxMargin|0)) soUp = (maxMargin|0);
+              violatesTopMargin = ((caretLine1|0) < ((topCmpLock|0) + (soUp|0)));
+            }catch{ violatesTopMargin = false; }
+
+            if (caretInViewLock && !violatesTopMargin){
               // Keep overlays in sync when callers expect a caret render.
               if (force){ try{ _repositionCaret(); }catch{} }
               return;
@@ -10399,6 +11239,13 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
           (_wrapEnabled && _wrapEnabled()) &&
           (_wrapUsesVisualScrollGrid && !_wrapUsesVisualScrollGrid())
         );
+        const mdOff = !(function(){ try{ return _mdRichActive && _mdRichActive(); }catch{ return false; } })();
+        const wrapOn = (function(){ try{ return _wrapEnabled && _wrapEnabled(); }catch{ return false; } })();
+        // Tokenize scheduled pins so multiple timers don't fight and cause flicker.
+        const pinSeq = (function(){
+          try{ ensureScrolloff._eofPinSeq = ((ensureScrolloff._eofPinSeq|0) + 1)|0; return ensureScrolloff._eofPinSeq|0; }
+          catch{ return (Date.now()|0); }
+        })();
         if (mdLogicalWrap){
           // Refresh compensation and drive to *physical* bottom so thumb reaches the end,
           // while effective scrollTop hides extraPx and keeps only eofPad visible.
@@ -10406,6 +11253,43 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
           const physMax = Math.max(0, ((editor.scrollHeight||0) - (editor.clientHeight||0))|0);
           _setEditorScrollTop(physMax, Object.assign({}, opts||{}, { immediate:true, keepCaret:true, physical:true }));
           try{ _mdPinThumbPhysBottom('ensure:eofToBottom'); }catch{}
+        } else if (mdOff && wrapOn && (_eofPad|0) > 0) {
+          // #1572: markdown-off + wrap-on: always use physical bottom.
+          // Padding baseline is handled by _syncEofPadGridComp() (it applies a 1-line implicit compensation).
+          const pin = ()=>{
+            try{ if ((ensureScrolloff._eofPinSeq|0) !== (pinSeq|0)) return; }catch{}
+            try{ _syncEofPadGridComp && _syncEofPadGridComp(); }catch{}
+            const physMax = Math.max(0, ((editor.scrollHeight||0) - (editor.clientHeight||0))|0);
+            try{ if (Math.abs(((editor.scrollTop||0) - (physMax|0))) <= 0.5) return; }catch{}
+            _setEditorScrollTop(physMax, Object.assign({}, opts||{}, { immediate:true, keepCaret:true, physical:true }));
+            // Mark pinned EOF so later snap/persist logic doesn't detach the thumb.
+            try{ const b0=currentBuffer(); if (b0){ b0.viewPinnedBottomAtEof = true; b0.viewScrollTop = (physMax|0); } }catch{}
+          };
+          pin();
+          try{ if (window && window.requestAnimationFrame) requestAnimationFrame(pin); }catch{}
+          try{ setTimeout(pin, 0); }catch{}
+          try{ setTimeout(pin, 60); }catch{}
+          try{ setTimeout(pin, 160); }catch{}
+        } else if (mdOff && !wrapOn && (_eofPad|0) > 0) {
+          // markdown-off + wrap-off: LINE_HEIGHT rounding/subpixel can make the line-based
+          // target fall short of the physical bottom, leaving a thumb gap.
+          const pin = ()=>{
+            try{ if ((ensureScrolloff._eofPinSeq|0) !== (pinSeq|0)) return; }catch{}
+            try{ _syncEofPadGridComp && _syncEofPadGridComp(); }catch{}
+            const physMax = Math.max(0, ((editor.scrollHeight||0) - (editor.clientHeight||0))|0);
+            const cur = (editor && typeof editor.scrollTop === 'number') ? (editor.scrollTop||0) : 0;
+            // Only ever adjust downward to avoid the fast up/down flicker.
+            try{ if (((physMax|0) - (cur|0)) <= 0.5) return; }catch{}
+            _setEditorScrollTop(physMax, Object.assign({}, opts||{}, { immediate:true, keepCaret:true, physical:true }));
+            // Mark pinned EOF so later snap/persist logic doesn't detach the thumb.
+            try{ const b0=currentBuffer(); if (b0){ b0.viewPinnedBottomAtEof = true; b0.viewScrollTop = (physMax|0); } }catch{}
+          };
+          // Re-pin after paddingBottom/layout settles. Use downward-only pins to avoid flicker.
+          pin();
+          try{ if (window && window.requestAnimationFrame) requestAnimationFrame(pin); }catch{}
+          try{ setTimeout(pin, 0); }catch{}
+          try{ setTimeout(pin, 80); }catch{}
+          try{ _scrollGuardUntil = Date.now() + 400; }catch{}
         } else {
           const targetPx = Math.max(0, ((maxTopWithPad|0) - 1) * (LINE_HEIGHT|0));
           _setEditorScrollTop(targetPx, Object.assign({}, opts||{}, { immediate:true }));
@@ -10649,14 +11533,21 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
       }catch{}
 
       // markdown-off + wrap-on: browser clamp at physical EOF may be non-aligned to LINE_HEIGHT.
-      // If ensureScrolloff didn't scroll, snapping here causes a visible "25% line" jump near EOF.
+      // Snapping (floor) at physical EOF moves the fractional remainder to the TOP of the viewport,
+      // which looks like the whole screen "slips" (EOF pad goes from N+frac to N).
+      // Therefore, near physical EOF we must skip snapping regardless of whether ensureScrolloff
+      // *attempted* to scroll (the attempt can be clamped, leaving st unchanged but scrolled=true).
       try{
         const mdNow = (function(){ try{ return _mdRichActive && _mdRichActive(); }catch{ return false; } })();
         const wrapNow = (function(){ try{ return _wrapEnabled && _wrapEnabled(); }catch{ return false; } })();
-        if (!mdNow && wrapNow && !scrolled){
+        if (!mdNow && wrapNow){
           const stE = (editor.scrollTop||0);
           const maxE = (editor.scrollHeight||0) - (editor.clientHeight||0);
-          if ((maxE - stE) <= 1.5) return;
+          if ((maxE - stE) <= 1.5){
+            // Even if we avoid snapping, keep tiled backgrounds aligned with the fractional remainder.
+            try{ _syncTiledBgRemainder && _syncTiledBgRemainder(); }catch{}
+            return;
+          }
         }
       }catch{}
 
@@ -10688,6 +11579,21 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
                 if (stP2 > (effMax2 + 0.5)) return;
               }
             }catch{}
+            // Same EOF-near clamp guard as above: do not floor-snap at physical EOF
+            // for markdown-off + wrap-on.
+            try{
+              const mdNow2 = (function(){ try{ return _mdRichActive && _mdRichActive(); }catch{ return false; } })();
+              const wrapNow2 = (function(){ try{ return _wrapEnabled && _wrapEnabled(); }catch{ return false; } })();
+              if (!mdNow2 && wrapNow2){
+                const stE2 = (editor.scrollTop||0);
+                const maxE2 = (editor.scrollHeight||0) - (editor.clientHeight||0);
+                if ((maxE2 - stE2) <= 1.5){
+                  try{ _syncTiledBgRemainder && _syncTiledBgRemainder(); }catch{}
+                  return;
+                }
+              }
+            }catch{}
+
             const st1 = (editor.scrollTop||0);
             const flo1 = Math.floor(st1/LINE_HEIGHT)*LINE_HEIGHT;
             if (Math.abs(flo1 - st1) > 0.01){
@@ -10708,6 +11614,48 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
       let st = (editor && typeof editor.scrollTop === 'number') ? (editor.scrollTop|0) : 0;
       const vis = Math.max(1, (function(){ try{ return _visibleLinesExact(); }catch{ return 1; } })());
       const total = (function(){ try{ return _totalLines(); }catch{ return 1; } })();
+
+      // Session restore + EOF pad (markdown-off + wrap-on): keep physical bottom pinned.
+      // This function is called during post-start stabilization; without this guard it can
+      // floor-snap scrollTop and hide 1 EOF pad line, producing the "thumb gap".
+      try{
+        const mdNow0 = (function(){ try{ return _mdRichActive && _mdRichActive(); }catch{ return false; } })();
+        const eofPad0 = (typeof _eofPadLines==='function') ? (_eofPadLines()|0) : 0;
+        const atEof0 = (((caretRow|0) + 1) === (total|0));
+        const sr = window.__sixSessionRestore;
+        const now = Date.now();
+        const srActive = !!(sr && (now < (sr.until|0)) && ((currentIdx|0) === (sr.idx|0)));
+        const b0 = (typeof currentBuffer==='function') ? currentBuffer() : null;
+        const pin = (!mdNow0 && (eofPad0|0) > 0 && atEof0 && ((srActive && !!sr.pinBottomAtEof) || !!(b0 && b0.viewPinnedBottomAtEof)));
+        if (pin){
+          try{ _syncEofPadGridComp && _syncEofPadGridComp(); }catch{}
+          const physMax = Math.max(0, ((editor.scrollHeight||0) - (editor.clientHeight||0))|0);
+          _setEditorScrollTop(physMax|0, { immediate:true, keepCaret:true, physical:true });
+          try{ if (b0){ b0.viewPinnedBottomAtEof = true; b0.viewScrollTop = (physMax|0); b0.viewRow = caretRow|0; b0.viewCol = caretCol|0; } }catch{}
+          _repositionCaret(); updateGutter();
+          try{ _scrollGuardUntil = Date.now() + 400; }catch{}
+          return;
+        }
+      }catch{}
+
+      // markdown-off + wrap-on: near physical EOF, scrollTop can be clamped to a non-grid max.
+      // Snapping here would move the remainder to the TOP (half-row), and can change perceived EOF padding.
+      // Keep current scrollTop and just persist/re-render.
+      try{
+        const mdNow = (function(){ try{ return _mdRichActive && _mdRichActive(); }catch{ return false; } })();
+        const wrapNow = (function(){ try{ return _wrapEnabled && _wrapEnabled(); }catch{ return false; } })();
+        if (!mdNow && wrapNow && editor && (LINE_HEIGHT|0) > 0){
+          const lh = (LINE_HEIGHT|0);
+          const maxE = ((editor.scrollHeight||0) - (editor.clientHeight||0));
+          const maxRem = (lh > 0) ? (Math.abs((maxE|0) % lh)|0) : 0;
+          if (maxRem !== 0 && (maxE - st) <= 1.5){
+            try{ const b = currentBuffer(); if (b){ b.viewScrollTop = (st|0); b.viewRow = caretRow|0; b.viewCol = caretCol|0; } }catch{}
+            try{ _syncTiledBgRemainder && _syncTiledBgRemainder(); }catch{}
+            _repositionCaret(); updateGutter();
+            return;
+          }
+        }
+      }catch{}
 
       // 現在の可視範囲（変更前）
       let curTopLine = Math.floor(st/LINE_HEIGHT) + 1;
@@ -10825,7 +11773,15 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
   function updateGutter(opts){
     // IME未確定中はガター更新を停止（重いDOM更新を避ける）
     // ただし markdown-rich は行高同期が必要なので抑止しない (#1477)
-    try{ if (window._imeComposing===true && !_mdRichEnabled()){ return; } }catch{}
+    // #1587: Reduced-text IME mode changes editor.value to a small subset and makes caret coords
+    // relative to that subset. In that state, skipping gutter updates leaves numbers stale and
+    // visually desyncs the caret/gutter (and looks like a jump). Allow updates in reduced mode.
+    try{
+      if (window._imeComposing===true && !_mdRichEnabled()){
+        const imeReduced = !!(document && document.body && document.body.classList && document.body.classList.contains('ime-reduced-text'));
+        if (!imeReduced) return;
+      }
+    }catch{}
     // Markdown rich mode: render per-line heights + text layer (visible region only)
     try{
       if (_mdRichActive()){
@@ -10995,7 +11951,17 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
     // Wrap mode (non-markdown): render gutter per *visual* line.
     try{
       if (_wrapEnabled() && !_mdRichActive()){
-        const vis = _visibleLinesExact();
+        let imeReduced = false;
+        let imeBase1 = 0;
+        try{ imeReduced = !!(document && document.body && document.body.classList && document.body.classList.contains('ime-reduced-text')); }catch{ imeReduced = false; }
+        try{ imeBase1 = (window && Number.isFinite(window._imeReducedBaseLine1)) ? (window._imeReducedBaseLine1|0) : 0; }catch{ imeBase1 = 0; }
+
+        // IMPORTANT: use the full viewport height for gutter row count.
+        // The textarea's paddingBottom (used for EOF padding) reduces the "content box" height,
+        // but the gutter must still fully cover the visible viewport to avoid an unpainted strip
+        // that looks like a mysterious extra "no-number" gutter line.
+        const vpH = (viewport && viewport.clientHeight) ? (viewport.clientHeight|0) : ((editor && editor.clientHeight) ? (editor.clientHeight|0) : 0);
+        const vis = Math.max(1, Math.floor((vpH|0) / (LINE_HEIGHT||1)));
         const topV1 = _topVisualLine1();
         const infoTop = _wrapRowFromVisualLine1(topV1);
         const rows = [];
@@ -11016,10 +11982,12 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
         }
 
         const children = Array.from(gutter.children).filter(c => !c.classList.contains('gutter-stripe'));
+        let lastEl = null;
         for (let i=0;i<rows.length; i++){
           const rr = rows[i];
           let el = children[i];
           if (!el){ el = document.createElement('div'); gutter.appendChild(el); }
+          lastEl = el;
           try{
             el.style.display = 'block';
             el.style.height = LINE_HEIGHT+'px';
@@ -11032,11 +12000,23 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
             el.style.background = 'var(--eofGutterFillColor, yellow)';
             el.style.color = 'var(--gutterNumberColor, yellow)';
           } else {
-            el.textContent = rr.ln ? String(rr.ln) : '';
+            const ln0 = rr.ln ? (rr.ln|0) : 0;
+            const dispLn = (imeReduced && (imeBase1|0) > 0 && (ln0|0) > 0) ? (((imeBase1|0) + (ln0|0) - 1)|0) : (ln0|0);
+            el.textContent = (ln0|0) > 0 ? String(dispLn|0) : '';
             el.style.background = '';
             el.style.color = 'var(--gutterNumberColor, yellow)';
           }
         }
+        // Make the last row absorb the remainder pixels so the gutter fully covers the viewport.
+        try{
+          const y = (rows.length|0) * (LINE_HEIGHT|0);
+          const remPx = Math.max(0, (vpH|0) - (y|0));
+          if (remPx > 0 && lastEl){
+            const baseH = (LINE_HEIGHT|0);
+            lastEl.style.height = (baseH + (remPx|0)) + 'px';
+            lastEl.style.lineHeight = (LINE_HEIGHT + 'px');
+          }
+        }catch{}
         for (let i=rows.length; i<children.length; i++){
           try{ gutter.removeChild(children[i]); }catch{}
         }
@@ -11063,6 +12043,25 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
         const st = (editor.scrollTop||0);
         // #1262: Disable snapping at EOF in updateGutter too
         const maxScroll = editor.scrollHeight - editor.clientHeight;
+        // If we intend to stay pinned to physical bottom at EOF (EOF pad), never grid-snap.
+        // If we're close to bottom but not quite there (layout/padding just changed), re-pin instead.
+        try{
+          const b0 = (typeof currentBuffer==='function') ? currentBuffer() : null;
+          const mdNow0 = (function(){ try{ return _mdRichActive && _mdRichActive(); }catch{ return false; } })();
+          const eofPad0 = (typeof _eofPadLines==='function') ? (_eofPadLines()|0) : 0;
+          const total0 = (function(){ try{ return _totalLines(); }catch{ return 1; } })();
+          const atEof0 = (((caretRow|0) + 1) === (total0|0));
+          const pinned0 = !!(b0 && b0.viewPinnedBottomAtEof);
+          const nearBottom0 = ((maxScroll - st) <= Math.max(2, (LINE_HEIGHT|0) * 2));
+          if (!mdNow0 && atEof0 && pinned0 && (eofPad0|0) > 0 && nearBottom0){
+            if ((maxScroll - st) > 0.5){
+              try{ _setEditorScrollTop((maxScroll|0), { immediate:true, keepCaret:true, physical:true }); }catch{}
+            }
+            // Either way, don't snap to grid here.
+            return;
+          }
+        }catch{}
+
         if (maxScroll - st > 1.5) {
             const snapped = Math.round(st/LINE_HEIGHT)*LINE_HEIGHT;
             let _changed = false;
@@ -11072,6 +12071,11 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
         }
       }
     }catch{}
+    let _imeReduced0 = false;
+    let _imeBase10 = 0;
+    try{ _imeReduced0 = !!(document && document.body && document.body.classList && document.body.classList.contains('ime-reduced-text')); }catch{ _imeReduced0 = false; }
+    try{ _imeBase10 = (window && Number.isFinite(window._imeReducedBaseLine1)) ? (window._imeReducedBaseLine1|0) : 0; }catch{ _imeBase10 = 0; }
+
     const vis = _visibleLinesExact();
     const top = _topLine();
     const total = _totalLines();
@@ -11115,7 +12119,9 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
         el.style.background = 'var(--eofGutterFillColor, yellow)';
         el.style.color = 'var(--gutterNumberColor, yellow)';
       } else {
-        el.textContent = r.ln;
+        const ln0 = (r.ln|0);
+        const dispLn = (_imeReduced0 && (_imeBase10|0) > 0 && (ln0|0) > 0) ? (((_imeBase10|0) + (ln0|0) - 1)|0) : (ln0|0);
+        el.textContent = String(dispLn|0);
         // #1277: Active line background is now handled by #gutterStripe (static overlay)
         // We no longer set background on the number element itself to avoid flicker during View Scroll.
         el.style.background = '';
@@ -11147,7 +12153,21 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
    *********************************************************/
   function _moveCaretLines(delta, opts){
     const lines = _splitLines();
-    const newRow = Math.max(0, Math.min(lines.length-1, caretRow + delta));
+    const prevRow = caretRow|0;
+    const prevCol = caretCol|0;
+    const newRow = Math.max(0, Math.min(lines.length-1, (prevRow|0) + (delta|0)));
+
+    // No-op at BOF/EOF: do not enforce scrolloff or snap scrollTop.
+    // This prevents: at physical bottom (thumb already at end) `j` still causing a tiny scroll
+    // that changes the visible EOF padding by ~<1 line.
+    if ((newRow|0) === (prevRow|0)){
+      // Allow dedicated EOF-pad step scrolling (virtual padding) when present.
+      if ((delta|0) > 0 && (prevRow|0) === ((lines.length-1)|0)){
+        try{ if (_maybeScrollEofPadStep('normal-eof-pad-scroll')) return; }catch{}
+      }
+      return;
+    }
+
     // Wrap mode: use wrap-local visual X (from wrapped segment left edge) as curswant.
     // This differs from Vim, but matches the requested behavior.
     let newCol = 0;
@@ -11172,7 +12192,6 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
       newCol = _colForVisual(line, _desiredVisualCol|0);
     }
     // commit without updating desired (keep it across j/k)
-    const prevRow = caretRow|0;
     caretRow = newRow;
     _suppressDesiredOnce = true;
     // Preserve wrap curswant across vertical motions.
@@ -11209,6 +12228,11 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
             const totalVis = (c.prefix && c.prefix.length) ? (c.prefix[c.prefix.length-1]|0) : (_totalLines()|0);
             const curV1 = _mdWrapVisualLine1ForRowCol(caretRow|0, caretCol|0);
             const targetV1 = Math.max(1, Math.min(Math.max(1, totalVis|0), (curV1|0) + d));
+            if ((targetV1|0) === (curV1|0)){
+              // No-op at visual EOF: don't enforce scrolloff; allow EOF-pad step scrolling.
+              try{ if (d > 0){ const lines2=_splitLines(); if ((caretRow|0) === ((lines2.length-1)|0)) { if (_maybeScrollEofPadStep('normal-eof-pad-scroll')) return; } } }catch{}
+              return;
+            }
             const info = _mdWrapRowFromVisualLine1(targetV1|0);
             const lines = _splitLines();
             const row = Math.max(0, Math.min((lines.length-1)|0, (info.row|0)));
@@ -11283,6 +12307,11 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
       const totalVis = (c.prefix && c.prefix.length) ? (c.prefix[c.prefix.length-1]|0) : (_totalLines()|0);
       const curV1 = _wrapVisualLine1ForRowCol(caretRow|0, caretCol|0);
       const targetV1 = Math.max(1, Math.min(Math.max(1, totalVis|0), (curV1|0) + d));
+      if ((targetV1|0) === (curV1|0)){
+        // No-op at visual EOF: don't enforce scrolloff; allow EOF-pad step scrolling.
+        try{ if (d > 0){ const lines2=_splitLines(); if ((caretRow|0) === ((lines2.length-1)|0)) { if (_maybeScrollEofPadStep('normal-eof-pad-scroll')) return; } } }catch{}
+        return;
+      }
       const info = _wrapRowFromVisualLine1(targetV1|0);
       const lines = _splitLines();
       const row = Math.max(0, Math.min((lines.length-1)|0, (info.row|0)));
@@ -11389,6 +12418,17 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
     try{
       const lines=_splitLines();
       if (caretRow !== lines.length-1) return false;
+
+      // If the native scrollbar is already at the physical bottom, do not attempt a 1-line
+      // "EOF pad step". With fractional scrollTop near EOF (non-markdown + wrap-on), _topLine()
+      // can under-report by 1 due to floor(), making curTop < maxTopWithPad even though the
+      // viewport is already fully bottomed-out. Stepping in that state causes a visible nudge.
+      try{
+        const stE = (editor && typeof editor.scrollTop === 'number') ? +editor.scrollTop : 0;
+        const maxE = Math.max(0, ((editor && editor.scrollHeight) ? +editor.scrollHeight : 0) - ((editor && editor.clientHeight) ? +editor.clientHeight : 0));
+        if ((maxE - stE) <= 1.5) return false;
+      }catch{}
+
       const vis=_visibleLinesExact();
       const linesTotal=_totalLines();
       // md-rich: do NOT expose compensation range as visible EOF pad.
@@ -13298,13 +14338,13 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
         _fileLoading = true;
         _filePopupShow();
         (function(){
-          const reqKey = (function(){ try{ return _ensureSlash(_fileBaseURL)?.toString()||null; }catch{ return null; } })();
+          const reqKey = (function(){ try{ return _ensureSlashKey(_fileBaseURL); }catch{ return null; } })();
           // Freshen directory listing on popup open to include newly added files (e.g., TODO.md)
           try{ if (reqKey && _dirCache && _dirCache.delete) _dirCache.delete(reqKey); }catch{}
           _listDirEntries(_fileBaseURL)
             .then(list=>{
               try{
-                const curKey = _ensureSlash(_fileBaseURL)?.toString()||null;
+                const curKey = _ensureSlashKey(_fileBaseURL);
                 if (!reqKey || curKey === reqKey){
                   _fileEntries = Array.isArray(list) ? list : [];
                   if (Array.isArray(list) && list.length>0){
@@ -13353,13 +14393,13 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
             _fileLoading = true;
             _filePopupShow();
             (function(){
-              const reqKey = (function(){ try{ return _ensureSlash(_fileBaseURL)?.toString()||null; }catch{ return null; } })();
+              const reqKey = (function(){ try{ return _ensureSlashKey(_fileBaseURL); }catch{ return null; } })();
               // Freshen directory listing on popup open (dir hint) to include newly added files
               try{ if (reqKey && _dirCache && _dirCache.delete) _dirCache.delete(reqKey); }catch{}
               _listDirEntries(_fileBaseURL)
                 .then(list=>{
                   try{
-                    const curKey = _ensureSlash(_fileBaseURL)?.toString()||null;
+                    const curKey = _ensureSlashKey(_fileBaseURL);
                     if (!reqKey || curKey === reqKey){
                       _fileEntries = Array.isArray(list) ? list : [];
                       if (Array.isArray(list) && list.length>0){
@@ -13661,7 +14701,16 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
       cmdfloat.style.left = (band.left) + 'px';
       cmdfloat.style.right = (Math.max(0, (window.innerWidth||0) - band.rightLimit)) + 'px';
       // Determine vertical placement
-      const st = (editor && typeof editor.scrollTop==='number') ? (editor.scrollTop|0) : 0;
+      // Use effective scrollTop where applicable (md-rich compensation) and keep fractional precision
+      // for wrap-on visual scroll.
+      const st = (function(){
+        try{
+          if (_mdRichActive && _mdRichActive() && _wrapEnabled && _wrapEnabled() && typeof _mdEffectiveScrollTopPx === 'function'){
+            return +(_mdEffectiveScrollTopPx({ snap:false })|0);
+          }
+        }catch{}
+        try{ return (editor && typeof editor.scrollTop==='number') ? +editor.scrollTop : 0; }catch{ return 0; }
+      })();
       const h = cmdfloat.offsetHeight || 26;
       let topPx = 0;
       const gapBelowSel = Math.round(1.5 * (function(){ try{ return parseFloat(getComputedStyle(document.documentElement).fontSize)||16; }catch{ return 16; } })());
@@ -13676,8 +14725,23 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
         const aR = _visCmdAnchorR|0, aC = _visCmdAnchorC|0, cR = _visCmdCaretR|0, cC = _visCmdCaretC|0;
         const rMin = Math.max(0, Math.min(aR, cR));
         const rMax = Math.max(aR, cR);
-        const selTop = (rMin*LINE_HEIGHT) - st;
-        const selBottom = ((rMax+1)*LINE_HEIGHT) - st;
+        // wrap-on (visual scroll grid): map logical rows to visual lines for correct Y.
+        let selTop = (rMin*LINE_HEIGHT) - st;
+        let selBottom = ((rMax+1)*LINE_HEIGHT) - st;
+        try{
+          const wrapNow = (function(){ try{ return _wrapEnabled && _wrapEnabled(); }catch{ return false; } })();
+          const usesVisual = (function(){
+            try{ if (typeof _wrapUsesVisualScrollGrid === 'function') return !!_wrapUsesVisualScrollGrid(); }catch{}
+            return false;
+          })();
+          if (wrapNow && usesVisual && typeof _wrapVisualLine1ForRowCol === 'function'){
+            const topV1 = Math.max(1, (_wrapVisualLine1ForRowCol(rMin|0, 0)|0));
+            const endCol = (typeof _lineLen === 'function') ? (_lineLen(rMax|0)|0) : 0;
+            const botV1 = Math.max(topV1, (_wrapVisualLine1ForRowCol(rMax|0, endCol|0)|0));
+            selTop = ((topV1 - 1) * LINE_HEIGHT) - st;
+            selBottom = ((botV1) * LINE_HEIGHT) - st;
+          }
+        }catch{}
         const below = selBottom + gapBelowSel;
         const minTop = 4; const maxTop = band.viewH - h - 4;
         // Prefer below; fallback above if not enough space
@@ -13688,7 +14752,18 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
         }
       } else {
         // Caret-based default (3 lines above/below relative to viewport)
-        const caretTopPx = (caretRow|0) * LINE_HEIGHT - st;
+        let caretTopPx = (caretRow|0) * LINE_HEIGHT - st;
+        try{
+          const wrapNow = (function(){ try{ return _wrapEnabled && _wrapEnabled(); }catch{ return false; } })();
+          const usesVisual = (function(){
+            try{ if (typeof _wrapUsesVisualScrollGrid === 'function') return !!_wrapUsesVisualScrollGrid(); }catch{}
+            return false;
+          })();
+          if (wrapNow && usesVisual && typeof _wrapVisualLine1ForRowCol === 'function'){
+            const v1 = Math.max(1, (_wrapVisualLine1ForRowCol(caretRow|0, caretCol|0)|0));
+            caretTopPx = ((v1 - 1) * LINE_HEIGHT) - st;
+          }
+        }catch{}
         const half = band.viewH/2;
         if (caretTopPx < half){ topPx = caretTopPx + (3*LINE_HEIGHT); }
         else { topPx = caretTopPx - (3*LINE_HEIGHT) - h; }
@@ -14992,6 +16067,22 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
   let _evtLastST = 0;
   let _evtLastSL = 0;
   let _evtLastInited = false;
+
+  // Keep tiled backgrounds (editorViewport/gutter) aligned even when scrollTop is not on the line grid.
+  // This matters near physical EOF in wrap-on where we intentionally avoid snapping.
+  function _syncTiledBgRemainder(){
+    try{
+      const root = document && document.documentElement;
+      if (!root) return;
+      // md-rich uses per-row backgrounds; keep tiled offset at 0.
+      try{ if (_mdRichActive && _mdRichActive()){ root.style.setProperty('--scrollRemY', '0px'); return; } }catch{}
+      const lh = (typeof LINE_HEIGHT === 'number' && LINE_HEIGHT > 0) ? LINE_HEIGHT : 20;
+      const st = (editor && typeof editor.scrollTop === 'number') ? +editor.scrollTop : 0;
+      const rem = st - Math.floor(st / lh) * lh;
+      const v = (Math.abs(rem) > 0.01) ? ((-rem) + 'px') : '0px';
+      root.style.setProperty('--scrollRemY', v);
+    }catch{}
+  }
   function _scrollSettleCheck(){
     try{
       const sh = (window && window.__sixScanHoldScrollActive);
@@ -15060,6 +16151,9 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
     try{ if (_scrollRAF) cancelAnimationFrame(_scrollRAF); }catch{}
     _scrollRAF = requestAnimationFrame(()=>{
       try{
+        // Background tiling alignment (cheap): do this early each frame.
+        try{ _syncTiledBgRemainder(); }catch{}
+
         // During IME composition, keep this RAF handler lightweight to avoid IME lag on larger buffers.
         try{ if (window && window._imeComposing===true){ return; } }catch{}
 
@@ -15088,6 +16182,34 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
             return;
           }
         }catch{}
+
+        // EOF bottom stick (markdown-off + wrap-on + eofPad):
+        // After a text mutation at EOF, late layout updates can change scrollHeight and leave the
+        // view ~1 line above the physical bottom until the next explicit scroll. During a short
+        // window, keep re-pinning to the physical max to stabilize the visible EOF padding.
+        try{
+          const until = window.__sixEofBottomStickUntil;
+          if (until && Date.now() < (until|0)){
+            const mdNow = (function(){ try{ return _mdRichActive && _mdRichActive(); }catch{ return false; } })();
+            const wrapNow = (function(){ try{ return _wrapEnabled && _wrapEnabled(); }catch{ return false; } })();
+            if (!mdNow && wrapNow){
+              const eofPad = (typeof _eofPadLines === 'function') ? (_eofPadLines()|0) : 0;
+              if ((eofPad|0) > 0){
+                const total = (typeof _totalLines === 'function') ? (_totalLines()|0) : 0;
+                const atEOF = ((total|0) > 0) && ((caretRow|0) >= ((total|0) - 1));
+                if (atEOF && editor && typeof editor.scrollTop === 'number'){
+                  const pm = Math.max(0, ((editor.scrollHeight||0) - (editor.clientHeight||0)));
+                  const cur = +editor.scrollTop;
+                  const lh = (typeof LINE_HEIGHT === 'number' && LINE_HEIGHT > 0) ? LINE_HEIGHT : 20;
+                  const diff = (pm - cur);
+                  // Only enforce if we are still near the bottom (avoid surprising large jumps).
+                  if (diff > 0.5 && diff <= (lh * 3 + 2)) editor.scrollTop = pm;
+                }
+              }
+            }
+          }
+        }catch{}
+
         // Detect horizontal-only scroll: scrollLeft changed but scrollTop did not.
         // In that case, do not apply vertical grid snapping (it can cause 1-line EOF bounce).
         let _mostlyHorizontal = false;
@@ -15277,6 +16399,10 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
     // Scroll snapping is handled in the unified RAF above
     // IME破棄時のビジュアルベル制御（スパム防止のため軽いスロットリング）
     let _imeBellLastAt = 0;
+    // INSERT Enter at EOF: if we were physically pinned to bottom before the mutation,
+    // re-pin to physical bottom after the mutation so the thumb stays at the end.
+    // (Works for markdown-off + wrap on/off when EOF pad is enabled.)
+    let _pendingEofEnterPhysPin = null;
     editor.addEventListener('beforeinput', (e)=>{
       try{ const M = window.SIX_IME_METRICS; if (M && window._imeComposing===true){ M.events.beforeinput++; } }catch{}
       // listchars fast-path: capture the pre-edit position for operations that shift line numbers (Enter)
@@ -15290,6 +16416,31 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
           }
         }
       }catch{}
+
+      // Snapshot "pinned-at-bottom" state for Enter at logical EOF.
+      try{
+        const it = String((e && e.inputType) || '');
+        if (_mode === 'INSERT' && (it==='insertLineBreak' || it==='insertParagraph')){
+          const mdNow = (function(){ try{ return _mdRichActive && _mdRichActive(); }catch{ return false; } })();
+          const eofPad = (typeof _eofPadLines==='function') ? (_eofPadLines()|0) : 0;
+          if (!mdNow && (eofPad|0) > 0 && editor){
+            const linesTotal0 = (_totalLines()|0);
+            const atLogicalEOF0 = (((caretRow|0) + 1) === (linesTotal0|0));
+            if (atLogicalEOF0){
+              const st0 = (editor.scrollTop||0);
+              const phys0 = Math.max(0, ((editor.scrollHeight||0) - (editor.clientHeight||0))|0);
+              const wasAtBottom = Math.abs((st0|0) - (phys0|0)) <= 1.5;
+              _pendingEofEnterPhysPin = wasAtBottom ? { why:'enter-eof', t:Date.now() } : null;
+            } else {
+              _pendingEofEnterPhysPin = null;
+            }
+          } else {
+            _pendingEofEnterPhysPin = null;
+          }
+        } else {
+          _pendingEofEnterPhysPin = null;
+        }
+      }catch{ _pendingEofEnterPhysPin = null; }
       // NORMAL/VISUAL/CMD では本文変更を全面禁止（未確定表示 insertCompositionText も含む）
       if (_mode !== 'INSERT'){
         try{ e.preventDefault(); }catch{}
@@ -15420,6 +16571,31 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
             caretRow = rc.r; caretCol = rc.c;
           }
         }catch{}
+
+        // If Enter happened at logical EOF while we were already pinned to physical bottom,
+        // re-pin after the mutation. This avoids a bottom thumb gap in wrap-off too.
+        try{
+          if (_pendingEofEnterPhysPin && (window && window._imeComposing!==true)){
+            const mdNow = (function(){ try{ return _mdRichActive && _mdRichActive(); }catch{ return false; } })();
+            const eofPad = (typeof _eofPadLines==='function') ? (_eofPadLines()|0) : 0;
+            const linesTotal1 = (_totalLines()|0);
+            const atLogicalEOF1 = (((caretRow|0) + 1) === (linesTotal1|0));
+            if (!mdNow && (eofPad|0) > 0 && atLogicalEOF1 && editor){
+              const pin = ()=>{
+                try{ _syncEofPadGridComp && _syncEofPadGridComp(); }catch{}
+                const physMax = Math.max(0, ((editor.scrollHeight||0) - (editor.clientHeight||0))|0);
+                _setEditorScrollTop(physMax, { immediate:true, keepCaret:true, physical:true, why:'enter-eof' });
+              };
+              pin();
+              try{ if (window && window.requestAnimationFrame) requestAnimationFrame(pin); }catch{}
+              try{ setTimeout(pin, 0); }catch{}
+              try{ setTimeout(pin, 60); }catch{}
+              try{ setTimeout(pin, 160); }catch{}
+              try{ const b=currentBuffer(); if (b){ b.viewPinnedBottomAtEof = true; } }catch{}
+            }
+            _pendingEofEnterPhysPin = null;
+          }
+        }catch{ _pendingEofEnterPhysPin = null; }
         // _touchBufferModified already hides cursor; redundant call removed
         // #624: 差分検出用に直前テキストを参照（末尾状態の変化トレース）
         try{
@@ -15860,7 +17036,10 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
                 const vis = Math.max(1, Math.floor(((editor && editor.clientHeight)||0) / lh));
                 // past-EOF check is based on *full* line count before reduction
                 const pastEofVisible = ((origTopLine + vis) > (lines ? (lines.length|0) : 0));
-                if (pastEofVisible && ((_imeOrigBottomSlackPx|0) > 0)){
+                if (pastEofVisible){
+                  // Preserve the same distance from the physical bottom while composing.
+                  // This must also hold when bottomSlack is 0 (thumb pinned at end), otherwise
+                  // the viewport can jump by ~maxMargin lines when IME starts (#1587).
                   const stNew = Math.max(0, Math.min(newMax, (newMax - (_imeOrigBottomSlackPx|0))|0));
                   editor.scrollTop = stNew;
                 } else {
@@ -15975,7 +17154,103 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
         }
       }catch{}
     });
-  window.addEventListener('resize', ()=>{ _syncEditorMetrics(); clampViewportExactLines(); try{ _wrapInvalidateCache('resize'); _wrapEnsureCache(true); }catch{} try{ _mdWrapInvalidateCache('resize'); _mdWrapEnsureCache(true); }catch{} try{ _mdSyncEofPadComp(); }catch{} _exactLineLockAdjust(); ensureScrolloff(); _repositionCaret(); updateGutter(); _renderHlMatchesVisible(); _incPrevRefresh(); _renderVisSelOverlay(); });
+  window.addEventListener('resize', ()=>{
+    _syncEditorMetrics();
+    clampViewportExactLines();
+    try{ _wrapInvalidateCache('resize'); _wrapEnsureCache(true); }catch{}
+    try{ _mdWrapInvalidateCache('resize'); _mdWrapEnsureCache(true); }catch{}
+    try{ _mdSyncEofPadComp(); }catch{}
+    try{ _syncEofPadGridComp && _syncEofPadGridComp(); }catch{}
+    _exactLineLockAdjust();
+
+    // If we're in the post-session-restore window, prefer restoring the saved viewport
+    // rather than running ensureScrolloff (which may re-center after host resize).
+    try{
+      const sr = window.__sixSessionRestore;
+      const now = Date.now();
+      if (sr && (now < (sr.until|0)) && (currentIdx|0) === (sr.idx|0)){
+        // Debounce multi-fire resize bursts.
+        if (window.__sixSessionRestoreResizeTimer){ clearTimeout(window.__sixSessionRestoreResizeTimer); }
+        const apply = ()=>{
+          try{ _scrollGuardUntil = Date.now() + 1200; }catch{}
+          try{ _setCaret((sr.vr|0), (sr.vc|0)); }catch{}
+          try{
+            // Prefer restoring by top-line anchor when LINE_HEIGHT changed since save.
+            let st = Math.max(0, (sr.vs|0));
+            // Wrap-on (markdown-off): prefer restoring by logical top-row/intra anchor.
+            try{
+              const mdNow = (function(){ try{ return _mdRichActive && _mdRichActive(); }catch{ return false; } })();
+              const wrapNow = (function(){ try{ return _wrapEnabled && _wrapEnabled(); }catch{ return false; } })();
+              const usesVisual = (function(){ try{ return _wrapUsesVisualScrollGrid && _wrapUsesVisualScrollGrid(); }catch{ return false; } })();
+              const topRow = Number.isFinite(sr.topRow) ? (sr.topRow|0) : -1;
+              const topIntra = Number.isFinite(sr.topIntra) ? (sr.topIntra|0) : 0;
+              if (!mdNow && wrapNow && usesVisual && (topRow|0) >= 0 && typeof _wrapVisualStartLine1ForRow === 'function' && typeof _wrapEnsureCache === 'function'){
+                const c = _wrapEnsureCache(false);
+                let intra = topIntra|0;
+                try{
+                  if (c && c.counts && c.counts[topRow|0] != null){
+                    const maxIntra = Math.max(0, (c.counts[topRow|0]|0) - 1);
+                    if ((intra|0) > (maxIntra|0)) intra = maxIntra|0;
+                  } else {
+                    intra = Math.max(0, intra|0);
+                  }
+                }catch{}
+                const v1 = Math.max(1, (_wrapVisualStartLine1ForRow(topRow|0)|0) + (intra|0));
+                st = Math.max(0, (v1 - 1) * Math.max(1, (LINE_HEIGHT|0)));
+              }
+            }catch{}
+            try{
+              const top1Saved = Number.isFinite(sr.top1) ? (sr.top1|0) : 0;
+              const lhSaved = Number.isFinite(sr.lh) ? (sr.lh|0) : 0;
+              const lhNow = Math.max(1, (LINE_HEIGHT|0));
+              if ((top1Saved|0) > 0 && (lhSaved|0) > 0 && (lhNow|0) > 0 && (lhSaved|0) !== (lhNow|0)){
+                st = Math.max(0, ((top1Saved|0) - 1) * (lhNow|0));
+              }
+            }catch{}
+            // Recompute from the active buffer too (most accurate after caches rebuild)
+            try{
+              const bb = (typeof currentBuffer==='function') ? currentBuffer() : null;
+              if (bb){
+                const r = _restoreScrollTopForBuffer(bb, { forceWrapCache:true });
+                if (r && Number.isFinite(r.st)) st = Math.max(0, (r.st|0));
+                _dbgRestore('resize:recompute', { idx:(sr.idx|0), why:(r&&r.why)||'?', st:(st|0), extra:(r||null), vp:_dbgViewportSnapshot() });
+
+                // If the intended restore state is "pinned bottom at EOF", do NOT apply scrollTop
+                // via _setEditorScrollTop(st) without the physical flag (it snaps to grid and
+                // hides 1 pad line, leaving a thumb gap). Re-pin using ensureScrolloff(eofToBottom).
+                try{
+                  const pin = !!(sr && sr.pinBottomAtEof) || !!(bb && bb.viewPinnedBottomAtEof) || !!(r && r.why === 'pinned-eof');
+                  if (pin){
+                    try{ ensureScrolloff({ force:true, preferEOFPad:true, eofToBottom:true, keepCaret:true, immediate:true }); }catch{}
+                    try{ _repositionCaret(); updateGutter(); }catch{}
+                    try{ _renderHlMatchesVisible(); }catch{}
+                    try{ _incPrevRefresh(); }catch{}
+                    try{ _renderVisSelOverlay(); }catch{}
+                    return;
+                  }
+                }catch{}
+              }
+            }catch{}
+            _setEditorScrollTop(st, { immediate:true });
+          }catch{}
+          try{ _repositionCaret(); updateGutter(); }catch{}
+          try{ _renderHlMatchesVisible(); }catch{}
+          try{ _incPrevRefresh(); }catch{}
+          try{ _renderVisSelOverlay(); }catch{}
+        };
+        apply();
+        window.__sixSessionRestoreResizeTimer = setTimeout(()=>{ try{ apply(); }catch{} }, 90);
+        return;
+      }
+    }catch{}
+
+    ensureScrolloff();
+    _repositionCaret();
+    updateGutter();
+    _renderHlMatchesVisible();
+    _incPrevRefresh();
+    _renderVisSelOverlay();
+  });
 
   editor.addEventListener('keydown', (e)=>{
       // Short guard: absorb any stray keydown right after modal close
@@ -15992,7 +17267,16 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
       // Put this as early as possible to avoid per-key overhead on multi-line buffers.
       try{
         if (_mode === 'INSERT' && (window._imeComposing===true || e.isComposing===true)){
-          return;
+          // After compositionend, some environments still report isComposing=true for the next keydown.
+          // Allow Esc to be processed so INSERT->NORMAL isn't lost (#1589).
+          try{
+            const esc = (typeof _isEsc === 'function') ? _isEsc(e) : (e && e.key === 'Escape');
+            if (esc && !(window && window._imeComposing===true)){
+              // fall through
+            } else {
+              return;
+            }
+          }catch{ return; }
         }
       }catch{}
 
@@ -16088,6 +17372,44 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
           const printable = (e.key && e.key.length===1 && !e.ctrlKey && !e.altKey && !e.metaKey);
           if (printable && !e.isComposing){ _imeActive=false; _applyCaretGradient(); }
         }catch{}
+
+        // #1575: INSERTのEnter（EOF付近）でEOFパッドが1行欠ける/thumb gapが出る。
+        // 改行はネイティブに委ねつつ、改行後に物理bottomへ再ピンしてパッド全量を見せる。
+        try{
+          if (e && e.key==='Enter' && !e.ctrlKey && !e.altKey && !e.metaKey){
+            // 事前にネイティブ selectionStart を caretRow/Col に反映
+            try{ const off0 = editor.selectionStart|0; const rc0 = _rcFromOffset(off0); caretRow = rc0.r; caretCol = rc0.c; }catch{}
+            const mdNow = (function(){ try{ return _mdRichActive && _mdRichActive(); }catch{ return false; } })();
+            const wrapNow = (function(){ try{ return _wrapEnabled && _wrapEnabled(); }catch{ return false; } })();
+            const eofPad = (typeof _eofPadLines==='function') ? (_eofPadLines()|0) : 0;
+            let atLogicalEofBefore = false;
+            try{ atLogicalEofBefore = (((caretRow|0) + 1) === (_totalLines()|0)); }catch{ atLogicalEofBefore = false; }
+            const wantPin = (!mdNow && wrapNow && (eofPad|0) > 0 && atLogicalEofBefore);
+            if (wantPin){
+              const pin = ()=>{
+                try{ _syncEofPadGridComp && _syncEofPadGridComp(); }catch{}
+                try{
+                  const physMax = Math.max(0, ((editor.scrollHeight||0) - (editor.clientHeight||0))|0);
+                  _setEditorScrollTop(physMax, { immediate:true, keepCaret:true, physical:true });
+                }catch{}
+              };
+              // 改行が入った後にピン（wrap reflow 遅延に備えて複数回）
+              try{
+                setTimeout(()=>{
+                  try{
+                    try{ const off = editor.selectionStart|0; const rc = _rcFromOffset(off); caretRow = rc.r; caretCol = rc.c; }catch{}
+                    pin();
+                    try{ _repositionCaret(); updateGutter(); }catch{}
+                  }catch{}
+                }, 0);
+              }catch{}
+              try{ if (window && window.requestAnimationFrame) requestAnimationFrame(()=>{ try{ pin(); }catch{} }); }catch{}
+              try{ setTimeout(()=>{ try{ pin(); }catch{} }, 60); }catch{}
+              try{ setTimeout(()=>{ try{ pin(); }catch{} }, 160); }catch{}
+            }
+          }
+        }catch{}
+
         // INSERTモードで Tab または Ctrl+I でタブ文字を挿入 (#459)
         // ブラウザのデフォルト Tab 挙動(フォーカス移動)を抑止し、明示的に '\t' を挿入する。
         try{
@@ -16142,7 +17464,10 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
           const now = Date.now();
           // 候補猶予ウィンドウを考慮
           const candWin = (typeof window._imeCandidateUntil==='number') ? (now < window._imeCandidateUntil) : false;
-          if (_imeComposing || (e && e.isComposing) || candWin || (now - (_lastCompEndTs||0) < 900)){
+          // After IME commit (compositionend), Esc should immediately return to NORMAL.
+          // Do not suppress solely based on "recent compositionend"; only suppress while
+          // composition/candidate is actually active.
+          if (_imeComposing || (e && e.isComposing) || candWin){
             // IMEネイティブ動作に委譲: 第1回Escで変換をキャンセル→未確定に戻す、第2回Escで未確定クリア
             // IMEがOFFへ落ちる環境向けに短期ON維持ガードを付与
             try{
@@ -16560,7 +17885,17 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
           return;
         }
     // Motions extend selection
-  const moveAndUpdate=(fn)=>{ fn(); try{ _flagCaretMotion(); }catch{} _ensureAfterMotion(); _repositionCaret(); updateGutter(); _updateVisualSelection(); };
+  const moveAndUpdate=(fn)=>{
+    const fr = (caretRow|0);
+    const fc = (caretCol|0);
+    fn();
+    const moved = (((caretRow|0) !== (fr|0)) || ((caretCol|0) !== (fc|0)));
+    if (moved){
+      try{ _flagCaretMotion(); }catch{}
+      _ensureAfterMotion();
+    }
+    _repositionCaret(); updateGutter(); _updateVisualSelection();
+  };
         if (e.key==='ArrowDown'){
           e.preventDefault();
           const n=_consumeCount();
@@ -18096,6 +19431,24 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
         e.preventDefault();
         _pushUndoSnapshot('open-below');
         _suppressInsertSnapshotOnce = true;
+        // #1574: Determine logical EOF BEFORE mutation. Raw split may include a trailing empty line
+        // when the text ends with '\n', but the user-visible EOF is based on _totalLines().
+        let __atLogicalEofBefore = false;
+        try{ __atLogicalEofBefore = (((caretRow|0) + 1) === ((_totalLines()|0))); }catch{ __atLogicalEofBefore = false; }
+        // If we are visually pinned to the physical bottom at EOF, keep that pin after mutation.
+        // Otherwise, inserting a new last line will consume one EOF-pad line.
+        let __pinBottomAfter = false;
+        let __pinBottomFn = null;
+        try{
+          const st0 = (editor && typeof editor.scrollTop === 'number') ? +editor.scrollTop : 0;
+          const max0 = Math.max(0, ((editor.scrollHeight||0) - (editor.clientHeight||0)));
+          const lh = (typeof LINE_HEIGHT === 'number' && LINE_HEIGHT > 0) ? LINE_HEIGHT : 20;
+          // #1570: When at EOF with padding, consider us "pinned" if we're within the expected EOF pad range.
+          // This ensures 'o' at EOF maintains the full pad (6 lines) rather than consuming one pad line.
+          const eofPad0 = (typeof _eofPadLines === 'function') ? (_eofPadLines()|0) : 0;
+          const slack = Math.max(2, (eofPad0 > 0) ? Math.floor(lh * (eofPad0 + 0.9)) : Math.floor(lh * 0.9));
+          __pinBottomAfter = ((max0 - st0) <= slack);
+        }catch{ __pinBottomAfter = false; }
         const prev = String(editor.value||'');
         const hadFinalLF = prev.endsWith('\n'); // no longer used for auto newline augmentation (#597)
         const lines = _splitLinesRaw(); // (#607) 末尾空要素保持
@@ -18108,9 +19461,88 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
         if (wasLastRow && hadFinalLF && !hadBlankEOFLine){ out = prev + '\n'; }
         if (out !== prev){ editor.value = out; _touchBufferModified(); }
         _setCaret(rr+1, 0);
-        ensureScrolloff(); _repositionCaret(); updateGutter();
+        // Re-pin to the new physical bottom if we were pinned before and we opened below EOF.
+        try{
+          if (__atLogicalEofBefore && __pinBottomAfter && typeof _setEditorScrollTop === 'function'){
+            const pin = ()=>{
+              try{
+                try{ _syncEofPadGridComp && _syncEofPadGridComp(); }catch{}
+                const max1 = Math.max(0, ((editor.scrollHeight||0) - (editor.clientHeight||0)));
+                _setEditorScrollTop(max1, { immediate:true, keepCaret:true, physical:true });
+              }catch{}
+            };
+            __pinBottomFn = pin;
+            pin();
+            try{ if (window && window.requestAnimationFrame) requestAnimationFrame(pin); }catch{}
+            try{ setTimeout(pin, 0); }catch{}
+            try{ setTimeout(pin, 60); }catch{}
+          }
+        }catch{}
+
+        // Even if we weren't strictly "pinned" before, Chromium can grow the physical max by ~1 line
+        // after inserting a new EOF line under wrap-on, leaving us 1 pad line short until the next scroll.
+        // If we're already near the bottom, re-pin to the new physical max unconditionally.
+        let __pinNearFn = null;
+        try{
+          const mdNow2 = (function(){ try{ return _mdRichActive && _mdRichActive(); }catch{ return false; } })();
+          const wrapNow2 = (function(){ try{ return _wrapEnabled && _wrapEnabled(); }catch{ return false; } })();
+          const eofPad2 = (typeof _eofPadLines === 'function') ? (_eofPadLines()|0) : 0;
+          if (__atLogicalEofBefore && !mdNow2 && wrapNow2 && (eofPad2|0) > 0 && editor && typeof editor.scrollTop === 'number'){
+            const lh = (typeof LINE_HEIGHT === 'number' && LINE_HEIGHT > 0) ? LINE_HEIGHT : 20;
+            const pinNear = ()=>{
+              try{
+                try{ _syncEofPadGridComp && _syncEofPadGridComp(); }catch{}
+                const pm = Math.max(0, ((editor.scrollHeight||0) - (editor.clientHeight||0)));
+                const cur = +editor.scrollTop;
+                const diff = (pm - cur);
+                // Only adjust when we're near bottom already (avoid surprising jumps).
+                if (diff > 0.5 && diff <= (lh * 12 + 4)){
+                  _setEditorScrollTop(pm, { immediate:true, keepCaret:true, physical:true });
+                }
+              }catch{}
+            };
+            __pinNearFn = pinNear;
+            pinNear();
+            try{ if (window && window.requestAnimationFrame) requestAnimationFrame(pinNear); }catch{}
+            try{ setTimeout(pinNear, 0); }catch{}
+            try{ setTimeout(pinNear, 80); }catch{}
+          }
+        }catch{}
+        // If we were pinned to the physical bottom at EOF, keep showing full EOF pad after the mutation.
+        // Force eofToBottom to bypass EOF bottom-lock and any stale clamp while layout settles.
+        try{
+          if (__atLogicalEofBefore && __pinBottomAfter){
+            ensureScrolloff({ force:true, eofToBottom:true, preferEOFPad:true, keepCaret:true, immediate:true });
+          } else {
+            ensureScrolloff();
+          }
+        }catch{ ensureScrolloff(); }
+        _repositionCaret(); updateGutter();
         try{ _scheduleListCharsRender && _scheduleListCharsRender('open-below'); }catch{}
         _setMode('INSERT');
+        // Mode switch can touch selection/scroll; reinforce EOF-bottom preference once more.
+        try{
+          if (__atLogicalEofBefore && __pinBottomAfter){
+            setTimeout(()=>{ try{ ensureScrolloff({ force:true, eofToBottom:true, preferEOFPad:true, keepCaret:true, immediate:true }); }catch{} }, 0);
+            setTimeout(()=>{ try{ ensureScrolloff({ force:true, eofToBottom:true, preferEOFPad:true, keepCaret:true, immediate:true }); }catch{} }, 80);
+            setTimeout(()=>{ try{ ensureScrolloff({ force:true, eofToBottom:true, preferEOFPad:true, keepCaret:true, immediate:true }); }catch{} }, 180);
+          }
+        }catch{}
+        // Entering INSERT can touch selection/scroll; re-pin again if we captured a pin function.
+        try{
+          if (__pinBottomFn){
+            try{ setTimeout(__pinBottomFn, 0); }catch{}
+            try{ setTimeout(__pinBottomFn, 60); }catch{}
+          }
+        }catch{}
+        // Re-run near-bottom pin after mode switch too (selection/focus can move scrollTop).
+        try{
+          if (__pinNearFn){
+            try{ setTimeout(__pinNearFn, 0); }catch{}
+            try{ setTimeout(__pinNearFn, 80); }catch{}
+            try{ setTimeout(__pinNearFn, 180); }catch{}
+          }
+        }catch{}
         return;
       }
       if (e.key==='O' && !e.ctrlKey && !e.metaKey && !e.altKey){
@@ -18602,16 +20034,52 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
             const maxTopWithPad = Math.max(1, baseMaxTop + (_eofPad|0));
 
             // #1219: Use pixel-based check for scrollability to handle fractional scrollTop
-            // (caused by smooth scrolling) correctly.
-            const curTopPx = (editor && editor.scrollTop) || 0;
+            // (caused by smooth scrolling / browser clamp near EOF) correctly.
+            const curTopPx = (editor && typeof editor.scrollTop === 'number') ? +editor.scrollTop : 0;
             const maxTopPx = (maxTopWithPad - 1) * LINE_HEIGHT;
-            
-            // Can we scroll down? (Are we already at the bottom?)
-            // Use 0.5px tolerance
-            const canScrollDown = (curTopPx < maxTopPx - 0.5);
-            
-            // Can we scroll up? (Are we already at the top?)
-            const canScrollUp = (curTopPx > 0.5);
+
+            // IMPORTANT: In wrap-on, the browser's physical max scrollTop near EOF can be
+            // *not* aligned to LINE_HEIGHT (e.g. maxE = N*LH - frac). If we only compare
+            // against maxTopPx (a line-grid value), we can incorrectly think "we can scroll"
+            // even though the thumb is already at the physical bottom. That causes scan-hold
+            // to enter scroll mode and forcibly move caretRow upward (idealOffset), producing
+            // the observed caret disappear/jump loop.
+            const physMaxPx = Math.max(0,
+              ((editor && editor.scrollHeight) ? +editor.scrollHeight : 0) -
+              ((editor && editor.clientHeight) ? +editor.clientHeight : 0)
+            );
+            const maxPossiblePx = Math.min(physMaxPx, maxTopPx);
+
+            // Can we scroll down/up (physically)? Use small tolerance.
+            // Additionally, require enough headroom for at least ~1 visual line; otherwise scan-hold
+            // would start scroll mode, get clamped within a few pixels, and then snap, causing
+            // EOF padding to jump (e.g. "6+half" -> "7").
+            const lhPx = (typeof LINE_HEIGHT === 'number' && LINE_HEIGHT > 0) ? LINE_HEIGHT : 20;
+            const remainDownPx = (maxPossiblePx - curTopPx);
+            const remainUpPx = curTopPx;
+            const minEffectivePx = Math.max(2, Math.floor(lhPx * 0.85));
+            const canScrollDown = (remainDownPx > 0.5) && (remainDownPx >= minEffectivePx);
+            const canScrollUp = (remainUpPx > 0.5) && (remainUpPx >= minEffectivePx);
+
+            // Extra guard: if caret is already at EOF and thumb is physically at bottom,
+            // never choose scroll mode on downward motion.
+            try{
+              if (delta > 0){
+                const atPhysBottom = ((physMaxPx - curTopPx) <= 1.5);
+                let atEOF = false;
+                if (_scanHoldUsesVisualGrid()){
+                  try{
+                    const c = _wrapEnsureCache(false);
+                    const totalVis2 = (c && c.prefix && c.prefix.length) ? (c.prefix[c.prefix.length-1]|0) : (linesTotalEff|0);
+                    const caretV1 = _wrapVisualLine1ForRowCol(caretRow|0, caretCol|0);
+                    atEOF = ((caretV1|0) >= (totalVis2|0));
+                  }catch{ atEOF = ((caretRow|0) >= ((linesTotal-1)|0)); }
+                } else {
+                  atEOF = ((caretRow|0) >= ((linesTotal-1)|0));
+                }
+                if (atEOF && atPhysBottom) return 'caret';
+              }
+            }catch{}
 
             const preferScroll = () => {
               if (delta > 0 && canScrollDown) return 'scroll';
@@ -18688,6 +20156,11 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
             // so we must not early-return based on row alone.
             if (!mdOn && newRow === caretRow) {
               _scanHold.caretLastMove = performance.now();
+              // Keep caret visual consistent even on boundary no-op.
+              // scan-hold keydown may have called _showCursor(); restore filled caret without
+              // doing heavy scrolloff/gutter work.
+              try{ _cursorForceHiddenUntil = Date.now() + 800; }catch{}
+              try{ _hideCursor && _hideCursor(); }catch{}
               // #1255: Do NOT call _ensureAfterMotion() here.
               return;
             }
@@ -19924,9 +21397,9 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
               }catch{}
               _fileEntries=[]; _fileLoading=true; try{ window._fileLastListStartTs=Date.now(); }catch{} _fileFilter='';
               if (_filePopupVisible()) _filePopupRender();
-              const reqKeyDir = (function(){ try{ return _ensureSlash(_fileBaseURL)?.toString()||null; }catch{ return null; } })();
+              const reqKeyDir = (function(){ try{ return _ensureSlashKey(_fileBaseURL); }catch{ return null; } })();
               _listDirEntriesWithQuickRetry(_fileBaseURL)
-                .then(list2=>{ try{ const curKey=_ensureSlash(_fileBaseURL)?.toString()||null; if(!reqKeyDir||curKey===reqKeyDir){ _fileEntries=Array.isArray(list2)? list2: []; if(Array.isArray(list2)&&list2.length>0){ _fileStableEntries=list2.slice(); _fileStableBaseKey=curKey; } _fileSel=0; } }catch{} })
+                .then(list2=>{ try{ const curKey=_ensureSlashKey(_fileBaseURL); if(!reqKeyDir||curKey===reqKeyDir){ _fileEntries=Array.isArray(list2)? list2: []; if(Array.isArray(list2)&&list2.length>0){ _fileStableEntries=list2.slice(); _fileStableBaseKey=curKey; } _fileSel=0; } }catch{} })
                 .finally(()=>{ _fileLoading=false; if (_filePopupVisible()) _filePopupRender(); });
               return; // ハンドリング済み
             }
@@ -20016,7 +21489,7 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
           try{
             const normCmd = (raw.startsWith(':')?raw:(':'+raw));
             if (/^:\s*[\/?].+/.test(normCmd)){
-              // store normalized '/...' or '?...' form
+              // store normalized '/...' or '? ...' form
               const store = normCmd.replace(/^:\s*/, '');
               _searchHistoryMaybePush(store);
               // Delegate to runCommand and exit early
@@ -20122,11 +21595,11 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
                             if (cmdinput){ cmdinput.value=':e ' + _collapseDotDotPath(_fileTypedDirRaw); }
                     const baseAfter = _fileBaseURL = _ensureSlash(new URL(q+'/', _fileBaseURL));
                     _fileEntries = []; _fileLoading = true; try{ window._fileLastListStartTs = Date.now(); }catch{} _fileFilter=''; if (_filePopupVisible()) _filePopupRender();
-                    const reqKeyDir = (function(){ try{ return _ensureSlash(_fileBaseURL)?.toString()||null; }catch{ return null; } })();
+                    const reqKeyDir = _ensureSlashKey(_fileBaseURL);
                     _listDirEntriesWithQuickRetry(_fileBaseURL)
                       .then(list2=>{
                         try{
-                          const curKey = _ensureSlash(_fileBaseURL)?.toString()||null;
+                          const curKey = _ensureSlashKey(_fileBaseURL);
                           if (!reqKeyDir || curKey===reqKeyDir){
                             _fileEntries = Array.isArray(list2)? list2: [];
                             if (Array.isArray(list2) && list2.length>0){ _fileStableEntries=list2.slice(); _fileStableBaseKey=curKey; }
@@ -20177,10 +21650,10 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
                         try { cmdinput.dispatchEvent(new Event('input', { bubbles:true })); } catch {}
                       }
                     }catch{}
-                    const reqKey = (function(){ try{ return _ensureSlash(_fileBaseURL)?.toString()||null; }catch{ return null; } })();
+                    const reqKey = (function(){ try{ return _ensureSlashKey(_fileBaseURL); }catch{ return null; } })();
                     _listDirEntriesWithQuickRetry(_fileBaseURL).then(list2=>{
                       try{
-                        const curKey = _ensureSlash(_fileBaseURL)?.toString()||null;
+                        const curKey = _ensureSlashKey(_fileBaseURL);
                         if (!reqKey || curKey===reqKey){
                           _fileEntries = Array.isArray(list2) ? list2 : [];
                           if (Array.isArray(list2) && list2.length>0){ _fileStableEntries = list2.slice(); _fileStableBaseKey = curKey; }
@@ -20209,11 +21682,11 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
                       // 非同期で子をロード→先頭ディレクトリがあれば追記（スラッシュ無しで選択状態）
                       const baseAfter = _fileBaseURL = _ensureSlash(new URL(q+'/', _fileBaseURL));
                       _fileEntries = []; _fileLoading = true; try{ window._fileLastListStartTs = Date.now(); }catch{} _fileFilter=''; if (_filePopupVisible()) _filePopupRender();
-                      const reqKeyDir = (function(){ try{ return _ensureSlash(_fileBaseURL)?.toString()||null; }catch{ return null; } })();
+                      const reqKeyDir = (function(){ try{ return _ensureSlashKey(_fileBaseURL); }catch{ return null; } })();
                       _listDirEntriesWithQuickRetry(_fileBaseURL)
                         .then(list2=>{
                           try{
-                            const curKey = _ensureSlash(_fileBaseURL)?.toString()||null;
+                            const curKey = _ensureSlashKey(_fileBaseURL);
                             if (!reqKeyDir || curKey===reqKeyDir){
                               _fileEntries = Array.isArray(list2)? list2: [];
                               if (Array.isArray(list2) && list2.length>0){ _fileStableEntries=list2.slice(); _fileStableBaseKey=curKey; }
@@ -20343,10 +21816,10 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
                   // 親一覧で直前セグメントをハイライトするため保持（Enter専用経路も網羅）
                   _filePostSelectName = prevSeg || null;
                   _fileBaseURL = parent; _fileTypedDirRaw = newTyped; _fileFilter = '';
-                  const reqKey = (function(){ try{ return _ensureSlash(_fileBaseURL)?.toString()||null; }catch{ return null; } })();
+                  const reqKey = (function(){ try{ return _ensureSlashKey(_fileBaseURL); }catch{ return null; } })();
                   _listDirEntriesWithQuickRetry(_fileBaseURL).then(list2=>{
                     try{
-                      const curKey = _ensureSlash(_fileBaseURL)?.toString()||null;
+                      const curKey = _ensureSlashKey(_fileBaseURL);
                       if (!reqKey || curKey===reqKey){
                         _fileEntries = Array.isArray(list2) ? list2 : [];
                         if (Array.isArray(list2) && list2.length>0){ _fileStableEntries = list2.slice(); _fileStableBaseKey = curKey; }
@@ -20428,11 +21901,11 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
                     try{
                       const baseNowEnter = _ensureSlash(_fileBaseURL);
                       try{ _filePopupNoUp = !!(baseNowEnter && (_isHostRoot(baseNowEnter) || _isUncShareRoot(baseNowEnter))); }catch{}
-                      const reqKeyEnter = (function(){ try{ return _ensureSlash(_fileBaseURL)?.toString()||null; }catch{ return null; } })();
+                      const reqKeyEnter = (function(){ try{ return _ensureSlashKey(_fileBaseURL); }catch{ return null; } })();
                       _listDirEntriesWithQuickRetry(_fileBaseURL)
                         .then(listEnter=>{
                           try{
-                            const curKeyEnter = _ensureSlash(_fileBaseURL)?.toString()||null;
+                            const curKeyEnter = _ensureSlashKey(_fileBaseURL);
                             if (!reqKeyEnter || curKeyEnter===reqKeyEnter){
                               _fileEntries = Array.isArray(listEnter) ? listEnter : [];
                               if (Array.isArray(listEnter) && listEnter.length>0){ _fileStableEntries = listEnter.slice(); _fileStableBaseKey = curKeyEnter; }
@@ -20694,13 +22167,13 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
                 try{ if (cmdinput){ const pos=(cmdinput.value||'').length; cmdinput.setSelectionRange(pos,pos); } }catch{}
                 if (!_filePopupVisible()) _filePopupShow(); else _filePopupRender();
                 (function(){
-                  const reqKey = (function(){ try{ return _ensureSlash(_fileBaseURL)?.toString()||null; }catch{ return null; } })();
+                  const reqKey = (function(){ try{ return _ensureSlashKey(_fileBaseURL); }catch{ return null; } })();
                   // Freshen directory listing on popup open via Tab to include newly added files
                   try{ if (reqKey && _dirCache && _dirCache.delete) _dirCache.delete(reqKey); }catch{}
                   _listDirEntries(_fileBaseURL)
                     .then(list=>{
                       try{
-                        const curKey = _ensureSlash(_fileBaseURL)?.toString()||null;
+                        const curKey = _ensureSlashKey(_fileBaseURL);
                         if (!reqKey || curKey===reqKey){
                           _fileEntries = Array.isArray(list) ? list : [];
                           if (Array.isArray(list) && list.length>0){ _fileStableEntries = list.slice(); _fileStableBaseKey = curKey; }
@@ -20937,13 +22410,13 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
             _fileReflectedOnOpen = false;
             if (!_filePopupVisible()) _filePopupShow(); else _filePopupRender();
             (function(){
-              const reqKey = (function(){ try{ return _ensureSlash(_fileBaseURL)?.toString()||null; }catch{ return null; } })();
+              const reqKey = (function(){ try{ return _ensureSlashKey(_fileBaseURL); }catch{ return null; } })();
               // Freshen directory listing on ":e " popup open to include newly added files
               try{ if (reqKey && _dirCache && _dirCache.delete) _dirCache.delete(reqKey); }catch{}
               _listDirEntriesWithQuickRetry(_fileBaseURL)
                 .then(list=>{
                   try{
-                    const curKey = _ensureSlash(_fileBaseURL)?.toString()||null;
+                    const curKey = _ensureSlashKey(_fileBaseURL);
                     if (!reqKey || curKey===reqKey){
                       _fileEntries = Array.isArray(list) ? list : [];
                       if (Array.isArray(list) && list.length>0){ _fileStableEntries = list.slice(); _fileStableBaseKey = curKey; }
@@ -21137,7 +22610,7 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
                   }
                   entries.sort((a,b)=> a.name.localeCompare(b.name));
                   _fileEntries = entries;
-                  try{ const curKey = _ensureSlash(_fileBaseURL)?.toString()||null; _fileStableEntries = entries.slice(); _fileStableBaseKey = curKey; }catch{}
+                  try{ const curKey = _ensureSlashKey(_fileBaseURL); _fileStableEntries = entries.slice(); _fileStableBaseKey = curKey; }catch{}
                   _fileInvalid = false;
                 }).catch(()=>{
                   _fileInvalid = true;
@@ -21153,11 +22626,11 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
 
           // 有効になったら列挙（この時点で base を更新）。
           // ベース変更時のみ列挙。フィルタ変更のみは描画のみ（デバウンス）。
-          const prevKey = (function(){ try{ return _ensureSlash(_fileBaseURL)?.toString()||null; }catch{ return null; } })();
+          const prevKey = (function(){ try{ return _ensureSlashKey(_fileBaseURL); }catch{ return null; } })();
           // 変更前の基点URLオブジェクト（"../" 入力時の表示正規化に使用）
           const prevBaseObj = (function(){ try{ return _ensureSlash(_fileBaseURL); }catch{ return null; } })();
           if (parsed.baseURL){ _fileBaseURL = parsed.baseURL; }
-          let newKey = null; try{ newKey = _ensureSlash(_fileBaseURL)?.toString()||null; }catch{}
+          let newKey = null; try{ newKey = _ensureSlashKey(_fileBaseURL); }catch{}
           _fileInvalid = false;
           if (newKey !== prevKey){
             try{ console.debug('[e-input-base-changed]', { prevKey, newKey, typedDirRaw:_fileTypedDirRaw, filter:_fileFilter }); }catch{}
@@ -21205,11 +22678,11 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
               }
             }catch{}
             const doList = ()=>{
-              const reqKey = (function(){ try{ return _ensureSlash(_fileBaseURL)?.toString()||null; }catch{ return null; } })();
+              const reqKey = (function(){ try{ return _ensureSlashKey(_fileBaseURL); }catch{ return null; } })();
               _listDirEntriesWithQuickRetry(_fileBaseURL)
                 .then(list=>{
                   try{
-                    const curKey = _ensureSlash(_fileBaseURL)?.toString()||null;
+                    const curKey = _ensureSlashKey(_fileBaseURL);
                     if (!reqKey || curKey === reqKey){
                       // 取得結果が非空のときのみ上書き。空のときは直前の一覧を維持し、
                       // 一時的に "../" だけになる・"(no entries)" に振れる瞬間を避ける。
@@ -21242,7 +22715,7 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
               _fileLoading = true;
               _filePopupRender();
               const delay = (_fileNavRetryCount<=2 ? 250 : _fileNavRetryCount<=4 ? 400 : 600);
-              setTimeout(()=>{ try{ const kNow = _ensureSlash(_fileBaseURL)?.toString(); if (kNow===reqKey) { doList(); } else { _fileLoading=false; _filePopupRender(); } }catch{} }, delay);
+              setTimeout(()=>{ try{ const kNow = _ensureSlashKey(_fileBaseURL); if (kNow===reqKey) { doList(); } else { _fileLoading=false; _filePopupRender(); } }catch{} }, delay);
               return;
             }
           }catch{}
@@ -21259,12 +22732,12 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
               _fileEntries = []; _fileSel = 0; _fileLoading = true;
               if (_fileListTimer){ try{ clearTimeout(_fileListTimer); }catch{} _fileListTimer=null; }
               if (_filePopupVisible()) _filePopupRender();
-              const reqKey = (function(){ try{ return _ensureSlash(_fileBaseURL)?.toString()||null; }catch{ return null; } })();
+              const reqKey = (function(){ try{ return _ensureSlashKey(_fileBaseURL); }catch{ return null; } })();
               const doList2 = ()=>{
                 _listDirEntriesWithQuickRetry(_fileBaseURL)
                   .then(list=>{
                     try{
-                      const curKey = _ensureSlash(_fileBaseURL)?.toString()||null;
+                      const curKey = _ensureSlashKey(_fileBaseURL);
                       if (!reqKey || curKey === reqKey){
                         if (Array.isArray(list) && list.length>0){
                           _fileEntries = list;
@@ -21284,7 +22757,7 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
                         _fileLoading = true;
                         _filePopupRender();
                         const delay = (_fileNavRetryCount<=2 ? 250 : _fileNavRetryCount<=4 ? 400 : 600);
-                        setTimeout(()=>{ try{ const kNow = _ensureSlash(_fileBaseURL)?.toString(); if (kNow===reqKey) { doList2(); } else { _fileLoading=false; _filePopupRender(); } }catch{} }, delay);
+                        setTimeout(()=>{ try{ const kNow = _ensureSlashKey(_fileBaseURL); if (kNow===reqKey) { doList2(); } else { _fileLoading=false; _filePopupRender(); } }catch{} }, delay);
                         return;
                       }
                     }catch{}
@@ -21332,11 +22805,11 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
             }catch{ _filePopupNoUp = false; }
             if (_filePopupVisible()) _filePopupRender();
             (function(){
-              const reqKey = (function(){ try{ return _ensureSlash(_fileBaseURL)?.toString()||null; }catch{ return null; } })();
+              const reqKey = (function(){ try{ return _ensureSlashKey(_fileBaseURL); }catch{ return null; } })();
               _listDirEntriesWithQuickRetry(_fileBaseURL)
                 .then(list=>{
                   try{
-                    const curKey = _ensureSlash(_fileBaseURL)?.toString()||null;
+                    const curKey = _ensureSlashKey(_fileBaseURL);
                     if (!reqKey || curKey === reqKey){
                       _fileEntries = Array.isArray(list) ? list : [];
                       if (Array.isArray(list) && list.length>0){
@@ -21370,6 +22843,8 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
                 if (_quitInProgress) return;
                 _quitInProgress = true;
                 // Treat window close as immediate quit (F10 semantics): persist session, no prompt (#435)
+                try{ window.__sixPersistHint = 'quit:close-request'; }catch{}
+                try{ _prepareViewStateForImmediateQuit('close-request'); }catch{}
                 try{ _persistSessionNow(); _suppressPersistOnQuit = false; _skipPersistOnUnloadOnce = true; _quittingAll = true; _allowUnloadOnce = true; }catch{}
                 try{ window.chrome.webview.postMessage({ type:'close-result', ok: true }); }catch{}
                 try{ window.close(); }catch{}
@@ -21598,7 +23073,7 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
     try{ const act = bufpopupInner.querySelector('.item.active'); if (act && act.scrollIntoView) act.scrollIntoView({block:'nearest', inline:'nearest'}); }catch{}
     // 可視スナップショット更新（現在表示している一覧/基点を保存）
     try{
-      const curKey = _ensureSlash(_fileBaseURL)?.toString()||null;
+      const curKey = _ensureSlashKey(_fileBaseURL);
       _fileVisibleBaseKey = curKey;
       _fileVisibleEntries = (_fileEntries && Array.isArray(_fileEntries)) ? _fileEntries.slice() : [];
     }catch{}
@@ -21774,6 +23249,13 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
       const x = new URL(u);
       if (!x.pathname.endsWith('/')) x.pathname += '/';
       return x;
+    }catch{ return null; }
+  }
+
+  function _ensureSlashKey(u){
+    try{
+      const x = _ensureSlash(u);
+      return x ? x.toString() : null;
     }catch{ return null; }
   }
 
@@ -21998,7 +23480,7 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
     if (Array.isArray(list) && list.length > 0) return list;
     // If this key recently hard-failed (HTTP 4xx), do not spin quick retries.
     try{
-      const k0 = _ensureSlash(u)?.toString()||null;
+      const k0 = _ensureSlashKey(u);
       const hf0 = (k0 && _dirHardFail) ? _dirHardFail.get(k0) : null;
       if (hf0 && Number.isFinite(hf0.status) && (hf0.status|0) >= 400 && hf0.ts && (Date.now() - hf0.ts) < 30000){
         return list;
@@ -22012,14 +23494,14 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
       for (const d of delays){
         // If key hard-failed, stop retrying.
         try{
-          const k1 = _ensureSlash(u)?.toString()||null;
+          const k1 = _ensureSlashKey(u);
           const hf1 = (k1 && _dirHardFail) ? _dirHardFail.get(k1) : null;
           if (hf1 && Number.isFinite(hf1.status) && (hf1.status|0) >= 400 && hf1.ts && (Date.now() - hf1.ts) < 30000){
             break;
           }
         }catch{}
         // ベースが変わっていたら中断
-        try{ const curKey = _ensureSlash(_fileBaseURL)?.toString()||null; if (!curKey || curKey !== _ensureSlash(u)?.toString()) break; }catch{}
+        try{ const curKey = _ensureSlashKey(_fileBaseURL); if (!curKey || curKey !== _ensureSlashKey(u)) break; }catch{}
         await new Promise(r=>setTimeout(r, d));
         // 同一ベースを確認して再列挙
         const again = await _listDirEntries(u);
@@ -22027,7 +23509,7 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
       }
       // なお空のままなら、バックグラウンド再試行スケジューラへ委譲
       try{
-        const key = _ensureSlash(u)?.toString();
+        const key = _ensureSlashKey(u);
         const hf = (key && _dirHardFail) ? _dirHardFail.get(key) : null;
         const hard = !!(hf && Number.isFinite(hf.status) && (hf.status|0) >= 400 && hf.ts && (Date.now() - hf.ts) < 30000);
         if (key && !hard) _scheduleDirRetry(key);
@@ -22073,7 +23555,7 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
           _dirCache.set(key, arrx);
           // まだ同じディレクトリを見ているなら即時反映
           try{
-            const curKey = _ensureSlash(_fileBaseURL)?.toString();
+            const curKey = _ensureSlashKey(_fileBaseURL);
             if (curKey === key){ _fileEntries = arrx; _filePopupRender(); }
           }catch{}
           _dirRetryState.delete(key);
@@ -22537,10 +24019,10 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
               _fileEntries=[]; _fileSel=0; _fileLoading=true; try{ window._fileLastListStartTs=Date.now(); }catch{}
               // 入力欄追従 (#833)
               try{ _reflectCmdInputFullPath(hostPart, targetPath); }catch{}
-              const reqKey = (function(){ try{ return _ensureSlash(_fileBaseURL)?.toString()||null; }catch{ return null; } })();
+              const reqKey = (function(){ try{ return _ensureSlashKey(_fileBaseURL); }catch{ return null; } })();
               console.debug('[pathHeader nav]', { target:targetPath, url:urlStr });
               _listDirEntriesWithQuickRetry(_fileBaseURL)
-                .then(list=>{ try{ const curKey=_ensureSlash(_fileBaseURL)?.toString()||null; if (!reqKey || reqKey===curKey){ _fileEntries=Array.isArray(list)? list: []; if (Array.isArray(list)&&list.length>0){ _fileStableEntries=list.slice(); _fileStableBaseKey=curKey; } } }catch{} })
+                .then(list=>{ try{ const curKey=_ensureSlashKey(_fileBaseURL); if (!reqKey || reqKey===curKey){ _fileEntries=Array.isArray(list)? list: []; if (Array.isArray(list)&&list.length>0){ _fileStableEntries=list.slice(); _fileStableBaseKey=curKey; } } }catch{} })
                 .finally(()=>{ _fileLoading=false; if (_filePopupVisible()) _filePopupRender(); try{ console.debug('[pathHeader nav done]', { seg, targetPath, base:_fileBaseURL?String(_fileBaseURL):null }); }catch{} });
             }catch(e){ console.warn('[pathHeader nav error]', e); }
           });
@@ -22571,10 +24053,10 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
           _fileEntries=[]; _fileSel=0; _fileLoading=true; try{ window._fileLastListStartTs=Date.now(); }catch{}
           // 入力欄追従 (F2/F3等多段遡上) (#833)
           try{ _reflectCmdInputFullPath(hostPart, pathRel); }catch{}
-          const reqKey=(function(){ try{ return _ensureSlash(_fileBaseURL)?.toString()||null; }catch{ return null; } })();
+          const reqKey=(function(){ try{ return _ensureSlashKey(_fileBaseURL); }catch{ return null; } })();
           console.debug('[fkey nav]', { levels, target:pathRel, url:urlStr });
           _listDirEntriesWithQuickRetry(_fileBaseURL)
-            .then(list=>{ try{ const curKey=_ensureSlash(_fileBaseURL)?.toString()||null; if (!reqKey || reqKey===curKey){ _fileEntries=Array.isArray(list)? list: []; if (Array.isArray(list)&&list.length>0){ _fileStableEntries=list.slice(); _fileStableBaseKey=curKey; } } }catch{} })
+            .then(list=>{ try{ const curKey=_ensureSlashKey(_fileBaseURL); if (!reqKey || reqKey===curKey){ _fileEntries=Array.isArray(list)? list: []; if (Array.isArray(list)&&list.length>0){ _fileStableEntries=list.slice(); _fileStableBaseKey=curKey; } } }catch{} })
             .finally(()=>{ _fileLoading=false; if (_filePopupVisible()) _filePopupRender(); });
         }catch(e){ console.warn('[fkey nav error]', e); }
       }
@@ -22680,10 +24162,10 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
           _fileFilter = '';
           _fileAutoPrefillOnNextRender = null;
           _fileEntries = []; _fileSel=0; _fileLoading=true; try{ window._fileLastListStartTs = Date.now(); }catch{}
-          const reqKey = (function(){ try{ return _ensureSlash(_fileBaseURL)?.toString()||null; }catch{ return null; } })();
+          const reqKey = _ensureSlashKey(_fileBaseURL);
           console.debug('[fkey nav]', { levels, target:pathRel, url:urlStr });
           _listDirEntriesWithQuickRetry(_fileBaseURL)
-            .then(list=>{ try{ const curKey=_ensureSlash(_fileBaseURL)?.toString()||null; if (!reqKey || reqKey===curKey){ _fileEntries=Array.isArray(list)? list: []; if (Array.isArray(list)&&list.length>0){ _fileStableEntries=list.slice(); _fileStableBaseKey=curKey; } } }catch{} })
+            .then(list=>{ try{ const curKey=_ensureSlashKey(_fileBaseURL); if (!reqKey || reqKey===curKey){ _fileEntries=Array.isArray(list)? list: []; if (Array.isArray(list)&&list.length>0){ _fileStableEntries=list.slice(); _fileStableBaseKey=curKey; } } }catch{} })
             .finally(()=>{ _fileLoading=false; if (_filePopupVisible()) _filePopupRender(); });
         }catch(e){ console.warn('[fkey nav error]', e); }
       }
@@ -22725,7 +24207,7 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
     }catch{}
     // 基点変更ごとにリトライカウンタ初期化 (#826)
     try{
-      const curKey = (function(){ try{ return _ensureSlash(_fileBaseURL)?.toString()||null; }catch{ return null; } })();
+      const curKey = (function(){ try{ return _ensureSlashKey(_fileBaseURL); }catch{ return null; } })();
       if (curKey && window._fileListRetryKey !== curKey){ window._fileListRetryKey = curKey; window._fileListRetryCount = 0; }
     }catch{}
     // ハング/空即表示抑止: 直近ナビゲーション後の空一覧は一定時間ロード扱い (#826)
@@ -22733,7 +24215,7 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
       const now = Date.now();
       const navElapsed = now - (_fileJustNavAt||0);
       const startElapsed = now - (window._fileLastListStartTs||0);
-      const baseKey = (function(){ try{ return _ensureSlash(_fileBaseURL)?.toString()||null; }catch{ return null; } })();
+      const baseKey = (function(){ try{ return _ensureSlashKey(_fileBaseURL); }catch{ return null; } })();
       // 自動再試行条件
       const wantRetry = (
         _fileLoading && startElapsed > 1800 && window._fileListRetryCount < 3
@@ -22747,7 +24229,7 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
         const reqKey = baseKey;
         try{
           _listDirEntriesWithQuickRetry(_fileBaseURL)
-            .then(list=>{ try{ const cur = _ensureSlash(_fileBaseURL)?.toString()||null; if (!reqKey || cur===reqKey){ _fileEntries = Array.isArray(list)? list: []; } }catch{} })
+            .then(list=>{ try{ const cur = _ensureSlashKey(_fileBaseURL); if (!reqKey || cur===reqKey){ _fileEntries = Array.isArray(list)? list: []; } }catch{} })
             .finally(()=>{ _fileLoading = false; try{ if (_filePopupVisible && _filePopupVisible()) _filePopupRender&&_filePopupRender(); }catch{} });
         }catch{}
       }
@@ -22847,7 +24329,7 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
     // 現在選択項目名を入力欄へ補完（カーソル未移動でも即利用可能に）
     try{
       if (_fileAutoPrefillOnNextRender && !_fileFilter){
-        const baseStrNow = (function(){ try{ return _ensureSlash(_fileBaseURL)?.toString()||null; }catch{ return null; } })();
+        const baseStrNow = _ensureSlashKey(_fileBaseURL);
         if (baseStrNow && _fileAutoPrefillOnNextRender.base === baseStrNow){
           try{ console.debug('[e-prefill-check]', { base: baseStrNow, typedRaw: _fileTypedDirRaw, filter:_fileFilter, sel:_fileSel, desired:_fileAutoPrefillOnNextRender.desiredName||null }); }catch{}
           // #817: desiredName 優先（親移動直後に前ディレクトリを補完したいケース）
@@ -22935,9 +24417,9 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
         if (last && (now - last) > 1500){
           console.debug('[filePopup retry stale-loading]', { since: now - last });
           window._fileLastListStartTs = now; // update start ts
-          const key = (function(){ try{ return _ensureSlash(_fileBaseURL)?.toString()||null; }catch{ return null; } })();
+          const key = _ensureSlashKey(_fileBaseURL);
           _listDirEntriesWithQuickRetry(_fileBaseURL)
-            .then(list=>{ try{ const cur=_ensureSlash(_fileBaseURL)?.toString()||null; if (!key || cur===key){ _fileEntries=Array.isArray(list)? list: []; } }catch{} })
+            .then(list=>{ try{ const cur=_ensureSlashKey(_fileBaseURL); if (!key || cur===key){ _fileEntries=Array.isArray(list)? list: []; } }catch{} })
             .finally(()=>{ _fileLoading=false; try{ if (_filePopupVisible && _filePopupVisible()) _filePopupRender&&_filePopupRender(); }catch{} });
         }
       }
@@ -23000,7 +24482,7 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
       div.addEventListener('click', ()=>{
         // クリック開始時に parentNav 自動実行待機フラグを明示的に解除（誤遷移二重発火抑止）
         try{ _fileNavParentPending = false; window._fileParentNavAutoRunFlag=false; }catch{}
-        try{ const baseStr0=_ensureSlash(_fileBaseURL)?.toString()||''; _fileClickLog({ phase:'click-start', base:baseStr0, typedDirRaw:String(_fileTypedDirRaw||''), domName: div && div.dataset ? div.dataset.entryName : null }); }catch{}
+        try{ const baseStr0=_ensureSlashKey(_fileBaseURL)||''; _fileClickLog({ phase:'click-start', base:baseStr0, typedDirRaw:String(_fileTypedDirRaw||''), domName: div && div.dataset ? div.dataset.entryName : null }); }catch{}
         // 動的再取得（staleクロージャ疑い対策）: DOMに保持した名前から現在の一覧を再探索
         try{
           const nmDom = div && div.dataset ? (div.dataset.entryName||'') : '';
@@ -23055,7 +24537,7 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
               try{ _fileClickLog(Object.assign({}, dbg, { phase:'pre-build' })); }catch{}
               // 現在のディレクトリ自身 (it.url === _fileBaseURL) の重複表示があればスキップ (#849)
               try{
-                const baseStrCur = _ensureSlash(_fileBaseURL)?.toString()||'';
+                const baseStrCur = _ensureSlashKey(_fileBaseURL)||'';
                 const itUrlStr = String(it && it.url || '');
                 if (baseStrCur && itUrlStr && itUrlStr === baseStrCur){
                   _fileClickLog(Object.assign({}, dbg, { phase:'self-url-skip', baseStrCur, itUrlStr }));
@@ -23135,11 +24617,11 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
                   _loadSharesForHost(baseNow.host, prevSeg)
                     .finally(()=>{ _fileLoading=false; if (_filePopupVisible()) _filePopupRender(); });
                 } else {
-                  const reqKey = (function(){ try{ return _ensureSlash(_fileBaseURL)?.toString()||null; }catch{ return null; } })();
+                  const reqKey = _ensureSlashKey(_fileBaseURL);
                   _listDirEntriesWithQuickRetry(_fileBaseURL)
                     .then(list2=>{
                       try{
-                        const curKey = _ensureSlash(_fileBaseURL)?.toString()||null;
+                        const curKey = _ensureSlashKey(_fileBaseURL);
                         if (!reqKey || curKey===reqKey){
                           _fileEntries = Array.isArray(list2) ? list2 : [];
                           if (Array.isArray(list2) && list2.length>0){ _fileStableEntries = list2.slice(); _fileStableBaseKey = curKey; }
@@ -23216,11 +24698,11 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
               try{
                 const baseNow = _ensureSlash(_fileBaseURL);
                 try{ _filePopupNoUp = !!(baseNow && (_isHostRoot(baseNow) || _isUncShareRoot(baseNow))); }catch{ /* keep as-is */ }
-                const reqKey = (function(){ try{ return _ensureSlash(_fileBaseURL)?.toString()||null; }catch{ return null; } })();
+                const reqKey = _ensureSlashKey(_fileBaseURL);
                 _listDirEntriesWithQuickRetry(_fileBaseURL)
                   .then(list2=>{
                     try{
-                      const curKey = _ensureSlash(_fileBaseURL)?.toString()||null;
+                      const curKey = _ensureSlashKey(_fileBaseURL);
                       if (!reqKey || curKey===reqKey){
                         _fileEntries = Array.isArray(list2) ? list2 : [];
                         if (Array.isArray(list2) && list2.length>0){ _fileStableEntries = list2.slice(); _fileStableBaseKey = curKey; }
@@ -23232,7 +24714,7 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
                   .finally(()=>{ _fileLoading=false; if (_filePopupVisible()) _filePopupRender(); });
               }catch{}
             }
-            try{ _fileNavPendingKey = _ensureSlash(nextBase)?.toString()||null; }catch{ _fileNavPendingKey=null; }
+            try{ _fileNavPendingKey = _ensureSlashKey(nextBase)||null; }catch{ _fileNavPendingKey=null; }
             if (cmdinput){ try { cmdinput.dispatchEvent(new Event('input', { bubbles:true })); } catch {} }
             try{ cmdinput && cmdinput.focus(); }catch{}
           }catch{}
@@ -23296,11 +24778,11 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
     try{
       if (_fileBaseURL && (!_fileEntries || _fileEntries.length===0)){
         _fileLoading = true;
-        const reqKey0 = (function(){ try{ return _ensureSlash(_fileBaseURL)?.toString()||null; }catch{ return null; } })();
+        const reqKey0 = _ensureSlashKey(_fileBaseURL);
         _listDirEntriesWithQuickRetry(_fileBaseURL)
           .then(list0=>{
             try{
-              const curKey = _ensureSlash(_fileBaseURL)?.toString()||null;
+              const curKey = _ensureSlashKey(_fileBaseURL);
               if (!reqKey0 || curKey===reqKey0){
                 _fileEntries = Array.isArray(list0)? list0: [];
                 if (Array.isArray(list0) && list0.length>0){ _fileStableEntries=list0.slice(); _fileStableBaseKey=curKey; }
@@ -23510,11 +24992,11 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
       try{ _fileAutoPrefillOnNextRender = { base: String(_fileBaseURL), typed: _augmentWSL(String(_fileTypedDirRaw||'')), desiredName: prevSeg }; }catch{}
       try{ if (cmdinput){ const disp=_augmentWSL(_collapseDotDotPath(String(_fileTypedDirRaw||''))); cmdinput.value=':e ' + disp; const pos=(cmdinput.value||'').length; cmdinput.setSelectionRange(pos,pos); } }catch{}
       const prevBaseStr = (function(){ try{ return baseDir ? baseDir.toString() : null; }catch{ return null; } })();
-      const reqKey = (function(){ try{ return _ensureSlash(_fileBaseURL)?.toString()||null; }catch{ return null; } })();
+      const reqKey = _ensureSlashKey(_fileBaseURL);
       _listDirEntriesWithQuickRetry(_fileBaseURL)
         .then(list2=>{
           try{
-            const curKey = _ensureSlash(_fileBaseURL)?.toString()||null;
+            const curKey = _ensureSlashKey(_fileBaseURL);
             if (!reqKey || curKey===reqKey){
               _fileEntries = Array.isArray(list2)? list2: [];
               if (Array.isArray(list2) && list2.length>0){ _fileStableEntries=list2.slice(); _fileStableBaseKey=curKey; }
@@ -24025,6 +25507,8 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
       quitBtn.addEventListener('click', (e)=>{
         try{ e.preventDefault(); e.stopPropagation(); }catch{}
         try{
+          try{ window.__sixPersistHint = 'quit:button'; }catch{}
+          _prepareViewStateForImmediateQuit('quitBtn');
           _persistSessionNow();
           _suppressPersistOnQuit = false;
           _skipPersistOnUnloadOnce = true; _quittingAll = true; _allowUnloadOnce = true;
@@ -24781,6 +26265,8 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
           if (key === 'F10'){
             try{ e.preventDefault(); e.stopPropagation(); }catch{}
             try{
+              try{ window.__sixPersistHint = 'quit:F10'; }catch{}
+              _prepareViewStateForImmediateQuit('F10');
               _persistSessionNow();
               _suppressPersistOnQuit = false;
               _skipPersistOnUnloadOnce = true; // onbeforeunload での二重書き込みを避ける
@@ -27281,7 +28767,7 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
 
 
         const _grepQuoteArg = (s)=>{
-          const v = String(s ?? '');
+          const v = String((s==null)?'':s);
           if (!v) return '""';
           if (/\s/.test(v) || /"/.test(v)) return '"' + v.replace(/"/g, '\\"') + '"';
           return v;
@@ -27805,7 +29291,7 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
     try {
         const b = currentBuffer(); // For settings fallback
         const isFixed = !!(flagsGiven && String(flagsGiven).includes('F'));
-        const _escapeRegExpLiteral = (s)=> String(s??'').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        const _escapeRegExpLiteral = (s)=> String((s==null)?'':s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
         const patSrc = isFixed ? _escapeRegExpLiteral(pat) : pat;
         // Case sensitivity logic
         let needI = false;
@@ -28033,6 +29519,24 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
       _wireZoomHUD();
       // Save session opportunistically on unload (no prompt)
   try{ window.addEventListener('beforeunload', ()=>{ try{ if (!_skipPersistOnUnloadOnce) _persistSessionNow(); }catch{} }, { capture:true }); }catch{}
+      // Also persist on pagehide/visibilitychange(hidden) to improve reliability for immediate exits
+      // in hosts where beforeunload timing is unreliable.
+      try{
+        let _lastPersistOnHideAt = 0;
+        const persistOnHide = (tag)=>{
+          try{
+            const now = Date.now();
+            if ((now - (_lastPersistOnHideAt|0)) < 400) return;
+            _lastPersistOnHideAt = now;
+            if (_skipPersistOnUnloadOnce) return;
+            try{ window.__sixPersistHint = 'quit:' + String(tag||'hide'); }catch{}
+            try{ _prepareViewStateForImmediateQuit(String(tag||'hide')); }catch{}
+            try{ _persistSessionNow(); }catch{}
+          }catch{}
+        };
+        window.addEventListener('pagehide', ()=>{ try{ persistOnHide('pagehide'); }catch{} }, { capture:true });
+        document.addEventListener('visibilitychange', ()=>{ try{ if (document.hidden) persistOnHide('hidden'); }catch{} }, { capture:true });
+      }catch{}
       const loadP = Promise.resolve().then(()=>_loadDocFromQuery()).catch(()=>false);
       const watchdog = new Promise(resolve=> setTimeout(()=>resolve(false), 1500));
       Promise.race([loadP, watchdog]).then(loaded=>{
@@ -28047,9 +29551,89 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
         if (cmdinput){ cmdinput.placeholder = 'command (e.g. :100, :q)'; }
         caretRow = Math.max(0, Math.min(_totalLines()-1, caretRow));
         caretCol = Math.max(0, caretCol);
-        ensureScrolloff({centerOnce:false});
+        // If session restore captured an exact viewport (caret/scrollTop), keep it.
+        // Boot-time ensureScrolloff/forced stabilization can otherwise recenter the view (restart jump).
+        try{
+          const sr = window.__sixSessionRestore;
+          const now = Date.now();
+          if (sr && (now < (sr.until|0)) && (currentIdx|0) === (sr.idx|0)){
+            try{ _scrollGuardUntil = Date.now() + 2200; }catch{}
+            try{ _setCaret((sr.vr|0), (sr.vc|0)); }catch{}
+            // If the restored view is intended to be pinned at EOF (wrap-on + pad), avoid grid-snapping.
+            // _setEditorScrollTop without {physical:true} can clamp/snap and hide 1 pad line (thumb gap).
+            try{
+              const mdNow = (function(){ try{ return _mdRichActive && _mdRichActive(); }catch{ return false; } })();
+              const wrapNow = (function(){ try{ return _wrapEnabled && _wrapEnabled(); }catch{ return false; } })();
+              const eofPad = (typeof _eofPadLines==='function') ? (_eofPadLines()|0) : 0;
+              const atEof = (((sr.vr|0) + 1) === (_totalLines()|0));
+              let physMax = 0;
+              try{ physMax = Math.max(0, ((editor.scrollHeight||0) - (editor.clientHeight||0))|0); }catch{ physMax = 0; }
+              const nearPhysBottom = (Math.abs(((sr.vs|0) - (physMax|0))|0) <= Math.max(2, (LINE_HEIGHT|0) * 2));
+              const pin = (!!sr.pinBottomAtEof) || (!mdNow && wrapNow && (eofPad|0) > 0 && atEof && nearPhysBottom);
+              if (pin){
+                ensureScrolloff({ force:true, preferEOFPad:true, eofToBottom:true, keepCaret:true, immediate:true });
+              } else {
+                _setEditorScrollTop(Math.max(0, (sr.vs|0)), { immediate:true });
+              }
+            }catch{ try{ _setEditorScrollTop(Math.max(0, (sr.vs|0)), { immediate:true }); }catch{} }
+            try{ _skipEnsureOnceAfterSwitch = true; }catch{}
+          } else {
+            ensureScrolloff({centerOnce:false});
+          }
+        }catch{ ensureScrolloff({centerOnce:false}); }
         _repositionCaret();
         updateGutter();
+
+        // Post-startup stabilization:
+        // - Fonts/metrics can settle after session restore, changing LINE_HEIGHT and making the
+        //   restored scrollTop misaligned (visible half-row at top).
+        // - wrap-on EOF pad needs grid-aligned physical max to avoid hiding 1 pad line.
+        const _postStartStabilize = ()=>{
+          try{
+            try{ _syncEditorMetrics && _syncEditorMetrics(); }catch{}
+            try{ clampViewportExactLines && clampViewportExactLines(); }catch{}
+            try{ _syncEofPadGridComp && _syncEofPadGridComp(); }catch{}
+            try{ _snapScrollGridPersist && _snapScrollGridPersist(); }catch{}
+            // Session restore: do not force ensureScrolloff during stabilization. It can override the
+            // restored viewport (especially after font/metric settle) and cause a jump.
+            try{
+              const sr = window.__sixSessionRestore;
+              const now = Date.now();
+              if (sr && (now < (sr.until|0)) && (currentIdx|0) === (sr.idx|0)){
+                try{ _scrollGuardUntil = Date.now() + 1800; }catch{}
+                try{ _setCaret((sr.vr|0), (sr.vc|0)); }catch{}
+                try{
+                  const mdNow = (function(){ try{ return _mdRichActive && _mdRichActive(); }catch{ return false; } })();
+                  const wrapNow = (function(){ try{ return _wrapEnabled && _wrapEnabled(); }catch{ return false; } })();
+                  const eofPad = (typeof _eofPadLines==='function') ? (_eofPadLines()|0) : 0;
+                  const atEof = (((sr.vr|0) + 1) === (_totalLines()|0));
+                  let physMax = 0;
+                  try{ physMax = Math.max(0, ((editor.scrollHeight||0) - (editor.clientHeight||0))|0); }catch{ physMax = 0; }
+                  const nearPhysBottom = (Math.abs(((sr.vs|0) - (physMax|0))|0) <= Math.max(2, (LINE_HEIGHT|0) * 2));
+                  const pin = (!!sr.pinBottomAtEof) || (!mdNow && wrapNow && (eofPad|0) > 0 && atEof && nearPhysBottom);
+                  if (pin){
+                    ensureScrolloff({ force:true, preferEOFPad:true, eofToBottom:true, keepCaret:true, immediate:true });
+                  } else {
+                    _setEditorScrollTop(Math.max(0, (sr.vs|0)), { immediate:true });
+                  }
+                }catch{ try{ _setEditorScrollTop(Math.max(0, (sr.vs|0)), { immediate:true }); }catch{} }
+              } else {
+                // _snapScrollGridPersist may set _scrollGuardUntil; force ensureScrolloff so caret doesn't stay off-screen.
+                try{ ensureScrolloff && ensureScrolloff({ force:true, centerOnce:false, keepCaret:true, immediate:true }); }catch{}
+              }
+            }catch{ try{ ensureScrolloff && ensureScrolloff({ force:true, centerOnce:false, keepCaret:true, immediate:true }); }catch{} }
+            try{ _repositionCaret && _repositionCaret(); }catch{}
+            try{ updateGutter && updateGutter(); }catch{}
+          }catch{}
+        };
+        try{ setTimeout(_postStartStabilize, 220); }catch{}
+        try{ setTimeout(_postStartStabilize, 650); }catch{}
+        try{
+          if (document && document.fonts && document.fonts.ready && typeof document.fonts.ready.then === 'function'){
+            document.fonts.ready.then(()=>{ try{ _postStartStabilize(); }catch{} }).catch(()=>{});
+          }
+        }catch{}
+
         // 起動直後は塗りつぶしcaretから開始（輪郭のみを避ける）
         try{ _hideCursor(); }catch{}
         _renderTabbar();
@@ -28294,6 +29878,83 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
 
   window.six = {
     runCommand,
-    setScrolloff:(n)=>{ try{ const v = parseInt(n,10); if (Number.isNaN(v)) return; scrolloff = v|0; _schedulePersist('scrolloff'); ensureScrolloff({force:true}); _repositionCaret(); updateGutter(); }catch{} }
+    setScrolloff:(n)=>{ try{ const v = parseInt(n,10); if (Number.isNaN(v)) return; scrolloff = v|0; _schedulePersist('scrolloff'); ensureScrolloff({force:true}); _repositionCaret(); updateGutter(); }catch{} },
+    dumpEofPad: ()=>{
+      try{
+        const root = document && document.documentElement ? document.documentElement : null;
+        const rootCs = root ? window.getComputedStyle(root) : null;
+        const edCs = editor ? window.getComputedStyle(editor) : null;
+        const lh = (typeof LINE_HEIGHT==='number' && LINE_HEIGHT>0) ? (LINE_HEIGHT|0) : 0;
+        const eofPad = (typeof _eofPadLines==='function') ? (_eofPadLines()|0) : -1;
+        const pb = edCs ? Math.round(parseFloat(edCs.getPropertyValue('padding-bottom')||'0')||0) : -1;
+        const pt = edCs ? Math.round(parseFloat(edCs.getPropertyValue('padding-top')||'0')||0) : -1;
+        const sh = editor ? (editor.scrollHeight||0) : 0;
+        const ch = editor ? (editor.clientHeight||0) : 0;
+        const st = editor ? (editor.scrollTop||0) : 0;
+        const physMax = Math.max(0, (sh|0) - (ch|0));
+        const wrapNow = (function(){ try{ return _wrapEnabled && _wrapEnabled(); }catch{ return false; } })();
+        const mdNow = (function(){ try{ return _mdRichActive && _mdRichActive(); }catch{ return false; } })();
+        const usesVisual = (function(){ try{ return _wrapUsesVisualScrollGrid && _wrapUsesVisualScrollGrid(); }catch{ return false; } })();
+        const top1 = (function(){ try{ return _topLine ? (_topLine()|0) : -1; }catch{ return -1; } })();
+        const total = (function(){ try{ return _totalLines ? (_totalLines()|0) : -1; }catch{ return -1; } })();
+        const caret1 = (function(){ try{ return (caretRow|0) + 1; }catch{ return -1; } })();
+        const cssEof = rootCs ? String(rootCs.getPropertyValue('--eofPadLines')||'').trim() : '';
+
+        let endsWithNewline = false;
+        let trailingNewlines = 0;
+        let lastLineLen = -1;
+        try{
+          const s = String(editor ? (editor.value||'') : '');
+          endsWithNewline = s.endsWith('\n');
+          let k = 0;
+          for (let i=s.length-1;i>=0;i--){ if (s[i] === '\n') k++; else break; }
+          trailingNewlines = k|0;
+          const lastNL = s.lastIndexOf('\n');
+          const lastLine = (lastNL >= 0) ? s.slice(lastNL+1) : s;
+          lastLineLen = (lastLine||'').length|0;
+        }catch{}
+
+        const out = {
+          mdNow, wrapNow, usesVisual,
+          cssEofPadLines: cssEof,
+          eofPadLines: eofPad,
+          lh,
+          endsWithNewline: !!endsWithNewline,
+          trailingNewlines: (trailingNewlines|0),
+          lastLineLen: (lastLineLen|0),
+          paddingTopPx: pt,
+          paddingBottomPx: pb,
+          stylePaddingBottom: (editor && editor.style) ? String(editor.style.paddingBottom||'') : '',
+          scrollTopPx: (st|0),
+          scrollTopMod: (lh>0 ? ((st|0) % lh) : -1),
+          scrollHeightPx: (sh|0),
+          clientHeightPx: (ch|0),
+          physMaxPx: (physMax|0),
+          physMaxMod: (lh>0 ? ((physMax|0) % lh) : -1),
+          topLine1: (top1|0),
+          caretLine1: (caret1|0),
+          totalLines: (total|0)
+        };
+        console.log('[six][dumpEofPad]', out);
+        return out;
+      }catch(e){ try{ console.error('[six][dumpEofPad] failed', e); }catch{} return null; }
+    },
+    debug: (function(){
+      try{
+        const dbg = {};
+        // Allow: six.debug.eofpad = 1  (writes localStorage)
+        try{
+          Object.defineProperty(dbg, 'eofpad', {
+            configurable: true,
+            enumerable: true,
+            get: ()=>{ try{ return String(localStorage.getItem('six.debug.eofpad')||''); }catch{ return ''; } },
+            set: (v)=>{ try{ localStorage.setItem('six.debug.eofpad', (String(v)==='1' || String(v).toLowerCase()==='true') ? '1' : '0'); }catch{} }
+          });
+        }catch{}
+        dbg.set = (k,v)=>{ try{ localStorage.setItem(String(k||''), String(v)); }catch{} };
+        dbg.get = (k)=>{ try{ return localStorage.getItem(String(k||'')); }catch{ return null; } };
+        return dbg;
+      }catch{ return {}; }
+    })()
   };
 })();
