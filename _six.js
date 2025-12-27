@@ -1859,8 +1859,23 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
       try {
           if (Array.isArray(j.searchHistory) && typeof _searchHistory !== 'undefined') {
               _searchHistory.length = 0;
-              j.searchHistory.forEach(v => _searchHistory.push(String(v)));
+              // Migrate legacy entries that included leading '/' or '?'
+              j.searchHistory.forEach(v => {
+                try{
+                  let s = String(v||'');
+                  let i = 0;
+                  while (i < s.length && (s[i] === ' ' || s[i] === '\t')) i++;
+                  if (s[i] === ':'){
+                    i++;
+                    while (i < s.length && (s[i] === ' ' || s[i] === '\t')) i++;
+                  }
+                  if (s[i] === '/' || s[i] === '?') i++;
+                  s = s.slice(i);
+                  if (s.length) _searchHistory.push(s);
+                }catch{}
+              });
               _searchHistIndex = _searchHistory.length;
+              try{ _searchHistBrowsing=false; _searchHistTemp=''; _searchHistTempHead='/'; }catch{}
           }
       } catch {}
 
@@ -5317,6 +5332,28 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
   let _searchHistIndex = 0;         // 0.._searchHistory.length (length means draft)
   let _searchHistBrowsing = false;  // true when navigating search history in cmdinput
   let _searchHistTemp = '';         // current draft while browsing
+  let _searchHistTempHead = '/';    // preserved prefix segment (up to and including '/' or '?') while browsing
+
+  function _splitCmdSearchPrefix(v){
+    // Returns { head, prefix, tail } where head includes the prefix char ('/' or '?').
+    // Accepts optional leading spaces and optional leading ':' with optional spaces.
+    try{
+      const s = String(v||'');
+      let i = 0;
+      while (i < s.length && (s[i] === ' ' || s[i] === '\t')) i++;
+      if (s[i] === ':'){
+        i++;
+        while (i < s.length && (s[i] === ' ' || s[i] === '\t')) i++;
+      }
+      const c = s[i];
+      if (c === '/' || c === '?'){
+        return { head: s.slice(0, i+1), prefix: c, tail: s.slice(i+1) };
+      }
+      return { head: '/', prefix: '/', tail: s };
+    }catch{
+      return { head: '/', prefix: '/', tail: String(v||'') };
+    }
+  }
 
   // grep path history (session-shared; for grep dialog PATH/-basedir)
   const _grepBasedirHistory = [];
@@ -5374,35 +5411,40 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
 
   function _searchHistoryMaybePush(s){
     try{
-      // Normalize: accept '/pat' or '?pat' (optional leading ':'), while preserving whitespace patterns.
+      // Store as "pattern remainder" without leading '/' or '?'.
+      // Example: '/foo/gi' -> 'foo/gi', '?  ' -> '  ' (whitespace preserved).
       let v0 = String(s||'');
-      v0 = v0.replace(/^\s*:\s*/, '');
-      v0 = v0.replace(/^\s*/, '');
-      const parsed = _parseSlashSearchCmdPreserveWS(v0);
-      if (!parsed) return;
-      const pat = String(parsed.pat||'');
+      // Strip leading spaces, optional ':', and spaces after ':' (but DO NOT trim after the prefix char).
+      let i = 0;
+      while (i < v0.length && (v0[i] === ' ' || v0[i] === '\t')) i++;
+      if (v0[i] === ':'){
+        i++;
+        while (i < v0.length && (v0[i] === ' ' || v0[i] === '\t')) i++;
+      }
+      if (v0[i] === '/' || v0[i] === '?') i++;
+      const v = v0.slice(i);
       // Require non-empty pattern (can be whitespace)
-      if (pat.length === 0) return;
-      const v = (parsed.forward ? '/' : '?') + pat + (parsed.flagsGiven ? ((parsed.forward?'/':'?') + parsed.flagsGiven) : '');
+      if (v.length === 0) return;
       // Move-to-end unique
-      const i = _searchHistory.indexOf(v);
-      if (i >= 0) _searchHistory.splice(i, 1);
+      const j = _searchHistory.indexOf(v);
+      if (j >= 0) _searchHistory.splice(j, 1);
       _searchHistory.push(v);
 
       // #1374: Cap history size if configured
       try {
-          const limit = (window.SIX_OPTIONS && typeof window.SIX_OPTIONS.SEARCH_TERM_IN_SESSION === 'number') ? window.SIX_OPTIONS.SEARCH_TERM_IN_SESSION : 0;
-          if (limit > 0) {
-              while (_searchHistory.length > limit) {
-                  _searchHistory.shift();
-              }
+        const limit = (window.SIX_OPTIONS && typeof window.SIX_OPTIONS.SEARCH_TERM_IN_SESSION === 'number') ? window.SIX_OPTIONS.SEARCH_TERM_IN_SESSION : 0;
+        if (limit > 0) {
+          while (_searchHistory.length > limit) {
+            _searchHistory.shift();
           }
+        }
       } catch {}
     }catch{}
     // reset browsing state after submit
     _searchHistIndex = _searchHistory.length;
     _searchHistBrowsing = false;
     _searchHistTemp = '';
+    _searchHistTempHead = '/';
   }
 
   function _cmdHistoryMaybePush(s){
@@ -5690,6 +5732,7 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
   const _searchHistPopupId = 'searchHistPopup';
   let _searchHistPopupSel = 0;
   let _searchHistPopupOrig = null;
+  let _searchHistPopupHead = '/';
   let _searchHistPopupReflecting = false;
 
   function _searchHistPopupVisible(){
@@ -5731,7 +5774,7 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
       _searchHistPopupSel = Math.max(0, Math.min(items.length-1, (_searchHistPopupSel|0)));
       const it = items[_searchHistPopupSel];
       if (!it) return;
-      cmdinput.value = String(it.value||'');
+      cmdinput.value = String(_searchHistPopupHead || '/') + String(it.value||'');
       try{ const pos=(cmdinput.value||'').length; cmdinput.setSelectionRange(pos,pos); }catch{}
       try{ _searchHistPopupReflecting = true; cmdinput.dispatchEvent(new Event('input', { bubbles:true })); }catch{} finally{ _searchHistPopupReflecting=false; }
     }catch{}
@@ -5830,6 +5873,7 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
       }
       pop.style.display='';
       _searchHistPopupOrig = String(cmdinput.value||'');
+      _searchHistPopupHead = (function(){ try{ return _splitCmdSearchPrefix(_searchHistPopupOrig).head; }catch{ return '/'; } })();
       const items = _searchHistPopupItems();
       _searchHistPopupSel = items.length ? (items.length - 1) : 0;
       _searchHistPopupRender();
@@ -5881,7 +5925,7 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
   function _histPopupToggleForCmdInput(){
     try{
       const curVal = (function(){ try{ return String(cmdinput && cmdinput.value || ''); }catch{ return ''; } })();
-      const isSearchInput = /^\s*:?[\/?]/.test(curVal);
+      const isSearchInput = /^\s*:?\s*[\/?]/.test(curVal);
       if (isSearchInput){
         try{ if (typeof _cmdHistPopupVisible === 'function' && _cmdHistPopupVisible()) _cmdHistPopupHide(true); }catch{}
         _searchHistPopupToggle();
@@ -12131,7 +12175,7 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
       try{ _incPrevHide && _incPrevHide(); }catch{}
       // reset history browsing state on cancel
       try{ _cmdHistBrowsing=false; _cmdHistIndex=_cmdHistory.length; _cmdHistTemp=''; }catch{}
-      try{ _searchHistBrowsing=false; _searchHistIndex=_searchHistory.length; _searchHistTemp=''; }catch{}
+      try{ _searchHistBrowsing=false; _searchHistIndex=_searchHistory.length; _searchHistTemp=''; _searchHistTempHead='/'; }catch{}
       // capture current view and selection
       let st = 0, cr = 0, cc = 0; try{ st = (editor.scrollTop||0); cr = (caretRow|0); cc = (caretCol|0); }catch{}
       let selS = 0, selE = 0; try{ selS = editor.selectionStart|0; selE = editor.selectionEnd|0; }catch{}
@@ -20147,15 +20191,21 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
             const h = (function(){ try{ return _searchHistory||[]; }catch{ return []; } })();
             const last = h.length ? String(h[h.length-1]||'') : '';
             if (last){
-              // Accept '/pat[/flags]' or '?pat[?flags]'
-              let m = last.match(/^\/(.*?)(?:\/([A-Za-z]*))?$/);
+              // Accept legacy '/pat[/flags]' or '?pat[?flags]' OR new 'pat[/flags]' format.
+              let pat = '';
+              let flg = '';
               let dir = 'fwd';
-              if (!m){ m = last.match(/^\?(.*?)(?:\?([A-Za-z]*))?$/); dir = 'bwd'; }
-              if (m){
-                const pat = String(m[1]||'');
-                const flg = String(m[2]||'');
-                if (pat){ _lastSearch = { src: pat, flags: flg||'', dir, origDir: dir }; }
+              if (last[0] === '/'){
+                const m = last.match(/^\/(.*?)(?:\/(\w+))?$/);
+                if (m){ pat = String(m[1]||''); flg = String(m[2]||''); dir = 'fwd'; }
+              } else if (last[0] === '?'){
+                const m = last.match(/^\?(.*?)(?:\?(\w+))?$/);
+                if (m){ pat = String(m[1]||''); flg = String(m[2]||''); dir = 'bwd'; }
+              } else {
+                const m = last.match(/^(.*?)(?:\/(\w+))?$/);
+                if (m){ pat = String(m[1]||''); flg = String(m[2]||''); dir = 'fwd'; }
               }
+              if (pat){ _lastSearch = { src: pat, flags: flg||'', dir, origDir: dir }; }
             }
           }
         }catch{}
@@ -21790,6 +21840,37 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
           }
         }catch{}
 
+        // Search history popup handling (mirror cmd history popup)
+        try{
+          if (typeof _searchHistPopupVisible === 'function' && _searchHistPopupVisible()){
+            const kS = String((e && e.key) || '');
+            if (kS === 'Escape' || kS === 'Esc'){
+              try{ e.preventDefault(); e.stopPropagation(); }catch{}
+              _searchHistPopupHide(true);
+              return;
+            }
+            if (kS === 'ArrowUp'){
+              try{ e.preventDefault(); e.stopPropagation(); }catch{}
+              const items = _searchHistPopupItems();
+              if (items.length){ _searchHistPopupSel = Math.max(0, (_searchHistPopupSel|0) - 1); _searchHistPopupRender(); _searchHistPopupPreviewSel(); }
+              return;
+            }
+            if (kS === 'ArrowDown'){
+              try{ e.preventDefault(); e.stopPropagation(); }catch{}
+              const items = _searchHistPopupItems();
+              if (items.length){ _searchHistPopupSel = Math.min(items.length-1, (_searchHistPopupSel|0) + 1); _searchHistPopupRender(); _searchHistPopupPreviewSel(); }
+              return;
+            }
+            if (kS === 'Enter' || kS === ' ' || kS === 'Spacebar'){
+              try{ e.preventDefault(); e.stopPropagation(); }catch{}
+              _searchHistPopupCommitSel();
+              return;
+            }
+            // Any other key closes the popup but keeps the preview value for editing.
+            try{ _searchHistPopupHide(false); }catch{}
+          }
+        }catch{}
+
         // F4 toggles history popup (search vs command)
         try{
           if (e && e.key === 'F4'){
@@ -22416,7 +22497,7 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
           _incPrevHide();
           // reset history browsing state on cancel
           try{ _cmdHistBrowsing=false; _cmdHistIndex=_cmdHistory.length; _cmdHistTemp=''; }catch{}
-          try{ _searchHistBrowsing=false; _searchHistIndex=_searchHistory.length; _searchHistTemp=''; }catch{}
+          try{ _searchHistBrowsing=false; _searchHistIndex=_searchHistory.length; _searchHistTemp=''; _searchHistTempHead='/'; }catch{}
           // CMD 終了時の一瞬のスクロール揺れ（EOF 付近へ飛ぶ）を抑止するガードと座標再適用
           let st = editor.scrollTop, cr = caretRow, cc = caretCol;
           let selS = 0, selE = 0; try{ selS = editor.selectionStart; selE = editor.selectionEnd; }catch{}
@@ -22665,10 +22746,15 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
             e.preventDefault(); e.stopPropagation();
             try{
               const curVal = String(cmdinput.value||'');
-              const isSearchInput = /^\s*:?[\/?]/.test(curVal);
+              const isSearchInput = /^\s*:?\s*[\/?]/.test(curVal);
               if (isSearchInput){
                 const nS = _searchHistory.length;
-                if (!_searchHistBrowsing){ _searchHistTemp = curVal; _searchHistIndex = nS; _searchHistBrowsing = true; }
+                if (!_searchHistBrowsing){
+                  _searchHistTemp = curVal;
+                  _searchHistTempHead = (function(){ try{ return _splitCmdSearchPrefix(curVal).head; }catch{ return '/'; } })();
+                  _searchHistIndex = nS;
+                  _searchHistBrowsing = true;
+                }
                 if (e.key==='ArrowUp'){
                   _searchHistIndex = Math.max(0, _searchHistIndex - 1);
                 } else if (e.key==='ArrowDown'){
@@ -22678,7 +22764,7 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
                   _searchHistBrowsing = false; // back to draft
                   cmdinput.value = _searchHistTemp;
                 } else {
-                  cmdinput.value = _searchHistory[_searchHistIndex] || '';
+                  cmdinput.value = String(_searchHistTempHead || '/') + String(_searchHistory[_searchHistIndex] || '');
                 }
               } else {
                 const n = _cmdHistory.length;
@@ -26890,8 +26976,7 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
       try{
         if (Array.isArray(_searchHistory) && _searchHistory.length){
           const raw = String(_searchHistory[_searchHistory.length-1]||'');
-          const d = raw.replace(/^[:\s]*[/?]/, '');
-          if (d) input.value = d;
+          if (raw) input.value = raw;
         }
       }catch{}
 
@@ -28658,7 +28743,6 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
                     if (histIdx === -1) histIdx = _searchHistory.length;
                     histIdx = Math.max(0, histIdx - 1);
                     let val = _searchHistory[histIdx] || '';
-                    val = val.replace(/^[:\s]*[/?]/, '');
                     input.value = val;
                 }
             }
@@ -28672,7 +28756,6 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
                         histIdx = -1;
                     } else {
                         let val = _searchHistory[histIdx] || '';
-                        val = val.replace(/^[:\s]*[/?]/, '');
                         input.value = val;
                     }
                 }
