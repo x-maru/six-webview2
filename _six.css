@@ -327,9 +327,10 @@ body.md-rich #editor::selection {
 	background: transparent !important;
 }
 
-/* md-rich + wrap-on: show native selection highlight (wrap-aware) */
-body.md-rich.wrap-on #editor::selection {
-	background: var(--selBg, cyan) !important;
+/* md-rich: hide native textarea selection highlight.
+   Selection is rendered in #textLayer via .md-sel to avoid drift under wrap/variable line heights. */
+body.md-rich #editor::selection {
+	background: transparent !important;
 	color: transparent !important;
 }
 

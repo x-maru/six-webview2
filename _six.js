@@ -406,6 +406,18 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
           if (!(_selEnd > _selStart)){ _selStart = null; _selEnd = null; }
         }
       }catch{ _selStart = null; _selEnd = null; }
+
+      // INSERT range selection (native selection) for md-rich rendering.
+      // This avoids textarea selection drift when wrap/variable per-line heights are active.
+      try{
+        if (_mode === 'INSERT' && editor && typeof editor.selectionStart === 'number' && typeof editor.selectionEnd === 'number'){
+          const sOff = (editor.selectionStart|0);
+          const eOff = (editor.selectionEnd|0);
+          const ss = Math.min(sOff, eOff)|0;
+          const ee = Math.max(sOff, eOff)|0;
+          if (ee > ss){ _selStart = ss; _selEnd = ee; }
+        }
+      }catch{}
       const wrapOn = (function(){ try{ return _wrapEnabled(); }catch{ return false; } })();
       let wPx = 80;
       try{ if (wrapOn) wPx = _wrapAvailWidthPx()|0; }catch{ wPx = 80; }
@@ -17675,12 +17687,27 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
           }
         } else {
           // Non-VISUAL: sync to native insertion point
-          const off = editor.selectionStart|0;
+          let off = editor.selectionStart|0;
+          try{
+            const s = editor.selectionStart|0;
+            const e = editor.selectionEnd|0;
+            if (s !== e){
+              off = (String(editor.selectionDirection||'') === 'backward') ? (s|0) : (e|0);
+            } else {
+              off = s|0;
+            }
+          }catch{}
           const rc = _rcFromOffset(off);
           caretRow = rc.r; caretCol = rc.c;
         }
       }catch{}
-      if (_selChanged !== false){ _repositionCaret(); updateGutter(); _updatePosInfo(); }
+      if (_selChanged !== false){
+        _repositionCaret();
+        updateGutter();
+        _updatePosInfo();
+        // md-rich: re-render selection highlight inside #textLayer for INSERT range selection.
+        try{ if (_mdRichActive && _mdRichActive()){ _mdRenderTextLayer && _mdRenderTextLayer(); } }catch{}
+      }
     });
   editor.addEventListener('keyup', (e)=>{
     const isComp = !!(window && window._imeComposing===true);
