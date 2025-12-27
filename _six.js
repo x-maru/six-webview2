@@ -21964,6 +21964,29 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
               _searchHistPopupHide(true);
               return;
             }
+            if (kS === 'Delete' || kS === 'Del'){
+              try{ e.preventDefault(); e.stopPropagation(); }catch{}
+              try{
+                const items = _searchHistPopupItems();
+                if (items.length && Array.isArray(_searchHistory) && _searchHistory.length){
+                  const sel = Math.max(0, Math.min(items.length-1, (_searchHistPopupSel|0)));
+                  const it = items[sel];
+                  const origIdx = (it && (it.origIndex|0));
+                  if (origIdx >= 0 && origIdx < _searchHistory.length){
+                    _searchHistory.splice(origIdx, 1);
+                    try{ _searchHistIndex = _searchHistory.length; _searchHistBrowsing=false; _searchHistTemp=''; _searchHistTempHead='/'; }catch{}
+                    try{ _schedulePersist && _schedulePersist('searchhistory'); }catch{}
+                  }
+                }
+              }catch{}
+              try{
+                const items2 = _searchHistPopupItems();
+                _searchHistPopupSel = Math.max(0, Math.min(Math.max(0, items2.length-1), (_searchHistPopupSel|0)));
+                _searchHistPopupRender();
+                _searchHistPopupPreviewSel();
+              }catch{}
+              return;
+            }
             if (kS === 'ArrowUp'){
               try{ e.preventDefault(); e.stopPropagation(); }catch{}
               try{ _sixHideMouseForPopup && _sixHideMouseForPopup('popup-arrow:searchHist'); }catch{}
