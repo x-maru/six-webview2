@@ -1,7 +1,14 @@
 const VERSION = '0.9.1';
+// Build stamp (for verifying which _six.js is actually running)
+// NOTE: Intentionally ASCII-only; fullwidth variants should be treated as invalid.
+try{ window.__sixBuildTs = '2025-12-29T00:00:00Z'; }catch{}
 const VERSION_STR = 'vi like TextEditor "six" v' + VERSION;
 // Build sentinel (#912) - confirm script actually refreshed & executed
-try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
+try{
+  const ts = Date.now();
+  window.__sixBootTs = ts;
+  console.log('[six] _six.js build#912 loaded ts=' + ts);
+}catch{}
 // six migration oriented bootstrap (spec-aligned skeleton with file load)
 (function(){
   // Multi-instance lock (#643): prevent opening a second active instance.
@@ -767,6 +774,8 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
   // This keeps the caret visually in sync even when overlay rendering is intentionally throttled.
   let _nativeCaretEnabled = false;
   let _nativeCaretForceUntil = 0;
+  // Track Shift key state as a fallback: some synthetic routed events can lose shiftKey.
+  let _shiftHeld = false;
   function _editorTextLen(){
     try{
       if (!editor) return 0;
@@ -978,6 +987,22 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
   let _imePollFailCount = 0;
   let _imePollDelayMs = 500;
   let _imePollStopped = false;
+  // When imeSwitchKey='direct', host polling is still useful for environments where
+  // かな/英数 key events are unreliable. We only allow NORMAL->INSERT when a recent
+  // toggle request was observed.
+  let _imeToggleRequestedAt = 0;
+  // Short window to consume ambiguous Process-key events that actually represent an IME toggle.
+  // Some environments report the かな key as key='Process' with code='KeyK' (and it can otherwise
+  // be misinterpreted as NORMAL motion 'k').
+  let _imeToggleConsumeUntil = 0;
+  const _noteImeToggleRequested = (why, e)=>{
+    try{
+      _imeToggleRequestedAt = Date.now();
+      // Consume ambiguous Process events briefly so they don't trigger NORMAL motions.
+      _imeToggleConsumeUntil = (_imeToggleRequestedAt|0) + 220;
+      try{ if (_optDebugKeys) _debugPush({ t:Date.now(), type:'ime-toggle-request', mode:_mode, why:String(why||''), key:(e&&e.key)||'', code:(e&&e.code)||'' }); }catch{}
+    }catch{}
+  };
   function _stopImePolling(){
     try{ if (_imePollTimer){ clearTimeout(_imePollTimer); } }catch{}
     _imePollTimer = null;
@@ -991,15 +1016,9 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
       if (!api) return;
       api = api.endsWith('/') ? api : (api + '/');
 
-      // imeSwitchKey='direct': trust physical Kana/Eisu key handling and do not apply
-      // host polling results to the editor (it can be stale and causes spurious INSERT/visual IME).
-      try{
-        const km = String((window && window.SIX_OPTIONS && window.SIX_OPTIONS.imeSwitchKey) || '').toLowerCase();
-        if (km === 'direct'){
-          try{ _stopImePolling(); }catch{}
-          return;
-        }
-      }catch{}
+      // NOTE: Even when imeSwitchKey='direct', keep host polling enabled.
+      // Some environments do not deliver usable Lang1/Lang2 events; polling is the fallback
+      // that keeps caret IME visuals in sync.
 
       _imePollStopped = false;
       try{ if (_imePollTimer){ clearTimeout(_imePollTimer); } }catch{}
@@ -1083,17 +1102,23 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
               }
             }catch{}
             const newActive = (st === 'on');
-            // NORMAL→IMEがONになったことを検知したらINSERTへ（⑤→②を保証）
-            if (newActive && _mode === 'NORMAL'){
-              try{
+            // Always sync visual IME state (caret color). This is safe even in direct mode.
+            if (newActive !== _imeActive){ _imeActive = newActive; _applyCaretGradient(); }
+
+            // In direct mode, only allow NORMAL->INSERT when a recent toggle request was observed.
+            try{
+              const km = String((window && window.SIX_OPTIONS && window.SIX_OPTIONS.imeSwitchKey) || '').toLowerCase();
+              const isDirect = (km === 'direct');
+              const now1 = Date.now();
+              const recentlyRequested = (now1 - (_imeToggleRequestedAt|0)) <= 1600;
+              if (newActive && _mode === 'NORMAL' && (!isDirect || recentlyRequested)){
                 _setMode('INSERT');
                 _imeVisualLockUntil = 0;
-                if (editor){ editor.removeAttribute('inputmode'); editor.style.imeMode=''; }
-                _imeActive = true; _applyCaretGradient(); _repositionCaret(); updateGutter();
-              }catch{}
-            } else {
-              if (newActive !== _imeActive){ _imeActive = newActive; _applyCaretGradient(); }
-            }
+                try{ if (editor){ editor.removeAttribute('inputmode'); editor.style.imeMode=''; } }catch{}
+                _imeActive = true; _applyCaretGradient();
+                try{ _repositionCaret(); updateGutter(); }catch{}
+              }
+            }catch{}
           }
           _noteOk();
         }catch{
@@ -1120,6 +1145,106 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
       return api;
     }catch{ return null; }
   }
+
+  // One-shot IME visual sync from host (/ime). Used as a fallback when IME toggle key events
+  // arrive as key='Process' and we can't reliably classify Kana/Eisu.
+  async function _imeSyncFromHostOnce(reason){
+    try{
+      // Only meaningful when Nano API is available
+      let api = _nanoApiBase();
+      if (!api) return;
+      api = api.endsWith('/') ? api : (api + '/');
+
+      // Avoid disturbing IME composition or modal dialogs.
+      try{ if (window && window._imeComposing===true) return; }catch{}
+      try{
+        if ((window && window._grepDialogOpen===true) || document.getElementById('grepDialog') || (typeof _isModalOverlayOpen==='function' && _isModalOverlayOpen())) return;
+      }catch{}
+
+      const ac = (window.AbortController ? new AbortController() : null);
+      const to = setTimeout(()=>{ try{ ac && ac.abort(); }catch{} }, 450);
+      let resp = null;
+      try{ resp = await fetch(api + 'ime', { cache:'no-store', signal: ac ? ac.signal : undefined }); }
+      finally{ try{ clearTimeout(to); }catch{} }
+      if (!resp || !resp.ok) return;
+      const js = await resp.json();
+      const st = js && js.state;
+      if (!(st === 'on' || st === 'off')) return;
+
+      // Respect post-CMD keep-off guard.
+      try{
+        const now0 = Date.now();
+        if (now0 < (_imeKeepOffUntil|0)){
+          if (st === 'on'){ try{ _imePost && _imePost('off'); }catch{} }
+          if (_imeActive !== false){ _imeActive = false; _applyCaretGradient(); }
+          return;
+        }
+      }catch{}
+
+      const newActive = (st === 'on');
+      if (newActive !== _imeActive){ _imeActive = newActive; try{ _applyCaretGradient(); }catch{} }
+
+      // If this sync was triggered by an IME toggle key and IME is ON in NORMAL, enter INSERT.
+      if (reason === 'imeToggle' && newActive && _mode === 'NORMAL'){
+        try{ _setMode('INSERT'); }catch{}
+        try{ _imeVisualLockUntil = 0; }catch{}
+        try{ if (editor){ editor.removeAttribute('inputmode'); editor.style.imeMode=''; } }catch{}
+        try{ _repositionCaret(); updateGutter(); }catch{}
+      }
+    }catch{}
+  }
+
+  // When IME toggle keys don't reach the editor (WebView2/OS routing), do a short sync burst.
+  // This keeps caret IME color in sync without enabling polling.
+  let _imeToggleSyncBurstUntil = 0;
+  function _imeSyncFromHostBurst(reason){
+    try{
+      const now = Date.now();
+      // throttle bursts
+      if (now < (_imeToggleSyncBurstUntil|0)) return;
+      _imeToggleSyncBurstUntil = now + 350;
+      const r = String(reason||'');
+      try{ _imeSyncFromHostOnce && _imeSyncFromHostOnce(r||'imeToggle'); }catch{}
+      try{ setTimeout(()=>{ try{ _imeSyncFromHostOnce && _imeSyncFromHostOnce(r||'imeToggle'); }catch{} }, 80); }catch{}
+      try{ setTimeout(()=>{ try{ _imeSyncFromHostOnce && _imeSyncFromHostOnce(r||'imeToggle'); }catch{} }, 200); }catch{}
+    }catch{}
+  }
+
+  // Capture IME toggle keys globally for imeSwitchKey='direct'.
+  (function(){
+    try{
+      if (window.__sixImeToggleCaptureOnce) return;
+      window.__sixImeToggleCaptureOnce = true;
+      const shouldHandle = ()=>{
+        try{ return String((window && window.SIX_OPTIONS && window.SIX_OPTIONS.imeSwitchKey) || '').toLowerCase() === 'direct'; }catch{ return false; }
+      };
+      const isImeToggleEvt = (e)=>{
+        try{
+          if (!e) return false;
+          if (_isKanaKey(e) || _isEisuKey(e) || e.code === 'Lang1' || e.code === 'Lang2') return true;
+          const k = String((e && e.key) || '');
+          const kc = (typeof e.keyCode==='number') ? (e.keyCode|0) : 0;
+          const wh = (typeof e.which==='number') ? (e.which|0) : 0;
+          if (k === 'Process' && ((kc|0)===229 || (wh|0)===229)) return true;
+          // Environment-specific fallback: some IME toggle keys are reported as Process + Quote.
+          // Treat it as a toggle *request* and let host polling decide the resulting state.
+          if (k === 'Process' && String(e.code||'') === 'Quote' && !e.ctrlKey && !e.altKey && !e.metaKey) return true;
+          return false;
+        }catch{ return false; }
+      };
+      const onAny = (e)=>{
+        try{
+          if (!shouldHandle()) return;
+          if (!isImeToggleEvt(e)) return;
+          try{ if (typeof _noteImeToggleRequested === 'function') _noteImeToggleRequested('capture', e); }catch{}
+          // Don't run during composition or modals; _imeSyncFromHostOnce handles guards.
+          _imeSyncFromHostBurst('imeToggle');
+        }catch{}
+      };
+      window.addEventListener('keydown', onAny, true);
+      window.addEventListener('keyup', onAny, true);
+    }catch{}
+  })();
   async function _imePost(state){
     try{
       let api = _nanoApiBase(); if (!api) return;
@@ -1167,6 +1292,8 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
           }
         }catch{}
         _imeActive = true;
+        try{ _imeVisualLockUntil = 0; }catch{}
+        try{ _applyCaretGradient(); }catch{}
         // タイピング中の重い再描画を少し長めに抑止（IME候補表示中のフレーム落ち対策）
         try{ _typingGuardUntil = Date.now() + 200; }catch{}
         try{ _applyCaretGradient(); }catch{}
@@ -2422,6 +2549,11 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
       if (!e) return false;
       // かなキーのみをIME ONとして認識する
       if (e.key === 'KanaMode' || e.key === 'Hiragana') return true;
+      // Some environments report the toggle via code (or as 'Process' with a specific code).
+      if (e.code === 'KanaMode' || e.code === 'Hiragana') return true;
+      // JIS配列: かな=Lang1 が key='Unidentified' で来る環境がある
+      if (e.code === 'Lang1') return true;
+      if (e.key === 'Process' && (e.code === 'KanaMode' || e.code === 'Hiragana' || e.code === 'Lang1')) return true;
       // 他キー（KanjiMode/ZenkakuHankaku/IntlRo/NonConvert など）はIME ON扱いしない
       return false;
     }catch{ return false; }
@@ -2435,11 +2567,38 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
       if (e.key === 'RomanCharacters') return true;
       // Windows日本語配列では 'Convert' が 英数 相当として配信されるケースへの対応
       if (e.code === 'Convert') return true;
+      // JIS配列: 英数=Lang2 が key='Unidentified' で来る環境がある
+      if (e.code === 'Lang2') return true;
+      // Some environments report the toggle as 'Process' with a language code.
+      if (e.key === 'Process' && (e.code === 'Lang2' || e.code === 'Convert')) return true;
       // 以前の調査: vk=26（フォールバック）
       if (typeof e.keyCode === 'number' && e.keyCode === 26) return true;
       return false;
     }catch{ return false; }
   }
+
+  // Track Shift state globally (capture-phase) so md-rich Shift+Arrow works even when focus/IME routing is odd.
+  (function(){
+    try{
+      if (window.__sixShiftTrackOnce) return;
+      window.__sixShiftTrackOnce = true;
+      window.addEventListener('keydown', (e)=>{
+        try{
+          if (!e) return;
+          if (e.key === 'Shift' || e.code === 'ShiftLeft' || e.code === 'ShiftRight') _shiftHeld = true;
+          // Some environments don't set shiftKey reliably on non-Shift keys; prefer getModifierState.
+          try{ if (!_shiftHeld && typeof e.getModifierState==='function' && e.getModifierState('Shift')) _shiftHeld = true; }catch{}
+        }catch{}
+      }, true);
+      window.addEventListener('keyup', (e)=>{
+        try{
+          if (!e) return;
+          if (e.key === 'Shift' || e.code === 'ShiftLeft' || e.code === 'ShiftRight') _shiftHeld = false;
+        }catch{}
+      }, true);
+      window.addEventListener('blur', ()=>{ try{ _shiftHeld = false; }catch{} }, true);
+    }catch{}
+  })();
 
   // Overlay palette / popup keyboard interception (capture-phase, highest priority)
   // #1469: while popups are open, swallow handled keys so the main editor textarea
@@ -5675,6 +5834,7 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
       if (/^:\s*pick!?\s*$/i.test(v)) return true;
       if (/^:\s*api\?\s*$/i.test(v)) return true;
       if (/^:\s*echo\s+api\s*$/i.test(v)) return true;
+      if (/^:\s*build\??\s*$/i.test(v)) return true;
       if (/^:\s*(?:lastsynctime|statmeta!?|parentnav|dumpkeys|dumprawkeys|clearkeys|clearrawkeys)\b/i.test(v)) return true;
 
       return false;
@@ -14244,7 +14404,8 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
     }
 
     // :b [N|query] — Enter で確定（数字のみは優先）
-    if (/^:b/i.test(cmd)){
+    // NOTE: Avoid swallowing ":build" / ":build?".
+    if (/^:b(?!uild\b)/i.test(cmd)){
       const mNum = cmd.match(/^:b\s*(\d+)\s*$/i);
       if (mNum){
         const nArg = parseInt(mNum[1],10);
@@ -14761,10 +14922,25 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
             ` m=${e.mode}`+
             (e.key!==undefined?` key=${JSON.stringify(e.key)}`:'')+
             (e.code?` code=${e.code}`:'')+
+            (e.keyCode!=null?` keyCode=${e.keyCode}`:'')+
+            (e.which!=null?` which=${e.which}`:'')+
+            (e.via?` via=${e.via}`:'')+
+            (e.kind?` kind=${e.kind}`:'')+
+            (e.delta!=null?` delta=${e.delta}`:'')+
+            (e.fromR!=null?` fromR=${(e.fromR|0)+1}`:'')+
+            (e.fromC!=null?` fromC=${(e.fromC|0)}`:'')+
+            (e.toR!=null?` toR=${(e.toR|0)+1}`:'')+
+            (e.toC!=null?` toC=${(e.toC|0)}`:'')+
+            (e.fromV1!=null?` fromV1=${e.fromV1}`:'')+
+            (e.toV1!=null?` toV1=${e.toV1}`:'')+
+            (e.top!=null?` top=${e.top}`:'')+
+            (e.maxTopWithPad!=null?` maxTopWithPad=${e.maxTopWithPad}`:'')+
+            (e.reason?` reason=${e.reason}`:'')+
+            (e.note?` note=${e.note}`:'')+
             (e.inputType?` inputType=${e.inputType}`:'')+
             (e.data!==undefined?` data=${JSON.stringify(e.data)}`:'')+
             (e.compData!==undefined?` comp=${JSON.stringify(e.compData)}`:'')+
-            ` ctrl=${e.ctrl?'1':'0'} alt=${e.alt?'1':'0'} meta=${e.meta?'1':'0'} isComp=${e.isComp?'1':'0'}`;
+            ` ctrl=${e.ctrl?'1':'0'} alt=${e.alt?'1':'0'} shift=${e.shift?'1':'0'} meta=${e.meta?'1':'0'} isComp=${e.isComp?'1':'0'}`;
         }).join('\n');
         (async()=>{ const ok = await _copyToClipboard(s2); toast(ok?`dumped ${arr.length} events to clipboard.`:'Clipboard write failed.', ok?1000:1500); })();
         return;
@@ -15240,6 +15416,23 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
     if (cmd === ':api?' || cmd === ':echo api'){
       toast('api = ' + (_apiBase || '(none)'));
       return;
+    }
+    
+    // :build / :build? -> show currently running build stamp/version (debug for cache issues)
+    // Fullwidth variants are treated as invalid by design.
+    {
+      const s = String(cmd||'');
+      if (/[：？]/.test(s)){
+        try{ console.log('[six][cmd] :build invalid(fullwidth)', { cmd: s }); }catch{}
+        try{ toast('invalid command: use ASCII ":" and "?"', 1700); }catch{}
+        try{ _triggerVisualBell(); }catch{}
+        return;
+      }
+      if (/^:\s*build\s*$/i.test(s) || /^:\s*build\?\s*$/i.test(s)){
+        try{ console.log('[six][cmd] :build hit', { cmd: s, ts: (window && window.__sixBuildTs) || '?', ver: (typeof VERSION!=='undefined'?VERSION:'?'), boot: (window && window.__sixBootTs) || null }); }catch{}
+        try{ toast('build ts=' + String((window && window.__sixBuildTs) || '?') + ' ver=' + String(VERSION||'?')); }catch{}
+        return;
+      }
     }
   }
 
@@ -17237,6 +17430,9 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
           if (isIMEInsert){
             const now = Date.now();
             if (now - _imeBellLastAt > 120){ _imeBellLastAt = now; try{ _triggerVisualBell && _triggerVisualBell(); }catch{} }
+            // Some environments never fire compositionend when we block beforeinput in NORMAL/VISUAL/CMD.
+            // Force-clear composing state so keys don't get stuck as isComp=1 (#1619).
+            try{ setTimeout(()=>{ try{ if (typeof _forceEndComposition==='function') _forceEndComposition('beforeinput-block'); }catch{} }, 0); }catch{}
           }
         }catch{}
         try{ if (_optDebugKeys) _debugPush({ t:Date.now(), type:'beforeinput-block', mode:_mode, inputType:e.inputType, data:e.data, ctrl:e.ctrlKey, alt:e.altKey, meta:e.metaKey, isComp:false }); }catch{}
@@ -17329,6 +17525,11 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
               try{ const rc = _rcFromOffset(off); caretRow = rc.r; caretCol = rc.c; _repositionCaret(); updateGutter(); }catch{}
             }
             try{ if (_optDebugKeys) _debugPush({ t:Date.now(), type:'input-rollback', mode:_mode, inputType:it, data:e.data, ctrl:e.ctrlKey, alt:e.altKey, meta:e.metaKey, isComp:false }); }catch{}
+            // Same as beforeinput-block: if we rolled back IME inserts outside INSERT, composing can be left stuck.
+            try{
+              const isImeIt = (it === 'insertFromComposition' || it === 'insertCompositionText' || (it === 'insertText' && (window && window._imeComposing===true)));
+              if (isImeIt){ setTimeout(()=>{ try{ if (typeof _forceEndComposition==='function') _forceEndComposition('input-rollback'); }catch{} }, 0); }
+            }catch{}
           }
           return;
         }
@@ -17711,7 +17912,46 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
     });
   editor.addEventListener('keyup', (e)=>{
     const isComp = !!(window && window._imeComposing===true);
-    try{ if (_optDebugKeys) _debugPush({ t:Date.now(), type:'keyup', mode:_mode, key:e.key, code:e.code, keyCode:e.keyCode, which:e.which, ctrl:e.ctrlKey, alt:e.altKey, meta:e.metaKey, isComp }); }catch{}
+    try{ if (_optDebugKeys) _debugPush({ t:Date.now(), type:'keyup', mode:_mode, key:e.key, code:e.code, keyCode:e.keyCode, which:e.which, ctrl:e.ctrlKey, alt:e.altKey, shift:e.shiftKey, meta:e.metaKey, isComp }); }catch{}
+    try{ if (e && e.shiftKey) _shiftHeld = true; }catch{}
+    try{ if (e && e.key==='Shift') _shiftHeld = false; }catch{}
+
+    // imeSwitchKey='direct': also handle IME toggle on keyup.
+    // Some environments don't deliver a reliable keydown for Lang1/Lang2, or composition flags can block it.
+    try{
+      const imeKeyMode = String((window && window.SIX_OPTIONS && window.SIX_OPTIONS.imeSwitchKey) || '').toLowerCase();
+      if (imeKeyMode === 'direct'){
+        // Ambiguous IME toggle (Process/229): one-shot host sync.
+        try{
+          const k = String((e && e.key) || '');
+          const kc = (typeof e.keyCode==='number') ? (e.keyCode|0) : 0;
+          const wh = (typeof e.which==='number') ? (e.which|0) : 0;
+          if (k === 'Process' && ((kc|0)===229 || (wh|0)===229)){
+            try{ _imeSyncFromHostOnce && _imeSyncFromHostOnce('imeToggle'); }catch{}
+          }
+        }catch{}
+
+        if (_isKanaKey(e) || e.code === 'Lang1'){
+          // VISUALでは考慮しない
+          if (_mode !== 'VISUAL'){
+            try{ _imeVisualLockUntil = 0; }catch{}
+            try{ if (editor){ editor.removeAttribute('inputmode'); editor.style.imeMode=''; } }catch{}
+            try{ if (_mode === 'NORMAL') _setMode('INSERT'); }catch{}
+            try{ _imeActive = true; _applyCaretGradient(); }catch{}
+            try{ _repositionCaret(); updateGutter(); }catch{}
+            try{ _imePost && _imePost('on'); }catch{}
+          }
+        } else if (_isEisuKey(e) || e.code === 'Lang2'){
+          if (_mode !== 'VISUAL'){
+            try{ _imeVisualLockUntil = 0; }catch{}
+            try{ _imeActive = false; _applyCaretGradient(); }catch{}
+            try{ _repositionCaret(); updateGutter(); }catch{}
+            try{ _imePost && _imePost('off'); }catch{}
+          }
+        }
+      }
+    }catch{}
+
     // During IME composition, avoid costly caret/gutter recompute on keyup.
     if (isComp) return;
     try{ _requestCaretRender && _requestCaretRender(); }catch{}
@@ -17729,6 +17969,21 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
     let _lastCompStartTs = 0;
     let _lastCompEndTs = 0;
     let _preCompSelS = 0, _preCompSelE = 0;
+    // Fallback: if compositionend does not arrive (WebView2/IME edge), force clear composing state.
+    const _forceEndComposition = (why)=>{
+      try{
+        const winComp = !!(window && window._imeComposing===true);
+        if (!_imeComposing && !winComp) return;
+      }catch{}
+      _imeComposing = false; _blockedComposition = false; _lastCompEndTs = Date.now();
+      try{ window._imeComposing = false; }catch{}
+      try{ window._imeReducedText = false; window._imeReducedBaseLine1 = 0; }catch{}
+      try{ document.body.classList.remove('ime-reduced-text'); }catch{}
+      try{ editor && editor.classList && editor.classList.remove('ime-reduced-text'); }catch{}
+      try{ _imeReducedText = false; _imeOrigFullText = ''; }catch{}
+      try{ if (_optDebugKeys) _debugPush({ t:Date.now(), type:'compositionend-forced', mode:_mode, why:String(why||''), isComp:false }); }catch{}
+      try{ _refreshCaretMode && _refreshCaretMode('compositionend-forced'); }catch{}
+    };
     // #1416: Reduce textarea content during composition to lower native IME rendering cost on large buffers.
     let _imeReducedText = false;
     let _imeOrigFullText = '';
@@ -17745,9 +18000,31 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
       try{ editor && editor.classList && editor.classList.remove('ime-reduced-text'); }catch{}
       try{
         const imeKeyMode = String((window && window.SIX_OPTIONS && window.SIX_OPTIONS.imeSwitchKey) || '').toLowerCase();
+
+        // direct mode: if IME composition starts in NORMAL, interpret it as "user intends to insert".
+        // Switch to INSERT immediately so beforeinput/input are not blocked (avoids one dropped key + visualbell).
+        try{
+          const now0 = Date.now();
+          const modalOpen = !!((_modalOverlay && _modalOverlay.style && _modalOverlay.style.display !== 'none') || document.getElementById('grepDialog') || (window && window._grepDialogOpen===true));
+          const keepOff = (now0 < (_imeKeepOffUntil|0));
+          if (imeKeyMode === 'direct' && _mode === 'NORMAL' && !modalOpen && !keepOff){
+            try{ if (typeof _noteImeToggleRequested === 'function') _noteImeToggleRequested('compositionstart', e); }catch{}
+            try{ _setMode('INSERT'); }catch{}
+          }
+        }catch{}
+
         if (_mode !== 'INSERT'){
-          // INSERT以外では未確定表示は許可するが、確定は破棄（既存動作）。フォールバックによるモード変更は行わない。
+          // INSERT以外では未確定表示は許可するが、確定は破棄（既存動作）。
           _blockedComposition = true;
+          // If compositionend never arrives (seen with blocked beforeinput), clear composing after a short timeout.
+          try{
+            const t0 = _lastCompStartTs|0;
+            setTimeout(()=>{
+              try{
+                if (_blockedComposition && (window && window._imeComposing===true) && ((Date.now() - (t0|0)) > 120)) _forceEndComposition('blocked-timeout');
+              }catch{}
+            }, 180);
+          }catch{}
           try{
             const off = _offsetFromRC(caretRow|0, caretCol|0)|0;
             _preCompSelS = off; _preCompSelE = off;
@@ -17756,9 +18033,10 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
             if ((editor.scrollTop|0) !== stHold) editor.scrollTop = stHold;
             if ((editor.scrollLeft|0) !== slHold) editor.scrollLeft = slHold;
           }catch{}
-        } else { // 既に INSERT
+        } else { // INSERT
           _blockedComposition = false;
           _imeActive = true; // IME ON視覚
+          try{ _imeVisualLockUntil = 0; }catch{}
           try{ _applyCaretGradient(); }catch{}
           // #1426: Sync caretRow/caretCol from native selection before reduced-text mode.
           // This prevents IME insertion point drifting away from overlay caret.
@@ -18054,6 +18332,7 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
   });
 
   editor.addEventListener('keydown', (e)=>{
+      try{ if (e && e.shiftKey) _shiftHeld = true; }catch{}
       // Short guard: absorb any stray keydown right after modal close
       if (Date.now() < _kbdGuardUntil){ try{ e.preventDefault(); e.stopPropagation(); }catch{} return; }
       // #1339: Block editor interaction if modal is open
@@ -18075,7 +18354,43 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
             if (esc && !(window && window._imeComposing===true)){
               // fall through
             } else {
-              return;
+              // Some environments keep e.isComposing=true for navigation keys even after compositionend.
+              // If we're not actually composing (window._imeComposing!==true), allow caret/selection moves
+              // so Shift+ArrowUp/Down can extend selection in INSERT.
+              try{
+                const kNav = String((e && e.key) || '');
+                const actuallyComposing = !!(window && window._imeComposing===true);
+                const isNavKey = (kNav==='ArrowUp' || kNav==='ArrowDown' || kNav==='ArrowLeft' || kNav==='ArrowRight' ||
+                                  kNav==='Home' || kNav==='End' || kNav==='PageUp' || kNav==='PageDown');
+                if (isNavKey && !actuallyComposing){
+                  // fall through
+                } else {
+              // Some environments report IME toggle keys (Kana/Eisu) as isComposing.
+              // Allow them through so imeSwitchKey='direct' can update caret visuals immediately.
+              try{
+                const imeKeyMode = String((window && window.SIX_OPTIONS && window.SIX_OPTIONS.imeSwitchKey) || '').toLowerCase();
+                if (imeKeyMode === 'direct'){
+                  const isImeToggleKey = (_isKanaKey(e) || _isEisuKey(e) || e.code === 'Lang1' || e.code === 'Lang2' || e.code === 'KanaMode' || e.code === 'Hiragana');
+                  // Also allow ambiguous IME events (key='Process', keyCode/which=229) through;
+                  // we'll run a one-shot host sync in the direct handler.
+                  let isProcessIme = false;
+                  try{
+                    const k = String((e && e.key) || '');
+                    const kc = (typeof e.keyCode==='number') ? (e.keyCode|0) : 0;
+                    const wh = (typeof e.which==='number') ? (e.which|0) : 0;
+                    if (k === 'Process' && ((kc|0)===229 || (wh|0)===229)) isProcessIme = true;
+                  }catch{}
+                  if (isImeToggleKey || isProcessIme){
+                    // fall through
+                  } else {
+                    return;
+                  }
+                } else {
+                  return;
+                }
+              }catch{ return; }
+                }
+              }catch{ return; }
             }
           }catch{ return; }
         }
@@ -18093,13 +18408,14 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
       // These events are generated when the user presses Ctrl/Shift/Alt/Meta alone.
       try{
         if (e && (e.key==='Shift' || e.key==='Control' || e.key==='Alt' || e.key==='Meta' || e.key==='AltGraph')){
+          try{ if (e.key==='Shift') _shiftHeld = true; }catch{}
           try{ e.stopImmediatePropagation(); e.stopPropagation(); }catch{}
           return;
         }
       }catch{}
     // Globally consume Ctrl+U to avoid Edge opening view-source window (#447)
     if (e && e.ctrlKey && !e.altKey && !e.metaKey && (e.key==='u' || e.key==='U')){ try{ e.preventDefault(); e.stopPropagation(); }catch{} return; }
-    try{ if (_optDebugKeys) _debugPush({ t:Date.now(), type:'keydown', mode:_mode, key:e.key, code:e.code, keyCode:e.keyCode, which:e.which, ctrl:e.ctrlKey, alt:e.altKey, meta:e.metaKey, isComp:_imeComposing }); }catch{}
+    try{ if (_optDebugKeys) _debugPush({ t:Date.now(), type:'keydown', mode:_mode, key:e.key, code:e.code, keyCode:e.keyCode, which:e.which, ctrl:e.ctrlKey, alt:e.altKey, shift:e.shiftKey, meta:e.metaKey, isComp:_imeComposing }); }catch{}
     // DEBUG GUARD (#523): investigate spurious 'l' motions in NORMAL with IME ON.
     // If key is reported as 'l' but original event has a printable key pressed that differs and no modifiers,
     // add lightweight console trace. (Will be removed after root cause isolated.)
@@ -18116,6 +18432,19 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
       try{
         const imeKeyMode = String((window && window.SIX_OPTIONS && window.SIX_OPTIONS.imeSwitchKey) || '').toLowerCase();
         if (imeKeyMode === 'direct'){
+          // Fallback: some environments report IME toggle as key='Process' (keyCode/which=229).
+          // In that case, do a one-shot host sync to update caret visuals (and possibly NORMAL->INSERT).
+          try{
+            const k = String((e && e.key) || '');
+            if (k === 'Process' && !_isKanaKey(e) && !_isEisuKey(e)){
+              const kc = (typeof e.keyCode==='number') ? (e.keyCode|0) : 0;
+              const wh = (typeof e.which==='number') ? (e.which|0) : 0;
+              if ((kc|0) === 229 || (wh|0) === 229){
+                try{ _imeSyncFromHostOnce && _imeSyncFromHostOnce('imeToggle'); }catch{}
+              }
+            }
+          }catch{}
+
           // Right after CMD close, delayed IME-toggle keys can arrive; keep IME OFF and
           // do not auto-enter INSERT during this guard window.
           const now = Date.now();
@@ -18291,6 +18620,28 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
             }catch{}
             return;
           }
+
+          // 仕様追加(#1626): INSERT で範囲選択が存在する場合、Esc は選択クリアのみ。
+          // - 既存の IME スルー条件（上）を満たす場合はそちらを優先。
+          // - 選択が無い場合は従来通り INSERT→NORMAL。
+          try{
+            const s = (editor && typeof editor.selectionStart==='number') ? (editor.selectionStart|0) : 0;
+            const t = (editor && typeof editor.selectionEnd==='number') ? (editor.selectionEnd|0) : 0;
+            if ((s|0) !== (t|0)){
+              e.preventDefault();
+              // Collapse to the active edge (selectionDirection-aware).
+              let off = (t|0);
+              try{
+                const dir = String(editor.selectionDirection||'');
+                if (dir === 'backward') off = (s|0);
+              }catch{}
+              try{ editor.setSelectionRange(off|0, off|0); }catch{ try{ editor.selectionStart = off|0; editor.selectionEnd = off|0; }catch{} }
+              try{ const rc = _rcFromOffset(off|0); caretRow = rc.r; caretCol = rc.c; _setCaret(caretRow, caretCol); }catch{}
+              try{ ensureScrolloff(); }catch{}
+              _repositionCaret(); updateGutter();
+              return;
+            }
+          }catch{}
           e.preventDefault();
           // on leaving INSERT, capture native caret back to overlay state
           try{ const off = editor.selectionStart|0; const rc = _rcFromOffset(off); caretRow = rc.r; caretCol = rc.c; }catch{}
@@ -18410,12 +18761,79 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
             return;
           }
 
+          // INSERT + Shift+ArrowUp/Down: extend selection across lines reliably.
+          // Some environments intercept or de-sync native Shift+Up/Down selection.
+          // Implement it explicitly so the selection survives overlay/caret sync.
+          try{
+            if (_mode==='INSERT' && (e.key==='ArrowUp' || e.key==='ArrowDown')){
+              let shiftHeld = false;
+              try{ shiftHeld = !!e.shiftKey; }catch{}
+              try{ if (!shiftHeld && e && typeof e.getModifierState==='function') shiftHeld = !!e.getModifierState('Shift'); }catch{}
+              try{ if (!shiftHeld) shiftHeld = !!_shiftHeld; }catch{}
+              if (shiftHeld && !e.ctrlKey && !e.altKey && !e.metaKey){
+                e.preventDefault(); e.stopPropagation();
+
+                let s0 = 0, e0 = 0;
+                let dir0 = 'none';
+                try{ s0 = editor.selectionStart|0; e0 = editor.selectionEnd|0; dir0 = String(editor.selectionDirection||'none'); }catch{}
+
+                // Fixed edge (anchor) and moving edge (active)
+                let anchorOff = s0|0;
+                let activeOff = s0|0;
+                try{
+                  if ((s0|0) !== (e0|0)){
+                    if (dir0 === 'backward'){ activeOff = s0|0; anchorOff = e0|0; }
+                    else { activeOff = e0|0; anchorOff = s0|0; }
+                  } else {
+                    anchorOff = s0|0;
+                    activeOff = s0|0;
+                  }
+                }catch{}
+
+                // Move from the active edge
+                try{ const rc0 = _rcFromOffset(activeOff|0); caretRow = rc0.r|0; caretCol = rc0.c|0; }catch{}
+                const delta = (e.key==='ArrowDown') ? 1 : -1;
+
+                // Prefer visual-line motion when markdown-rich or when wrap uses a visual scroll grid.
+                const useVisual = (function(){
+                  try{ if (_mdRichEnabled && _mdRichEnabled()) return true; }catch{}
+                  try{ if (_wrapUsesVisualScrollGrid && _wrapUsesVisualScrollGrid()) return true; }catch{}
+                  return false;
+                })();
+                if (useVisual) _moveCaretVisualLines(delta|0);
+                else _moveCaretLines(delta|0);
+
+                const newActiveOff = _offsetFromRC(caretRow|0, caretCol|0)|0;
+                const newDir = ((newActiveOff|0) < (anchorOff|0)) ? 'backward' : 'forward';
+                try{
+                  if (newDir === 'backward') editor.setSelectionRange(newActiveOff|0, anchorOff|0, 'backward');
+                  else editor.setSelectionRange(anchorOff|0, newActiveOff|0, 'forward');
+                }catch{
+                  try{ editor.setSelectionRange(Math.min(anchorOff|0, newActiveOff|0), Math.max(anchorOff|0, newActiveOff|0)); }catch{}
+                }
+
+                try{ ensureScrolloff(); }catch{}
+                _repositionCaret(); updateGutter();
+                return;
+              }
+            }
+          }catch{}
+
           // #603: ArrowDown で末尾LF欠落時に仮改行を挿入する旧処理(#602)を撤廃。
           // 最終行末尾での下方向移動は何も起こさず、そのまま位置維持。
           // #635/#636: 改行文字上 (offset===length-1) からの ArrowDown で仮想最終空行へ移動させる。
           // ただし既に改行直後 (offset===length) にいる場合はネイティブ挙動に委ねて何もしない。
           try{
             if (e.key==='ArrowDown' && _mode==='INSERT'){
+              // If Shift is held, do not steal ArrowDown: allow native range selection (markdown-off).
+              let shiftHeld = false;
+              try{ shiftHeld = !!e.shiftKey; }catch{}
+              try{ if (!shiftHeld && e && typeof e.getModifierState==='function') shiftHeld = !!e.getModifierState('Shift'); }catch{}
+              try{ if (!shiftHeld) shiftHeld = !!_shiftHeld; }catch{}
+              if (shiftHeld){
+                // Let browser handle Shift+ArrowDown selection.
+                // Our later setTimeout sync will still update overlay caret from selection.
+              } else {
               const v = String(editor.value||'');
               if (v.endsWith('\n')){
                 const start = editor.selectionStart|0;
@@ -18434,6 +18852,7 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
               }
               // EOF パッドスクロール (INSERT) 共通ヘルパー利用 (#866/#867)
               if (_maybeScrollEofPadStep('insert-eof-pad-scroll')){ e.preventDefault(); e.stopPropagation(); try{ _flagCaretMotion(); }catch{} return; }
+              }
             }
           }catch{}
           // 他の移動キーは後段 setTimeout で同期
@@ -18441,9 +18860,57 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
           // markdown(md-rich)では↑↓も見た目行(visual-line)移動に統一
           try{
             if (_mdRichEnabled() && (e.key==='ArrowUp' || e.key==='ArrowDown')){
-              e.preventDefault(); e.stopPropagation();
               const cnt = (_getCountArg()|0) || 1;
               const delta = (e.key==='ArrowDown') ? (cnt|0) : -((cnt|0));
+
+              let shiftHeld = false;
+              try{ shiftHeld = !!e.shiftKey; }catch{}
+              try{ if (!shiftHeld && e && typeof e.getModifierState==='function') shiftHeld = !!e.getModifierState('Shift'); }catch{}
+              try{ if (!shiftHeld) shiftHeld = !!_shiftHeld; }catch{}
+
+              if (shiftHeld){
+                // INSERT + md-rich + Shift+Up/Down: extend native selection across visual lines.
+                // Do not rely on browser hit-testing (variable line heights + wrap).
+                e.preventDefault(); e.stopPropagation();
+                let s0 = 0, e0 = 0;
+                let dir0 = 'none';
+                try{ s0 = editor.selectionStart|0; e0 = editor.selectionEnd|0; dir0 = String(editor.selectionDirection||'none'); }catch{}
+                // Determine anchor (fixed edge) and active edge (moving caret).
+                let anchorOff = s0|0;
+                let activeOff = s0|0;
+                try{
+                  if ((s0|0) !== (e0|0)){
+                    if (dir0 === 'backward'){ activeOff = s0|0; anchorOff = e0|0; }
+                    else { activeOff = e0|0; anchorOff = s0|0; }
+                  } else {
+                    // Starting a new selection: treat as forward by default.
+                    activeOff = s0|0;
+                    anchorOff = s0|0;
+                    dir0 = 'forward';
+                  }
+                }catch{}
+
+                // Move from the active edge.
+                try{ const rc0 = _rcFromOffset(activeOff|0); caretRow = rc0.r|0; caretCol = rc0.c|0; }catch{}
+                _moveCaretVisualLines(delta|0);
+                const newActiveOff = _offsetFromRC(caretRow|0, caretCol|0)|0;
+
+                // Apply selection with direction (best-effort).
+                try{
+                  if (dir0 === 'backward') editor.setSelectionRange(newActiveOff|0, anchorOff|0, 'backward');
+                  else editor.setSelectionRange(anchorOff|0, newActiveOff|0, 'forward');
+                }catch{
+                  // Fallback: no direction support
+                  try{ editor.setSelectionRange(Math.min(anchorOff|0, newActiveOff|0), Math.max(anchorOff|0, newActiveOff|0)); }catch{}
+                }
+
+                try{ ensureScrolloff(); }catch{}
+                _repositionCaret(); updateGutter();
+                return;
+              }
+
+              // No Shift: keep existing visual-line motion.
+              e.preventDefault(); e.stopPropagation();
               _moveCaretVisualLines(delta|0);
               try{ _syncNativeSelectionToCaret(); }catch{}
               try{ ensureScrolloff(); }catch{}
@@ -18455,7 +18922,18 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
           try{ _flagCaretMotion(); }catch{}
           // Defer until after the browser updates selection/caret
           setTimeout(()=>{
-            try{ const off = editor.selectionStart|0; const rc = _rcFromOffset(off); caretRow = rc.r; caretCol = rc.c; }catch{}
+            try{
+              let off = editor.selectionStart|0;
+              const s = editor.selectionStart|0;
+              const t = editor.selectionEnd|0;
+              if (s !== t){
+                off = (String(editor.selectionDirection||'') === 'backward') ? (s|0) : (t|0);
+              } else {
+                off = s|0;
+              }
+              const rc = _rcFromOffset(off);
+              caretRow = rc.r; caretCol = rc.c;
+            }catch{}
             
             // #1289: Update desired visual column for horizontal moves in INSERT mode
             if (e.key==='ArrowLeft' || e.key==='ArrowRight' || e.key==='Home' || e.key==='End'){
@@ -18830,6 +19308,23 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
           return;
         }
         if (e.key==='k' || (e.key==='Process' && e.code==='KeyK')){
+          // If this is within the IME-toggle consume window, do not treat as motion.
+          try{
+            if (e && e.key==='Process' && e.code==='KeyK' && (Date.now() < (_imeToggleConsumeUntil|0))){
+              try{ e.preventDefault(); e.stopPropagation(); }catch{}
+              try{
+                const imeKeyMode = String((window && window.SIX_OPTIONS && window.SIX_OPTIONS.imeSwitchKey) || '').toLowerCase();
+                const now = Date.now();
+                if (imeKeyMode === 'direct' && _mode === 'NORMAL' && now >= (_imeKeepOffUntil|0)){
+                  try{ _setMode('INSERT'); }catch{}
+                  try{ _imeVisualLockUntil = 0; _imeActive = true; _applyCaretGradient(); }catch{}
+                  try{ _repositionCaret(); updateGutter(); }catch{}
+                  try{ _imeSyncFromHostBurst && _imeSyncFromHostBurst('imeToggle:consumeK2'); }catch{}
+                }
+              }catch{}
+              return;
+            }
+          }catch{}
           e.preventDefault();
           try{ _debugPush({ t:Date.now(), type:'motion-exec', mode:_mode, key:'k', code:e.code, via:(e.key==='Process'?'Process/KeyK':'k') }); }catch{}
           const n=_consumeCount();
@@ -19962,6 +20457,24 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
   }
 
   if (e.key==='j' || e.key==='ArrowDown' || (e.key==='Process' && e.code==='KeyJ')){
+    // If this looks like an IME toggle (e.g. かな reported as Process/KeyJ), do not execute motion.
+    // Consume briefly after _noteImeToggleRequested() to avoid false positives for real Process-key motions.
+    try{
+      if (e && e.key==='Process' && e.code==='KeyJ' && (Date.now() < (_imeToggleConsumeUntil|0))){
+        try{ e.preventDefault(); e.stopPropagation(); }catch{}
+        try{
+          const imeKeyMode = String((window && window.SIX_OPTIONS && window.SIX_OPTIONS.imeSwitchKey) || '').toLowerCase();
+          const now = Date.now();
+          if (imeKeyMode === 'direct' && _mode === 'NORMAL' && now >= (_imeKeepOffUntil|0)){
+            try{ _setMode('INSERT'); }catch{}
+            try{ _imeVisualLockUntil = 0; _imeActive = true; _applyCaretGradient(); }catch{}
+            try{ _repositionCaret(); updateGutter(); }catch{}
+            try{ _imeSyncFromHostBurst && _imeSyncFromHostBurst('imeToggle:consumeJ'); }catch{}
+          }
+        }catch{}
+        return;
+      }
+    }catch{}
     // #1253: Suppress default handling if scan-hold is active
     try{ const h=window.__sixScanHoldHeld; if(h && (h.has('KeyJ') || h.has('ArrowDown'))){ e.preventDefault(); return; } }catch{}
 
@@ -20008,6 +20521,23 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
     _repositionCaret(); updateGutter(); return;
   }
   if (e.key==='k' || e.key==='ArrowUp' || (e.key==='Process' && e.code==='KeyK')){
+    // If this looks like an IME toggle (e.g. かな reported as Process/KeyK), do not execute motion.
+    try{
+      if (e && e.key==='Process' && e.code==='KeyK' && (Date.now() < (_imeToggleConsumeUntil|0))){
+        try{ e.preventDefault(); e.stopPropagation(); }catch{}
+        try{
+          const imeKeyMode = String((window && window.SIX_OPTIONS && window.SIX_OPTIONS.imeSwitchKey) || '').toLowerCase();
+          const now = Date.now();
+          if (imeKeyMode === 'direct' && _mode === 'NORMAL' && now >= (_imeKeepOffUntil|0)){
+            try{ _setMode('INSERT'); }catch{}
+            try{ _imeVisualLockUntil = 0; _imeActive = true; _applyCaretGradient(); }catch{}
+            try{ _repositionCaret(); updateGutter(); }catch{}
+            try{ _imeSyncFromHostBurst && _imeSyncFromHostBurst('imeToggle:consumeK'); }catch{}
+          }
+        }catch{}
+        return;
+      }
+    }catch{}
     // #1253: Suppress default handling if scan-hold is active
     try{ const h=window.__sixScanHoldHeld; if(h && (h.has('KeyK') || h.has('ArrowUp'))){ e.preventDefault(); return; } }catch{}
 
@@ -21410,6 +21940,18 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
               ''
             );
             if (!_effCode) return;
+
+            // INSERT + Shift+ArrowUp/Down must reach the editor handler so native/explicit
+            // range selection can extend across lines. scan-hold capturing these keys
+            // prevents keydown logging and breaks selection.
+            try{
+              if (_mode === 'INSERT' && (_effCode === 'ArrowUp' || _effCode === 'ArrowDown')){
+                let sh = false;
+                try{ sh = !!e.shiftKey; }catch{}
+                try{ if (!sh && e && typeof e.getModifierState==='function') sh = !!e.getModifierState('Shift'); }catch{}
+                if (sh) return;
+              }
+            }catch{}
             if (!_scanHold.codes.has(_effCode)) return;
             if (e.ctrlKey || e.altKey || e.metaKey) return;
             
@@ -22109,6 +22651,71 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
       try{ window.__sixGlobalKeyRouterHandler = _globalKeyRouter; }catch{}
       window.addEventListener('keydown', _globalKeyRouter, true);
       document.addEventListener('keydown', _globalKeyRouter, true);
+
+      // Emergency escape: always allow Esc/F19 to regain control.
+      // This is a safety net for environments where IME/Process events or focus routing glitches
+      // prevent the editor's own keydown handler from seeing Escape.
+      try{
+        if (!window.__sixEmergencyEscOnce){
+          window.__sixEmergencyEscOnce = true;
+          window.addEventListener('keydown', (e)=>{
+            try{
+              // Do not interfere with modal dialogs or cmdinput; they have their own handlers.
+              const modalOpen = !!((_modalOverlay && _modalOverlay.style && _modalOverlay.style.display !== 'none') || document.getElementById('grepDialog') || (window._grepDialogOpen===true));
+              if (modalOpen) return;
+              const ae = document.activeElement;
+              if (cmdinput && ae === cmdinput) return;
+
+              const esc = (typeof _isEsc === 'function') ? _isEsc(e) : (e && e.key === 'Escape');
+              if (!esc) return;
+
+              // While IME composition/candidate is active, Esc should be handled by IME.
+              try{
+                const now = Date.now();
+                const candWin = (typeof window._imeCandidateUntil==='number') ? (now < window._imeCandidateUntil) : false;
+                if (window && window._imeComposing===true) return;
+                if (e && e.isComposing===true) return;
+                if (candWin) return;
+              }catch{}
+
+              try{ e.preventDefault(); e.stopImmediatePropagation(); e.stopPropagation(); }catch{}
+              try{ editor && editor.focus && editor.focus(); }catch{}
+
+              // If in CMD, close it like Esc.
+              try{ if (_mode === 'CMD'){ _cmdExitAndRestoreView && _cmdExitAndRestoreView({}); return; } }catch{}
+
+              // If in INSERT, force back to NORMAL.
+              try{
+                if (_mode === 'INSERT'){
+                  // 仕様追加(#1626): INSERT で範囲選択が存在する場合、Esc は選択クリアのみ。
+                  try{
+                    const s = (editor && typeof editor.selectionStart==='number') ? (editor.selectionStart|0) : 0;
+                    const t = (editor && typeof editor.selectionEnd==='number') ? (editor.selectionEnd|0) : 0;
+                    if ((s|0) !== (t|0)){
+                      let off = (t|0);
+                      try{ const dir = String(editor.selectionDirection||''); if (dir === 'backward') off = (s|0); }catch{}
+                      try{ editor.setSelectionRange(off|0, off|0); }catch{ try{ editor.selectionStart = off|0; editor.selectionEnd = off|0; }catch{} }
+                      try{ const rc = _rcFromOffset(off|0); caretRow = rc.r; caretCol = rc.c; _setCaret(caretRow, caretCol); }catch{}
+                      try{ ensureScrolloff(); }catch{}
+                      try{ _repositionCaret(); updateGutter(); _updatePosInfo && _updatePosInfo(); }catch{}
+                      return;
+                    }
+                  }catch{}
+                  try{ const off = (editor && typeof editor.selectionStart==='number') ? (editor.selectionStart|0) : 0; const rc = _rcFromOffset(off); caretRow = rc.r; caretCol = rc.c; }catch{}
+                  try{ _imeActive = false; _imeVisualLockUntil = Date.now() + 600; _applyCaretGradient(); }catch{}
+                  try{ _setMode('NORMAL'); }catch{}
+                  try{ _applyCaretGradient(); }catch{}
+                  try{ ensureScrolloff(); }catch{}
+                  try{ _repositionCaret(); updateGutter(); _updatePosInfo && _updatePosInfo(); }catch{}
+                  return;
+                }
+              }catch{}
+
+              // Otherwise, keep NORMAL/VISUAL as-is.
+            }catch{}
+          }, true);
+        }
+      }catch{}
     }catch{}
     if (cmdinput){
       // If user clicks into the cmdinput directly (e.g., while in INSERT/VISUAL), treat it as entering CMD
@@ -22851,9 +23458,17 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
             return;
           }
           if (raw){
+            const cmdLine = raw.startsWith(':') ? raw : (':' + raw);
             // Store only if it is a valid/implemented command (#1464)
-            try{ if (_cmdHistoryShouldPush(cmdinput.value)) _cmdHistoryMaybePush(cmdinput.value); }catch{}
-            runCommand(raw.startsWith(':')?raw:(':'+raw));
+            try{ if (_cmdHistoryShouldPush(cmdLine)) _cmdHistoryMaybePush(cmdLine); }catch{}
+            // Debug: if :build looks "unresponsive", log what CMD actually submitted.
+            try{
+              const v = String(cmdinput && cmdinput.value || '');
+              if (/^:\s*build\??\s*$/i.test(cmdLine) || /[：？]/.test(v) || /\bbuild\b/i.test(v)){
+                console.log('[six][cmd] submit', { raw, cmdLine, value: v, mode: _mode });
+              }
+            }catch{}
+            runCommand(cmdLine);
           }
           cmdinput.value = '';
           // VISUAL からの CMD だった場合はここで VISUAL を終了（オーバレイもクリア）
