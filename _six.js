@@ -5680,10 +5680,216 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
       btn.type = 'button';
       btn.textContent = '履歴 F4';
       btn.addEventListener('mousedown', (e)=>{ try{ e.preventDefault(); e.stopPropagation(); }catch{} }, true);
-      btn.addEventListener('click', (e)=>{ try{ e.preventDefault(); e.stopPropagation(); }catch{}; try{ _cmdHistPopupToggle(); }catch{}; try{ cmdinput && cmdinput.focus && cmdinput.focus({preventScroll:true}); }catch{} }, true);
+      btn.addEventListener('click', (e)=>{ try{ e.preventDefault(); e.stopPropagation(); }catch{}; try{ _histPopupToggleForCmdInput && _histPopupToggleForCmdInput(); }catch{}; try{ cmdinput && cmdinput.focus && cmdinput.focus({preventScroll:true}); }catch{} }, true);
       cmdfloat.appendChild(btn);
       _cmdHistPopupBtn = btn;
     }catch{}
+  }
+
+  // Search history popup for CMD '/' and '?' (F4)
+  const _searchHistPopupId = 'searchHistPopup';
+  let _searchHistPopupSel = 0;
+  let _searchHistPopupOrig = null;
+  let _searchHistPopupReflecting = false;
+
+  function _searchHistPopupVisible(){
+    try{ const p=document.getElementById(_searchHistPopupId); return !!(p && p.style.display!=='none'); }catch{ return false; }
+  }
+  function _searchHistPopupItems(){
+    try{
+      const src = Array.isArray(_searchHistory) ? _searchHistory : [];
+      const out = [];
+      for (let i=0;i<src.length;i++){
+        const v = String(src[i]||'');
+        if (!v) continue;
+        out.push({ value: v, origIndex: i });
+      }
+      return out;
+    }catch{ return []; }
+  }
+  function _searchHistPopupHide(restore){
+    try{
+      const p=document.getElementById(_searchHistPopupId);
+      if (p) p.style.display='none';
+      if (restore){
+        try{
+          if (cmdinput && _searchHistPopupOrig != null){
+            cmdinput.value = String(_searchHistPopupOrig||'');
+            try{ const pos=(cmdinput.value||'').length; cmdinput.setSelectionRange(pos,pos); }catch{}
+            try{ _searchHistPopupReflecting = true; cmdinput.dispatchEvent(new Event('input', { bubbles:true })); }catch{} finally{ _searchHistPopupReflecting=false; }
+          }
+        }catch{}
+      }
+    }catch{}
+    _searchHistPopupOrig = null;
+  }
+  function _searchHistPopupPreviewSel(){
+    try{
+      if (!cmdinput) return;
+      const items = _searchHistPopupItems();
+      if (!items.length) return;
+      _searchHistPopupSel = Math.max(0, Math.min(items.length-1, (_searchHistPopupSel|0)));
+      const it = items[_searchHistPopupSel];
+      if (!it) return;
+      cmdinput.value = String(it.value||'');
+      try{ const pos=(cmdinput.value||'').length; cmdinput.setSelectionRange(pos,pos); }catch{}
+      try{ _searchHistPopupReflecting = true; cmdinput.dispatchEvent(new Event('input', { bubbles:true })); }catch{} finally{ _searchHistPopupReflecting=false; }
+    }catch{}
+  }
+  function _searchHistPopupCommitSel(){
+    try{ _searchHistPopupPreviewSel(); }catch{}
+    _searchHistPopupHide(false);
+    try{ cmdinput && cmdinput.focus && cmdinput.focus({preventScroll:true}); }catch{ try{ cmdinput && cmdinput.focus && cmdinput.focus(); }catch{} }
+  }
+  function _searchHistPopupRender(){
+    try{
+      const pop = document.getElementById(_searchHistPopupId); if (!pop) return;
+      let prevScroll = 0;
+      try{ prevScroll = Number.isFinite(pop.__scrollTop) ? (pop.__scrollTop|0) : 0; }catch{}
+      pop.innerHTML='';
+      const inner = document.createElement('div');
+      inner.className='inner';
+      inner.style.maxHeight='35vh';
+      inner.style.overflow='auto';
+      pop.appendChild(inner);
+      try{ inner.scrollTop = prevScroll; }catch{}
+      const items = _searchHistPopupItems();
+      if (!items.length){
+        const empty = document.createElement('div');
+        empty.textContent='(履歴なし)';
+        empty.style.padding='6px 10px';
+        empty.style.color='#2f3644';
+        inner.appendChild(empty);
+        return;
+      }
+      _searchHistPopupSel = Math.max(0, Math.min(items.length-1, (_searchHistPopupSel|0)));
+      let selEl = null;
+      items.forEach((it,i)=>{
+        const item = document.createElement('div');
+        item.className='item';
+        item.style.display='block';
+        item.style.padding='4px 10px';
+        item.style.cursor='pointer';
+        item.style.whiteSpace='nowrap';
+        item.style.borderRadius='4px';
+        item.textContent = String(it.value||'');
+        item.style.background = (i===_searchHistPopupSel) ? 'var(--popupActiveLine, #1a2030)' : 'transparent';
+        if (i===_searchHistPopupSel) selEl = item;
+        item.addEventListener('mouseenter', ()=>{ try{ _searchHistPopupSel=i; _searchHistPopupRender(); _searchHistPopupPreviewSel(); }catch{} });
+        const _apply = (ev)=>{
+          try{ ev.preventDefault(); ev.stopPropagation(); }catch{}
+          try{ _searchHistPopupSel = i; _searchHistPopupCommitSel(); }catch{}
+        };
+        item.addEventListener('mousedown', _apply);
+        item.addEventListener('click', _apply);
+        inner.appendChild(item);
+      });
+      try{
+        const ensure = (container, el)=>{
+          try{
+            if (!container || !el) return;
+            const top = container.scrollTop;
+            const h = container.clientHeight || 0;
+            const margin = Math.floor(h * 0.35);
+            const et = el.offsetTop;
+            const eb = et + (el.offsetHeight||0);
+            const min = top + margin;
+            const max = top + h - margin;
+            if (et < min) container.scrollTop = Math.max(0, et - margin);
+            else if (eb > max) container.scrollTop = Math.max(0, eb - (h - margin));
+          }catch{}
+        };
+        ensure(inner, selEl);
+        pop.__scrollTop = inner.scrollTop;
+        if (!inner.__bindScroll){
+          inner.__bindScroll = true;
+          inner.addEventListener('scroll', ()=>{ try{ pop.__scrollTop = inner.scrollTop; }catch{} }, { passive:true });
+        }
+      }catch{}
+    }catch{}
+  }
+  function _searchHistPopupShow(){
+    try{
+      if (!cmdinput || cmdinput.disabled) return;
+      let pop = document.getElementById(_searchHistPopupId);
+      if (!pop){
+        pop = document.createElement('div');
+        pop.id = _searchHistPopupId;
+        pop.style.position='fixed';
+        pop.style.maxHeight='35vh';
+        pop.style.background='#0f1117';
+        pop.style.color='#e6e6e6';
+        pop.style.border='1px solid #2a3244';
+        pop.style.boxShadow='0 10px 24px rgba(0,0,0,0.4)';
+        pop.style.zIndex='10001';
+        pop.style.borderRadius='6px';
+        pop.style.overflow='hidden';
+        pop.style.boxSizing='border-box';
+        pop.style.padding='4px 6px';
+        document.body.appendChild(pop);
+      }
+      pop.style.display='';
+      _searchHistPopupOrig = String(cmdinput.value||'');
+      const items = _searchHistPopupItems();
+      _searchHistPopupSel = items.length ? (items.length - 1) : 0;
+      _searchHistPopupRender();
+
+      const cr = (cmdfloat && cmdfloat.getBoundingClientRect) ? cmdfloat.getBoundingClientRect() : cmdinput.getBoundingClientRect();
+      const fixedW = Math.max(160, Math.round((cr && cr.width) ? cr.width : 240));
+      try{ pop.style.width=fixedW+'px'; pop.style.minWidth=fixedW+'px'; pop.style.maxWidth=fixedW+'px'; }catch{}
+      const vw = (window.innerWidth||0), vh=(window.innerHeight||0);
+      const ph = (pop.offsetHeight||160);
+      let left = Math.max(8, Math.min(vw - fixedW - 8, Math.round((cr && cr.left) ? cr.left : 8)));
+
+      let cmdAboveCaret = false;
+      try{
+        const vr = viewport ? viewport.getBoundingClientRect() : { top:0 };
+        const st = (editor && typeof editor.scrollTop==='number') ? (editor.scrollTop|0) : 0;
+        const caretAbs = (vr.top|0) + ((caretRow|0) * LINE_HEIGHT - st) + Math.floor(LINE_HEIGHT/2);
+        const cmdCenter = Math.floor(((cr.top||0) + (cr.bottom||0)) / 2);
+        cmdAboveCaret = (cmdCenter < caretAbs);
+      }catch{}
+      let top = 8;
+      if (cmdAboveCaret) top = Math.round((cr.top||0) - ph - 6);
+      else top = Math.round((cr.bottom||0) + 6);
+      top = Math.max(8, Math.min(vh - ph - 8, top));
+
+      pop.style.left = left + 'px';
+      pop.style.top  = top + 'px';
+
+      try{ _searchHistPopupPreviewSel(); }catch{}
+
+      if (!pop.__outsideClose){
+        pop.__outsideClose = true;
+        document.addEventListener('mousedown', (ev)=>{
+          try{
+            const pp = document.getElementById(_searchHistPopupId);
+            if (!pp || pp.style.display==='none') return;
+            const within = pp.contains(ev.target)
+              || (cmdfloat && cmdfloat.contains && cmdfloat.contains(ev.target))
+              || (_cmdHistPopupBtn && _cmdHistPopupBtn.contains && _cmdHistPopupBtn.contains(ev.target));
+            if (!within) _searchHistPopupHide(true);
+          }catch{}
+        }, true);
+      }
+    }catch{}
+  }
+  function _searchHistPopupToggle(){
+    try{ if (_searchHistPopupVisible()) _searchHistPopupHide(true); else _searchHistPopupShow(); }catch{}
+  }
+
+  function _histPopupToggleForCmdInput(){
+    try{
+      const curVal = (function(){ try{ return String(cmdinput && cmdinput.value || ''); }catch{ return ''; } })();
+      const isSearchInput = /^\s*:?[\/?]/.test(curVal);
+      if (isSearchInput){
+        try{ if (typeof _cmdHistPopupVisible === 'function' && _cmdHistPopupVisible()) _cmdHistPopupHide(true); }catch{}
+        _searchHistPopupToggle();
+      } else {
+        try{ if (_searchHistPopupVisible()) _searchHistPopupHide(true); }catch{}
+        _cmdHistPopupToggle();
+      }
+    }catch{ try{ _cmdHistPopupToggle(); }catch{} }
   }
 
   // file popup selection auto-follow control
@@ -21584,11 +21790,11 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
           }
         }catch{}
 
-        // F4 toggles CMD history popup
+        // F4 toggles history popup (search vs command)
         try{
           if (e && e.key === 'F4'){
             e.preventDefault(); e.stopPropagation();
-            _cmdHistPopupToggle();
+            try{ _histPopupToggleForCmdInput && _histPopupToggleForCmdInput(); }catch{ try{ _cmdHistPopupToggle(); }catch{} }
             return;
           }
         }catch{}
@@ -22501,6 +22707,11 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
         try{
           if (typeof _cmdHistPopupVisible === 'function' && _cmdHistPopupVisible() && !_cmdHistPopupReflecting){
             _cmdHistPopupHide(false);
+          }
+        }catch{}
+        try{
+          if (typeof _searchHistPopupVisible === 'function' && _searchHistPopupVisible() && !_searchHistPopupReflecting){
+            _searchHistPopupHide(false);
           }
         }catch{}
         const vRaw = cmdinput.value;
@@ -26554,10 +26765,10 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
             return;
           }
 
-          // CMD: F4 opens command history popup (override the generic F1–F8 trap)
+          // CMD: F4 opens history popup (search vs command depends on current cmdinput prefix)
           if (inCmd && isF4 && !grepOpen){
             try{ e.preventDefault(); e.stopPropagation(); }catch{}
-            try{ _cmdHistPopupToggle && _cmdHistPopupToggle(); }catch{}
+            try{ _histPopupToggleForCmdInput && _histPopupToggleForCmdInput(); }catch{}
             return;
           }
 
