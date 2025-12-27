@@ -5848,12 +5848,68 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
       cmdinput.value = String(_searchHistPopupHead || '/') + String(it.value||'');
       try{ const pos=(cmdinput.value||'').length; cmdinput.setSelectionRange(pos,pos); }catch{}
       try{ _searchHistPopupReflecting = true; cmdinput.dispatchEvent(new Event('input', { bubbles:true })); }catch{} finally{ _searchHistPopupReflecting=false; }
+
+      // After preview triggers scroll/jump + cmdfloat movement, keep popup attached with correct ordering.
+      try{ setTimeout(()=>{ try{ if (_mode==='CMD') _positionCmdFloat(); }catch{} try{ _positionSearchHistPopup(); }catch{} }, 0); }catch{}
     }catch{}
   }
   function _searchHistPopupCommitSel(){
     try{ _searchHistPopupPreviewSel(); }catch{}
     _searchHistPopupHide(false);
     try{ cmdinput && cmdinput.focus && cmdinput.focus({preventScroll:true}); }catch{ try{ cmdinput && cmdinput.focus && cmdinput.focus(); }catch{} }
+  }
+  // #1604: Keep search history popup positioned relative to highlight & cmdfloat.
+  // Relationship must be either: highlight < cmdbar < popup OR highlight > cmdbar > popup.
+  function _positionSearchHistPopup(){
+    try{
+      const pop = document.getElementById(_searchHistPopupId);
+      if (!pop || pop.style.display==='none') return;
+      if (!cmdinput) return;
+
+      const cr = (cmdfloat && cmdfloat.getBoundingClientRect) ? cmdfloat.getBoundingClientRect() : cmdinput.getBoundingClientRect();
+      const fixedW = Math.max(160, Math.round((cr && cr.width) ? cr.width : 240));
+      try{ pop.style.width=fixedW+'px'; pop.style.minWidth=fixedW+'px'; pop.style.maxWidth=fixedW+'px'; }catch{}
+
+      const vw = (window.innerWidth||0), vh=(window.innerHeight||0);
+      const ph = Math.max(80, (pop.offsetHeight||160));
+      let left = Math.max(8, Math.min(vw - fixedW - 8, Math.round((cr && cr.left) ? cr.left : 8)));
+
+      // Determine highlight center (prefer incremental preview highlight).
+      let hlCenter = NaN;
+      try{
+        if (_incPrevEl && _incPrevEl.getBoundingClientRect){
+          const rr = _incPrevEl.getBoundingClientRect();
+          if (rr && (rr.height||0) > 0){
+            const cy = (rr.top||0) + (rr.height||0)/2;
+            if (Number.isFinite(cy)) hlCenter = cy;
+          }
+        }
+      }catch{}
+      if (!Number.isFinite(hlCenter)){
+        try{
+          const vr = viewport ? viewport.getBoundingClientRect() : { top:0 };
+          const st = (editor && typeof editor.scrollTop==='number') ? (editor.scrollTop|0) : 0;
+          hlCenter = (vr.top|0) + ((caretRow|0) * LINE_HEIGHT - st) + Math.floor(LINE_HEIGHT/2);
+        }catch{ hlCenter = Math.floor(vh/2); }
+      }
+
+      const cmdCenter = Math.floor(((cr.top||0) + (cr.bottom||0)) / 2);
+      const highlightAboveCmd = (hlCenter < cmdCenter);
+      const gap = 6; // match cmd history popup spacing
+
+      let top = 8;
+      if (highlightAboveCmd){
+        // highlight above -> popup below cmdbar
+        top = Math.round((cr.bottom||0) + gap);
+      } else {
+        // highlight below -> popup above cmdbar
+        top = Math.round((cr.top||0) - ph - gap);
+      }
+      top = Math.max(8, Math.min(vh - ph - 8, top));
+
+      pop.style.left = left + 'px';
+      pop.style.top  = top + 'px';
+    }catch{}
   }
   function _searchHistPopupRender(){
     try{
@@ -5952,28 +6008,8 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
       _searchHistPopupSel = items.length ? (items.length - 1) : 0;
       _searchHistPopupRender();
 
-      const cr = (cmdfloat && cmdfloat.getBoundingClientRect) ? cmdfloat.getBoundingClientRect() : cmdinput.getBoundingClientRect();
-      const fixedW = Math.max(160, Math.round((cr && cr.width) ? cr.width : 240));
-      try{ pop.style.width=fixedW+'px'; pop.style.minWidth=fixedW+'px'; pop.style.maxWidth=fixedW+'px'; }catch{}
-      const vw = (window.innerWidth||0), vh=(window.innerHeight||0);
-      const ph = (pop.offsetHeight||160);
-      let left = Math.max(8, Math.min(vw - fixedW - 8, Math.round((cr && cr.left) ? cr.left : 8)));
-
-      let cmdAboveCaret = false;
-      try{
-        const vr = viewport ? viewport.getBoundingClientRect() : { top:0 };
-        const st = (editor && typeof editor.scrollTop==='number') ? (editor.scrollTop|0) : 0;
-        const caretAbs = (vr.top|0) + ((caretRow|0) * LINE_HEIGHT - st) + Math.floor(LINE_HEIGHT/2);
-        const cmdCenter = Math.floor(((cr.top||0) + (cr.bottom||0)) / 2);
-        cmdAboveCaret = (cmdCenter < caretAbs);
-      }catch{}
-      let top = 8;
-      if (cmdAboveCaret) top = Math.round((cr.top||0) - ph - 6);
-      else top = Math.round((cr.bottom||0) + 6);
-      top = Math.max(8, Math.min(vh - ph - 8, top));
-
-      pop.style.left = left + 'px';
-      pop.style.top  = top + 'px';
+      // Initial positioning based on highlight/cmdbar ordering.
+      try{ _positionSearchHistPopup(); }catch{}
 
       try{ _searchHistPopupPreviewSel(); }catch{}
 
@@ -15318,6 +15354,9 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
       if (topPx < minTop) topPx = minTop;
       if (topPx > maxTop) topPx = maxTop;
       cmdfloat.style.top = topPx + 'px';
+
+      // #1604: If search history popup is open, keep it attached to cmdfloat.
+      try{ if (typeof _searchHistPopupVisible==='function' && _searchHistPopupVisible()) _positionSearchHistPopup && _positionSearchHistPopup(); }catch{}
     }catch{}
   }
   try{ editor.addEventListener('scroll', ()=>{ try{ if (_mode==='CMD') _positionCmdFloat(); }catch{} }); }catch{}
