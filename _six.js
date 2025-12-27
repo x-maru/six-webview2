@@ -801,6 +801,9 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
   let _typingGuardUntil = 0;
   // IMEポーリング一時停止ガード
   let _imePollPausedUntil = 0;
+  // Force-IME-OFF guard window (used to suppress delayed IME ON -> INSERT transitions)
+  // e.g. right after closing CMD while IME was ON.
+  let _imeKeepOffUntil = 0;
   // IME未確定中の大量inputで重い処理が走るのを避ける（compositionendで一括反映）
   let _imeDeferredModifyPending = false;
   let _imeDeferredTickBumped = false;
@@ -976,6 +979,16 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
       if (!api) return;
       api = api.endsWith('/') ? api : (api + '/');
 
+      // imeSwitchKey='direct': trust physical Kana/Eisu key handling and do not apply
+      // host polling results to the editor (it can be stale and causes spurious INSERT/visual IME).
+      try{
+        const km = String((window && window.SIX_OPTIONS && window.SIX_OPTIONS.imeSwitchKey) || '').toLowerCase();
+        if (km === 'direct'){
+          try{ _stopImePolling(); }catch{}
+          return;
+        }
+      }catch{}
+
       _imePollStopped = false;
       try{ if (_imePollTimer){ clearTimeout(_imePollTimer); } }catch{}
       _imePollTimer = null;
@@ -1044,6 +1057,19 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
           const js = await resp.json();
           const st = js && js.state;
           if (st === 'on' || st === 'off'){
+            // If we are forcing IME OFF (e.g. right after CMD close), ignore 'on' and
+            // do NOT auto-enter INSERT. Reinforce OFF to win races with host/OS delays.
+            try{
+              const now0 = Date.now();
+              if (now0 < (_imeKeepOffUntil|0)){
+                if (st === 'on'){
+                  try{ _imePost && _imePost('off'); }catch{}
+                }
+                if (_imeActive !== false){ _imeActive = false; _applyCaretGradient(); }
+                _noteOk();
+                return;
+              }
+            }catch{}
             const newActive = (st === 'on');
             // NORMAL→IMEがONになったことを検知したらINSERTへ（⑤→②を保証）
             if (newActive && _mode === 'NORMAL'){
@@ -3673,7 +3699,18 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
       let _incMdBaseFontPx = 16;
       let _incMdWrapWidthPx = 80;
       try{ if (_incMdRich){ _incMdBaseFontPx = parseFloat(getComputedStyle(editor).fontSize)||_incMdBaseFontPx; } }catch{}
-      try{ if (_incMdRich && _incWrapOn){ _incMdWrapWidthPx = _wrapAvailWidthPx()|0; } }catch{ _incMdWrapWidthPx = 80; }
+      // IMPORTANT: Use the same wrap width cache as caret so wrapped visual-line mapping stays consistent.
+      try{
+        if (_incMdRich && _incWrapOn){
+          let w0 = 80;
+          try{
+            const c = (typeof _wrapEnsureCache === 'function') ? _wrapEnsureCache(false) : null;
+            if (c && Number.isFinite(c.wPx)) w0 = (c.wPx|0);
+            else w0 = _wrapAvailWidthPx()|0;
+          }catch{ try{ w0 = _wrapAvailWidthPx()|0; }catch{ w0 = 80; } }
+          _incMdWrapWidthPx = (w0|0);
+        }
+      }catch{ _incMdWrapWidthPx = 80; }
       const _incMdDispInfoAtRow = (row0)=>{
         try{
           const rr = (row0|0);
@@ -3736,13 +3773,26 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
       const _incMdMeasureXpx = (row0, col0)=>{
         try{
           const m = _incMdDispInfoAtRow(row0|0);
-          const disp = String(m.disp||'');
-          if (!disp && (disp.length|0) === 0) return 0;
-          let cc = Math.max(0, col0|0);
-          try{ if (m.hideSymbols && (m.prefixLen|0) > 0) cc = Math.max(0, (cc|0) - (m.prefixLen|0)); }catch{}
-          cc = Math.max(0, Math.min((disp.length|0), cc|0));
           const lh = Math.max(1, (m.rowHeightPx|0));
           const fs = Math.max(6, (m.fontSizePx|0));
+          // Match caret logic: use the same markdown WYSIWYG mapping from raw col -> display col/line.
+          const src = String(m.srcText||'');
+          let disp = '';
+          let cc = Math.max(0, col0|0);
+          try{
+            if (typeof _mdWysiwygAdjust === 'function'){
+              const adj = _mdWysiwygAdjust(src, cc|0);
+              disp = String(adj && adj.line !== undefined ? adj.line : '');
+              cc = (adj && Number.isFinite(adj.col)) ? (adj.col|0) : (cc|0);
+            } else {
+              disp = String(m.disp||'');
+              if (m.hideSymbols && (m.prefixLen|0) > 0) cc = Math.max(0, (cc|0) - (m.prefixLen|0));
+            }
+          }catch{
+            disp = String(m.disp||'');
+          }
+          if (!disp && (disp.length|0) === 0) return 0;
+          cc = Math.max(0, Math.min((disp.length|0), cc|0));
           // Use a large width when wrap is off so marker X isn't affected by wrapping.
           const wPx = _incWrapOn ? (_incMdWrapWidthPx|0) : 1000000;
           const xp = _wrapProbeXFromColStyled(disp, cc|0, wPx|0, fs|0, lh|0);
@@ -3836,24 +3886,99 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
       }
       // limit to single line box for preview; clamp highlight width within this line
       const endCol = Math.min(line.length, c + nlen);
+      // Clear multi-rect leftovers (multi-line or wrap) when rendering a single logical line.
+      try{ _incPrevExtra.forEach(el=>{ try{ if (el && el.parentNode){ el.parentNode.removeChild(el); } }catch{} }); }catch{}
+      _incPrevExtra=[];
+
       // measure x positions
       let x1 = 0, x2 = 0;
+      const lh0 = _incHeightPxForRow(r|0)|0;
+
+      // Wrap-aware measurement for non-md-rich: measure X within the wrapped visual line.
+      const _incWrapMeasure = (!_incMdRich && _incWrapOn);
+      let wPx = 80;
+      let fs = 16;
+      if (_incWrapMeasure){
+        try{ wPx = _wrapAvailWidthPx()|0; }catch{ wPx = 80; }
+        try{ fs = Math.max(6, Math.round(parseFloat(getComputedStyle(editor).fontSize)||16)); }catch{ fs = 16; }
+      }
+
       if (_incMdRich){
         x1 = _incMdMeasureXpx(r|0, c|0);
         x2 = _incMdMeasureXpx(r|0, endCol|0);
+      } else if (_incWrapMeasure){
+        // Use wrap probe helpers so matches on wrapped 2nd+ visual lines still highlight.
+        let intra1 = 0, intra2 = 0;
+        try{ intra1 = _wrapProbeIntraFromColStyled(line, c|0, wPx|0, lh0|0, fs|0) | 0; }catch{ intra1 = 0; }
+        try{ intra2 = _wrapProbeIntraFromColStyled(line, endCol|0, wPx|0, lh0|0, fs|0) | 0; }catch{ intra2 = intra1; }
+        intra1 = Math.max(0, intra1|0);
+        intra2 = Math.max(intra1, intra2|0);
+        try{ const xp = _wrapProbeXFromColStyled(line, c|0, wPx|0, fs|0, lh0|0); if (Number.isFinite(xp)) x1 = Math.max(0, xp); }catch{}
+        try{ const xp = _wrapProbeXFromColStyled(line, endCol|0, wPx|0, fs|0, lh0|0); if (Number.isFinite(xp)) x2 = Math.max(0, xp); }catch{}
+
+        // compute top (relative to current viewport top line)
+        const topPx0 = _incTopPxForRowCol(r|0, c|0);
+
+        // If the match spans multiple wrapped visual lines, render multiple rectangles.
+        if (intra2 > intra1){
+          // Remove any single-line element
+          try{ if (_incPrevEl && _incPrevEl.parentNode){ _incPrevEl.parentNode.removeChild(_incPrevEl); } }catch{}
+          _incPrevEl = null;
+
+          let _hs = 0; try{ _hs = (editor.scrollLeft||0); }catch{}
+          for (let intra=intra1; intra<=intra2; intra++){
+            let sx = 0;
+            let ex = wPx;
+            try{ if (intra === intra1) sx = Math.max(0, x1); }catch{}
+            try{ if (intra === intra2) ex = Math.max(0, x2); }catch{}
+            if (!(ex > sx)) continue;
+            const el = document.createElement('div');
+            el.className = 'incprev';
+            el.style.left = (sx - _hs) + 'px';
+            el.style.top = (topPx0 + ((intra - intra1)|0) * (lh0|0)) + 'px';
+            el.style.width = Math.max(1, Math.round(ex - sx)) + 'px';
+            el.style.height = Math.max(1, (lh0|0)) + 'px';
+            try{ caretLayer.appendChild(el); }catch{}
+            _incPrevExtra.push(el);
+          }
+          return;
+        }
+
+        // Single wrapped visual line: use the wrap-measured x1/x2 and proceed below.
       } else {
         _measureSpan.textContent = line.slice(0, c);
         x1 = _measureSpan.getBoundingClientRect().width;
         _measureSpan.textContent = line.slice(0, endCol);
         x2 = _measureSpan.getBoundingClientRect().width;
       }
+
       if (!(x2 > x1)){
         // zero-length or unmeasurable width → hide preview (caret移動のみ)
-            // Zoom popup と統一 (#930)
-            pop.style.padding = '4px 6px';
         _incPrevHide();
         return;
       }
+
+      // md-rich + wrap-on: align incprev X to caret overlay to avoid drift on wrapped 2nd+ visual lines.
+      // Use DOM rects (not style.left) so the correction works even if inline styles are not set.
+      // Only do this when the caret is already at the match start.
+      try{
+        if (_incMdRich && _incWrapOn && (caretRow|0)===(r|0) && (caretCol|0)===(c|0) && caretLayer && caretLayer.querySelector){
+          const caretEl = caretLayer.querySelector('.caret');
+          if (caretEl && caretEl.getBoundingClientRect){
+            const cr = caretEl.getBoundingClientRect();
+            const lr = caretLayer.getBoundingClientRect ? caretLayer.getBoundingClientRect() : null;
+            if (lr){
+              const caretLeftLayer = (cr.left - lr.left);
+              if (Number.isFinite(caretLeftLayer)){
+                let _hs0 = 0; try{ _hs0 = (editor.scrollLeft||0); }catch{}
+                const x1Layer = (x1 - _hs0);
+                const delta = caretLeftLayer - x1Layer;
+                if (Number.isFinite(delta) && Math.abs(delta) > 0.5){ x1 += delta; x2 += delta; }
+              }
+            }
+          }
+        }
+      }catch{}
       // compute top (relative to current viewport top line)
       const topPx = _incTopPxForRowCol(r|0, c|0);
       if (topPx < -LINE_HEIGHT || topPx > (viewport.clientHeight + LINE_HEIGHT)){
@@ -3869,6 +3994,30 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
       _incPrevEl.style.top = topPx + 'px';
       _incPrevEl.style.width = Math.max(1, Math.round(x2 - x1)) + 'px';
       _incPrevEl.style.height = _incHeightPxForRow(r|0) + 'px';
+
+      // markdown-off + wrap-off: if the match is horizontally offscreen in CMD incremental search,
+      // scroll horizontally so the highlight becomes visible.
+      try{
+        const mdNow = !!(_incMdRich);
+        const wrapNow = !!(_incWrapOn);
+        if (!mdNow && !wrapNow && _mode==='CMD' && Date.now() > (_userHScrollGuardUntil|0)){
+          const gw = (gutter && gutter.clientWidth) ? (gutter.clientWidth|0) : 0;
+          const vpW = (viewport && viewport.clientWidth) ? (viewport.clientWidth|0) : (editor && editor.clientWidth ? (editor.clientWidth|0) : 0);
+          const visW = Math.max(0, (vpW|0) - (gw|0));
+          if (visW > 0 && editor && typeof editor.scrollLeft === 'number'){
+            const margin = Math.max(6, Math.round((typeof FONT_SIZE==='number' ? FONT_SIZE : 16) * 0.6));
+            const leftInView = (x1 - _hs);
+            const rightInView = (x2 - _hs);
+            let next = (_hs|0);
+            // Prefer making the END visible; otherwise ensure start is visible.
+            if (rightInView > (visW - margin)) next = (next + Math.ceil(rightInView - (visW - margin)))|0;
+            else if (leftInView < margin) next = Math.max(0, (next - Math.ceil(margin - leftInView)))|0;
+            const maxSL = Math.max(0, ((editor.scrollWidth||0) - (editor.clientWidth||0))|0);
+            if (next > maxSL) next = maxSL;
+            if (next !== (_hs|0)) editor.scrollLeft = next;
+          }
+        }
+      }catch{}
     }catch{ _incPrevHide(); }
   }
 
@@ -6465,7 +6614,16 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
     try{
       const p = _wrapEnsureProbe();
       if (!p || !editor) return;
-      const cs = window.getComputedStyle(editor);
+      // In markdown-rich, visible glyphs are rendered in #textLayer, not the textarea.
+      // Sync probe styles from the visible layer to keep wrap/X metrics consistent.
+      let baseEl = editor;
+      try{
+        if (_mdRichActive && _mdRichActive() && _wrapEnabled && _wrapEnabled()){
+          try{ _mdEnsureTextLayer && _mdEnsureTextLayer(); }catch{}
+          if (_mdTextLayer) baseEl = _mdTextLayer;
+        }
+      }catch{}
+      const cs = window.getComputedStyle(baseEl);
       if (cs && cs.fontFamily) p.style.fontFamily = cs.fontFamily;
       if (cs && cs.fontWeight) p.style.fontWeight = cs.fontWeight;
       if (cs && cs.fontSize) p.style.fontSize = cs.fontSize;
@@ -12283,6 +12441,30 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
     try{
       // hide incsearch preview if any
       try{ _incPrevHide && _incPrevHide(); }catch{}
+      // Spec (#1610): Closing CMD should always force IME OFF.
+      // Also absorb any stray IME-related keydown that might arrive right after focus returns to the editor.
+      try{
+        try{ if (cmdinput && cmdinput.blur) cmdinput.blur(); }catch{}
+        try{ if (typeof window._imeComposing !== 'undefined') window._imeComposing = false; }catch{}
+        try{ _imeActive = false; _applyCaretGradient && _applyCaretGradient(); }catch{}
+        try{ _imePost && _imePost('off'); }catch{}
+        try{ if (editor){ editor.setAttribute('inputmode','none'); editor.style.imeMode='disabled'; } }catch{}
+        // General keydown guard stays short; dedicated IME-off guard is longer.
+        try{ _kbdGuardUntil = Date.now() + 180; }catch{}
+        // Dedicated guard: delayed Kana/Eisu keydown after CMD close must not
+        // re-enter INSERT nor re-enable IME.
+        try{ _imeKeepOffUntil = Date.now() + 3200; }catch{}
+        // Pause IME polling during the same window (polling can otherwise re-enter INSERT).
+        try{ _imePollPausedUntil = Math.max((_imePollPausedUntil|0), Date.now() + 3200); }catch{}
+        // Reinforce IME-off a few times to win races with OS/host delayed toggles.
+        try{
+          setTimeout(()=>{ try{ _imePost && _imePost('off'); }catch{} }, 60);
+          setTimeout(()=>{ try{ _imePost && _imePost('off'); }catch{} }, 220);
+          setTimeout(()=>{ try{ _imePost && _imePost('off'); }catch{} }, 520);
+          setTimeout(()=>{ try{ _imePost && _imePost('off'); }catch{} }, 1200);
+          setTimeout(()=>{ try{ _imePost && _imePost('off'); }catch{} }, 2400);
+        }catch{}
+      }catch{}
       // reset history browsing state on cancel
       try{ _cmdHistBrowsing=false; _cmdHistIndex=_cmdHistory.length; _cmdHistTemp=''; }catch{}
       try{ _searchHistBrowsing=false; _searchHistIndex=_searchHistory.length; _searchHistTemp=''; _searchHistTempHead='/'; }catch{}
@@ -14558,11 +14740,6 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
       if (mDump){
         let arr = _debugKeyRing.slice();
         let numStr = (mDump[1]||'').trim();
-      // imeSwitchKey が 'direct' の場合はAPIポーリングによる視覚IME同期を行わない（⑨防止）
-      try{
-        const m = String((window&&window.SIX_OPTIONS&&window.SIX_OPTIONS.imeSwitchKey)||'').toLowerCase();
-        if (m === 'direct') return;
-      }catch{}
         if (numStr){ numStr = numStr.replace(/[０-９]/g, ch=> String.fromCharCode(ch.charCodeAt(0)-0xFF10+0x30)); }
         const nArg = parseInt(numStr||'',10);
         if (Number.isFinite(nArg) && nArg>0 && nArg < arr.length){ arr = arr.slice(arr.length - nArg); }
@@ -15333,6 +15510,17 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
       } else {
         // Caret-based default (3 lines above/below relative to viewport)
         let caretTopPx = (caretRow|0) * LINE_HEIGHT - st;
+        // Prefer DOM caret position when available (md-rich + wrap-on intra-row Y, etc.).
+        try{
+          if (caretLayer && viewport && caretLayer.querySelector){
+            const caretEl = caretLayer.querySelector('.caret');
+            if (caretEl && caretEl.getBoundingClientRect){
+              const vr = viewport.getBoundingClientRect();
+              const cr = caretEl.getBoundingClientRect();
+              if (Number.isFinite(cr.top) && Number.isFinite(vr.top)) caretTopPx = (cr.top - vr.top);
+            }
+          }
+        }catch{}
         try{
           const wrapNow = (function(){ try{ return _wrapEnabled && _wrapEnabled(); }catch{ return false; } })();
           const usesVisual = (function(){
@@ -16684,6 +16872,9 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
       // and relying on a later input can leave the caret invisible (notably after large jumps).
       try{ updateGutter(); }catch{}
       try{ _repositionCaret(); }catch{}
+      // If we skipped heavy overlays during continuous scroll, resync them once at the end.
+      // This is important for incremental search preview (incprev) after large scroll/jumps.
+      try{ _incPrevRefresh(); }catch{}
       try{ _updatePosInfo(); }catch{}
     }catch{}
     try{ if (typeof _scheduleListCharsRender === 'function') _scheduleListCharsRender('scrollend'); }catch{}
@@ -17898,6 +18089,18 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
       try{
         const imeKeyMode = String((window && window.SIX_OPTIONS && window.SIX_OPTIONS.imeSwitchKey) || '').toLowerCase();
         if (imeKeyMode === 'direct'){
+          // Right after CMD close, delayed IME-toggle keys can arrive; keep IME OFF and
+          // do not auto-enter INSERT during this guard window.
+          const now = Date.now();
+          if (now < (_imeKeepOffUntil|0)){
+            const isImeToggleKey = (_isKanaKey(e) || _isEisuKey(e) || e.code === 'Lang1' || e.code === 'Lang2');
+            if (isImeToggleKey){
+              try{ e.preventDefault(); e.stopPropagation(); }catch{}
+              try{ _imeActive = false; _applyCaretGradient(); }catch{}
+              try{ _imePost && _imePost('off'); }catch{}
+              return;
+            }
+          }
           if (_isKanaKey(e)){
             e.preventDefault(); e.stopPropagation();
             // VISUALでは考慮しない

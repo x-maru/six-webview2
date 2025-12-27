@@ -139,8 +139,7 @@ body.wrap-on #editor {
 
 /* Keep overlay layers aligned with the reserved right inset */
 body.wrap-on #caretLayer,
-body.wrap-on #textLayer,
-{
+body.wrap-on #textLayer {
 	/* Match #editor's reserved right padding so wrap metrics and visuals stay in sync */
 	right: calc(2rem + var(--wrapRightInset, 1ch));
 }
