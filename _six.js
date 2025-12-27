@@ -2425,11 +2425,13 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
               }
               if (key === 'ArrowUp'){
                 try{ e.preventDefault(); e.stopImmediatePropagation(); }catch{}
+                try{ _sixHideMouseForPopup && _sixHideMouseForPopup('popup-arrow:zoom'); }catch{}
                 try{ _overlayZoomPopupMoveSel(-1); }catch{}
                 return;
               }
               if (key === 'ArrowDown'){
                 try{ e.preventDefault(); e.stopImmediatePropagation(); }catch{}
+                try{ _sixHideMouseForPopup && _sixHideMouseForPopup('popup-arrow:zoom'); }catch{}
                 try{ _overlayZoomPopupMoveSel(+1); }catch{}
                 return;
               }
@@ -2475,11 +2477,13 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
               }
               if (key === 'ArrowUp' || key === 'k'){
                 try{ e.preventDefault(); e.stopImmediatePropagation(); }catch{}
+                try{ if (key === 'ArrowUp') _sixHideMouseForPopup && _sixHideMouseForPopup('popup-arrow:enc'); }catch{}
                 try{ _encPopupMoveSel(-1); }catch{}
                 return;
               }
               if (key === 'ArrowDown' || key === 'j' || key === 'Tab'){
                 try{ e.preventDefault(); e.stopImmediatePropagation(); }catch{}
+                try{ if (key === 'ArrowDown') _sixHideMouseForPopup && _sixHideMouseForPopup('popup-arrow:enc'); }catch{}
                 try{ _encPopupMoveSel(+1); }catch{}
                 return;
               }
@@ -2530,11 +2534,13 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
               }
               if (key === 'ArrowUp' || key === 'k'){
                 try{ e.preventDefault(); e.stopImmediatePropagation(); }catch{}
+                try{ if (key === 'ArrowUp') _sixHideMouseForPopup && _sixHideMouseForPopup('popup-arrow:case'); }catch{}
                 try{ _casePopupMoveSel(-1); }catch{}
                 return;
               }
               if (key === 'ArrowDown' || key === 'j' || key === 'Tab'){
                 try{ e.preventDefault(); e.stopImmediatePropagation(); }catch{}
+                try{ if (key === 'ArrowDown') _sixHideMouseForPopup && _sixHideMouseForPopup('popup-arrow:case'); }catch{}
                 try{ _casePopupMoveSel(+1); }catch{}
                 return;
               }
@@ -2906,7 +2912,9 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
         pop.style.boxSizing='border-box';
         document.body.appendChild(pop);
       }
+      try{ pop.classList && pop.classList.add('six-popup'); }catch{}
       pop.style.display='';
+      try{ _sixHideMouseForPopup && _sixHideMouseForPopup('popup-show:enc'); }catch{}
       if (!Number.isFinite(_encSel)){ try{ _encSel=_encFindIndex(_encCurrentMeta()); }catch{ _encSel=0; } }
       _encPopupRender();
       // ホバー外れでハイライトのみ消去 (#903)
@@ -3459,7 +3467,9 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
         pop.style.padding='4px 6px';
         document.body.appendChild(pop);
       }
+      try{ pop.classList && pop.classList.add('six-popup'); }catch{}
       pop.style.display='';
+      try{ _sixHideMouseForPopup && _sixHideMouseForPopup('popup-show:case'); }catch{}
       try{ _caseSel = _caseCurrentIndex(); }catch{ _caseSel = 0; }
       _casePopupRender();
       // 幅ロック: "混在時区別" の項目幅に合わせ、padding/borderも含めて収まるように計算 (#905/#932)
@@ -5510,6 +5520,64 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
     }catch{ return false; }
   }
 
+  // Popup mouse-hide helper (#1601)
+  // Purpose: when a popup opens or when ArrowUp/Down is pressed, hide the mouse cursor temporarily
+  // and disable hover (pointer events) on popups so a stationary pointer cannot steal selection.
+  let _sixMouseHidden = false;
+  let _sixMouseHideInit = false;
+  function _sixEnsureMouseHideForPopups(){
+    try{
+      if (_sixMouseHideInit) return;
+      _sixMouseHideInit = true;
+
+      // Inject minimal CSS once.
+      try{
+        if (!document.getElementById('six-mouse-hide-css')){
+          const st = document.createElement('style');
+          st.id = 'six-mouse-hide-css';
+          st.textContent = [
+            // Hide cursor globally while active.
+            'body.six-mouse-hidden, body.six-mouse-hidden * { cursor: none !important; }',
+            // Disable hover/click on popups while hidden.
+            'body.six-mouse-hidden .six-popup, body.six-mouse-hidden .six-popup * { pointer-events: none !important; }'
+          ].join('\n');
+          (document.head || document.documentElement || document.body).appendChild(st);
+        }
+      }catch{}
+
+      const show = ()=>{ try{ _sixMouseHidden = false; document.body && document.body.classList && document.body.classList.remove('six-mouse-hidden'); }catch{} };
+      const onAny = ()=>{ try{ if (_sixMouseHidden) show(); }catch{} };
+
+      const _add = (target, type)=>{
+        try{
+          if (!target || !target.addEventListener) return;
+          try{ target.addEventListener(type, onAny, { passive:true, capture:true }); return; }catch{}
+          try{ target.addEventListener(type, onAny, true); }catch{}
+        }catch{}
+      };
+
+      // Any real pointing interaction brings the cursor back.
+      // Use both window and document: some hosts dispatch pointer/mouse events differently.
+      const targets = [window, document];
+      for (const t of targets){
+        _add(t, 'mousemove');
+        _add(t, 'mousedown');
+        _add(t, 'wheel');
+        _add(t, 'pointermove');
+        _add(t, 'pointerdown');
+        _add(t, 'touchstart');
+        _add(t, 'touchmove');
+      }
+    }catch{}
+  }
+  function _sixHideMouseForPopup(reason){
+    try{
+      _sixEnsureMouseHideForPopups();
+      _sixMouseHidden = true;
+      try{ document.body && document.body.classList && document.body.classList.add('six-mouse-hidden'); }catch{}
+    }catch{}
+  }
+
   // CMD history popup (F4)
   const _cmdHistPopupId = 'cmdHistPopup';
   let _cmdHistPopupSel = 0;
@@ -5642,6 +5710,7 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
       if (!pop){
         pop = document.createElement('div');
         pop.id = _cmdHistPopupId;
+        try{ pop.classList && pop.classList.add('six-popup'); }catch{}
         pop.style.position='fixed';
         pop.style.maxHeight='35vh';
         pop.style.background='#0f1117';
@@ -5655,7 +5724,9 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
         pop.style.padding='4px 6px';
         document.body.appendChild(pop);
       }
+      try{ pop.classList && pop.classList.add('six-popup'); }catch{}
       pop.style.display='';
+      try{ _sixHideMouseForPopup && _sixHideMouseForPopup('popup-show:cmdHist'); }catch{}
       _cmdHistPopupOrig = String(cmdinput.value||'');
       const items = _cmdHistPopupItems();
       _cmdHistPopupSel = items.length ? (items.length - 1) : 0;
@@ -5858,6 +5929,7 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
       if (!pop){
         pop = document.createElement('div');
         pop.id = _searchHistPopupId;
+        try{ pop.classList && pop.classList.add('six-popup'); }catch{}
         pop.style.position='fixed';
         pop.style.maxHeight='35vh';
         pop.style.background='#0f1117';
@@ -5871,7 +5943,9 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
         pop.style.padding='4px 6px';
         document.body.appendChild(pop);
       }
+      try{ pop.classList && pop.classList.add('six-popup'); }catch{}
       pop.style.display='';
+      try{ _sixHideMouseForPopup && _sixHideMouseForPopup('popup-show:searchHist'); }catch{}
       _searchHistPopupOrig = String(cmdinput.value||'');
       _searchHistPopupHead = (function(){ try{ return _splitCmdSearchPrefix(_searchHistPopupOrig).head; }catch{ return '/'; } })();
       const items = _searchHistPopupItems();
@@ -21820,12 +21894,14 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
             }
             if (kH === 'ArrowUp'){
               try{ e.preventDefault(); e.stopPropagation(); }catch{}
+              try{ _sixHideMouseForPopup && _sixHideMouseForPopup('popup-arrow:cmdHist'); }catch{}
               const items = _cmdHistPopupItems();
               if (items.length){ _cmdHistPopupSel = Math.max(0, (_cmdHistPopupSel|0) - 1); _cmdHistPopupRender(); _cmdHistPopupPreviewSel(); }
               return;
             }
             if (kH === 'ArrowDown'){
               try{ e.preventDefault(); e.stopPropagation(); }catch{}
+              try{ _sixHideMouseForPopup && _sixHideMouseForPopup('popup-arrow:cmdHist'); }catch{}
               const items = _cmdHistPopupItems();
               if (items.length){ _cmdHistPopupSel = Math.min(items.length-1, (_cmdHistPopupSel|0) + 1); _cmdHistPopupRender(); _cmdHistPopupPreviewSel(); }
               return;
@@ -21851,12 +21927,14 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
             }
             if (kS === 'ArrowUp'){
               try{ e.preventDefault(); e.stopPropagation(); }catch{}
+              try{ _sixHideMouseForPopup && _sixHideMouseForPopup('popup-arrow:searchHist'); }catch{}
               const items = _searchHistPopupItems();
               if (items.length){ _searchHistPopupSel = Math.max(0, (_searchHistPopupSel|0) - 1); _searchHistPopupRender(); _searchHistPopupPreviewSel(); }
               return;
             }
             if (kS === 'ArrowDown'){
               try{ e.preventDefault(); e.stopPropagation(); }catch{}
+              try{ _sixHideMouseForPopup && _sixHideMouseForPopup('popup-arrow:searchHist'); }catch{}
               const items = _searchHistPopupItems();
               if (items.length){ _searchHistPopupSel = Math.min(items.length-1, (_searchHistPopupSel|0) + 1); _searchHistPopupRender(); _searchHistPopupPreviewSel(); }
               return;
@@ -22734,10 +22812,12 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
           // buf popup navigation
           if (_bufPopupVisible()){
             e.preventDefault(); e.stopPropagation();
+            try{ _sixHideMouseForPopup && _sixHideMouseForPopup('popup-arrow:buf'); }catch{}
             const delta = (e.key==='PageDown')?10 : (e.key==='PageUp')?-10 : (e.key==='ArrowDown'?1:-1);
             _bufPopupMove(delta);
           } else if (_filePopupVisible()){
             e.preventDefault(); e.stopPropagation();
+            try{ _sixHideMouseForPopup && _sixHideMouseForPopup('popup-arrow:file'); }catch{}
             const delta = (e.key==='PageDown')?10 : (e.key==='PageUp')?-10 : (e.key==='ArrowDown'?1:-1);
             _filePopupMove(delta);
           } else {
@@ -23597,7 +23677,17 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
       _fileVisibleEntries = (_fileEntries && Array.isArray(_fileEntries)) ? _fileEntries.slice() : [];
     }catch{}
   }
-  function _bufPopupShow(){ if (!bufpopup) return; try{ if (typeof _encPopupHide==='function') _encPopupHide(); }catch{} bufpopup.dataset.kind='buf'; bufpopup.style.display=''; if (!(_bufSel>=0)) _bufSel=Math.max(0,Math.min(buffers.length-1,currentIdx)); _layoutBufPopup(); _bufPopupRender(); }
+  function _bufPopupShow(){
+    if (!bufpopup) return;
+    try{ if (typeof _encPopupHide==='function') _encPopupHide(); }catch{}
+    try{ bufpopup.classList && bufpopup.classList.add('six-popup'); }catch{}
+    try{ _sixHideMouseForPopup && _sixHideMouseForPopup('popup-show:buf'); }catch{}
+    bufpopup.dataset.kind='buf';
+    bufpopup.style.display='';
+    if (!(_bufSel>=0)) _bufSel=Math.max(0,Math.min(buffers.length-1,currentIdx));
+    _layoutBufPopup();
+    _bufPopupRender();
+  }
   function _bufPopupHide(){ if (!bufpopup) return; if (_bufPopupVisible()) bufpopup.style.display='none'; }
   function _bufPopupMove(d){ if (!bufpopup) return; _bufSel=_bufSel+d; if (_bufSel<0) _bufSel=0; _bufPopupRender(); }
 
@@ -25264,6 +25354,8 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
   function _filePopupShow(){
     if (!bufpopup) return;
     try{ if (typeof _encPopupHide==='function') _encPopupHide(); }catch{}
+    try{ bufpopup.classList && bufpopup.classList.add('six-popup'); }catch{}
+    try{ _sixHideMouseForPopup && _sixHideMouseForPopup('popup-show:file'); }catch{}
     bufpopup.dataset.kind='file';
     bufpopup.style.display='';
     _layoutBufPopup();
@@ -25401,6 +25493,57 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
   if (bufpopup){
     bufpopup.addEventListener('mousedown', (ev)=>{ ev.preventDefault(); });
     bufpopup.addEventListener('mouseenter', ()=>{ try{ if (_mode==='CMD' && cmdinput) cmdinput.focus(); else editor.focus(); }catch{} });
+
+    // #1603: :b/:e popup のホバー追従（選択カーソルを hover に合わせて移動）
+    // - six-mouse-hidden 中は hover を無効化（#1601 の仕様）
+    // - 再レンダは重いので DOM の active/muted だけ更新
+    try{
+      const _popupHoverSelect = (ev)=>{
+        try{
+          if (!bufpopup || !bufpopupInner) return;
+          if (bufpopup.style.display === 'none') return;
+          // マウス非表示中は hover 無効
+          try{ if (document.body && document.body.classList && document.body.classList.contains('six-mouse-hidden')) return; }catch{}
+          const kind = _popupKind();
+          if (kind !== 'buf' && kind !== 'file') return;
+
+          const t = ev && ev.target;
+          if (!t || !t.closest) return;
+          const item = t.closest('.item');
+          if (!item || !bufpopupInner.contains(item)) return;
+
+          const items = bufpopupInner.querySelectorAll('.item');
+          const idx = Array.prototype.indexOf.call(items, item);
+          if (!(idx >= 0)) return;
+
+          if (kind === 'buf'){
+            if ((_bufSel|0) === idx) return;
+            _bufSelAbs = null;
+            _bufSel = idx;
+            try{
+              const prev = bufpopupInner.querySelector('.item.active');
+              if (prev && prev !== item) prev.classList.remove('active');
+              item.classList.add('active');
+            }catch{}
+          } else {
+            // file
+            if ((_fileSel|0) === idx && !_fileSelMuted) return;
+            _fileSelAuto = false;
+            _fileSel = idx;
+            _fileSelMuted = false;
+            try{
+              const prev = bufpopupInner.querySelector('.item.active');
+              if (prev && prev !== item){ prev.classList.remove('active'); prev.classList.remove('muted'); }
+              item.classList.remove('muted');
+              item.classList.add('active');
+            }catch{}
+          }
+        }catch{}
+      };
+      bufpopupInner.addEventListener('mousemove', _popupHoverSelect, { passive:true });
+      bufpopupInner.addEventListener('pointermove', _popupHoverSelect, { passive:true });
+    }catch{}
+
     // ホイールはポップアップ内スクロールへ
     bufpopup.addEventListener('wheel', (ev)=>{
       try{
@@ -26078,6 +26221,7 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
       zoomBtn.appendChild(zoomTitle); zoomBtn.appendChild(zoomCurBtn); palTR.appendChild(zoomBtn);
       // Popup list
       const zoomPopup=document.createElement('div'); zoomPopup.id='overlayZoomPopup'; zoomPopup.style.position='absolute'; zoomPopup.style.display='none'; zoomPopup.style.background='#0f1117'; zoomPopup.style.border='1px solid #2a3244'; zoomPopup.style.borderRadius='6px'; zoomPopup.style.padding='4px 6px'; zoomPopup.style.boxShadow='0 6px 14px rgba(0,0,0,0.5)'; zoomPopup.style.zIndex='4';
+      try{ zoomPopup.classList && zoomPopup.classList.add('six-popup'); }catch{}
       // 固定フォントサイズ (zoom90% 相当で固定)
       zoomPopup.style.fontSize = 'calc(var(--editorFontBase, 20px) * 0.90)';
       zoomPopup.style.lineHeight = '1.4';
@@ -26103,6 +26247,7 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
         try{
           if(zoomPopup.style.display==='none'){
             zoomPopup.style.display='block';
+            try{ _sixHideMouseForPopup && _sixHideMouseForPopup('popup-show:zoom'); }catch{}
             // Zoomボタン全体右端に揃える (他popupと同様) (#898)
             const r=zoomBtn.getBoundingClientRect();
             const vp=document.getElementById('editorViewport');
@@ -27689,7 +27834,9 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
             pop.style.padding='4px 6px';
             document.body.appendChild(pop);
           }
+          try{ pop.classList && pop.classList.add('six-popup'); }catch{}
           pop.style.display='';
+          try{ _sixHideMouseForPopup && _sixHideMouseForPopup('popup-show:grepTermHist'); }catch{}
           _grepTermHistOrig = String(input && input.value || '');
           const items = _grepTermHistItems();
           _grepTermHistSel = items.length ? (items.length - 1) : 0;
@@ -27875,7 +28022,9 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
             pop.style.padding='4px 6px';
             document.body.appendChild(pop);
           }
+          try{ pop.classList && pop.classList.add('six-popup'); }catch{}
           pop.style.display='';
+          try{ _sixHideMouseForPopup && _sixHideMouseForPopup('popup-show:grepPathHist'); }catch{}
           _grepPathHistOrig = String(_grepPathHistTarget && _grepPathHistTarget.value || '');
           const items = _grepPathHistItems();
           _grepPathHistSel = items.length ? (items.length - 1) : 0;
@@ -28056,7 +28205,9 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
             pop.style.padding='4px 6px';
             document.body.appendChild(pop);
           }
+          try{ pop.classList && pop.classList.add('six-popup'); }catch{}
           pop.style.display='';
+          try{ _sixHideMouseForPopup && _sixHideMouseForPopup('popup-show:grepFileglobHist'); }catch{}
           _grepFileglobHistOrig = String(_grepFileglobHistTarget && _grepFileglobHistTarget.value || '');
           const items = _grepFileglobHistItems();
           _grepFileglobHistSel = items.length ? (items.length - 1) : 0;
@@ -28377,12 +28528,14 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
             }
             if (kH === 'ArrowUp'){
               try{ e.preventDefault(); e.stopPropagation(); }catch{}
+              try{ _sixHideMouseForPopup && _sixHideMouseForPopup('popup-arrow:grepTermHist'); }catch{}
               const items = _grepTermHistItems();
               if (items.length){ _grepTermHistSel = Math.max(0, (_grepTermHistSel|0) - 1); _grepTermHistPopupRender(); _grepTermHistPopupPreviewSel(); }
               return;
             }
             if (kH === 'ArrowDown'){
               try{ e.preventDefault(); e.stopPropagation(); }catch{}
+              try{ _sixHideMouseForPopup && _sixHideMouseForPopup('popup-arrow:grepTermHist'); }catch{}
               const items = _grepTermHistItems();
               if (items.length){ _grepTermHistSel = Math.min(items.length-1, (_grepTermHistSel|0) + 1); _grepTermHistPopupRender(); _grepTermHistPopupPreviewSel(); }
               return;
@@ -28446,12 +28599,14 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
             }
             if (kP === 'ArrowUp'){
               try{ e.preventDefault(); e.stopPropagation(); }catch{}
+              try{ _sixHideMouseForPopup && _sixHideMouseForPopup('popup-arrow:grepPathHist'); }catch{}
               const items = _grepPathHistItems();
               if (items.length){ _grepPathHistSel = Math.max(0, (_grepPathHistSel|0) - 1); _grepPathHistPopupRender(); _grepPathHistPopupPreviewSel(); }
               return;
             }
             if (kP === 'ArrowDown'){
               try{ e.preventDefault(); e.stopPropagation(); }catch{}
+              try{ _sixHideMouseForPopup && _sixHideMouseForPopup('popup-arrow:grepPathHist'); }catch{}
               const items = _grepPathHistItems();
               if (items.length){ _grepPathHistSel = Math.min(items.length-1, (_grepPathHistSel|0) + 1); _grepPathHistPopupRender(); _grepPathHistPopupPreviewSel(); }
               return;
@@ -28510,12 +28665,14 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
             }
             if (kP === 'ArrowUp'){
               try{ e.preventDefault(); e.stopPropagation(); }catch{}
+              try{ _sixHideMouseForPopup && _sixHideMouseForPopup('popup-arrow:grepFileglobHist'); }catch{}
               const items = _grepFileglobHistItems();
               if (items.length){ _grepFileglobHistSel = Math.max(0, (_grepFileglobHistSel|0) - 1); _grepFileglobHistPopupRender(); _grepFileglobHistPopupPreviewSel(); }
               return;
             }
             if (kP === 'ArrowDown'){
               try{ e.preventDefault(); e.stopPropagation(); }catch{}
+              try{ _sixHideMouseForPopup && _sixHideMouseForPopup('popup-arrow:grepFileglobHist'); }catch{}
               const items = _grepFileglobHistItems();
               if (items.length){ _grepFileglobHistSel = Math.min(items.length-1, (_grepFileglobHistSel|0) + 1); _grepFileglobHistPopupRender(); _grepFileglobHistPopupPreviewSel(); }
               return;
@@ -28552,11 +28709,13 @@ try{ console.log('[six] _six.js build#912 loaded ts='+(Date.now())); }catch{}
             }
             if (kx === 'ArrowUp'){
               try{ e.preventDefault(); e.stopPropagation(); }catch{}
+              try{ _sixHideMouseForPopup && _sixHideMouseForPopup('popup-arrow:case'); }catch{}
               try{ if (typeof _casePopupMoveSel === 'function') _casePopupMoveSel(-1); }catch{}
               return;
             }
             if (kx === 'ArrowDown'){
               try{ e.preventDefault(); e.stopPropagation(); }catch{}
+              try{ _sixHideMouseForPopup && _sixHideMouseForPopup('popup-arrow:case'); }catch{}
               try{ if (typeof _casePopupMoveSel === 'function') _casePopupMoveSel(+1); }catch{}
               return;
             }
