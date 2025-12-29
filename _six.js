@@ -995,11 +995,20 @@ try{
   // Some environments report the かな key as key='Process' with code='KeyK' (and it can otherwise
   // be misinterpreted as NORMAL motion 'k').
   let _imeToggleConsumeUntil = 0;
+  // Fallback: some environments report かな/英数 as a generic Process key without 229 and without code.
+  // We treat Process in NORMAL as a short-lived "toggle candidate" and trigger a host sync burst.
+  let _imeToggleCandidateUntil = 0;
+  // When we enter INSERT as the result of an IME toggle intent, do NOT force-IME-OFF initialization.
+  // (Otherwise the caret stays IME-OFF and the first IME key can be transient/rolled back.)
+  let _insertImeBypassOffUntil = 0;
   const _noteImeToggleRequested = (why, e)=>{
     try{
       _imeToggleRequestedAt = Date.now();
       // Consume ambiguous Process events briefly so they don't trigger NORMAL motions.
-      _imeToggleConsumeUntil = (_imeToggleRequestedAt|0) + 220;
+      _imeToggleConsumeUntil = (+_imeToggleRequestedAt || 0) + 220;
+      // For a short window, allow INSERT to start with IME ON visuals if that's what the user intended.
+      // (Used by host off->on, Process/229 fallback, and any direct Kana/Eisu detections.)
+      _insertImeBypassOffUntil = (+_imeToggleRequestedAt || 0) + 1600;
       try{ if (_optDebugKeys) _debugPush({ t:Date.now(), type:'ime-toggle-request', mode:_mode, why:String(why||''), key:(e&&e.key)||'', code:(e&&e.code)||'' }); }catch{}
     }catch{}
   };
@@ -1028,7 +1037,8 @@ try{
 
       const _schedule = (ms)=>{
         try{ if (_imePollStopped) return; }catch{}
-        const delay = Math.max(200, Math.min(30000, (ms|0) || 500));
+        // Allow faster polling when needed (adaptive fast path below).
+        const delay = Math.max(50, Math.min(30000, (ms|0) || 500));
         try{ if (_imePollTimer){ clearTimeout(_imePollTimer); } }catch{}
         _imePollTimer = setTimeout(_tick, delay);
       };
@@ -1053,6 +1063,7 @@ try{
         _schedule(_imePollDelayMs);
       };
 
+      let _lastHostImeState = null; // 'on' | 'off' | null
       const _tick = async ()=>{
         try{ if (_imePollStopped) return; }catch{}
         // When hidden/suspended, reduce background activity.
@@ -1088,6 +1099,13 @@ try{
           const js = await resp.json();
           const st = js && js.state;
           if (st === 'on' || st === 'off'){
+            // Debug: record host IME transitions (only on change).
+            try{
+              if (_optDebugKeys && st !== _lastHostImeState){
+                _debugPush({ t:Date.now(), type:'ime-host', mode:_mode, key:'host', code:String(st), isComp:!!(window&&window._imeComposing===true) });
+              }
+            }catch{}
+
             // If we are forcing IME OFF (e.g. right after CMD close), ignore 'on' and
             // do NOT auto-enter INSERT. Reinforce OFF to win races with host/OS delays.
             try{
@@ -1105,13 +1123,38 @@ try{
             // Always sync visual IME state (caret color). This is safe even in direct mode.
             if (newActive !== _imeActive){ _imeActive = newActive; _applyCaretGradient(); }
 
+            // If the host IME state flips OFF->ON while we are in NORMAL, treat it as a toggle intent
+            // even when the Kana key produces no DOM key event.
+            try{
+              const nowH = Date.now();
+              const prev = _lastHostImeState;
+              _lastHostImeState = st;
+              const km = String((window && window.SIX_OPTIONS && window.SIX_OPTIONS.imeSwitchKey) || '').toLowerCase();
+              const isDirect = (km === 'direct');
+              const hasFocus = !!(editor && document && document.activeElement === editor);
+              // In direct mode, treat host IME becoming ON as a strong intent to start typing.
+              // Some environments do not deliver かな/英数 key events to the page, so the first
+              // observable signal is the host IME state itself (sometimes null->on).
+              if (isDirect && hasFocus && _mode === 'NORMAL' && st === 'on' && prev !== 'on'){
+                try{ _imeToggleCandidateUntil = nowH + 1200; }catch{}
+                try{ if (typeof _noteImeToggleRequested === 'function') _noteImeToggleRequested('host:' + String(prev||'null') + '->on', null); }catch{}
+                try{ if (_optDebugKeys) _debugPush({ t:Date.now(), type:'ime-host-enter', mode:_mode, key:'host', code:String(prev||'null')+'->on', isComp:false }); }catch{}
+                try{ _setMode('INSERT'); }catch{}
+                try{ _imeVisualLockUntil = 0; }catch{}
+                try{ if (editor){ editor.removeAttribute('inputmode'); editor.style.imeMode=''; } }catch{}
+                try{ _imeActive = true; _applyCaretGradient(); }catch{}
+                try{ _repositionCaret(); updateGutter(); }catch{}
+              }
+            }catch{ try{ _lastHostImeState = st; }catch{} }
+
             // In direct mode, only allow NORMAL->INSERT when a recent toggle request was observed.
             try{
               const km = String((window && window.SIX_OPTIONS && window.SIX_OPTIONS.imeSwitchKey) || '').toLowerCase();
               const isDirect = (km === 'direct');
               const now1 = Date.now();
-              const recentlyRequested = (now1 - (_imeToggleRequestedAt|0)) <= 1600;
-              if (newActive && _mode === 'NORMAL' && (!isDirect || recentlyRequested)){
+              const recentlyRequested = (now1 - (+_imeToggleRequestedAt || 0)) <= 1600;
+              const recentCandidate = (now1 < (+_imeToggleCandidateUntil || 0));
+              if (newActive && _mode === 'NORMAL' && (!isDirect || recentlyRequested || recentCandidate)){
                 _setMode('INSERT');
                 _imeVisualLockUntil = 0;
                 try{ if (editor){ editor.removeAttribute('inputmode'); editor.style.imeMode=''; } }catch{}
@@ -1126,7 +1169,15 @@ try{
         }
       };
 
-      // Start immediately.
+          // Adaptive poll rate: faster while in NORMAL+focused in direct mode.
+          try{
+            const km2 = String((window && window.SIX_OPTIONS && window.SIX_OPTIONS.imeSwitchKey) || '').toLowerCase();
+            const isDirect2 = (km2 === 'direct');
+            const hasFocus2 = !!(editor && document && document.activeElement === editor);
+            const fast = !!(isDirect2 && hasFocus2 && _mode === 'NORMAL' && !(window && window._imeComposing===true));
+            if (fast){ _schedule(80); return; }
+          }catch{}
+          _noteOk();
       _schedule(0);
 
       // Resume quickly after focus/visibility restore.
@@ -1174,7 +1225,7 @@ try{
       // Respect post-CMD keep-off guard.
       try{
         const now0 = Date.now();
-        if (now0 < (_imeKeepOffUntil|0)){
+        if (now0 < (+_imeKeepOffUntil || 0)){
           if (st === 'on'){ try{ _imePost && _imePost('off'); }catch{} }
           if (_imeActive !== false){ _imeActive = false; _applyCaretGradient(); }
           return;
@@ -1184,13 +1235,27 @@ try{
       const newActive = (st === 'on');
       if (newActive !== _imeActive){ _imeActive = newActive; try{ _applyCaretGradient(); }catch{} }
 
-      // If this sync was triggered by an IME toggle key and IME is ON in NORMAL, enter INSERT.
-      if (reason === 'imeToggle' && newActive && _mode === 'NORMAL'){
-        try{ _setMode('INSERT'); }catch{}
-        try{ _imeVisualLockUntil = 0; }catch{}
-        try{ if (editor){ editor.removeAttribute('inputmode'); editor.style.imeMode=''; } }catch{}
-        try{ _repositionCaret(); updateGutter(); }catch{}
-      }
+      // If IME becomes ON in NORMAL shortly after a toggle request, enter INSERT.
+      // Rationale: on some systems the host IME state flips *after* our first sync burst,
+      // causing the next key to be processed in NORMAL (motion) or briefly composed then rolled back.
+      try{
+        const km = String((window && window.SIX_OPTIONS && window.SIX_OPTIONS.imeSwitchKey) || '').toLowerCase();
+        const isDirect = (km === 'direct');
+        const now1 = Date.now();
+        const recentlyRequested = (now1 - (+_imeToggleRequestedAt || 0)) <= 1600;
+        const recentCandidate = (now1 < (+_imeToggleCandidateUntil || 0));
+        const shouldEnter = !!(
+          newActive &&
+          _mode === 'NORMAL' &&
+          (!isDirect || reason === 'imeToggle' || recentlyRequested || recentCandidate)
+        );
+        if (shouldEnter){
+          try{ _setMode('INSERT'); }catch{}
+          try{ _imeVisualLockUntil = 0; }catch{}
+          try{ if (editor){ editor.removeAttribute('inputmode'); editor.style.imeMode=''; } }catch{}
+          try{ _repositionCaret(); updateGutter(); }catch{}
+        }
+      }catch{}
     }catch{}
   }
 
@@ -1201,7 +1266,7 @@ try{
     try{
       const now = Date.now();
       // throttle bursts
-      if (now < (_imeToggleSyncBurstUntil|0)) return;
+      if (now < (+_imeToggleSyncBurstUntil || 0)) return;
       _imeToggleSyncBurstUntil = now + 350;
       const r = String(reason||'');
       try{ _imeSyncFromHostOnce && _imeSyncFromHostOnce(r||'imeToggle'); }catch{}
@@ -1225,18 +1290,135 @@ try{
           const k = String((e && e.key) || '');
           const kc = (typeof e.keyCode==='number') ? (e.keyCode|0) : 0;
           const wh = (typeof e.which==='number') ? (e.which|0) : 0;
-          if (k === 'Process' && ((kc|0)===229 || (wh|0)===229)) return true;
+          // NOTE: Do NOT treat all Process/229 as an IME toggle.
+          // During IME typing, keydown is frequently Process/229 (e.g. KeyA/Enter in #1632 logs).
+          // Restrict Process/229 to known toggle-like codes, and only in NORMAL.
+          if (k === 'Process' && ((kc|0)===229 || (wh|0)===229)){
+            if (_mode !== 'NORMAL') return false;
+            const c0 = String((e && e.code) || '');
+            if (
+              c0 === 'KeyK' || c0 === 'KeyJ' || c0 === 'Quote' ||
+              c0 === 'Lang1' || c0 === 'Lang2' || c0 === 'KanaMode' || c0 === 'Hiragana' || c0 === 'Convert'
+            ) return true;
+            return false;
+          }
+
+          // Environment-specific fallback: some systems report the toggle as Process + KeyK/KeyJ
+          // but keyCode/which may not be 229. Accept only in NORMAL and without modifiers.
+          if (_mode === 'NORMAL' && k === 'Process'){
+            const c1 = String((e && e.code) || '');
+            if ((c1 === 'KeyK' || c1 === 'KeyJ' || c1 === 'Quote') && !e.ctrlKey && !e.altKey && !e.metaKey) return true;
+          }
           // Environment-specific fallback: some IME toggle keys are reported as Process + Quote.
           // Treat it as a toggle *request* and let host polling decide the resulting state.
-          if (k === 'Process' && String(e.code||'') === 'Quote' && !e.ctrlKey && !e.altKey && !e.metaKey) return true;
+          if (_mode === 'NORMAL' && k === 'Process' && String(e.code||'') === 'Quote' && !e.ctrlKey && !e.altKey && !e.metaKey) return true;
           return false;
         }catch{ return false; }
+      };
+      let _imeToggleCapLastDownAt = 0;
+      let _imeToggleCapLastDownSig = '';
+      const _imeToggleCapSig = (e)=>{
+        try{
+          if (!e) return '';
+          const k = String(e.key||'');
+          const c = String(e.code||'');
+          const kc = (typeof e.keyCode==='number') ? (e.keyCode|0) : 0;
+          const wh = (typeof e.which==='number') ? (e.which|0) : 0;
+          const mods = (e.ctrlKey? 'C':'') + (e.altKey? 'A':'') + (e.metaKey? 'M':'') + (e.shiftKey? 'S':'');
+          return k + '|' + c + '|' + kc + '|' + wh + '|' + mods;
+        }catch{ return ''; }
       };
       const onAny = (e)=>{
         try{
           if (!shouldHandle()) return;
+
+          // Debug: record capture-stage IME-ish keys (even if we can't classify them as toggle).
+          try{
+            if (_optDebugKeys){
+              const k0 = String((e && e.key) || '');
+              const c0 = String((e && e.code) || '');
+              const kc0 = (typeof e.keyCode==='number') ? (e.keyCode|0) : 0;
+              const wh0 = (typeof e.which==='number') ? (e.which|0) : 0;
+              const imeish = (k0 === 'Process' || c0 === 'Lang1' || c0 === 'Lang2' || c0 === 'KanaMode' || c0 === 'Hiragana' || c0 === 'Convert' || (kc0===229) || (wh0===229));
+              if (imeish){
+                _debugPush({ t:Date.now(), type:'cap-'+String((e&&e.type)||''), mode:_mode, key:k0, code:c0, keyCode:kc0, which:wh0, ctrl:e&&e.ctrlKey, alt:e&&e.altKey, shift:e&&e.shiftKey, meta:e&&e.metaKey, isComp:!!(window&&window._imeComposing===true) });
+              }
+            }
+          }catch{}
+
+          // Robust fallback: treat generic Process in NORMAL as an IME toggle candidate.
+          // This covers cases where かな/英数 never surface as Lang1/Lang2/229.
+          try{
+            const t0 = String((e && e.type) || '');
+            const k0 = String((e && e.key) || '');
+            if ((t0 === 'keydown' || t0 === 'keyup') && _mode === 'NORMAL' && k0 === 'Process' && !e.ctrlKey && !e.altKey && !e.metaKey){
+              const now0 = Date.now();
+              _imeToggleCandidateUntil = now0 + 1200;
+              try{ if (typeof _noteImeToggleRequested === 'function') _noteImeToggleRequested('capture:ProcessAny', e); }catch{}
+              // Do NOT preventDefault here; let OS/IME handle the toggle.
+              _imeSyncFromHostBurst('imeToggle:ProcessAny');
+              // Continue; if this also matches a stricter classifier below, it will be handled too.
+            }
+          }catch{}
+
           if (!isImeToggleEvt(e)) return;
+
+          // Avoid double toggle (keydown + keyup) for the same physical press.
+          const t = String((e && e.type) || '');
+          const nowCap = Date.now();
+          const sig = _imeToggleCapSig(e);
+          if (t === 'keydown'){
+            _imeToggleCapLastDownAt = nowCap;
+            _imeToggleCapLastDownSig = sig;
+          } else if (t === 'keyup'){
+            const dt = nowCap - (+_imeToggleCapLastDownAt || 0);
+            if (dt >= 0 && dt <= 650 && sig && sig === String(_imeToggleCapLastDownSig||'')) return;
+          }
+
+          // Primary path is keydown. Only allow keyup if keydown was not observed.
+          if (t === 'keyup'){
+            const dt = nowCap - (+_imeToggleCapLastDownAt || 0);
+            if (dt >= 0 && dt <= 650) return;
+          }
+
           try{ if (typeof _noteImeToggleRequested === 'function') _noteImeToggleRequested('capture', e); }catch{}
+
+          // Make the UI respond immediately on IME toggle in NORMAL:
+          // Some environments flip host IME state later; waiting for compositionstart causes
+          // "かな直後は何も起きない" and the next key being transient/rolled back.
+          // We optimistically enter INSERT and show IME visuals, then host sync corrects if needed.
+          try{
+            if (e && String(e.type||'') === 'keydown'){
+              const now0 = Date.now();
+              const modalOpen = !!((_modalOverlay && _modalOverlay.style && _modalOverlay.style.display !== 'none') || document.getElementById('grepDialog') || (window && window._grepDialogOpen===true));
+              const keepOff = (now0 < (+_imeKeepOffUntil || 0));
+              if (!modalOpen && !keepOff && _mode === 'NORMAL' && !e.ctrlKey && !e.altKey && !e.metaKey){
+                // Only act on likely IME toggle keys (Kana/Eisu or Process-coded variants)
+                const k = String((e && e.key) || '');
+                const c = String((e && e.code) || '');
+                const kc = (typeof e.keyCode==='number') ? (e.keyCode|0) : 0;
+                const wh = (typeof e.which==='number') ? (e.which|0) : 0;
+                const isProc229 = (k === 'Process' && ((kc|0)===229 || (wh|0)===229));
+                const isProcKanaLike = (k === 'Process' && (c === 'KeyK' || c === 'KeyJ' || c === 'Quote'));
+                const isDirectKana = !!(_isKanaKey(e) || e.code === 'Lang1' || e.code === 'KanaMode' || e.code === 'Hiragana');
+                if (isDirectKana || (isProc229 && isProcKanaLike)){
+                  // Only consume the ambiguous Process/229 variants (they can spuriously create "ｋ").
+                  // For real Kana/Lang keys, do NOT preventDefault so the OS toggle remains reliable.
+                  if (isProc229 && isProcKanaLike){
+                    try{ e.preventDefault(); }catch{}
+                    try{ e.stopImmediatePropagation(); }catch{}
+                    try{ e.stopPropagation(); }catch{}
+                  }
+                  try{ _setMode('INSERT'); }catch{}
+                  try{ _imeVisualLockUntil = 0; }catch{}
+                  try{ if (editor){ editor.removeAttribute('inputmode'); editor.style.imeMode=''; } }catch{}
+                  try{ _imeActive = true; _applyCaretGradient(); }catch{}
+                  try{ _repositionCaret(); updateGutter(); }catch{}
+                }
+              }
+            }
+          }catch{}
+
           // Don't run during composition or modals; _imeSyncFromHostOnce handles guards.
           _imeSyncFromHostBurst('imeToggle');
         }catch{}
@@ -12627,7 +12809,7 @@ try{
         // re-enter INSERT nor re-enable IME.
         try{ _imeKeepOffUntil = Date.now() + 3200; }catch{}
         // Pause IME polling during the same window (polling can otherwise re-enter INSERT).
-        try{ _imePollPausedUntil = Math.max((_imePollPausedUntil|0), Date.now() + 3200); }catch{}
+        try{ _imePollPausedUntil = Math.max((+_imePollPausedUntil || 0), Date.now() + 3200); }catch{}
         // Reinforce IME-off a few times to win races with OS/host delayed toggles.
         try{
           setTimeout(()=>{ try{ _imePost && _imePost('off'); }catch{} }, 60);
@@ -15469,17 +15651,27 @@ try{
     }
     // Begin an INSERT compound edit by pushing a snapshot before edits start
     if (m==='INSERT'){
-      // #1023: INSERT移行時は常に IME OFF 初期状態（IME ON色で開始しない）
-      // 既存の _imeActive 状態を無視して false に強制し、OFF用グラデを即適用。
-      try {
-        _imeActive = false;
-        // 視覚ロック: INSERT直後の短時間はIME視覚をOFF固定（初手のraw入力でもjpに切り替わらない）
-        _imeVisualLockUntil = Date.now() + 900;
-        // IME 自体も短時間無効化（OSの自動未確定開始を抑止）
-        if (editor){ editor.setAttribute('inputmode','none'); editor.style.imeMode='disabled'; }
-        setTimeout(()=>{ try{ if (editor){ editor.removeAttribute('inputmode'); editor.style.imeMode=''; } }catch{} }, 900);
-        _applyCaretGradient();
-      } catch {}
+      // #1023: Default INSERT start is IME-OFF.
+      // BUT: when entering INSERT due to IME toggle intent (かな/英数/host off->on), bypass this
+      // so the caret immediately reflects IME ON and the first IME key isn't transient.
+      let bypassImeOff = false;
+      try{ bypassImeOff = (Date.now() < (+_insertImeBypassOffUntil || 0)); }catch{ bypassImeOff = false; }
+      if (!bypassImeOff){
+        try {
+          _imeActive = false;
+          // 視覚ロック: INSERT直後の短時間はIME視覚をOFF固定（初手のraw入力でもjpに切り替わらない）
+          _imeVisualLockUntil = Date.now() + 900;
+          // IME 自体も短時間無効化（OSの自動未確定開始を抑止）
+          if (editor){ editor.setAttribute('inputmode','none'); editor.style.imeMode='disabled'; }
+          setTimeout(()=>{ try{ if (editor){ editor.removeAttribute('inputmode'); editor.style.imeMode=''; } }catch{} }, 900);
+          _applyCaretGradient();
+        } catch {}
+      } else {
+        // IME intent: allow IME immediately and show IME visuals.
+        try{ _imeVisualLockUntil = 0; }catch{}
+        try{ if (editor){ editor.removeAttribute('inputmode'); editor.style.imeMode=''; } }catch{}
+        try{ _applyCaretGradient(); }catch{}
+      }
       // Allow IME in INSERT
       try{ if (editor){ editor.removeAttribute('inputmode'); editor.style.imeMode = ''; } }catch{}
       // Default to overlay caret; native caret may be enabled dynamically during composition.
@@ -15524,9 +15716,17 @@ try{
         if (editor){
           editor.readOnly = false;
           if (m==='NORMAL' || m==='VISUAL'){
-            // NORMAL/VISUAL 中は IME を積極的に無効化し、勝手な未確定開始を防ぐ
-            editor.setAttribute('inputmode','none');
-            editor.style.imeMode = 'disabled';
+            // NOTE: Do not disable IME by default.
+            // Disabling IME (inputmode=none / imeMode=disabled) can prevent the かな key from
+            // reaching the page (observed as "no key event" right after startup).
+            // If the user wants stricter behavior, use :set strictnormalime.
+            if (_optStrictNormalIME){
+              editor.setAttribute('inputmode','none');
+              editor.style.imeMode = 'disabled';
+            } else {
+              editor.removeAttribute('inputmode');
+              editor.style.imeMode='';
+            }
           } else {
             // CMD では制限を外す（コマンド入力は別UIだが安全側）
             editor.removeAttribute('inputmode');
@@ -18006,7 +18206,7 @@ try{
         try{
           const now0 = Date.now();
           const modalOpen = !!((_modalOverlay && _modalOverlay.style && _modalOverlay.style.display !== 'none') || document.getElementById('grepDialog') || (window && window._grepDialogOpen===true));
-          const keepOff = (now0 < (_imeKeepOffUntil|0));
+          const keepOff = (now0 < (+_imeKeepOffUntil || 0));
           if (imeKeyMode === 'direct' && _mode === 'NORMAL' && !modalOpen && !keepOff){
             try{ if (typeof _noteImeToggleRequested === 'function') _noteImeToggleRequested('compositionstart', e); }catch{}
             try{ _setMode('INSERT'); }catch{}
@@ -18432,6 +18632,29 @@ try{
       try{
         const imeKeyMode = String((window && window.SIX_OPTIONS && window.SIX_OPTIONS.imeSwitchKey) || '').toLowerCase();
         if (imeKeyMode === 'direct'){
+          // If the IME is already ON (host state) and the かな key itself does not reach the DOM,
+          // the *next* key is often delivered as Process/229 in NORMAL.
+          // Treat that as insertion intent: enter INSERT immediately and do not run NORMAL logic.
+          try{
+            const now0 = Date.now();
+            const modalOpen = !!((_modalOverlay && _modalOverlay.style && _modalOverlay.style.display !== 'none') || document.getElementById('grepDialog') || (window && window._grepDialogOpen===true));
+            const keepOff = (now0 < (+_imeKeepOffUntil || 0));
+            const k0 = String((e && e.key) || '');
+            const kc0 = (typeof e.keyCode==='number') ? (e.keyCode|0) : 0;
+            const wh0 = (typeof e.which==='number') ? (e.which|0) : 0;
+            const isProc229 = (k0 === 'Process' && ((kc0|0)===229 || (wh0|0)===229));
+            if (!modalOpen && !keepOff && _mode === 'NORMAL' && isProc229 && !e.ctrlKey && !e.altKey && !e.metaKey){
+              try{ if (typeof _noteImeToggleRequested === 'function') _noteImeToggleRequested('keydown:Process229', e); }catch{}
+              try{ _setMode('INSERT'); }catch{}
+              try{ _imeVisualLockUntil = 0; }catch{}
+              try{ if (editor){ editor.removeAttribute('inputmode'); editor.style.imeMode=''; } }catch{}
+              try{ _imeActive = true; _applyCaretGradient(); }catch{}
+              try{ _repositionCaret(); updateGutter(); }catch{}
+              try{ _imeSyncFromHostBurst && _imeSyncFromHostBurst('imeToggle:Process229'); }catch{}
+              return; // allow default IME input; skip NORMAL key handling
+            }
+          }catch{}
+
           // Fallback: some environments report IME toggle as key='Process' (keyCode/which=229).
           // In that case, do a one-shot host sync to update caret visuals (and possibly NORMAL->INSERT).
           try{
@@ -18448,7 +18671,7 @@ try{
           // Right after CMD close, delayed IME-toggle keys can arrive; keep IME OFF and
           // do not auto-enter INSERT during this guard window.
           const now = Date.now();
-          if (now < (_imeKeepOffUntil|0)){
+          if (now < (+_imeKeepOffUntil || 0)){
             const isImeToggleKey = (_isKanaKey(e) || _isEisuKey(e) || e.code === 'Lang1' || e.code === 'Lang2');
             if (isImeToggleKey){
               try{ e.preventDefault(); e.stopPropagation(); }catch{}
@@ -19310,12 +19533,12 @@ try{
         if (e.key==='k' || (e.key==='Process' && e.code==='KeyK')){
           // If this is within the IME-toggle consume window, do not treat as motion.
           try{
-            if (e && e.key==='Process' && e.code==='KeyK' && (Date.now() < (_imeToggleConsumeUntil|0))){
+            if (e && e.key==='Process' && e.code==='KeyK' && (Date.now() < (+_imeToggleConsumeUntil || 0))){
               try{ e.preventDefault(); e.stopPropagation(); }catch{}
               try{
                 const imeKeyMode = String((window && window.SIX_OPTIONS && window.SIX_OPTIONS.imeSwitchKey) || '').toLowerCase();
                 const now = Date.now();
-                if (imeKeyMode === 'direct' && _mode === 'NORMAL' && now >= (_imeKeepOffUntil|0)){
+                if (imeKeyMode === 'direct' && _mode === 'NORMAL' && now >= (+_imeKeepOffUntil || 0)){
                   try{ _setMode('INSERT'); }catch{}
                   try{ _imeVisualLockUntil = 0; _imeActive = true; _applyCaretGradient(); }catch{}
                   try{ _repositionCaret(); updateGutter(); }catch{}
@@ -20460,12 +20683,12 @@ try{
     // If this looks like an IME toggle (e.g. かな reported as Process/KeyJ), do not execute motion.
     // Consume briefly after _noteImeToggleRequested() to avoid false positives for real Process-key motions.
     try{
-      if (e && e.key==='Process' && e.code==='KeyJ' && (Date.now() < (_imeToggleConsumeUntil|0))){
+      if (e && e.key==='Process' && e.code==='KeyJ' && (Date.now() < (+_imeToggleConsumeUntil || 0))){
         try{ e.preventDefault(); e.stopPropagation(); }catch{}
         try{
           const imeKeyMode = String((window && window.SIX_OPTIONS && window.SIX_OPTIONS.imeSwitchKey) || '').toLowerCase();
           const now = Date.now();
-          if (imeKeyMode === 'direct' && _mode === 'NORMAL' && now >= (_imeKeepOffUntil|0)){
+          if (imeKeyMode === 'direct' && _mode === 'NORMAL' && now >= (+_imeKeepOffUntil || 0)){
             try{ _setMode('INSERT'); }catch{}
             try{ _imeVisualLockUntil = 0; _imeActive = true; _applyCaretGradient(); }catch{}
             try{ _repositionCaret(); updateGutter(); }catch{}
@@ -20523,12 +20746,12 @@ try{
   if (e.key==='k' || e.key==='ArrowUp' || (e.key==='Process' && e.code==='KeyK')){
     // If this looks like an IME toggle (e.g. かな reported as Process/KeyK), do not execute motion.
     try{
-      if (e && e.key==='Process' && e.code==='KeyK' && (Date.now() < (_imeToggleConsumeUntil|0))){
+      if (e && e.key==='Process' && e.code==='KeyK' && (Date.now() < (+_imeToggleConsumeUntil || 0))){
         try{ e.preventDefault(); e.stopPropagation(); }catch{}
         try{
           const imeKeyMode = String((window && window.SIX_OPTIONS && window.SIX_OPTIONS.imeSwitchKey) || '').toLowerCase();
           const now = Date.now();
-          if (imeKeyMode === 'direct' && _mode === 'NORMAL' && now >= (_imeKeepOffUntil|0)){
+          if (imeKeyMode === 'direct' && _mode === 'NORMAL' && now >= (+_imeKeepOffUntil || 0)){
             try{ _setMode('INSERT'); }catch{}
             try{ _imeVisualLockUntil = 0; _imeActive = true; _applyCaretGradient(); }catch{}
             try{ _repositionCaret(); updateGutter(); }catch{}
@@ -21940,6 +22163,26 @@ try{
               ''
             );
             if (!_effCode) return;
+
+            // IME toggle ambiguity guard:
+            // Some environments report かな/英数 as key='Process' + code='KeyK' (or KeyJ).
+            // scan-hold runs in capture phase and can mistakenly execute NORMAL motions before
+            // the editor handler consumes the event via _imeToggleConsumeUntil.
+            // If this looks like a toggle or within the consume window, do NOT intercept.
+            try{
+              const km = String((window && window.SIX_OPTIONS && window.SIX_OPTIONS.imeSwitchKey) || '').toLowerCase();
+              if (km === 'direct'){
+                const k = String((e && e.key) || '');
+                const kc = (typeof e.keyCode==='number') ? (e.keyCode|0) : 0;
+                const wh = (typeof e.which==='number') ? (e.which|0) : 0;
+                const now0 = Date.now();
+                const inConsume = (now0 < (+_imeToggleConsumeUntil || 0));
+                const isProcess229 = (k === 'Process' && ((kc|0)===229 || (wh|0)===229));
+                const isProcHJKL = (k === 'Process' && (_effCode==='KeyH' || _effCode==='KeyJ' || _effCode==='KeyK' || _effCode==='KeyL'));
+                const isProcQuote = (k === 'Process' && String(e.code||'') === 'Quote' && !e.ctrlKey && !e.altKey && !e.metaKey);
+                if (inConsume || isProcess229 || isProcQuote || isProcHJKL) return;
+              }
+            }catch{}
 
             // INSERT + Shift+ArrowUp/Down must reach the editor handler so native/explicit
             // range selection can extend across lines. scan-hold capturing these keys
