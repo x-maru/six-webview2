@@ -1,4 +1,4 @@
-const VERSION = '0.9.1';
+const VERSION = '0.9.1.h';
 // Build stamp (for verifying which _six.js is actually running)
 // NOTE: Intentionally ASCII-only; fullwidth variants should be treated as invalid.
 try{ window.__sixBuildTs = '2025-12-29T00:00:00Z'; }catch{}
@@ -7387,17 +7387,28 @@ try{
     try{
       let st = (editor && typeof editor.scrollTop === 'number') ? (editor.scrollTop|0) : 0;
       if (_mdRichActive && _mdRichActive() && _wrapEnabled && _wrapEnabled()){
+        let effMaxLocal = -1;
         try{
           if (typeof _mdEffectiveMaxScrollPx === 'function'){
             const eff = (_mdEffectiveMaxScrollPx()|0);
-            if (eff >= 0) st = Math.min(st|0, eff|0);
+            if (eff >= 0){
+              effMaxLocal = (eff|0);
+              st = Math.min(st|0, effMaxLocal|0);
+            }
           }
         }catch{}
         const snap = !(opts && opts.snap === false);
         if (snap){
           const lh = Math.max(1, (LINE_HEIGHT|0));
-          // Snap down to grid so we never reveal the hidden compensation region.
-          st = Math.floor((st|0) / lh) * lh;
+          // Snap down to grid for stable mapping, BUT do not floor at the effective bottom.
+          // If we floor() at EOF, we can hide part of the last pad line and it looks like
+          // "5行+半端" when wrap compensation is exactly 1 line.
+          const effMax = (effMaxLocal|0);
+          if (effMax >= 0 && ((effMax - (st|0)) <= 1.5)){
+            st = effMax|0;
+          } else {
+            st = Math.floor((st|0) / lh) * lh;
+          }
         }
       }
       return st|0;
@@ -7600,8 +7611,8 @@ try{
       // md-rich + wrap-on: the native scroll range is expanded via paddingBottom (EOF pad + wrap/height compensation).
       // The scrollbar thumb should be allowed to reach the true physical bottom.
       // But the *effective* scrollTop used for mapping/rendering must clamp to a stable
-      // line-based maximum so that user-visible EOF padding is EXACTLY eofPadLines (+ remainder)
-      // and never becomes 5 lines or half-screen due to compensation drift.
+      // maximum so that user-visible EOF padding is EXACTLY eofPadLines (+ remainder)
+      // and never shrinks as wrap compensation grows.
       try{
         const mdLogicalWrap = !!(
           (_mdRichActive && _mdRichActive()) &&
@@ -7609,14 +7620,23 @@ try{
           (_wrapUsesVisualScrollGrid && !_wrapUsesVisualScrollGrid())
         );
         if (mdLogicalWrap){
+          // Effective max must be line-grid-aligned so user-visible EOF padding stays
+          // EXACTLY eofPadLines + viewport remainder.
+          //
+          // Key detail: editor/viewport height is not always a multiple of LINE_HEIGHT.
+          // If we subtract extraPx using the *physical* clientHeight as-is, the remainder
+          // gets subtracted too, and the visible EOF padding can drop by ~1 line when
+          // wrap compensation is exactly 1 line.
+          //
+          // Fix: add back the viewport remainder so effective max corresponds to
+          // (text+pad) - floor(viewportHeight/LINE_HEIGHT)*LINE_HEIGHT.
           const lh = Math.max(1, (LINE_HEIGHT|0));
-          const total = (_totalLines()|0);
-          const vis = (_visibleLinesExact()|0);
-          const eofPad = (_eofPadLines()|0);
-          const baseMaxTop = Math.max(1, (total|0) - (vis|0) + 1);
-          const maxTopWithPad = Math.max(1, (baseMaxTop|0) + (eofPad|0));
-          const effMaxByLines = Math.max(0, ((maxTopWithPad|0) - 1) * lh);
-          return Math.min((maxScroll|0), (effMaxByLines|0))|0;
+          const extraPx = Math.max(0, (_mdEofPadLastExtraPx|0))|0;
+          let vh = 0;
+          try{ vh = (viewport && typeof viewport.clientHeight === 'number' && (viewport.clientHeight|0) > 0) ? (viewport.clientHeight|0) : ((editor.clientHeight||0)|0); }catch{ vh = ((editor && editor.clientHeight)||0)|0; }
+          const rem = (vh > 0) ? ((vh|0) % (lh|0))|0 : 0;
+          const eff = Math.max(0, ((maxScroll|0) - (extraPx|0) + (rem|0))|0);
+          return Math.min((maxScroll|0), (eff|0))|0;
         }
       }catch{}
       return maxScroll|0;
@@ -7666,9 +7686,21 @@ try{
       d.lastSummaryAt = now;
       // One compact line per second at most
       try{
+        const lastE = (d.eof && d.eof.last) ? d.eof.last : null;
         console.debug('[md-eof:summary]', {
           width: { n:d.width.n|0, changes:d.width.changes|0, last:d.width.last },
-          eof:   { n:d.eof.n|0,   changes:d.eof.changes|0,   last: d.eof.last },
+          eof:   {
+            n:d.eof.n|0,
+            changes:d.eof.changes|0,
+            // keep `last` for deep inspection, but also surface key scalars for copy/paste.
+            linesTotal: lastE ? (lastE.linesTotal|0) : -1,
+            vis: lastE ? (lastE.vis|0) : -1,
+            extraPx: lastE ? (lastE.extraPx|0) : -1,
+            paddingBottomPx: lastE ? (lastE.paddingBottomPx|0) : -1,
+            mdCompLines: lastE ? (lastE.mdCompLines|0) : -1,
+            scrollbarPx: lastE ? (lastE.scrollbarPx|0) : -1,
+            last: d.eof.last,
+          },
           eofMeta: { enter:(d.eofMeta && d.eofMeta.enter)|0, cond:(d.eofMeta && d.eofMeta.cond)|0, err:(d.eofMeta && d.eofMeta.err)|0, lastErr:(d.eofMeta && d.eofMeta.lastErr)||'' },
           so:    { n:d.so.n|0,    changes:d.so.changes|0,    last: d.so.last },
         });
@@ -7807,7 +7839,8 @@ try{
       const basePad = (_eofPadLines()|0);
       if (_mdRichEnabled && _mdRichEnabled() && _wrapEnabled && _wrapEnabled()){
         // Use pixel-precise padding to reduce clamp/jitter near EOF under variable row heights.
-        const pb = Math.max(0, ((basePad|0) * (LINE_HEIGHT|0)) + (extraPx|0));
+        const lh = Math.max(1, (LINE_HEIGHT|0));
+        const pb = Math.max(0, ((basePad|0) * lh) + (extraPx|0));
         try{
           const pbI = (pb|0);
           if ((_mdEofPadLastPbPx|0) !== (pbI|0)){
@@ -7817,17 +7850,14 @@ try{
           }
         }catch{}
 
-        // Derive md compensation lines from actual scroll range so ensureScrolloff clamp matches reality.
-        // This prevents “余白が増える/暴れる” caused by rounding and width feedback.
+        // Cheap md compensation lines estimate.
+        // NOTE: Avoid scrollHeight/clientHeight reads here (they can trigger forced reflow).
+        // The main purpose of this value is “staleness” tracking and optional diagnostics.
         try{
-          const vis = _visibleLinesExact()|0;
-          const baseMaxTop = Math.max(1, (linesTotal|0) - (vis|0) + 1);
-          const maxTopWithPad = Math.max(1, (baseMaxTop|0) + (basePad|0));
-          const stMaxPx = Math.max(0, ((editor.scrollHeight||0) - (editor.clientHeight||0))|0);
-          const actualMaxTop = Math.max(1, (Math.floor(stMaxPx / Math.max(1, (LINE_HEIGHT|0)))|0) + 1);
-          const derivedExtra = Math.max(0, (actualMaxTop|0) - (maxTopWithPad|0));
+          const lh = Math.max(1, (LINE_HEIGHT|0));
+          const derivedExtra = Math.max(0, Math.ceil(Math.max(0, (extraPx|0)) / lh));
           _mdEofPadExtraLines = derivedExtra|0;
-        }catch{}
+        }catch{ _mdEofPadExtraLines = 0; }
 
         // Optional debug aggregation to DevTools console (throttled)
         try{
@@ -11407,7 +11437,8 @@ try{
     const block = (n===1) ? clip : String(clip).repeat(n);
     const final = _insertTextAt(pos.r, pos.c, block);
     _setCaret(final.r, final.c);
-    _touchBufferModified(); ensureScrolloff(); _repositionCaret(); updateGutter();
+    _touchBufferModified();
+    _afterTextMutation();
   }
   function _pasteLinewise(below, count){
     const n = Math.max(1, count|0);
@@ -11434,7 +11465,8 @@ try{
     const firstInsertedLine = String(clip).split(/\n/,1)[0] || '';
     const col = _firstNonBlankColOf(firstInsertedLine);
     _setCaret(newR, col);
-    _touchBufferModified(); ensureScrolloff(); _repositionCaret(); updateGutter();
+    _touchBufferModified();
+    _afterTextMutation();
   }
   function _paragraphNextPos(startRow, count){
     const lines=_splitLines(); let r=startRow; const times=Math.max(1,count|0);
@@ -12136,7 +12168,9 @@ try{
         // Avoid treating generic `force` as a reason to recompute (j/k repeats can call ensureScrolloff often).
         // Only recompute on explicit EOF-related requests.
         const explicit = !!(opts && (opts.preferEOFPad || opts.centerOnce));
-        const looksStale = ((_mdEofPadExtraLines|0) === 0) || ((_mdEofPadLastPbPx|0) < 0);
+        // Treat as stale only when paddingBottom was never applied.
+        // extraLines can legitimately be 0 when there are no wrapped visual lines.
+        const looksStale = ((_mdEofPadLastPbPx|0) < 0);
         const wants = explicit || (nearEOF && looksStale);
         if (wants && (now - last) >= 120){
           ensureScrolloff._mdEofSyncAt = now;
@@ -12511,6 +12545,27 @@ try{
         // we must NOT scroll if we are already at maxTop.
         // But if we are NOT at maxTop, we should scroll as much as possible.
         if (newTop !== topCmp2) {
+           // md-rich + wrap-on: when scrolloff pushes us to the EOF cap (maxTopWithPad),
+           // snap to the *effective* max scrollTop (px) so the last EOF pad line + viewport remainder
+           // becomes visible without requiring an extra manual scroll step.
+           try{
+             const mdLogicalWrap = !!(
+               (_mdRichActive && _mdRichActive()) &&
+               (_wrapEnabled && _wrapEnabled()) &&
+               (_wrapUsesVisualScrollGrid && !_wrapUsesVisualScrollGrid())
+             );
+             if (mdLogicalWrap && ((newTop|0) === (maxTopWithPad|0)) && typeof _mdEffectiveMaxScrollPx === 'function'){
+               const effMax = (_mdEffectiveMaxScrollPx()|0);
+               if (effMax >= 0){
+                 const stNow = (editor && typeof editor.scrollTop === 'number') ? (editor.scrollTop||0) : 0;
+                 if (Math.abs((effMax|0) - (stNow|0)) > 0.5){
+                   _setEditorScrollTop(effMax|0, Object.assign({}, opts||{}, { immediate:true, keepCaret:true }));
+                   scrolled = true;
+                   return;
+                 }
+               }
+             }
+           }catch{}
            // #1239: Smooth scroll transition for scan-hold
            const sh = window._scanHold;
            if (window.__sixScanHoldHeld && window.__sixScanHoldHeld.size > 0 && sh && sh.mode === 'caret' && !sh.stepAnimation) {
