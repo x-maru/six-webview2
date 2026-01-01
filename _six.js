@@ -1,4 +1,4 @@
-const VERSION = '0.9.1.m';
+const VERSION = '0.9.1.u';
 // Build stamp (for verifying which _six.js is actually running)
 // NOTE: Intentionally ASCII-only; fullwidth variants should be treated as invalid.
 try{ window.__sixBuildTs = '2025-12-29T00:00:00Z'; }catch{}
@@ -13381,7 +13381,7 @@ try{
       if (!_wrapEnabled || !_wrapEnabled()){ _moveCaretLines(d, opts); return; }
 
       // Markdown-rich: use styled wrap metrics (per-line font/line-height) so j/k behave like gj/gk.
-      if (_mdRichEnabled && _mdRichEnabled()){
+      if (_mdRichActive && _mdRichActive()){
         const heavy = (function(){ try{ return _editorTextLen() > 200000; }catch{ return false; } })();
         // For heavy buffers, prefer the normal wrap path (no full md wrap cache build).
         if (!heavy){
@@ -19042,32 +19042,65 @@ try{
           }
 
         // Allow native editing behavior, but keep overlays in sync when moving the caret.
-        // In wrap-on, intercept ArrowUp/Down (no modifiers) to move by logical lines deterministically
-        // and preserve desired column (wrap-off parity).
-        if (e.key==='ArrowUp' || e.key==='ArrowDown'){
+        if (e.key==='ArrowLeft' || e.key==='ArrowRight' || e.key==='ArrowUp' || e.key==='ArrowDown' ||
+            e.key==='Home' || e.key==='End' || e.key==='PageUp' || e.key==='PageDown'){
+          // Spec change (#1658): In markdown-off INSERT + wrap-on, ArrowUp/Down should behave like gj/gk
+          // (visual-line motion within wrapped lines; curswant is relative to the visual line start).
           try{
-            const wrapOn = !!(_wrapEnabled && _wrapEnabled());
-            const mdOn = !!(_mdRichEnabled && _mdRichEnabled());
-            // md-rich has its own visual-line arrow handling below.
-            if (wrapOn && !mdOn){
-              let shiftHeld = false;
-              try{ shiftHeld = !!e.shiftKey; }catch{}
-              try{ if (!shiftHeld && e && typeof e.getModifierState==='function') shiftHeld = !!e.getModifierState('Shift'); }catch{}
-              try{ if (!shiftHeld) shiftHeld = !!_shiftHeld; }catch{}
-              if (!shiftHeld && !e.ctrlKey && !e.altKey && !e.metaKey){
-                e.preventDefault(); e.stopPropagation();
-                const delta = (e.key==='ArrowDown') ? 1 : -1;
-                _moveCaretLines(delta|0);
-                try{ _syncNativeSelectionToCaret(); }catch{}
-                try{ ensureScrolloff(); }catch{}
-                _repositionCaret(); updateGutter();
-                return;
+            const k0 = String((e && e.key) || '');
+            const c0 = String((e && e.code) || '');
+            const isUp = (k0==='ArrowUp' || c0==='ArrowUp');
+            const isDown = (k0==='ArrowDown' || c0==='ArrowDown');
+            if (_mode==='INSERT' && (isUp || isDown)){
+              const mdNow = !!(_mdRichActive && _mdRichActive());
+              const wrapOn = !!(_wrapEnabled && _wrapEnabled());
+              if (!mdNow && wrapOn){
+                let shiftHeld = false;
+                try{ shiftHeld = !!e.shiftKey; }catch{}
+                try{ if (!shiftHeld && e && typeof e.getModifierState==='function') shiftHeld = !!e.getModifierState('Shift'); }catch{}
+                if (!shiftHeld && !e.ctrlKey && !e.altKey && !e.metaKey){
+                  const delta = isDown ? 1 : -1;
+                  // Preserve the special-case: when caret is on the final '\n' character, ArrowDown should
+                  // move into the virtual final empty line via the existing handler below.
+                  if (delta > 0){
+                    try{
+                      const v = String(editor.value||'');
+                      const start = editor.selectionStart|0;
+                      const end = editor.selectionEnd|0;
+                      if (start===end && v.endsWith('\n') && start === ((v.length|0)-1)){
+                        // fall through
+                      } else {
+                        try{ if (_optDebugKeys) _debugPush({ t:Date.now(), type:'insert-gjgk', key:k0, code:c0, md:mdNow, wrap:wrapOn, delta:(delta|0) }); }catch{}
+                        e.preventDefault(); e.stopPropagation();
+                        _moveCaretVisualLines(delta|0);
+                        try{ _syncNativeSelectionToCaret(); }catch{}
+                        try{ ensureScrolloff(); }catch{}
+                        _repositionCaret(); updateGutter();
+                        return;
+                      }
+                    }catch{
+                      try{ if (_optDebugKeys) _debugPush({ t:Date.now(), type:'insert-gjgk', key:k0, code:c0, md:mdNow, wrap:wrapOn, delta:(delta|0), why:'catch' }); }catch{}
+                      e.preventDefault(); e.stopPropagation();
+                      _moveCaretVisualLines(delta|0);
+                      try{ _syncNativeSelectionToCaret(); }catch{}
+                      try{ ensureScrolloff(); }catch{}
+                      _repositionCaret(); updateGutter();
+                      return;
+                    }
+                  } else {
+                    try{ if (_optDebugKeys) _debugPush({ t:Date.now(), type:'insert-gjgk', key:k0, code:c0, md:mdNow, wrap:wrapOn, delta:(delta|0) }); }catch{}
+                    e.preventDefault(); e.stopPropagation();
+                    _moveCaretVisualLines(delta|0);
+                    try{ _syncNativeSelectionToCaret(); }catch{}
+                    try{ ensureScrolloff(); }catch{}
+                    _repositionCaret(); updateGutter();
+                    return;
+                  }
+                }
               }
             }
           }catch{}
-        }
-        if (e.key==='ArrowLeft' || e.key==='ArrowRight' || e.key==='ArrowUp' || e.key==='ArrowDown' ||
-            e.key==='Home' || e.key==='End' || e.key==='PageUp' || e.key==='PageDown'){
+
           // PageUp/PageDown smooth scrolling in INSERT mode (#1264)
           if (e.key==='PageUp' || e.key==='PageDown'){
             e.preventDefault(); e.stopPropagation();
@@ -21832,7 +21865,11 @@ try{
             const lines = _splitLines();
             const deltaSigned = (delta|0) * (count|0);
             const mdOn = (function(){ try{ return (_mdRichEnabled && _mdRichEnabled()); }catch{ return false; } })();
-            const newRow = mdOn ? (caretRow|0) : Math.max(0, Math.min(lines.length-1, caretRow + (deltaSigned|0)));
+            const wrapOn = (function(){ try{ return (_wrapEnabled && _wrapEnabled()); }catch{ return false; } })();
+            // Spec change (#1658): markdown-off INSERT + wrap-on uses visual-line motion for ArrowUp/Down.
+            // NOTE: ArrowUp/Down in INSERT is captured by scan-hold (capture phase), so this must be applied here.
+            const insertWrapVis = (!mdOn && (_mode === 'INSERT') && wrapOn);
+            const newRow = (mdOn || insertWrapVis) ? (caretRow|0) : Math.max(0, Math.min(lines.length-1, caretRow + (deltaSigned|0)));
 
             // Debug (rawkeys): confirm count usage and actual row delta
             try{
@@ -21851,9 +21888,9 @@ try{
             
             // #1254: Optimization: if caret doesn't move (e.g. at boundary), skip heavy lifting
             // to prevent CPU spin/freeze when holding key at boundary.
-            // NOTE: In markdown, j/k behaves like gj/gk (visual-line). That can move within the same logical row,
-            // so we must not early-return based on row alone.
-            if (!mdOn && newRow === caretRow) {
+            // NOTE: In markdown and in INSERT+wrap visual-line mode, vertical motion can move within the
+            // same logical row, so we must not early-return based on row alone.
+            if (!mdOn && !insertWrapVis && newRow === caretRow) {
               _scanHold.caretLastMove = performance.now();
               // Keep caret visual consistent even on boundary no-op.
               // scan-hold keydown may have called _showCursor(); restore filled caret without
@@ -21870,8 +21907,17 @@ try{
 
             // Delegate actual caret move to the shared motion helper so policies stay consistent.
             // Markdown spec: j/k behaves like gj/gk (visual line).
-            if (mdOn) _moveCaretVisualLines(deltaSigned|0, { skipEnsure:true });
-            else _moveCaretLines(deltaSigned|0, { skipEnsure:true });
+            // Spec change (#1658): markdown-off INSERT + wrap-on uses visual-line motion (gj/gk) for ArrowUp/Down.
+            if (mdOn || insertWrapVis){
+              try{
+                if (insertWrapVis && _optDebugKeys){
+                  _debugPush({ t:Date.now(), type:'insert-gjgk', via:'scanhold', mode:_mode, md:false, wrap:true, delta:(deltaSigned|0) });
+                }
+              }catch{}
+              _moveCaretVisualLines(deltaSigned|0, { skipEnsure:true });
+            } else {
+              _moveCaretLines(deltaSigned|0, { skipEnsure:true });
+            }
             try{ _flagCaretMotion(); }catch{}
 
             // If we didn't move (boundary), stop here to avoid scrolloff loops.
