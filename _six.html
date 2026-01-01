@@ -73,7 +73,6 @@
   <!-- boot sentinel: shows if JS bootstrap didn't run -->
   <div id="bootwarn" style="display:none;position:fixed;left:8px;bottom:8px;z-index:99999;padding:6px 10px;border-radius:4px;background:#3b1f1f;color:#ffdede;font:12px/1.4 system-ui, sans-serif;box-shadow:0 1px 3px rgba(0,0,0,.4)"></div>
   <script>
-    // If _six.js didn't initialize within ~1.8s, show a small hint.
     setTimeout(function(){
       try{
         if (!window.six){
@@ -91,6 +90,6 @@
     }, 1800);
   </script>
 
-  <script id="sixjs" src="_six.js?v=0.9.1.j" onload="try{window.__sixLoaded=true; var bw=document.getElementById('bootwarn'); if(bw) bw.style.display='none';}catch{}" onerror="(function(){window.__sixLoadError=true; var el=document.getElementById('bootwarn'); if(el){ el.style.display=''; el.textContent='six: _six.js の読み込みに失敗しました（ファイル参照/権限/パスを確認）'; }})()"></script>
+  <script id="sixjs" src="_six.js?v=0.9.1.m" onload="try{window.__sixLoaded=true; var bw=document.getElementById('bootwarn'); if(bw) bw.style.display='none';}catch{}" onerror="(function(){window.__sixLoadError=true; var el=document.getElementById('bootwarn'); if(el){ el.style.display=''; el.textContent='six: _six.js の読み込みに失敗しました（ファイル参照/権限/パスを確認）'; }})()"></script>
 </body>
 </html>

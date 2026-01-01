@@ -1,4 +1,4 @@
-const VERSION = '0.9.1.j';
+const VERSION = '0.9.1.m';
 // Build stamp (for verifying which _six.js is actually running)
 // NOTE: Intentionally ASCII-only; fullwidth variants should be treated as invalid.
 try{ window.__sixBuildTs = '2025-12-29T00:00:00Z'; }catch{}
@@ -13344,24 +13344,13 @@ try{
       return;
     }
 
-    // Wrap mode: use wrap-local visual X (from wrapped segment left edge) as curswant.
-    // This differs from Vim, but matches the requested behavior.
     let newCol = 0;
     try{
-      if (_wrapEnabled && _wrapEnabled()){
-        // Update wrap curswant from current caret if we are on a wrapped logical line (never decrease).
-        try{ _maybeRaiseDesiredWrapXFromCurrentCaret(); }catch{}
-        try{ _ensureDesiredWrapX(); }catch{}
-        const c = _wrapEnsureCache(false);
-        const wPx = (c && Number.isFinite(c.wPx)) ? (c.wPx||80) : _wrapAvailWidthPx();
-        const desiredX = (_desiredWrapXPx == null) ? 0 : Number(_desiredWrapXPx||0);
-        const lineS = String(lines[newRow]||'');
-        newCol = _wrapColForIntraX(lineS, 0, desiredX, wPx, c);
-      } else {
-        _ensureDesired();
-        const line = lines[newRow] || '';
-        newCol = _colForVisual(line, _desiredVisualCol|0);
-      }
+      // Logical-line motion always preserves the desired visual column (Vim-like),
+      // even when wrap is enabled. Visual-line motion is handled separately (gj/gk).
+      _ensureDesired();
+      const line = lines[newRow] || '';
+      newCol = _colForVisual(line, _desiredVisualCol|0);
     }catch{
       _ensureDesired();
       const line = lines[newRow] || '';
@@ -17836,6 +17825,16 @@ try{
           }
         }catch{}
 
+        // Keep desired visual column in sync with actual caret after typing/deletes.
+        // Without this, vertical motions can keep using a stale column (notably with wrap-on).
+        try{
+          if (!(window && window._imeComposing===true)){
+            const lines = _splitLines();
+            const line = lines[caretRow] || '';
+            _desiredVisualCol = _visualWidthUpToLineWys(line, caretCol|0);
+          }
+        }catch{}
+
         // If Enter happened at logical EOF while we were already pinned to physical bottom,
         // re-pin after the mutation. This avoids a bottom thumb gap in wrap-off too.
         try{
@@ -19042,7 +19041,31 @@ try{
             return;
           }
 
-        // Allow native editing behavior, but keep overlays in sync when moving the caret
+        // Allow native editing behavior, but keep overlays in sync when moving the caret.
+        // In wrap-on, intercept ArrowUp/Down (no modifiers) to move by logical lines deterministically
+        // and preserve desired column (wrap-off parity).
+        if (e.key==='ArrowUp' || e.key==='ArrowDown'){
+          try{
+            const wrapOn = !!(_wrapEnabled && _wrapEnabled());
+            const mdOn = !!(_mdRichEnabled && _mdRichEnabled());
+            // md-rich has its own visual-line arrow handling below.
+            if (wrapOn && !mdOn){
+              let shiftHeld = false;
+              try{ shiftHeld = !!e.shiftKey; }catch{}
+              try{ if (!shiftHeld && e && typeof e.getModifierState==='function') shiftHeld = !!e.getModifierState('Shift'); }catch{}
+              try{ if (!shiftHeld) shiftHeld = !!_shiftHeld; }catch{}
+              if (!shiftHeld && !e.ctrlKey && !e.altKey && !e.metaKey){
+                e.preventDefault(); e.stopPropagation();
+                const delta = (e.key==='ArrowDown') ? 1 : -1;
+                _moveCaretLines(delta|0);
+                try{ _syncNativeSelectionToCaret(); }catch{}
+                try{ ensureScrolloff(); }catch{}
+                _repositionCaret(); updateGutter();
+                return;
+              }
+            }
+          }catch{}
+        }
         if (e.key==='ArrowLeft' || e.key==='ArrowRight' || e.key==='ArrowUp' || e.key==='ArrowDown' ||
             e.key==='Home' || e.key==='End' || e.key==='PageUp' || e.key==='PageDown'){
           // PageUp/PageDown smooth scrolling in INSERT mode (#1264)
@@ -19264,8 +19287,11 @@ try{
                try{
                    const lines = _splitLines();
                    const line = lines[caretRow] || '';
-                   _desiredVisualCol = _visualWidthUpToLine(line, caretCol);
+                   _desiredVisualCol = _visualWidthUpToLineWys(line, caretCol|0);
                }catch{}
+               // md-rich visual-line motions (ArrowUp/Down) use wrap desired X.
+               // Horizontal moves must reset it so subsequent vertical moves track the new column.
+               try{ _desiredWrapXPx = null; }catch{}
             }
 
             // Keep scrolloff for vertical moves
