@@ -1,4 +1,4 @@
-const VERSION = '0.9.1';
+const VERSION = '0.9.1.a';
 // Build stamp (for verifying which _six.js is actually running)
 // NOTE: Intentionally ASCII-only; fullwidth variants should be treated as invalid.
 try{ window.__sixBuildTs = '2025-12-29T00:00:00Z'; }catch{}
@@ -788,6 +788,9 @@ try{
   function _setNativeCaretMode(enabled){
     try{
       const on = !!enabled;
+      // Never allow native-caret while cmdfloat is being used as the IME bar.
+      // (This is the yellow underline caret; if it appears during IME bar, the app can enter a broken state.)
+      try{ if (on && cmdfloat && cmdfloat.dataset && cmdfloat.dataset.kind === 'ime') return; }catch{}
       if (on === _nativeCaretEnabled) return;
       _nativeCaretEnabled = on;
       try{ document.body.classList.toggle('use-native-caret', on); }catch{}
@@ -815,6 +818,8 @@ try{
       const large = (_editorTextLen() > 200000);
       // For huge buffers, prefer native caret throughout INSERT to avoid expensive overlay caret work.
       const want = forced || (_mode==='INSERT' && large);
+      // IME bar uses its own input; native caret must be off.
+      try{ if (cmdfloat && cmdfloat.dataset && cmdfloat.dataset.kind === 'ime'){ _nativeCaretForceUntil = 0; _setNativeCaretMode(false); return; } }catch{}
       _setNativeCaretMode(want);
     }catch{}
   }
@@ -828,6 +833,45 @@ try{
   // IME未確定中の大量inputで重い処理が走るのを避ける（compositionendで一括反映）
   let _imeDeferredModifyPending = false;
   let _imeDeferredTickBumped = false;
+  // IME candidate popup avoidance (markdown-rich): while candidate UI is likely shown,
+  // enforce a tiny (1-line) scrolloff so the caret moves at most by one line.
+  // This helps avoid the candidate window covering the caret without causing large re-centers.
+  let _imeCandidateEnsurePending = false;
+  function _scheduleImeCandidateEnsure(reason){
+    try{
+      if (_imeCandidateEnsurePending) return;
+      _imeCandidateEnsurePending = true;
+      const run = ()=>{
+        _imeCandidateEnsurePending = false;
+        try{ if (!(_mdRichActive && _mdRichActive())) return; }catch{}
+        try{ if (!editor) return; }catch{}
+        try{ if (!(_mode === 'INSERT')) return; }catch{}
+        // Candidate window heuristic: only during actual IME composition.
+        try{ if (!(window && window._imeComposing===true)) return; }catch{}
+        try{
+          const now = Date.now();
+          const until = (typeof window._imeCandidateUntil==='number') ? (window._imeCandidateUntil|0) : 0;
+          if (!(until && now < until)) return;
+        }catch{}
+        // Temporarily use scrolloff=1 so ensureScrolloff nudges by ~1 line at most.
+        let prevSo = null;
+        try{ prevSo = scrolloff; scrolloff = 1; }catch{ prevSo = null; }
+        try{ ensureScrolloff({ force:true, immediate:true, keepCaret:true }); }catch{}
+        try{ if (prevSo != null) scrolloff = prevSo; }catch{}
+        // Keep overlays in sync even during composition (forced one-shot).
+        try{ _repositionCaret && _repositionCaret({ force:true }); }catch{}
+        try{ updateGutter && updateGutter({ force:true }); }catch{}
+      };
+      if (window && window.requestAnimationFrame){
+        requestAnimationFrame(()=>{ try{ run(); }catch{} });
+      } else {
+        setTimeout(()=>{ try{ run(); }catch{} }, 0);
+      }
+      // Candidate UI can appear slightly after the keydown; run a second pass shortly after.
+      try{ setTimeout(()=>{ try{ run(); }catch{} }, 80); }catch{}
+      try{ if (_optDebugKeys) _debugPush({ t:Date.now(), type:'ime-candidate-ensure', mode:_mode, why:String(reason||'') }); }catch{}
+    }catch{ _imeCandidateEnsurePending = false; }
+  }
   // IME composing: schedule a minimal caret sync for markdown-rich so the very first key
   // doesn't render the preedit text shifted relative to the overlay caret.
   let _imeCompCaretSyncPending = false;
@@ -1015,6 +1059,534 @@ try{
       try{ document.documentElement.style.setProperty('--caretGradMid', mid); }catch{}
       try{ document.documentElement.style.setProperty('--caretWidth', widthLen); }catch{}
       try{ document.documentElement.style.setProperty('--caretGradMidStop', midStopLen); }catch{}
+
+      // markdown+IME bar visibility follows IME state.
+      try{ if (typeof _syncImeBarVisibility === 'function') _syncImeBarVisibility('applyCaretGradient'); }catch{}
+      try{ if (typeof _imeBarSafetyTick === 'function') _imeBarSafetyTick('applyCaretGradient'); }catch{}
+    }catch{}
+  }
+
+  // --- markdown IME bar (cmdfloat reuse, dedicated input) ---
+  // Goal: In markdown-rich mode while IME is ON, accept IME composition in a dedicated
+  // input element (imeinput) and mirror it incrementally into the main editor buffer.
+  // and mirror it incrementally into the main editor buffer at the caret.
+  let imeinput = null;
+
+  function _ensureImeInputEl(){
+    try{
+      if (imeinput && imeinput.parentNode) return imeinput;
+      const cf = (typeof cmdfloat !== 'undefined' && cmdfloat) ? cmdfloat : document.getElementById('cmdfloat');
+      if (!cf) return null;
+      let el = document.getElementById('imeinput');
+      if (!el){
+        el = document.createElement('input');
+        el.type = 'text';
+        el.id = 'imeinput';
+        try{ el.spellcheck = false; }catch{}
+        try{ el.autocomplete = 'off'; el.autocapitalize = 'off'; el.autocorrect = 'off'; }catch{}
+        try{ el.inputMode = 'text'; }catch{}
+        try{ el.style.display = 'none'; }catch{}
+        try{ if (typeof cmdinput !== 'undefined' && cmdinput){ el.className = cmdinput.className || ''; } }catch{}
+        try{
+          const prefix = document.getElementById('cmdprefix');
+          if (prefix && prefix.parentNode === cf){
+            if (prefix.nextSibling){
+              cf.insertBefore(el, prefix.nextSibling);
+            } else {
+              cf.appendChild(el);
+            }
+          } else {
+            cf.insertBefore(el, cf.firstChild);
+          }
+        }catch{ try{ cf.appendChild(el); }catch{} }
+      }
+      imeinput = el;
+      try{ window.imeinput = el; }catch{}
+      return el;
+    }catch{ return null; }
+  }
+
+  function _imeBarInputEl(){
+    try{ return _ensureImeInputEl() || ((typeof cmdinput !== 'undefined') ? cmdinput : null); }catch{ try{ return (typeof cmdinput !== 'undefined') ? cmdinput : null; }catch{ return null; } }
+  }
+  let _imeBarActive = false;
+  let _imeBarAnchorOff = 0;
+  let _imeBarPrevText = '';
+  let _imeBarComposing = false;
+  let _imeBarSnapshotTaken = false;
+  let _imeBarWasEditorReadOnly = false;
+  let _imeBarLastImeEvtAt = 0;
+  let _imeBarJustOpenedUntil = 0;
+  let _imeBarWatchdogTimer = 0;
+  // #1684: user can hide the IME bar while staying in INSERT.
+  // When hidden by user, the bar stays hidden while IME is OFF.
+  let _imeBarUserHidden = false;
+  let _imeBarSelAnchorOff = null;
+
+  function _imeSetActiveSoft(on, why, e){
+    try{
+      const v = !!on;
+      try{ _imeActive = v; }catch{}
+      try{ _imeVisualLockUntil = Date.now() + 600; }catch{}
+      try{ _applyCaretGradient && _applyCaretGradient(); }catch{}
+      try{ _imePost && _imePost(v ? 'on' : 'off'); }catch{}
+      if (!v){
+        try{ if (window){ window._imeComposing = false; window._imeCandidateUntil = 0; } }catch{}
+        try{ _imeBarComposing = false; }catch{}
+      }
+    }catch{}
+  }
+
+  function _imeBarHideByUser(reason, e){
+    try{ _imeBarUserHidden = true; }catch{}
+    try{ if (_imeBarActive){
+      try{ const el = _imeBarInputEl && _imeBarInputEl(); if (el){ try{ el.value = ''; }catch{} } }catch{}
+      try{ _imeBarReplaceInsertedText && _imeBarReplaceInsertedText('', 'userhide'); }catch{}
+      try{ _imeBarPrevText = ''; }catch{}
+      try{ _imeBarClose && _imeBarClose('userhide:' + String(reason||'')); }catch{}
+    } }catch{}
+    try{ if (editor) editor.readOnly = false; }catch{}
+    try{ _imeSetActiveSoft(false, 'userhide:' + String(reason||''), e); }catch{}
+    try{ editor && editor.focus && editor.focus({ preventScroll:true }); }catch{ try{ editor && editor.focus && editor.focus(); }catch{} }
+  }
+
+  function _imeBarStartWatchdog(reason){
+    try{
+      if (_imeBarWatchdogTimer) return;
+      _imeBarWatchdogTimer = setInterval(()=>{
+        try{
+          if (!_imeBarActive){
+            try{ clearInterval(_imeBarWatchdogTimer); }catch{}
+            _imeBarWatchdogTimer = 0;
+            return;
+          }
+          // Keep editor locked and cmdinput focused.
+          try{ if (editor) editor.readOnly = true; }catch{}
+          try{ if (cmdfloat){ if (cmdfloat.style.display==='none') cmdfloat.style.display='flex'; if (cmdfloat.style.visibility==='hidden') cmdfloat.style.visibility=''; } }catch{}
+          try{ const b=document.getElementById('cmdHistBtn'); if (b) b.style.display='none'; }catch{}
+          // IME bar uses cmdinput; keep native caret disabled to avoid yellow underscore sticking.
+          try{ _nativeCaretForceUntil = 0; _setNativeCaretMode && _setNativeCaretMode(false); }catch{}
+          try{
+            const el = _imeBarInputEl();
+            if (el){
+              if (document && document.activeElement !== el){ try{ el.focus({ preventScroll:true }); }catch{ try{ el.focus(); }catch{} } }
+            }
+          }catch{}
+          try{ _positionImeBar && _positionImeBar(); }catch{}
+        }catch{}
+      }, 120);
+    }catch{}
+  }
+  function _imeBarStopWatchdog(reason){
+    try{
+      if (_imeBarWatchdogTimer){
+        try{ clearInterval(_imeBarWatchdogTimer); }catch{}
+        _imeBarWatchdogTimer = 0;
+      }
+    }catch{}
+  }
+
+  function _imeBarShouldBeActive(){
+    try{
+      if (!(window && window.SIX_OPTIONS)){}
+      // Only for markdown-rich mode.
+      if (!(_mdRichActive && _mdRichActive())) return false;
+      // Only while IME is visually ON and we are in INSERT (typing intent).
+      if (_mode !== 'INSERT') return false;
+      // Final resort (#1683): keep IME bar visible throughout md-rich INSERT to reduce
+      // IME toggle races and bar open/close churn. This also allows half-width input.
+      // Respect explicit "keep IME off" guard (e.g. after Esc-close).
+      try{ if (Date.now() < (+_imeKeepOffUntil || 0)) return false; }catch{}
+      // #1684: allow user to hide the bar while staying in INSERT.
+      // When hidden by user, keep it hidden while IME is OFF; show again on IME ON.
+      try{ if (_imeBarUserHidden && !_imeActive) return false; }catch{}
+      // Do not show while CMD is active (cmdfloat is reserved for CMD).
+      if (_mode === 'CMD') return false;
+      // Avoid during modal dialogs.
+      try{ if ((_modalOverlay && _modalOverlay.style && _modalOverlay.style.display !== 'none') || document.getElementById('grepDialog') || (window && window._grepDialogOpen===true)) return false; }catch{}
+      return true;
+    }catch{ return false; }
+  }
+
+  function _imeBarReplaceInsertedText(nextText, why){
+    try{
+      if (!editor) return;
+      const prev = String(_imeBarPrevText||'');
+      const next = String(nextText||'');
+      const s0 = String(editor.value||'');
+      const start0 = Math.max(0, Math.min(s0.length, (_imeBarAnchorOff|0)));
+      let delStart = start0;
+      let delEnd = Math.max(delStart, Math.min(s0.length, (delStart + prev.length)));
+
+      // #1684: if a selection exists when starting a new segment, replace the selection.
+      try{
+        let ss = 0, se = 0;
+        try{ ss = editor.selectionStart|0; se = editor.selectionEnd|0; }catch{}
+        if ((prev.length|0) === 0 && (next.length|0) > 0 && (ss|0) !== (se|0)){
+          const a = Math.max(0, Math.min(s0.length, Math.min(ss|0, se|0)));
+          const b = Math.max(0, Math.min(s0.length, Math.max(ss|0, se|0)));
+          delStart = a|0;
+          delEnd = b|0;
+          _imeBarAnchorOff = delStart|0;
+        }
+      }catch{}
+      if (!_imeBarSnapshotTaken){
+        _imeBarSnapshotTaken = true;
+        try{ _pushUndoSnapshot && _pushUndoSnapshot('imebar'); }catch{}
+      }
+      const s = s0;
+      const out = s.slice(0, delStart) + next + s.slice(delEnd);
+      if (out !== s){
+        editor.value = out;
+        try{ const b=currentBuffer && currentBuffer(); if (b) b.text = out; }catch{}
+        try{ _touchBufferModified && _touchBufferModified(); }catch{}
+        try{ _afterTextMutation && _afterTextMutation(); }catch{}
+      }
+      const newOff = (delStart + next.length)|0;
+      try{ editor.selectionStart = editor.selectionEnd = newOff; }catch{ try{ editor.setSelectionRange(newOff, newOff); }catch{} }
+      try{ const rc = _rcFromOffset(newOff); caretRow = rc.r|0; caretCol = rc.c|0; }catch{}
+      try{ _repositionCaret && _repositionCaret({ force:true }); }catch{ try{ _repositionCaret && _repositionCaret(); }catch{} }
+      try{ ensureScrolloff && ensureScrolloff({ force:true }); }catch{ try{ ensureScrolloff && ensureScrolloff(); }catch{} }
+      try{ updateGutter && updateGutter({ force:true }); }catch{ try{ updateGutter && updateGutter(); }catch{} }
+      try{ _scheduleListCharsRender && _scheduleListCharsRender('imebar-' + String(why||'')); }catch{}
+      try{ if (_imeBarActive) _positionImeBar && _positionImeBar(); }catch{}
+      _imeBarPrevText = next;
+    }catch{}
+  }
+
+  function _positionImeBar(){
+    try{
+      if (!cmdfloat || !_imeBarActive) return;
+      const band = _computeOverlayBand();
+      // width = 1/4 window; left = 25% from window left
+      const winW = (window.innerWidth||0);
+      const w = Math.max(0, Math.floor(winW / 4));
+      cmdfloat.style.width = w + 'px';
+      cmdfloat.style.right = 'auto';
+      const baseL = (band && Number.isFinite(band.left)) ? (band.left|0) : 0;
+      const vw = (band && Number.isFinite(band.viewW)) ? (band.viewW|0) : (winW|0);
+      const left0 = baseL + Math.floor(vw * 0.25);
+      const maxL = baseL + Math.max(0, (vw - (w|0))|0);
+      const left = Math.max(baseL, Math.min(maxL, left0|0));
+      cmdfloat.style.left = left + 'px';
+
+      // One visual line above caret.
+      const h = cmdfloat.offsetHeight || 26;
+      let caretTopPx = (caretRow|0) * LINE_HEIGHT - (function(){ try{ return (editor && typeof editor.scrollTop==='number') ? +editor.scrollTop : 0; }catch{ return 0; } })();
+      try{
+        if (caretLayer && viewport && caretLayer.querySelector){
+          const caretEl = caretLayer.querySelector('.caret');
+          if (caretEl && caretEl.getBoundingClientRect){
+            const vr = viewport.getBoundingClientRect();
+            const cr = caretEl.getBoundingClientRect();
+            if (Number.isFinite(cr.top) && Number.isFinite(vr.top)) caretTopPx = (cr.top - vr.top);
+          }
+        }
+      }catch{}
+      try{
+        const wrapNow = (function(){ try{ return _wrapEnabled && _wrapEnabled(); }catch{ return false; } })();
+        const usesVisual = (function(){ try{ if (typeof _wrapUsesVisualScrollGrid === 'function') return !!_wrapUsesVisualScrollGrid(); }catch{} return false; })();
+        if (wrapNow && usesVisual && typeof _wrapVisualLine1ForRowCol === 'function'){
+          const st = (function(){ try{ return (editor && typeof editor.scrollTop==='number') ? +editor.scrollTop : 0; }catch{ return 0; } })();
+          const v1 = Math.max(1, (_wrapVisualLine1ForRowCol(caretRow|0, caretCol|0)|0));
+          caretTopPx = ((v1 - 1) * LINE_HEIGHT) - st;
+        }
+      }catch{}
+      // 1.75 visual lines above caret.
+      const lh = (typeof LINE_HEIGHT==='number' && LINE_HEIGHT>0) ? LINE_HEIGHT : 20;
+      let topPx = (caretTopPx|0) - Math.round(lh * 1.75);
+      // clamp
+      const minTop = 4;
+      const maxTop = Math.max(minTop, (band.viewH|0) - (h|0) - 4);
+      if (!Number.isFinite(topPx)) topPx = minTop;
+      if (topPx < minTop) topPx = minTop;
+      if (topPx > maxTop) topPx = maxTop;
+      cmdfloat.style.top = topPx + 'px';
+    }catch{}
+  }
+
+  function _imeBarOpen(reason){
+    try{
+      if (_imeBarActive) return;
+      if (!cmdfloat || !editor) return;
+      const imeEl = _ensureImeInputEl();
+      if (!imeEl) return;
+      _imeBarActive = true;
+      _imeBarComposing = false;
+      _imeBarPrevText = '';
+      _imeBarSnapshotTaken = false;
+      try{ _imeBarJustOpenedUntil = Date.now() + 260; }catch{}
+      try{ cmdfloat.dataset.kind = 'ime'; }catch{}
+      try{ const p=document.getElementById('cmdprefix'); if (p) p.textContent = ''; }catch{}
+      // Avoid a one-frame flash at (top=0,left=0) before we compute geometry.
+      try{ cmdfloat.style.visibility = 'hidden'; }catch{}
+      try{ cmdfloat.style.display = 'flex'; }catch{}
+      // IME bar must not show CMD history button.
+      try{ const b=document.getElementById('cmdHistBtn'); if (b) b.style.display='none'; }catch{}
+      // IME bar does not need native caret; disable it to avoid sticky underscore.
+      try{ _nativeCaretForceUntil = 0; _setNativeCaretMode && _setNativeCaretMode(false); }catch{}
+
+      // Anchor at current caret (sync native selection first).
+      try{ _syncNativeSelectionToCaret && _syncNativeSelectionToCaret(); }catch{}
+      try{ _imeBarAnchorOff = (editor && typeof editor.selectionStart==='number') ? (editor.selectionStart|0) : (_offsetFromRC(caretRow|0, caretCol|0)|0); }catch{ _imeBarAnchorOff = 0; }
+
+      // Prevent accidental edits in the textarea while the IME bar is active.
+      try{ _imeBarWasEditorReadOnly = !!editor.readOnly; }catch{ _imeBarWasEditorReadOnly = false; }
+      try{ editor.readOnly = true; }catch{}
+
+      // Switch visible input element: IME bar uses imeinput; CMD uses cmdinput.
+      try{ if (typeof cmdinput !== 'undefined' && cmdinput){ cmdinput.value = ''; cmdinput.style.display = 'none'; cmdinput.disabled = true; } }catch{}
+      try{ imeEl.value = ''; imeEl.style.display = ''; }catch{}
+      _positionImeBar();
+      try{ if (window && window.requestAnimationFrame) requestAnimationFrame(()=>{ try{ if (_imeBarActive) cmdfloat.style.visibility=''; }catch{} }); else { cmdfloat.style.visibility=''; } }catch{ try{ cmdfloat.style.visibility=''; }catch{} }
+      // Focus can be stolen by later mode/IME sync. Re-assert focus for a short window.
+      const _focusNow = ()=>{ try{ if (!_imeBarActive) return; try{ editor && (editor.readOnly = true); }catch{} try{ imeEl.focus({ preventScroll:true }); }catch{ try{ imeEl.focus(); }catch{} } try{ _positionImeBar(); }catch{} }catch{} };
+      try{ _focusNow(); }catch{}
+      try{ if (window && window.requestAnimationFrame) requestAnimationFrame(()=>{ try{ _focusNow(); }catch{} }); }catch{}
+      try{ setTimeout(()=>{ try{ _focusNow(); }catch{} }, 0); }catch{}
+      try{ setTimeout(()=>{ try{ _focusNow(); }catch{} }, 80); }catch{}
+      try{ if (_optDebugKeys) _debugPush({ t:Date.now(), type:'imebar-open', mode:_mode, why:String(reason||'') }); }catch{}
+      try{ _imeBarStartWatchdog && _imeBarStartWatchdog('open'); }catch{}
+    }catch{}
+  }
+
+  function _imeBarClose(reason){
+    try{
+      if (!_imeBarActive) return;
+      // Remove any remaining preedit from the document.
+      try{ if (String(_imeBarPrevText||'').length) _imeBarReplaceInsertedText('', 'close'); }catch{}
+      _imeBarActive = false;
+      _imeBarComposing = false;
+      _imeBarPrevText = '';
+      _imeBarSnapshotTaken = false;
+      try{ if (cmdfloat && cmdfloat.dataset) cmdfloat.dataset.kind = 'cmd'; }catch{}
+      // Hide only when not in CMD.
+      try{ if (cmdfloat && _mode !== 'CMD') cmdfloat.style.display = 'none'; }catch{}
+      try{ if (cmdfloat) cmdfloat.style.visibility = ''; }catch{}
+
+      // Restore visible input element.
+      try{ const imeEl = _imeBarInputEl(); if (imeEl && imeEl.id === 'imeinput'){ imeEl.value = ''; imeEl.style.display = 'none'; } }catch{}
+      try{ if (typeof cmdinput !== 'undefined' && cmdinput){ cmdinput.disabled = false; cmdinput.style.display = ''; } }catch{}
+
+      // Restore textarea editability.
+      try{ if (editor) editor.readOnly = !!_imeBarWasEditorReadOnly; }catch{}
+      try{ _imeBarWasEditorReadOnly = false; }catch{}
+
+      try{ _imeBarStopWatchdog && _imeBarStopWatchdog('close'); }catch{}
+
+      try{ if (_optDebugKeys) _debugPush({ t:Date.now(), type:'imebar-close', mode:_mode, why:String(reason||'') }); }catch{}
+    }catch{}
+  }
+
+  function _imeBarApplyCaretAndSync(reason, opt){
+    try{
+      // During IME bar, editor is readOnly and many motions update caretRow/caretCol only.
+      // Therefore, treat caretRow/caretCol as the source of truth and sync native selection from it.
+      const off = (_offsetFromRC(caretRow|0, caretCol|0)|0);
+      let caretOff = off|0;
+
+      // Optional: keep a selection (Shift+arrows in empty bar).
+      try{
+        if (opt && typeof opt.selectionStart === 'number' && typeof opt.selectionEnd === 'number'){
+          const a = (opt.selectionStart|0);
+          const b = (opt.selectionEnd|0);
+          const dir = String(opt.selectionDirection||'');
+          caretOff = (typeof opt.caretOff === 'number') ? (opt.caretOff|0) : (b|0);
+          try{ editor.setSelectionRange(a, b, dir||'none'); }catch{ try{ editor.selectionStart = a; editor.selectionEnd = b; }catch{} }
+        } else {
+          try{ editor.setSelectionRange(off|0, off|0); }catch{ try{ editor.selectionStart = off|0; editor.selectionEnd = off|0; }catch{} }
+        }
+      }catch{}
+
+      // Sync caret position from the actual caret offset (selection end).
+      try{ const rc = _rcFromOffset(caretOff|0); caretRow = rc.r|0; caretCol = rc.c|0; }catch{}
+      try{ _setCaret && _setCaret(caretRow|0, caretCol|0); }catch{}
+
+      // #1684: when the bar is empty (no active preedit), the next 1key should insert at the moved caret.
+      // So keep the insertion anchor synced to current caret/selection.
+      try{
+        if (_imeBarActive){
+          const el = (typeof _imeBarInputEl==='function') ? _imeBarInputEl() : null;
+          const emptyBar = (!String((el && el.value) || '')) && (!String(_imeBarPrevText||''));
+          const composing2 = !!_imeBarComposing || !!(window && window._imeComposing===true);
+          if (emptyBar && !composing2){
+            let ss = caretOff|0, se = caretOff|0;
+            try{ ss = editor.selectionStart|0; se = editor.selectionEnd|0; }catch{}
+            const a = Math.min(ss|0, se|0);
+            _imeBarAnchorOff = a|0;
+            _imeBarPrevText = '';
+          }
+        }
+      }catch{}
+
+      try{ _syncNativeSelectionToCaret && _syncNativeSelectionToCaret(); }catch{}
+      try{ ensureScrolloff && ensureScrolloff({ force:true }); }catch{ try{ ensureScrolloff && ensureScrolloff(); }catch{} }
+      try{ _repositionCaret && _repositionCaret({ force:true }); }catch{ try{ _repositionCaret && _repositionCaret(); }catch{} }
+      try{ updateGutter && updateGutter({ force:true }); }catch{ try{ updateGutter && updateGutter(); }catch{} }
+      try{ if (_imeBarActive) _positionImeBar && _positionImeBar(); }catch{}
+    }catch{}
+  }
+
+  function _imeBarBackspaceInDoc(){
+    try{
+      if (!editor) return;
+      if (!_imeBarSnapshotTaken){ _imeBarSnapshotTaken = true; try{ _pushUndoSnapshot && _pushUndoSnapshot('imebar'); }catch{} }
+      let start = 0, end = 0;
+      try{ start = editor.selectionStart|0; end = editor.selectionEnd|0; }catch{}
+      let s = String(editor.value||'');
+      start = Math.max(0, Math.min(s.length, start|0));
+      end = Math.max(0, Math.min(s.length, end|0));
+      if (start !== end){
+        const a = Math.min(start, end), b = Math.max(start, end);
+        editor.value = s.slice(0, a) + s.slice(b);
+        try{ editor.selectionStart = editor.selectionEnd = a; }catch{}
+        try{ const rc = _rcFromOffset(a|0); caretRow = rc.r|0; caretCol = rc.c|0; }catch{}
+      } else if (start > 0){
+        // delete previous code point (surrogate-aware)
+        let delStart = start - 1;
+        const prev = s[delStart];
+        if (prev && /[\uDC00-\uDFFF]/.test(prev) && delStart-1 >= 0){
+          const lead = s[delStart-1];
+          if (lead && /[\uD800-\uDBFF]/.test(lead)) delStart = delStart - 1;
+        }
+        editor.value = s.slice(0, delStart) + s.slice(start);
+        try{ editor.selectionStart = editor.selectionEnd = delStart; }catch{}
+        try{ const rc = _rcFromOffset(delStart|0); caretRow = rc.r|0; caretCol = rc.c|0; }catch{}
+      } else {
+        return;
+      }
+      try{ const out = String(editor.value||''); const b=currentBuffer && currentBuffer(); if (b) b.text = out; }catch{}
+      try{ _touchBufferModified && _touchBufferModified(); }catch{}
+      try{ _afterTextMutation && _afterTextMutation(); }catch{}
+      try{ _setCaret && _setCaret(caretRow|0, caretCol|0); }catch{}
+      try{ _syncNativeSelectionToCaret && _syncNativeSelectionToCaret(); }catch{}
+      try{ ensureScrolloff && ensureScrolloff({ force:true }); }catch{ try{ ensureScrolloff && ensureScrolloff(); }catch{} }
+      try{ _repositionCaret && _repositionCaret({ force:true }); }catch{ try{ _repositionCaret && _repositionCaret(); }catch{} }
+      try{ updateGutter && updateGutter({ force:true }); }catch{ try{ updateGutter && updateGutter(); }catch{} }
+      try{ _scheduleListCharsRender && _scheduleListCharsRender('imebar-backspace'); }catch{}
+      try{ if (_imeBarActive) _positionImeBar && _positionImeBar(); }catch{}
+    }catch{}
+  }
+
+  function _imeBarDeleteInDoc(){
+    try{
+      if (!editor) return;
+      if (!_imeBarSnapshotTaken){ _imeBarSnapshotTaken = true; try{ _pushUndoSnapshot && _pushUndoSnapshot('imebar'); }catch{} }
+      let start = 0, end = 0;
+      try{ start = editor.selectionStart|0; end = editor.selectionEnd|0; }catch{}
+      let s = String(editor.value||'');
+      start = Math.max(0, Math.min(s.length, start|0));
+      end = Math.max(0, Math.min(s.length, end|0));
+      if (start !== end){
+        const a = Math.min(start, end), b = Math.max(start, end);
+        editor.value = s.slice(0, a) + s.slice(b);
+        try{ editor.selectionStart = editor.selectionEnd = a; }catch{}
+        try{ const rc = _rcFromOffset(a|0); caretRow = rc.r|0; caretCol = rc.c|0; }catch{}
+      } else if (start < s.length){
+        // delete next code point (surrogate-aware)
+        let delEnd = start + 1;
+        const ch = s[start];
+        if (ch && /[\uD800-\uDBFF]/.test(ch) && (start+1) < s.length){
+          const trail = s[start+1];
+          if (trail && /[\uDC00-\uDFFF]/.test(trail)) delEnd = start + 2;
+        }
+        editor.value = s.slice(0, start) + s.slice(delEnd);
+        try{ editor.selectionStart = editor.selectionEnd = start; }catch{}
+        try{ const rc = _rcFromOffset(start|0); caretRow = rc.r|0; caretCol = rc.c|0; }catch{}
+      } else {
+        return;
+      }
+      try{ const out = String(editor.value||''); const b=currentBuffer && currentBuffer(); if (b) b.text = out; }catch{}
+      try{ _touchBufferModified && _touchBufferModified(); }catch{}
+      try{ _afterTextMutation && _afterTextMutation(); }catch{}
+      try{ _setCaret && _setCaret(caretRow|0, caretCol|0); }catch{}
+      try{ _syncNativeSelectionToCaret && _syncNativeSelectionToCaret(); }catch{}
+      try{ ensureScrolloff && ensureScrolloff({ force:true }); }catch{ try{ ensureScrolloff && ensureScrolloff(); }catch{} }
+      try{ _repositionCaret && _repositionCaret({ force:true }); }catch{ try{ _repositionCaret && _repositionCaret(); }catch{} }
+      try{ updateGutter && updateGutter({ force:true }); }catch{ try{ updateGutter && updateGutter(); }catch{} }
+      try{ _scheduleListCharsRender && _scheduleListCharsRender('imebar-del'); }catch{}
+      try{ if (_imeBarActive) _positionImeBar && _positionImeBar(); }catch{}
+    }catch{}
+  }
+
+  function _imeBarMoveHomeEnd(isEnd){
+    try{
+      const lines = _splitLines();
+      const line = String(lines[caretRow|0]||'');
+      if (isEnd){
+        caretCol = (line.length|0);
+      } else {
+        let minCol = 0;
+        try{ if (_mdHideSymbolsForRow && _mdHideSymbolsForRow(true)){ const p = _mdHeadingPrefixLen(line); if ((p|0) > 0) minCol = (p|0); } }catch{}
+        caretCol = Math.max(0, Math.min(line.length|0, minCol|0));
+      }
+      try{ _setCaret && _setCaret(caretRow|0, caretCol|0); }catch{}
+      _imeBarApplyCaretAndSync(isEnd ? 'end' : 'home');
+    }catch{}
+  }
+
+  function _forceImeOffNow(reason, e){
+    try{
+      // Strong guard: prevent immediate re-open races and force visuals to IME-OFF.
+      try{ _imeKeepOffUntil = Date.now() + 1800; }catch{}
+      try{ _imeVisualLockUntil = Date.now() + 900; }catch{}
+      // Clear stale IME composition/candidate flags (some environments get stuck).
+      try{ if (window){ window._imeComposing = false; window._imeCandidateUntil = 0; } }catch{}
+      try{ _imeBarComposing = false; _imeBarLastImeEvtAt = Date.now(); }catch{}
+      try{ _imeActive = false; _applyCaretGradient && _applyCaretGradient(); }catch{}
+      try{ _imePost && _imePost('off'); }catch{}
+      // Tear down IME bar.
+      try{ if (_imeBarActive){ _imeBarClose && _imeBarClose('force-ime-off:' + String(reason||'')); } }catch{}
+      // Ensure dedicated IME input is hidden and cmdinput is usable.
+      try{ const ie = (typeof _imeBarInputEl==='function') ? _imeBarInputEl() : null; if (ie && ie.id === 'imeinput'){ try{ ie.value = ''; }catch{} try{ ie.style.display = 'none'; }catch{} } }catch{}
+      try{ if (typeof cmdinput !== 'undefined' && cmdinput){ try{ cmdinput.disabled = false; }catch{} try{ if (cmdinput.style) cmdinput.style.display = ''; }catch{} } }catch{}
+      // Disable native caret mode (yellow underscore cases).
+      try{ _nativeCaretForceUntil = 0; _setNativeCaretMode && _setNativeCaretMode(false); }catch{}
+      try{ document && document.body && document.body.classList && document.body.classList.remove('use-native-caret'); }catch{}
+      try{ if (editor){ editor.style.caretColor = 'transparent'; editor.style.removeProperty('--nativeCaretColor'); } }catch{}
+      // Make editor writable again so keyboard input is accepted.
+      try{ if (editor) editor.readOnly = false; }catch{}
+      // Temporarily disable OS IME in textarea to make OFF immediate/reliable.
+      try{
+        if (editor){
+          editor.setAttribute('inputmode','none');
+          editor.style.imeMode = 'disabled';
+          setTimeout(()=>{ try{ editor.removeAttribute('inputmode'); editor.style.imeMode=''; }catch{} }, 900);
+        }
+      }catch{}
+      // Ensure focus returns to editor.
+      try{ if (editor && editor.blur) editor.blur(); }catch{}
+      try{ editor && editor.focus && editor.focus({ preventScroll:true }); }catch{ try{ editor && editor.focus && editor.focus(); }catch{} }
+      // Reposition caret overlays.
+      try{ ensureScrolloff && ensureScrolloff({ force:true }); }catch{ try{ ensureScrolloff && ensureScrolloff(); }catch{} }
+      try{ _repositionCaret && _repositionCaret({ force:true }); }catch{ try{ _repositionCaret && _repositionCaret(); }catch{} }
+      try{ updateGutter && updateGutter({ force:true }); }catch{ try{ updateGutter && updateGutter(); }catch{} }
+    }catch{}
+  }
+
+  function _syncImeBarVisibility(reason){
+    try{
+      const want = _imeBarShouldBeActive();
+      if (want){ _imeBarOpen('sync:' + String(reason||'')); }
+      else { _imeBarClose('sync:' + String(reason||'')); }
+      try{ if (_imeBarActive) _positionImeBar(); }catch{}
+    }catch{}
+  }
+
+  // Safety watchdog: if we ever end up in INSERT with editor.readOnly=true while the IME bar
+  // is not active, unlock the editor. This prevents a catastrophic dead-key state where
+  // neither cmdinput nor editor accepts input after rapid IME toggles.
+  function _imeBarSafetyTick(reason){
+    try{
+      if (!editor) return;
+      if (_mode !== 'INSERT') return;
+      if (_imeBarActive) return;
+      if (editor.readOnly === true){
+        try{ editor.readOnly = false; }catch{}
+        try{ editor.removeAttribute && editor.removeAttribute('inputmode'); }catch{}
+        try{ editor.style && (editor.style.imeMode = ''); }catch{}
+        try{ editor.focus && editor.focus({ preventScroll:true }); }catch{}
+      }
     }catch{}
   }
   // 即時IME同期: Nano API /ime を短周期ポーリングして視覚を即時反映
@@ -1156,7 +1728,12 @@ try{
             }catch{}
             const newActive = (st === 'on');
             // Always sync visual IME state (caret color). This is safe even in direct mode.
-            if (newActive !== _imeActive){ _imeActive = newActive; _applyCaretGradient(); }
+            if (newActive !== _imeActive){
+              _imeActive = newActive;
+              // #1684: IME ON should re-enable IME bar after user-hide.
+              try{ if (newActive && typeof _imeBarUserHidden !== 'undefined') _imeBarUserHidden = false; }catch{}
+              _applyCaretGradient();
+            }
 
             // If the host IME state flips OFF->ON while we are in NORMAL, treat it as a toggle intent
             // even when the Kana key produces no DOM key event.
@@ -1268,7 +1845,12 @@ try{
       }catch{}
 
       const newActive = (st === 'on');
-      if (newActive !== _imeActive){ _imeActive = newActive; try{ _applyCaretGradient(); }catch{} }
+      if (newActive !== _imeActive){
+        _imeActive = newActive;
+        // #1684: IME ON should re-enable IME bar after user-hide.
+        try{ if (newActive && typeof _imeBarUserHidden !== 'undefined') _imeBarUserHidden = false; }catch{}
+        try{ _applyCaretGradient(); }catch{}
+      }
 
       // If IME becomes ON in NORMAL shortly after a toggle request, enter INSERT.
       // Rationale: on some systems the host IME state flips *after* our first sync burst,
@@ -1366,6 +1948,47 @@ try{
       const onAny = (e)=>{
         try{
           if (!shouldHandle()) return;
+
+          // In INSERT (especially with IME bar), handle explicit Kana/Eisu immediately to avoid
+          // dead-key states where focus/composition gets stuck.
+          try{
+            const tIns = String((e && e.type) || '');
+            if (tIns === 'keydown' && _mode === 'INSERT' && !e.ctrlKey && !e.altKey && !e.metaKey){
+              if (typeof _isEisuKey === 'function' && _isEisuKey(e)){
+                // #1684: Eisu should NOT hide the IME bar (user can hide via Esc).
+                // Do a soft IME-OFF without closing the bar and without keep-off guard.
+                try{ _noteImeToggleRequested && _noteImeToggleRequested('capture-insert-eisu', e); }catch{}
+                try{ if (typeof _imeSetActiveSoft === 'function') _imeSetActiveSoft(false, 'capture-insert-eisu', e); else { _imeActive = false; _applyCaretGradient && _applyCaretGradient(); _imePost && _imePost('off'); } }catch{}
+                try{ if (_imeBarActive){ const el = (typeof _imeBarInputEl==='function') ? _imeBarInputEl() : null; el && el.focus && el.focus({ preventScroll:true }); } }catch{}
+                return;
+              }
+              if (typeof _isKanaKey === 'function' && _isKanaKey(e)){
+                // Kana: optimistic IME ON and ensure IME bar is visible.
+                try{ _noteImeToggleRequested && _noteImeToggleRequested('capture-insert-kana', e); }catch{}
+                try{ _imeKeepOffUntil = 0; }catch{}
+                try{ if (typeof _imeBarUserHidden !== 'undefined') _imeBarUserHidden = false; }catch{}
+                try{ _imeVisualLockUntil = 0; _imeActive = true; _applyCaretGradient && _applyCaretGradient(); }catch{}
+                try{ _imeSyncFromHostBurst && _imeSyncFromHostBurst('imeToggle:insertKana'); }catch{}
+                try{ _syncImeBarVisibility && _syncImeBarVisibility('insertKana'); }catch{}
+                try{ _imeBarJustOpenedUntil = Date.now() + 260; }catch{}
+                // #1684 regression fix: do not focus cmdinput (drops first key in non-markdown).
+                // Focus IME bar input only when it is actually active; otherwise keep focus on editor.
+                try{
+                  setTimeout(()=>{
+                    try{
+                      if (_imeBarActive){
+                        const el = (typeof _imeBarInputEl==='function') ? _imeBarInputEl() : null;
+                        if (el && document.activeElement !== el){ try{ el.focus({ preventScroll:true }); }catch{ try{ el.focus(); }catch{} } }
+                      } else {
+                        editor && editor.focus && editor.focus({ preventScroll:true });
+                      }
+                    }catch{}
+                  }, 0);
+                }catch{}
+                return;
+              }
+            }
+          }catch{}
 
           // Debug: record capture-stage IME-ish keys (even if we can't classify them as toggle).
           try{
@@ -1500,6 +2123,14 @@ try{
     if (editor){
       editor.addEventListener('compositionstart', ()=>{
         try{ window._imeComposing = true; }catch{}
+        // If composition starts on the editor while IME bar is active, we are in a broken focus/IME state.
+        // Force-recover to avoid sticky native caret and dead keys.
+        try{
+          if (cmdfloat && cmdfloat.dataset && cmdfloat.dataset.kind === 'ime'){
+            _forceImeOffNow && _forceImeOffNow('editor-compositionstart-while-imebar');
+            return;
+          }
+        }catch{}
         try{ _mdImeUpdateRange(); }catch{}
         try{ _imeDeferredTickBumped = false; _imeDeferredModifyPending = false; }catch{}
         try{
@@ -1511,11 +2142,21 @@ try{
         _imeActive = true;
         try{ _imeVisualLockUntil = 0; }catch{}
         try{ _applyCaretGradient(); }catch{}
+        // Predictive candidate UI can appear immediately on the first key.
+        // Mark a short candidate window and nudge caret visibility (1-line scrolloff) in md-rich.
+        try{
+          if (_mdRichActive && _mdRichActive()){
+            if (typeof window._imeCandidateUntil !== 'number') window._imeCandidateUntil = 0;
+            window._imeCandidateUntil = Date.now() + 1200;
+            _scheduleImeCandidateEnsure && _scheduleImeCandidateEnsure('compositionstart');
+          }
+        }catch{}
         // markdown-rich: show native caret during composition so IME candidate popup anchors
         // to the visible caret (overlay caret can be covered/misaligned).
         try{
           if (_mdRichActive && _mdRichActive()){
-            _nativeCaretForceUntil = Date.now() + 60*1000;
+            // Keep this window short; compositionupdate will refresh it.
+            _nativeCaretForceUntil = Date.now() + 2500;
             _setNativeCaretMode && _setNativeCaretMode(true);
           }
         }catch{}
@@ -1538,6 +2179,21 @@ try{
       editor.addEventListener('compositionupdate', ()=>{
         try{
           if (!_mdRichEnabled()) return;
+          // If IME bar is active, composition should not be happening on editor.
+          try{ if (cmdfloat && cmdfloat.dataset && cmdfloat.dataset.kind === 'ime') return; }catch{}
+          // Candidate UI is often updated on every keystroke; keep a short window alive.
+          try{
+            if (typeof window._imeCandidateUntil !== 'number') window._imeCandidateUntil = 0;
+            window._imeCandidateUntil = Date.now() + 1200;
+            _scheduleImeCandidateEnsure && _scheduleImeCandidateEnsure('compositionupdate');
+          }catch{}
+          // Refresh native-caret forcing while composing in md-rich, but never let it linger.
+          try{
+            if (_mdRichActive && _mdRichActive() && (window && window._imeComposing===true)){
+              _nativeCaretForceUntil = Date.now() + 2500;
+              _setNativeCaretMode && _setNativeCaretMode(true);
+            }
+          }catch{}
           try{ _mdImeUpdateRange(); }catch{}
           if (_mdImeUpdatePending) return;
           _mdImeUpdatePending = true;
@@ -2866,6 +3522,109 @@ try{
         }catch{}
       }, true);
       window.addEventListener('blur', ()=>{ try{ _shiftHeld = false; }catch{} }, true);
+    }catch{}
+  })();
+
+  // IME bar global capture: keep keys from leaking to the browser when IME bar is active,
+  // and route simple navigation keys to the document when the bar is empty.
+  (function(){
+    try{
+      if (window.__sixImeBarCaptureOnce) return;
+      window.__sixImeBarCaptureOnce = true;
+      const onCap = (e)=>{
+        try{
+          if (!_imeBarActive) return;
+          const modalOpen = !!((_modalOverlay && _modalOverlay.style && _modalOverlay.style.display !== 'none') || document.getElementById('grepDialog') || (window && window._grepDialogOpen===true));
+          if (modalOpen) return;
+          const k = String((e && e.key) || '');
+          const c = String((e && e.code) || '');
+          const kc = (typeof e.keyCode==='number') ? (e.keyCode|0) : 0;
+          // Block function keys from reaching the browser while IME bar is active.
+          if (/^F[1-8]$/.test(k)){
+            try{ e.preventDefault(); e.stopImmediatePropagation(); e.stopPropagation(); }catch{}
+            try{ const el = (typeof _imeBarInputEl==='function') ? _imeBarInputEl() : null; el && el.focus && el.focus({ preventScroll:true }); }catch{}
+            return;
+          }
+          // Empty-bar navigation routing (even if cmdinput handler doesn't see reliable key values).
+          const barEl = (typeof _imeBarInputEl==='function') ? _imeBarInputEl() : null;
+          const emptyBar = !!barEl && !String(barEl.value||'');
+          if (emptyBar){
+            const isLeft = (k==='ArrowLeft' || k==='Left' || c==='ArrowLeft' || kc===37);
+            const isRight = (k==='ArrowRight' || k==='Right' || c==='ArrowRight' || kc===39);
+            const isHome = (k==='Home' || c==='Home' || kc===36);
+            const isEnd = (k==='End' || c==='End' || kc===35);
+            const isUp = (k==='ArrowUp' || k==='Up' || c==='ArrowUp' || kc===38);
+            const isDown = (k==='ArrowDown' || k==='Down' || c==='ArrowDown' || kc===40);
+            const isBS = (k==='Backspace' || kc===8);
+            const isDel = (k==='Delete' || k==='Del' || kc===46);
+            if (isLeft || isRight){
+              try{ _moveCaretCols && _moveCaretCols(isLeft ? -1 : 1); }catch{}
+              try{ _imeBarApplyCaretAndSync && _imeBarApplyCaretAndSync('cap-lr'); }catch{}
+              try{ e.preventDefault(); e.stopImmediatePropagation(); e.stopPropagation(); }catch{}
+              return;
+            }
+            if (isHome || isEnd){
+              try{ _imeBarMoveHomeEnd && _imeBarMoveHomeEnd(!!isEnd); }catch{}
+              try{ e.preventDefault(); e.stopImmediatePropagation(); e.stopPropagation(); }catch{}
+              return;
+            }
+            if (isUp || isDown){
+              try{
+                const d = isUp ? -1 : 1;
+                try{
+                  if (_mdRichActive && _mdRichActive()){
+                    _moveCaretVisualLines && _moveCaretVisualLines(d|0);
+                  } else {
+                    _moveCaretLines && _moveCaretLines(d|0);
+                  }
+                }catch{}
+                try{ _imeBarApplyCaretAndSync && _imeBarApplyCaretAndSync('cap-ud'); }catch{}
+              }catch{}
+              try{ e.preventDefault(); e.stopImmediatePropagation(); e.stopPropagation(); }catch{}
+              return;
+            }
+            if (isBS){
+              try{ _imeBarBackspaceInDoc && _imeBarBackspaceInDoc(); }catch{}
+              try{ e.preventDefault(); e.stopImmediatePropagation(); e.stopPropagation(); }catch{}
+              return;
+            }
+            if (isDel){
+              try{ _imeBarDeleteInDoc && _imeBarDeleteInDoc(); }catch{}
+              try{ e.preventDefault(); e.stopImmediatePropagation(); e.stopPropagation(); }catch{}
+              return;
+            }
+          }
+          // Keep focus on imeinput to avoid dead keys.
+          try{ if (barEl && document.activeElement !== barEl){ barEl && barEl.focus && barEl.focus({ preventScroll:true }); } }catch{}
+        }catch{}
+      };
+      try{ window.addEventListener('keydown', onCap, true); }catch{}
+      try{ document.addEventListener('keydown', onCap, true); }catch{}
+    }catch{}
+  })();
+
+  // Native-caret (yellow underline) fallback: if native caret is active, prevent function keys
+  // from reaching the browser. This targets the broken state reports where F-keys leak when
+  // native caret gets stuck.
+  (function(){
+    try{
+      if (window.__sixNativeCaretFKeyBlockOnce) return;
+      window.__sixNativeCaretFKeyBlockOnce = true;
+      const onCap = (e)=>{
+        try{
+          if (!e) return;
+          const k = String(e.key||'');
+          if (!/^F[1-8]$/.test(k)) return;
+          // Only intervene in md-rich INSERT when native caret class is on.
+          try{ if (_mode !== 'INSERT') return; }catch{}
+          try{ if (!(_mdRichActive && _mdRichActive())) return; }catch{}
+          const on = (document && document.body && document.body.classList) ? document.body.classList.contains('use-native-caret') : false;
+          if (!on) return;
+          try{ e.preventDefault(); e.stopImmediatePropagation(); e.stopPropagation(); }catch{}
+        }catch{}
+      };
+      try{ window.addEventListener('keydown', onCap, true); }catch{}
+      try{ document.addEventListener('keydown', onCap, true); }catch{}
     }catch{}
   })();
 
@@ -6419,7 +7178,11 @@ try{
     try{
       if (!cmdfloat) return;
       const existing = document.getElementById('cmdHistBtn');
-      if (existing){ _cmdHistPopupBtn = existing; return; }
+      if (existing){
+        _cmdHistPopupBtn = existing;
+        try{ existing.style.display = ''; }catch{}
+        return;
+      }
       const btn = document.createElement('button');
       btn.id = 'cmdHistBtn';
       btn.type = 'button';
@@ -15922,6 +16685,10 @@ try{
     }
     // Begin an INSERT compound edit by pushing a snapshot before edits start
     if (m==='INSERT'){
+      // #1684: entering INSERT (e.g. NORMAL->INSERT) should show IME bar as usual.
+      // Clear user-hide and selection anchor.
+      try{ if (typeof _imeBarUserHidden !== 'undefined') _imeBarUserHidden = false; }catch{}
+      try{ if (typeof _imeBarSelAnchorOff !== 'undefined') _imeBarSelAnchorOff = null; }catch{}
       // #1023: Default INSERT start is IME-OFF.
       // BUT: when entering INSERT due to IME toggle intent (かな/英数/host off->on), bypass this
       // so the caret immediately reflects IME ON and the first IME key isn't transient.
@@ -15948,7 +16715,16 @@ try{
       // Default to overlay caret; native caret may be enabled dynamically during composition.
       try{ _nativeCaretForceUntil = 0; _refreshCaretMode(); }catch{}
       // ユーザー編集を許可（INSERT のみ）
-      try{ if (editor) editor.readOnly = false; }catch{}
+      try{
+        if (editor){
+          const wantImeBarNow = (function(){
+            try{ if (typeof _imeBarShouldBeActive === 'function') return !!(_imeBarActive || _imeBarShouldBeActive()); }catch{}
+            try{ return !!(_imeBarActive || ((_mdRichActive && _mdRichActive()) && (_mode==='INSERT'))); }catch{}
+            return !!_imeBarActive;
+          })();
+          editor.readOnly = !!wantImeBarNow ? true : false;
+        }
+      }catch{}
       // Keep text color consistent in INSERT (#1481)
       try{ if (editor) editor.style.color = 'var(--editorTextColor, #e6e6e6)'; }catch{}
       // If we previously hinted IME off by focus juggling, restore focus cleanly once here
@@ -15981,7 +16757,8 @@ try{
           try{ editor.scrollLeft = slHold; }catch{}
         }
       }catch{ try{ _syncNativeSelectionToCaret(); }catch{} }
-      try{ if (cmdfloat) cmdfloat.style.display='none'; }catch{}
+      try{ if (cmdfloat && !_imeBarActive) cmdfloat.style.display='none'; }catch{}
+      try{ _syncImeBarVisibility && _syncImeBarVisibility('setMode-INSERT'); }catch{}
   // Caret color remains baseline (IME visualization removed)
     } else {
       // NORMAL/VISUAL/CMD
@@ -16015,17 +16792,24 @@ try{
       try{ _nativeCaretForceUntil = 0; _setNativeCaretMode(false); }catch{}
       // OS IME も確実に閉じる（Esc等でINSERT離脱時）
       try{ if (_prevMode==='INSERT' && (m==='NORMAL' || m==='VISUAL')){ _imePost('off'); } }catch{}
+      try{ _syncImeBarVisibility && _syncImeBarVisibility('setMode-nonINSERT'); }catch{}
     }
     // Show/hide floating command bar for CMD mode
     try{
       if (m==='CMD'){
+        try{ if (_imeBarActive) _imeBarClose && _imeBarClose('enter-CMD'); }catch{}
         if (cmdfloat){
           cmdfloat.style.display='flex';
           try{ _cmdHistPopupEnsureButton && _cmdHistPopupEnsureButton(); }catch{}
           _positionCmdFloat();
         }
       }
-      else { if (cmdfloat){ cmdfloat.style.display='none'; } }
+      else {
+        if (cmdfloat){
+          if (_imeBarActive){ cmdfloat.style.display='flex'; try{ _positionImeBar && _positionImeBar(); }catch{} }
+          else { cmdfloat.style.display='none'; }
+        }
+      }
     }catch{}
   }
 
@@ -16133,6 +16917,7 @@ try{
       if (!cmdfloat || _mode!=='CMD') return;
       const band = _computeOverlayBand();
       // Apply width band to cmdfloat (left + right margin incl. scrollbar)
+      try{ cmdfloat.style.width = ''; }catch{}
       cmdfloat.style.left = (band.left) + 'px';
       cmdfloat.style.right = (Math.max(0, (window.innerWidth||0) - band.rightLimit)) + 'px';
       // Determine vertical placement
@@ -16225,8 +17010,8 @@ try{
       try{ if (typeof _searchHistPopupVisible==='function' && _searchHistPopupVisible()) _positionSearchHistPopup && _positionSearchHistPopup(); }catch{}
     }catch{}
   }
-  try{ editor.addEventListener('scroll', ()=>{ try{ if (_mode==='CMD') _positionCmdFloat(); }catch{} }); }catch{}
-  try{ window.addEventListener('resize', ()=>{ try{ if (_mode==='CMD') _positionCmdFloat(); _positionPaletteUI(); }catch{} }); }catch{}
+  try{ editor.addEventListener('scroll', ()=>{ try{ if (_mode==='CMD') _positionCmdFloat(); if (_imeBarActive) _positionImeBar && _positionImeBar(); }catch{} }); }catch{}
+  try{ window.addEventListener('resize', ()=>{ try{ if (_mode==='CMD') _positionCmdFloat(); if (_imeBarActive) _positionImeBar && _positionImeBar(); _positionPaletteUI(); }catch{} }); }catch{}
 
   // toast
   const _toastEl = document.getElementById('toast');
@@ -17510,6 +18295,13 @@ try{
   // タブ切替なしでアプリが不可視→可視になった場合も同様に確認
   document.addEventListener('visibilitychange', ()=>{
     try{
+      if (document.visibilityState !== 'visible'){
+        // If the page is hidden while IME bar is active, always tear it down to avoid
+        // returning in a dead-key state with editor.readOnly stuck.
+        try{ if (_imeBarActive){ _imeBarClose && _imeBarClose('visibility-hidden'); } }catch{}
+        try{ if (editor) editor.readOnly = false; }catch{}
+        return;
+      }
       if (document.visibilityState === 'visible'){
         const idx = (typeof currentIdx==='number') ? currentIdx : -1;
         const b = (idx>=0 && idx<buffers.length) ? buffers[idx] : null;
@@ -17518,6 +18310,8 @@ try{
         }
         // Long-idle recovery: reattach IME/keyboard by blurring+refocusing the editor
         try{ if (editor){ editor.blur(); editor.focus({ preventScroll:true }); } }catch{}
+        // Safety: if IME bar isn't active, ensure editor isn't left readOnly.
+        try{ if (editor && !_imeBarActive && _mode === 'INSERT') editor.readOnly = false; }catch{}
         // md-rich EOF padding can drift across visibility changes; resync on return.
         try{ _recoverMdEofOnActivate('visible'); }catch{}
         // 端末/環境により発火順が前後する場合のフォローとして遅延再試行
@@ -17529,6 +18323,7 @@ try{
               _maybeCheckExternalChangeOnActivate(idx2);
             }
             try{ if (editor){ editor.blur(); editor.focus({ preventScroll:true }); } }catch{}
+            try{ if (editor && !_imeBarActive && _mode === 'INSERT') editor.readOnly = false; }catch{}
             try{ _recoverMdEofOnActivate('visible+220'); }catch{}
           }catch{}
         }, 220);
@@ -17958,6 +18753,15 @@ try{
             // markdown-rich: even during composition, we must keep overlay caret aligned,
             // otherwise the very first preedit glyph can appear shifted.
             try{ if (_mdRichActive && _mdRichActive()) _scheduleImeCompCaretSync && _scheduleImeCompCaretSync('beforeinput-' + itIme); }catch{}
+            // Predictive candidate popup can show without explicit candidate-nav keys.
+            // Keep a short window and enforce tiny scrolloff to reduce caret overlap.
+            try{
+              if (_mdRichActive && _mdRichActive()){
+                if (typeof window._imeCandidateUntil !== 'number') window._imeCandidateUntil = 0;
+                window._imeCandidateUntil = Date.now() + 1200;
+                _scheduleImeCandidateEnsure && _scheduleImeCandidateEnsure('beforeinput-' + itIme);
+              }
+            }catch{}
             try{ if (_optDebugKeys) _debugPush({ t:Date.now(), type:'beforeinput-ime', mode:_mode, inputType:itIme, isComp:true }); }catch{}
             return;
           }
@@ -21753,6 +22557,23 @@ try{
               if (ic){ if (sc && /[A-Z]/.test(pat)){ effI=false; } else { effI=true; } }
             }catch{}
           }
+
+          // While actually composing, some keys indicate candidate navigation/selection.
+          // In markdown-rich, gently enforce a 1-line scrolloff so the candidate popup is less
+          // likely to cover the caret, without large viewport jumps.
+          try{
+            const composing = !!(window && window._imeComposing===true);
+            if (composing && _mdRichActive && _mdRichActive()){
+              const k = String((e && e.key) || '');
+              const candKey = (k===' ' || k==='Spacebar' || k==='ArrowUp' || k==='ArrowDown' || k==='ArrowLeft' || k==='ArrowRight' ||
+                               k==='Home' || k==='End' || k==='PageUp' || k==='PageDown');
+              if (candKey){
+                if (typeof window._imeCandidateUntil !== 'number') window._imeCandidateUntil = 0;
+                window._imeCandidateUntil = Date.now() + 1200;
+                _scheduleImeCandidateEnsure && _scheduleImeCandidateEnsure('keydown:' + k);
+              }
+            }
+          }catch{}
           let res = _searchFindNext(pat, (effI?'i':''), dir, fromAdj, true);
           // If searching backward and the result is the same occurrence that currently contains the caret,
           // step once more to the previous match so we actually move to the prior candidate (#698).
@@ -23243,6 +24064,49 @@ try{
       try{
       const _globalKeyRouter = (e)=>{
         try{
+          try{ if (typeof _imeBarSafetyTick === 'function') _imeBarSafetyTick('globalKeyRouter'); }catch{}
+
+          // If IME bar should be active and we just opened it, route the first printable key
+          // to cmdinput so it isn't dropped due to focus switching/readonly.
+          try{
+            const now0 = Date.now();
+            const wantImeBar = (typeof _imeBarShouldBeActive === 'function') ? !!_imeBarShouldBeActive() : false;
+            const justOpened = (now0 < (+_imeBarJustOpenedUntil || 0));
+            const imeEl = _imeBarInputEl();
+            if (wantImeBar && justOpened && imeEl && e && !e.ctrlKey && !e.altKey && !e.metaKey){
+              const k0 = String(e.key||'');
+              const c0 = String(e.code||'');
+              const kc0 = (typeof e.keyCode==='number') ? (e.keyCode|0) : 0;
+              const wh0 = (typeof e.which==='number') ? (e.which|0) : 0;
+              const isProc229 = (k0 === 'Process' && ((kc0|0)===229 || (wh0|0)===229));
+              const printable = (k0 && k0.length === 1);
+              const space = (k0 === ' ' || c0 === 'Space');
+              if (!isProc229 && (printable || space)){
+                const ae0 = document.activeElement;
+                if (ae0 !== imeEl){
+                  try{ imeEl.focus({ preventScroll:true }); }catch{ try{ imeEl.focus(); }catch{} }
+                }
+                // Dispatch a synthetic keydown to cmdinput and suppress the original.
+                const evInit = {
+                  key: k0,
+                  code: c0,
+                  ctrlKey: !!e.ctrlKey,
+                  altKey: !!e.altKey,
+                  shiftKey: !!e.shiftKey,
+                  metaKey: !!e.metaKey,
+                  repeat: !!e.repeat,
+                  location: (e.location||0),
+                  bubbles: true,
+                  cancelable: true,
+                  composed: true
+                };
+                try{ imeEl.dispatchEvent(new KeyboardEvent('keydown', evInit)); }catch{}
+                try{ e.preventDefault(); e.stopImmediatePropagation(); e.stopPropagation(); }catch{}
+                try{ _imeBarJustOpenedUntil = 0; }catch{}
+                return;
+              }
+            }
+          }catch{}
           // IME composition (editor focused): do not run global routing logic.
           // This reduces per-key overhead and avoids stalling composition rendering (SPACE conversion etc.).
           try{
@@ -23348,19 +24212,57 @@ try{
               const ae = document.activeElement;
               if (cmdinput && ae === cmdinput) return;
 
+              // If IME bar is active and Eisu is pressed, force IME OFF immediately.
+              try{
+                if (_imeBarActive && typeof _isEisuKey === 'function' && _isEisuKey(e)){
+                  // #1684: Eisu should not hide/close the IME bar.
+                  // Soft IME-OFF only; let OS toggle proceed.
+                  try{ _noteImeToggleRequested && _noteImeToggleRequested('emergency-eisu', e); }catch{}
+                  try{ if (typeof _imeSetActiveSoft === 'function') _imeSetActiveSoft(false, 'emergency-eisu', e); else { _imeActive = false; _applyCaretGradient && _applyCaretGradient(); _imePost && _imePost('off'); } }catch{}
+                  try{ const el = (typeof _imeBarInputEl==='function') ? _imeBarInputEl() : null; el && el.focus && el.focus({ preventScroll:true }); }catch{}
+                  return;
+                }
+              }catch{}
+
               const esc = (typeof _isEsc === 'function') ? _isEsc(e) : (e && e.key === 'Escape');
               if (!esc) return;
 
               // While IME composition/candidate is active, Esc should be handled by IME.
+              // But if composition is stale (rapid Kana/Eisu toggle glitches), allow Esc to recover.
               try{
                 const now = Date.now();
                 const candWin = (typeof window._imeCandidateUntil==='number') ? (now < window._imeCandidateUntil) : false;
-                if (window && window._imeComposing===true) return;
-                if (e && e.isComposing===true) return;
+                let composing2 = !!(window && window._imeComposing===true) || !!(e && e.isComposing===true) || !!_imeBarComposing;
+                try{
+                  const stale = (now - (+_imeBarLastImeEvtAt || 0)) > 450;
+                  try{
+                    const barEl = (typeof _imeBarInputEl==='function') ? _imeBarInputEl() : null;
+                    if (stale && _imeBarActive && barEl && !String(barEl.value||'') && !String(_imeBarPrevText||'')) composing2 = false;
+                  }catch{}
+                }catch{}
+                if (composing2) return;
                 if (candWin) return;
               }catch{}
 
               try{ e.preventDefault(); e.stopImmediatePropagation(); e.stopPropagation(); }catch{}
+
+              // If IME bar is active but focus routing is broken, Esc should still recover.
+              try{
+                if (_imeBarActive){
+                  const barEl = (typeof _imeBarInputEl==='function') ? _imeBarInputEl() : null;
+                  const vNow = (barEl ? String(barEl.value||'') : '');
+                  const composing2 = !!(e && (e.isComposing===true)) || !!_imeBarComposing || !!(window && window._imeComposing===true);
+                  if (!composing2){
+                    // #1684: Esc while IME bar is visible should hide the bar + IME OFF but keep INSERT.
+                    try{ if (barEl) barEl.value = ''; }catch{}
+                    try{ _imeBarReplaceInsertedText && _imeBarReplaceInsertedText('', 'emergency-esc-clear'); }catch{}
+                    try{ _imeBarPrevText = ''; }catch{}
+                    try{ if (typeof _imeBarHideByUser === 'function') _imeBarHideByUser('emergency-esc', e); }catch{}
+                    return;
+                  }
+                }
+              }catch{}
+
               try{ editor && editor.focus && editor.focus(); }catch{}
 
               // If in CMD, close it like Esc.
@@ -23403,6 +24305,8 @@ try{
       // If user clicks into the cmdinput directly (e.g., while in INSERT/VISUAL), treat it as entering CMD
       cmdinput.addEventListener('focus', ()=>{
         try{
+          // IME bar uses cmdinput without entering CMD.
+          if (_imeBarActive) return;
           if (_mode !== 'CMD'){
             _preCmdMode = _mode; // remember where we came from
             // If coming from VISUAL via click, capture selection snapshot the same as ':'
@@ -23417,7 +24321,436 @@ try{
           }
         }catch{}
       });
+
+      // --- IME bar handlers (markdown-rich + IME ON, dedicated imeinput) ---
+      try{
+        const imeEl = (typeof _ensureImeInputEl === 'function') ? _ensureImeInputEl() : null;
+        if (imeEl && !imeEl.__sixImeBarBound){
+          imeEl.__sixImeBarBound = true;
+
+          imeEl.addEventListener('compositionstart', (e)=>{
+            try{
+              if (!_imeBarActive) return;
+              _imeBarComposing = true;
+              try{ _imeBarLastImeEvtAt = Date.now(); }catch{}
+              // Anchor at current caret each composition session.
+              try{ _syncNativeSelectionToCaret && _syncNativeSelectionToCaret(); }catch{}
+              try{ _imeBarAnchorOff = (editor && typeof editor.selectionStart==='number') ? (editor.selectionStart|0) : (_offsetFromRC(caretRow|0, caretCol|0)|0); }catch{ _imeBarAnchorOff = 0; }
+              try{ _positionImeBar && _positionImeBar(); }catch{}
+              // Apply immediately (some IMEs don't emit compositionupdate early).
+              try{ _imeBarReplaceInsertedText(String(imeEl.value||''), 'compstart'); }catch{}
+            }catch{}
+          });
+          imeEl.addEventListener('compositionupdate', (e)=>{
+            try{
+              if (!_imeBarActive) return;
+              _imeBarComposing = true;
+              try{ _imeBarLastImeEvtAt = Date.now(); }catch{}
+              _imeBarReplaceInsertedText(String(imeEl.value||''), 'compupdate');
+              try{ _positionImeBar && _positionImeBar(); }catch{}
+            }catch{}
+          });
+          imeEl.addEventListener('compositionend', (e)=>{
+            try{
+              if (!_imeBarActive) return;
+              _imeBarComposing = false;
+              try{ _imeBarLastImeEvtAt = Date.now(); }catch{}
+              // Ensure final value is applied, then clear for the next segment.
+              try{ _imeBarReplaceInsertedText(String(imeEl.value||''), 'compend'); }catch{}
+              try{ imeEl.value = ''; }catch{}
+              try{ _imeBarPrevText = ''; _imeBarAnchorOff = (editor && typeof editor.selectionStart==='number') ? (editor.selectionStart|0) : ((_imeBarAnchorOff|0) + 0); }catch{}
+            }catch{}
+          });
+          imeEl.addEventListener('keydown', (e)=>{
+            try{
+              if (!_imeBarActive) return;
+              const k = String((e && e.key) || '');
+              const esc = (typeof _isEsc === 'function') ? _isEsc(e) : (k === 'Escape' || k === 'Esc');
+              let composing = !!(e && (e.isComposing===true)) || !!_imeBarComposing || !!(window && window._imeComposing===true);
+              // Some environments get stuck in isComposing=true after rapid Kana/Eisu toggles.
+              // If no IME-bar IME event has occurred recently and the bar is empty, treat as not composing.
+              try{
+                const now0 = Date.now();
+                const stale = (now0 - (+_imeBarLastImeEvtAt || 0)) > 450;
+                if (stale && !String(imeEl.value||'') && !String(_imeBarPrevText||'')) composing = false;
+              }catch{}
+
+              // When the bar is open but empty, navigation/edit keys should affect the document.
+              try{
+                const kc = (e && (e.keyCode|0)) || 0;
+                const c = String((e && e.code) || '');
+                const kL = (k === 'ArrowLeft' || k === 'Left' || c === 'ArrowLeft' || kc === 37);
+                const kR = (k === 'ArrowRight' || k === 'Right' || c === 'ArrowRight' || kc === 39);
+                const kU = (k === 'ArrowUp' || k === 'Up' || c === 'ArrowUp' || kc === 38);
+                const kD = (k === 'ArrowDown' || k === 'Down' || c === 'ArrowDown' || kc === 40);
+                const kH = (k === 'Home' || c === 'Home' || kc === 36);
+                const kE = (k === 'End' || c === 'End' || kc === 35);
+                const kB = (k === 'Backspace' || kc === 8);
+                const kX = (k === 'Delete' || k === 'Del' || kc === 46);
+                const emptyBar = (!String(imeEl.value||''));
+                if (emptyBar){
+                  // Shift+nav: keep selection in document while IME bar is empty.
+                  const selecting = !!(e && e.shiftKey);
+                  if (kL || kR){
+                    try{
+                      let s=0, t=0; let dir='none';
+                      try{ s=editor.selectionStart|0; t=editor.selectionEnd|0; dir=String(editor.selectionDirection||'none'); }catch{}
+                      if (selecting){
+                        let caretOff0 = (_offsetFromRC(caretRow|0, caretCol|0)|0);
+                        let anchor0 = caretOff0;
+                        if ((s|0) !== (t|0)){
+                          const a = Math.min(s|0, t|0), b = Math.max(s|0, t|0);
+                          if (dir === 'backward'){ caretOff0 = a|0; anchor0 = b|0; }
+                          else { caretOff0 = b|0; anchor0 = a|0; }
+                        }
+                        try{ if (_imeBarSelAnchorOff === null || typeof _imeBarSelAnchorOff !== 'number') _imeBarSelAnchorOff = anchor0|0; }catch{}
+                        try{ const rc0 = _rcFromOffset(caretOff0|0); caretRow = rc0.r|0; caretCol = rc0.c|0; _setCaret && _setCaret(caretRow|0, caretCol|0); }catch{}
+                        try{ _moveCaretCols && _moveCaretCols(kL ? -1 : 1); }catch{}
+                        const caretOff1 = (_offsetFromRC(caretRow|0, caretCol|0)|0);
+                        const anch = (typeof _imeBarSelAnchorOff==='number') ? (_imeBarSelAnchorOff|0) : (anchor0|0);
+                        const a1 = Math.min(anch|0, caretOff1|0);
+                        const b1 = Math.max(anch|0, caretOff1|0);
+                        const d1 = (caretOff1 < anch) ? 'backward' : 'forward';
+                        try{ _imeBarApplyCaretAndSync && _imeBarApplyCaretAndSync('arrow-sel', { selectionStart:a1|0, selectionEnd:b1|0, selectionDirection:d1, caretOff:caretOff1|0 }); }catch{}
+                      } else {
+                        try{ _imeBarSelAnchorOff = null; }catch{}
+                        if (s !== t){
+                          const off = (kL) ? Math.min(s,t) : Math.max(s,t);
+                          try{ const rc = _rcFromOffset(off|0); caretRow = rc.r|0; caretCol = rc.c|0; }catch{}
+                          try{ _setCaret && _setCaret(caretRow|0, caretCol|0); }catch{}
+                          try{ _imeBarApplyCaretAndSync && _imeBarApplyCaretAndSync('arrow-collapse'); }catch{}
+                        } else {
+                          try{ _moveCaretCols && _moveCaretCols(kL ? -1 : 1); }catch{}
+                          try{ _imeBarApplyCaretAndSync && _imeBarApplyCaretAndSync('arrow'); }catch{}
+                        }
+                      }
+                    }catch{}
+                    try{ e.preventDefault(); e.stopPropagation(); }catch{}
+                    return;
+                  }
+                  if (kU || kD){
+                    try{
+                      const d = (kU) ? -1 : 1;
+                      if (selecting){
+                        let s=0, t=0; let dir='none';
+                        try{ s=editor.selectionStart|0; t=editor.selectionEnd|0; dir=String(editor.selectionDirection||'none'); }catch{}
+                        let caretOff0 = (_offsetFromRC(caretRow|0, caretCol|0)|0);
+                        let anchor0 = caretOff0;
+                        if ((s|0) !== (t|0)){
+                          const a = Math.min(s|0, t|0), b = Math.max(s|0, t|0);
+                          if (dir === 'backward'){ caretOff0 = a|0; anchor0 = b|0; }
+                          else { caretOff0 = b|0; anchor0 = a|0; }
+                        }
+                        try{ if (_imeBarSelAnchorOff === null || typeof _imeBarSelAnchorOff !== 'number') _imeBarSelAnchorOff = anchor0|0; }catch{}
+                        try{ const rc0 = _rcFromOffset(caretOff0|0); caretRow = rc0.r|0; caretCol = rc0.c|0; _setCaret && _setCaret(caretRow|0, caretCol|0); }catch{}
+                        try{
+                          if (_mdRichActive && _mdRichActive()) _moveCaretVisualLines && _moveCaretVisualLines(d|0);
+                          else _moveCaretLines && _moveCaretLines(d|0);
+                        }catch{}
+                        const caretOff1 = (_offsetFromRC(caretRow|0, caretCol|0)|0);
+                        const anch = (typeof _imeBarSelAnchorOff==='number') ? (_imeBarSelAnchorOff|0) : (anchor0|0);
+                        const a1 = Math.min(anch|0, caretOff1|0);
+                        const b1 = Math.max(anch|0, caretOff1|0);
+                        const d1 = (caretOff1 < anch) ? 'backward' : 'forward';
+                        try{ _imeBarApplyCaretAndSync && _imeBarApplyCaretAndSync('arrow-ud-sel', { selectionStart:a1|0, selectionEnd:b1|0, selectionDirection:d1, caretOff:caretOff1|0 }); }catch{}
+                      } else {
+                        try{ _imeBarSelAnchorOff = null; }catch{}
+                        try{
+                          if (_mdRichActive && _mdRichActive()) _moveCaretVisualLines && _moveCaretVisualLines(d|0);
+                          else _moveCaretLines && _moveCaretLines(d|0);
+                        }catch{}
+                        try{ _imeBarApplyCaretAndSync && _imeBarApplyCaretAndSync('arrow-ud'); }catch{}
+                      }
+                    }catch{}
+                    try{ e.preventDefault(); e.stopPropagation(); }catch{}
+                    return;
+                  }
+                  if (kH){
+                    try{
+                      if (selecting){
+                        let s=0, t=0; let dir='none';
+                        try{ s=editor.selectionStart|0; t=editor.selectionEnd|0; dir=String(editor.selectionDirection||'none'); }catch{}
+                        let caretOff0 = (_offsetFromRC(caretRow|0, caretCol|0)|0);
+                        let anchor0 = caretOff0;
+                        if ((s|0) !== (t|0)){
+                          const a = Math.min(s|0, t|0), b = Math.max(s|0, t|0);
+                          if (dir === 'backward'){ caretOff0 = a|0; anchor0 = b|0; }
+                          else { caretOff0 = b|0; anchor0 = a|0; }
+                        }
+                        try{ if (_imeBarSelAnchorOff === null || typeof _imeBarSelAnchorOff !== 'number') _imeBarSelAnchorOff = anchor0|0; }catch{}
+                        try{ const rc0 = _rcFromOffset(caretOff0|0); caretRow = rc0.r|0; caretCol = rc0.c|0; _setCaret && _setCaret(caretRow|0, caretCol|0); }catch{}
+                        try{ _imeBarMoveHomeEnd && _imeBarMoveHomeEnd(false); }catch{}
+                        const caretOff1 = (_offsetFromRC(caretRow|0, caretCol|0)|0);
+                        const anch = (typeof _imeBarSelAnchorOff==='number') ? (_imeBarSelAnchorOff|0) : (anchor0|0);
+                        const a1 = Math.min(anch|0, caretOff1|0);
+                        const b1 = Math.max(anch|0, caretOff1|0);
+                        const d1 = (caretOff1 < anch) ? 'backward' : 'forward';
+                        try{ _imeBarApplyCaretAndSync && _imeBarApplyCaretAndSync('home-sel', { selectionStart:a1|0, selectionEnd:b1|0, selectionDirection:d1, caretOff:caretOff1|0 }); }catch{}
+                      } else {
+                        try{ _imeBarSelAnchorOff = null; }catch{}
+                        try{ _imeBarMoveHomeEnd && _imeBarMoveHomeEnd(false); }catch{}
+                      }
+                    }catch{}
+                    try{ e.preventDefault(); e.stopPropagation(); }catch{}
+                    return;
+                  }
+                  if (kE){
+                    try{
+                      if (selecting){
+                        let s=0, t=0; let dir='none';
+                        try{ s=editor.selectionStart|0; t=editor.selectionEnd|0; dir=String(editor.selectionDirection||'none'); }catch{}
+                        let caretOff0 = (_offsetFromRC(caretRow|0, caretCol|0)|0);
+                        let anchor0 = caretOff0;
+                        if ((s|0) !== (t|0)){
+                          const a = Math.min(s|0, t|0), b = Math.max(s|0, t|0);
+                          if (dir === 'backward'){ caretOff0 = a|0; anchor0 = b|0; }
+                          else { caretOff0 = b|0; anchor0 = a|0; }
+                        }
+                        try{ if (_imeBarSelAnchorOff === null || typeof _imeBarSelAnchorOff !== 'number') _imeBarSelAnchorOff = anchor0|0; }catch{}
+                        try{ const rc0 = _rcFromOffset(caretOff0|0); caretRow = rc0.r|0; caretCol = rc0.c|0; _setCaret && _setCaret(caretRow|0, caretCol|0); }catch{}
+                        try{ _imeBarMoveHomeEnd && _imeBarMoveHomeEnd(true); }catch{}
+                        const caretOff1 = (_offsetFromRC(caretRow|0, caretCol|0)|0);
+                        const anch = (typeof _imeBarSelAnchorOff==='number') ? (_imeBarSelAnchorOff|0) : (anchor0|0);
+                        const a1 = Math.min(anch|0, caretOff1|0);
+                        const b1 = Math.max(anch|0, caretOff1|0);
+                        const d1 = (caretOff1 < anch) ? 'backward' : 'forward';
+                        try{ _imeBarApplyCaretAndSync && _imeBarApplyCaretAndSync('end-sel', { selectionStart:a1|0, selectionEnd:b1|0, selectionDirection:d1, caretOff:caretOff1|0 }); }catch{}
+                      } else {
+                        try{ _imeBarSelAnchorOff = null; }catch{}
+                        try{ _imeBarMoveHomeEnd && _imeBarMoveHomeEnd(true); }catch{}
+                      }
+                    }catch{}
+                    try{ e.preventDefault(); e.stopPropagation(); }catch{}
+                    return;
+                  }
+                  if (kB){
+                    try{ _imeBarBackspaceInDoc && _imeBarBackspaceInDoc(); }catch{}
+                    try{ e.preventDefault(); e.stopPropagation(); }catch{}
+                    return;
+                  }
+                  if (kX){
+                    try{ _imeBarDeleteInDoc && _imeBarDeleteInDoc(); }catch{}
+                    try{ e.preventDefault(); e.stopPropagation(); }catch{}
+                    return;
+                  }
+                }
+              }catch{}
+
+              if (esc){
+                try{ e.preventDefault(); e.stopPropagation(); }catch{}
+                const vNow = String(imeEl.value||'');
+                if (!composing){
+                  // #1684: Esc hides IME bar + IME OFF, but keeps INSERT.
+                  try{ imeEl.value = ''; }catch{}
+                  try{ _imeBarReplaceInsertedText && _imeBarReplaceInsertedText('', 'esc-clear'); }catch{}
+                  try{ _imeBarPrevText = ''; }catch{}
+                  try{ if (typeof _imeBarHideByUser === 'function') _imeBarHideByUser('esc', e); }catch{}
+                  return;
+                }
+                return; // composing: let IME handle Esc
+              }
+              if (k === 'Enter' && !composing){
+                try{ e.preventDefault(); e.stopPropagation(); }catch{}
+                const vNow = String(imeEl.value||'');
+                if (vNow){
+                  // Commit current text and clear.
+                  try{ _imeBarReplaceInsertedText(vNow, 'enter-commit'); }catch{}
+                  try{ imeEl.value = ''; }catch{}
+                  try{ _imeBarPrevText = ''; _imeBarAnchorOff = (editor && typeof editor.selectionStart==='number') ? (editor.selectionStart|0) : (_imeBarAnchorOff|0); }catch{}
+                } else {
+                  // Insert newline into the document.
+                  try{ _imeBarAnchorOff = (editor && typeof editor.selectionStart==='number') ? (editor.selectionStart|0) : (_offsetFromRC(caretRow|0, caretCol|0)|0); }catch{}
+                  try{ _imeBarPrevText = ''; }catch{}
+                  try{ _imeBarReplaceInsertedText('\n', 'enter-nl'); }catch{}
+                  // Advance anchor and clear prev so next segment doesn't delete the newline.
+                  try{ _imeBarPrevText = ''; _imeBarAnchorOff = (editor && typeof editor.selectionStart==='number') ? (editor.selectionStart|0) : (_imeBarAnchorOff|0); }catch{}
+                }
+                try{ _positionImeBar && _positionImeBar(); }catch{}
+                return;
+              }
+              // Keep bar positioned while typing.
+              try{ _positionImeBar && _positionImeBar(); }catch{}
+            }catch{}
+          });
+          imeEl.addEventListener('input', (e)=>{
+            // IME bar: mirror current input into the document.
+            try{
+              if (!_imeBarActive) return;
+              const composing = !!(e && e.isComposing===true) || !!_imeBarComposing;
+              const vNow = String(imeEl.value||'');
+              if (composing){
+                _imeBarReplaceInsertedText(vNow, 'input-comp');
+              } else {
+                // Non-composing input: treat as committed and clear the bar.
+                if (vNow){
+                  _imeBarReplaceInsertedText(vNow, 'input-commit');
+                  try{ imeEl.value = ''; }catch{}
+                  try{ _imeBarPrevText = ''; _imeBarAnchorOff = (editor && typeof editor.selectionStart==='number') ? (editor.selectionStart|0) : (_imeBarAnchorOff|0); }catch{}
+                }
+              }
+              try{ _positionImeBar && _positionImeBar(); }catch{}
+            }catch{}
+          });
+        }
+      }catch{}
+
+      // --- IME bar handlers (legacy on cmdinput; kept for compatibility but should not be used) ---
+      cmdinput.addEventListener('compositionstart', (e)=>{
+        try{
+          if (!_imeBarActive) return;
+          _imeBarComposing = true;
+          try{ _imeBarLastImeEvtAt = Date.now(); }catch{}
+          // Anchor at current caret each composition session.
+          try{ _syncNativeSelectionToCaret && _syncNativeSelectionToCaret(); }catch{}
+          try{ _imeBarAnchorOff = (editor && typeof editor.selectionStart==='number') ? (editor.selectionStart|0) : (_offsetFromRC(caretRow|0, caretCol|0)|0); }catch{ _imeBarAnchorOff = 0; }
+          try{ _positionImeBar && _positionImeBar(); }catch{}
+          // Apply immediately (some IMEs don't emit compositionupdate early).
+          try{ _imeBarReplaceInsertedText(String(cmdinput.value||''), 'compstart'); }catch{}
+        }catch{}
+      });
+      cmdinput.addEventListener('compositionupdate', (e)=>{
+        try{
+          if (!_imeBarActive) return;
+          _imeBarComposing = true;
+          try{ _imeBarLastImeEvtAt = Date.now(); }catch{}
+          _imeBarReplaceInsertedText(String(cmdinput.value||''), 'compupdate');
+          try{ _positionImeBar && _positionImeBar(); }catch{}
+        }catch{}
+      });
+      cmdinput.addEventListener('compositionend', (e)=>{
+        try{
+          if (!_imeBarActive) return;
+          _imeBarComposing = false;
+          try{ _imeBarLastImeEvtAt = Date.now(); }catch{}
+          // Ensure final value is applied, then clear for the next segment.
+          try{ _imeBarReplaceInsertedText(String(cmdinput.value||''), 'compend'); }catch{}
+          try{ cmdinput.value = ''; }catch{}
+          try{ _imeBarPrevText = ''; _imeBarAnchorOff = (editor && typeof editor.selectionStart==='number') ? (editor.selectionStart|0) : ((_imeBarAnchorOff|0) + 0); }catch{}
+        }catch{}
+      });
       cmdinput.addEventListener('keydown',(e)=>{
+        // IME bar intercepts keys here.
+        try{
+          if (_imeBarActive){
+            const k = String((e && e.key) || '');
+            const esc = (typeof _isEsc === 'function') ? _isEsc(e) : (k === 'Escape' || k === 'Esc');
+            let composing = !!(e && (e.isComposing===true)) || !!_imeBarComposing || !!(window && window._imeComposing===true);
+            // Some environments get stuck in isComposing=true after rapid Kana/Eisu toggles.
+            // If no IME-bar IME event has occurred recently and the bar is empty, treat as not composing.
+            try{
+              const now0 = Date.now();
+              const stale = (now0 - (+_imeBarLastImeEvtAt || 0)) > 450;
+              if (stale && !String(cmdinput.value||'') && !String(_imeBarPrevText||'')) composing = false;
+            }catch{}
+
+            // When the bar is open but empty, navigation/edit keys should affect the document.
+            try{
+              const kc = (e && (e.keyCode|0)) || 0;
+              const c = String((e && e.code) || '');
+              const kL = (k === 'ArrowLeft' || k === 'Left' || c === 'ArrowLeft' || kc === 37);
+              const kR = (k === 'ArrowRight' || k === 'Right' || c === 'ArrowRight' || kc === 39);
+              const kU = (k === 'ArrowUp' || k === 'Up' || c === 'ArrowUp' || kc === 38);
+              const kD = (k === 'ArrowDown' || k === 'Down' || c === 'ArrowDown' || kc === 40);
+              const kH = (k === 'Home' || c === 'Home' || kc === 36);
+              const kE = (k === 'End' || c === 'End' || kc === 35);
+              const kB = (k === 'Backspace' || kc === 8);
+              const kX = (k === 'Delete' || k === 'Del' || kc === 46);
+              // Empty bar means there's no active preedit; route keys to the document even if
+              // the environment incorrectly keeps isComposing=true after rapid IME toggles.
+              const emptyBar = (!String(cmdinput.value||''));
+              if (emptyBar){
+                if (kL || kR){
+                  try{
+                    let s=0, t=0; try{ s=editor.selectionStart|0; t=editor.selectionEnd|0; }catch{}
+                    if (s !== t){
+                      const off = (kL) ? Math.min(s,t) : Math.max(s,t);
+                      try{ const rc = _rcFromOffset(off|0); caretRow = rc.r|0; caretCol = rc.c|0; }catch{}
+                      try{ _setCaret && _setCaret(caretRow|0, caretCol|0); }catch{}
+                      try{ _imeBarApplyCaretAndSync && _imeBarApplyCaretAndSync('arrow-collapse'); }catch{}
+                    } else {
+                      try{ _moveCaretCols && _moveCaretCols(kL ? -1 : 1); }catch{}
+                      try{ _imeBarApplyCaretAndSync && _imeBarApplyCaretAndSync('arrow'); }catch{}
+                    }
+                  }catch{}
+                  try{ e.preventDefault(); e.stopPropagation(); }catch{}
+                  return;
+                }
+                if (kU || kD){
+                  try{
+                    const d = (kU) ? -1 : 1;
+                    try{
+                      if (_mdRichActive && _mdRichActive()){
+                        _moveCaretVisualLines && _moveCaretVisualLines(d|0);
+                      } else {
+                        _moveCaretLines && _moveCaretLines(d|0);
+                      }
+                    }catch{}
+                    try{ _imeBarApplyCaretAndSync && _imeBarApplyCaretAndSync('arrow-ud'); }catch{}
+                  }catch{}
+                  try{ e.preventDefault(); e.stopPropagation(); }catch{}
+                  return;
+                }
+                if (kH){
+                  try{ _imeBarMoveHomeEnd && _imeBarMoveHomeEnd(false); }catch{}
+                  try{ e.preventDefault(); e.stopPropagation(); }catch{}
+                  return;
+                }
+                if (kE){
+                  try{ _imeBarMoveHomeEnd && _imeBarMoveHomeEnd(true); }catch{}
+                  try{ e.preventDefault(); e.stopPropagation(); }catch{}
+                  return;
+                }
+                if (kB){
+                  try{ _imeBarBackspaceInDoc && _imeBarBackspaceInDoc(); }catch{}
+                  try{ e.preventDefault(); e.stopPropagation(); }catch{}
+                  return;
+                }
+                if (kX){
+                  try{ _imeBarDeleteInDoc && _imeBarDeleteInDoc(); }catch{}
+                  try{ e.preventDefault(); e.stopPropagation(); }catch{}
+                  return;
+                }
+              }
+            }catch{}
+
+            if (esc){
+              try{ e.preventDefault(); e.stopPropagation(); }catch{}
+              const vNow = String(cmdinput.value||'');
+              if (!composing){
+                // #1684: Esc hides IME bar + IME OFF, but keeps INSERT.
+                try{ cmdinput.value = ''; }catch{}
+                try{ _imeBarReplaceInsertedText && _imeBarReplaceInsertedText('', 'esc-clear'); }catch{}
+                try{ _imeBarPrevText = ''; }catch{}
+                try{ if (typeof _imeBarHideByUser === 'function') _imeBarHideByUser('esc-legacy', e); }catch{}
+                return;
+              }
+              return; // composing: let IME handle Esc
+            }
+            if (k === 'Enter' && !composing){
+              try{ e.preventDefault(); e.stopPropagation(); }catch{}
+              const vNow = String(cmdinput.value||'');
+              if (vNow){
+                // Commit current text and clear.
+                try{ _imeBarReplaceInsertedText(vNow, 'enter-commit'); }catch{}
+                try{ cmdinput.value = ''; }catch{}
+                try{ _imeBarPrevText = ''; _imeBarAnchorOff = (editor && typeof editor.selectionStart==='number') ? (editor.selectionStart|0) : (_imeBarAnchorOff|0); }catch{}
+              } else {
+                // Insert newline into the document.
+                try{ _imeBarAnchorOff = (editor && typeof editor.selectionStart==='number') ? (editor.selectionStart|0) : (_offsetFromRC(caretRow|0, caretCol|0)|0); }catch{}
+                try{ _imeBarPrevText = ''; }catch{}
+                try{ _imeBarReplaceInsertedText('\n', 'enter-nl'); }catch{}
+                // Advance anchor and clear prev so next segment doesn't delete the newline.
+                try{ _imeBarPrevText = ''; _imeBarAnchorOff = (editor && typeof editor.selectionStart==='number') ? (editor.selectionStart|0) : (_imeBarAnchorOff|0); }catch{}
+              }
+              try{ _positionImeBar && _positionImeBar(); }catch{}
+              return;
+            }
+            // Keep bar positioned while typing.
+            try{ _positionImeBar && _positionImeBar(); }catch{}
+            return; // don't run CMD handlers
+          }
+        }catch{}
+
         // CMD history popup handling (takes precedence)
         try{
           if (typeof _cmdHistPopupVisible === 'function' && _cmdHistPopupVisible()){
@@ -24457,7 +25790,27 @@ try{
           }
         }
       });
-      cmdinput.addEventListener('input', ()=>{
+      cmdinput.addEventListener('input', (e)=>{
+        // IME bar: mirror current input into the document.
+        try{
+          if (_imeBarActive){
+            const composing = !!(e && e.isComposing===true) || !!_imeBarComposing;
+            const vNow = String(cmdinput.value||'');
+            if (composing){
+              _imeBarReplaceInsertedText(vNow, 'input-comp');
+            } else {
+              // Non-composing input: treat as committed and clear the bar.
+              if (vNow){
+                _imeBarReplaceInsertedText(vNow, 'input-commit');
+                try{ cmdinput.value = ''; }catch{}
+                try{ _imeBarPrevText = ''; _imeBarAnchorOff = (editor && typeof editor.selectionStart==='number') ? (editor.selectionStart|0) : (_imeBarAnchorOff|0); }catch{}
+              }
+            }
+            try{ _positionImeBar && _positionImeBar(); }catch{}
+            return;
+          }
+        }catch{}
+
         // If user edits cmdinput while history popup is open, close it (do not restore).
         try{
           if (typeof _cmdHistPopupVisible === 'function' && _cmdHistPopupVisible() && !_cmdHistPopupReflecting){
@@ -31812,7 +33165,7 @@ try{
         clampViewportExactLines();
         _initLineLock();
         bindEvents();
-        if (cmdinput){ cmdinput.placeholder = 'command (e.g. :100, :q)'; }
+        try{ if (cmdinput) cmdinput.placeholder = ''; }catch{}
         caretRow = Math.max(0, Math.min(_totalLines()-1, caretRow));
         caretCol = Math.max(0, caretCol);
         // If session restore captured an exact viewport (caret/scrollTop), keep it.

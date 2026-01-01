@@ -64,7 +64,8 @@ body { font: var(--fontBase, 18px)/20px Consolas, 'Courier New', monospace; over
 #modestatus { white-space: pre; min-width: 10ch; background: transparent; border:0; padding:0 6px 0 2px; height:28px; display:flex; align-items:center; font-size: calc(var(--fontBase, 18px) * 1.2); line-height:1; font-family: Consolas, 'Courier New', monospace; color: var(--tabText, yellow); opacity:0.95; user-select:none; cursor: default; font-weight:600; }
 #cmdfloat { position: absolute; left: calc(var(--gw) + 0.8rem); right: 0.8rem; top: 0; min-height: 26px; height: 26px; background: var(--tabBarBg); color: var(--tabBarFg); display:none; align-items:center; padding:0 8px; border:1px solid #1c2230; gap:8px; z-index: 10001; border-radius: 6px; box-shadow: 0 10px 12px rgba(0,0,0,0.6); }
 #cmdfloat #cmdprefix { opacity: 0.85; }
-#cmdfloat #cmdinput { flex:1; background: var(--cmdInputBg, transparent); color: var(--cmdInputFg, var(--tabBarFg)); border:0; outline:0; font: inherit; height:100%; }
+#cmdfloat #cmdinput,
+#cmdfloat #imeinput { flex:1; background: var(--cmdInputBg, transparent); color: var(--cmdInputFg, var(--tabBarFg)); border:0; outline:0; font: inherit; height:100%; }
 
 /* CMD history button ("履歴 F4") */
 #cmdfloat #cmdHistBtn {
