@@ -174,6 +174,25 @@ function Start-WebView2Host([string]$Url){
   }
 }
 
+function Ensure-WindowPosType(){
+  if ('SixWindowPos' -as [type]) { return }
+  Add-Type -Language CSharp -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+public static class SixWindowPos{
+  [DllImport("user32.dll", SetLastError=true)]
+  static extern bool SetWindowPos(IntPtr hWnd, IntPtr hWndInsertAfter, int X, int Y, int cx, int cy, uint uFlags);
+  const uint SWP_NOSIZE = 0x0001;
+  const uint SWP_NOZORDER = 0x0004;
+  const uint SWP_NOACTIVATE = 0x0010;
+  const uint SWP_SHOWWINDOW = 0x0040;
+  public static bool MoveOnly(IntPtr hWnd, int x, int y){
+    return SetWindowPos(hWnd, IntPtr.Zero, x, y, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_SHOWWINDOW);
+  }
+}
+'@ -ErrorAction Stop
+}
+
 $DocItems = @()
 if ($Docs -and $Docs.Count -gt 0) {
   foreach($d in $Docs){
@@ -699,6 +718,69 @@ if (-not $launched) {
     if (-not (Test-Path $profileDir)) { New-Item -ItemType Directory -Path $profileDir | Out-Null }
     $args = @("--allow-file-access-from-files","--user-data-dir=$profileDir","--app=$targetUrl")
     if ($DevInsecure) { $args = @("--allow-file-access-from-files","--disable-web-security","--user-data-dir=$profileDir","--app=$targetUrl") }
+
+    # Window bounds restore for Edge app-mode (no WebView2 host)
+    # State is written by _six.js to NanoApi, which persists it as .six-winstate.json under $here.
+    # Keep desired bounds around for post-launch SetWindowPos fallback
+    $sixDesiredX = $null; $sixDesiredY = $null; $sixDesiredW = $null; $sixDesiredH = $null; $sixDesiredMax = $false
+    try {
+      $wsPath = Join-Path $here ".six-winstate.json"
+      $ws = $null
+      if (Test-Path $wsPath) {
+        try { $ws = (Get-Content -LiteralPath $wsPath -Raw -Encoding UTF8 | ConvertFrom-Json) } catch { $ws = $null }
+      }
+      if ($ws) {
+        $isMax = $false
+        try { $isMax = [bool]$ws.isMaximized } catch { $isMax = $false }
+        $sixDesiredMax = $isMax
+        if ($isMax) {
+          $args += "--start-maximized"
+        } else {
+          # Prefer normal bounds, fallback to current ones
+          $w = 0; $h = 0; $x = $null; $y = $null
+          try { if ($ws.normalOuterW) { $w = [int]$ws.normalOuterW } } catch {}
+          try { if ($ws.normalOuterH) { $h = [int]$ws.normalOuterH } } catch {}
+          try { if ($ws.normalX -ne $null) { $x = [int]$ws.normalX } } catch {}
+          try { if ($ws.normalY -ne $null) { $y = [int]$ws.normalY } } catch {}
+          if ($w -le 0) { try { if ($ws.outerW) { $w = [int]$ws.outerW } } catch {} }
+          if ($h -le 0) { try { if ($ws.outerH) { $h = [int]$ws.outerH } } catch {} }
+          if ($x -eq $null) { try { if ($ws.screenX -ne $null) { $x = [int]$ws.screenX } } catch {} }
+          if ($y -eq $null) { try { if ($ws.screenY -ne $null) { $y = [int]$ws.screenY } } catch {} }
+
+          # Snap emulation (best-effort) using primary screen working area
+          try {
+            $snap = $null
+            try { $snap = [string]$ws.snapEdge } catch { $snap = $null }
+            if ($snap -and ($snap -eq 'left' -or $snap -eq 'right')) {
+              try { Add-Type -AssemblyName System.Windows.Forms -ErrorAction SilentlyContinue | Out-Null } catch {}
+              try {
+                $wa = [System.Windows.Forms.Screen]::PrimaryScreen.WorkingArea
+                $halfW = [int]([Math]::Max(200, [Math]::Floor($wa.Width / 2)))
+                $w = $halfW
+                $h = [int]([Math]::Max(150, $wa.Height))
+                $x = if ($snap -eq 'right') { [int]($wa.Left + $wa.Width - $halfW) } else { [int]$wa.Left }
+                $y = [int]$wa.Top
+              } catch {}
+            }
+          } catch {}
+
+          if ($w -gt 0 -and $h -gt 0) {
+            $args += "--window-size=$w,$h"
+            $sixDesiredW = $w; $sixDesiredH = $h
+          }
+          if ($x -ne $null -and $y -ne $null) {
+            $args += "--window-position=$x,$y"
+            $sixDesiredX = $x; $sixDesiredY = $y
+          }
+        }
+      }
+      if ($Diag) {
+        try {
+          Write-Host ("[winstate] path={0} has={1} x={2} y={3} w={4} h={5} max={6}" -f $wsPath, [bool]$ws, $sixDesiredX, $sixDesiredY, $sixDesiredW, $sixDesiredH, $sixDesiredMax)
+        } catch {}
+      }
+    } catch {}
+
     $p = Start-Process -FilePath $edge -ArgumentList $args -WorkingDirectory $here -PassThru
     $global:SixLaunched = $true
     # Start/Update F19->Esc hook limited to this Edge instance profile
@@ -717,6 +799,7 @@ if (-not $launched) {
     } catch {}
     $deadline = (Get-Date).AddMinutes([Math]::Max(1, $WaitMinutes))
     $seenWindow = $false; $lastHadWindow = Get-Date
+    $movedOnce = $false
     while ((Get-Date) -lt $deadline) {
       try {
         $wmi = Get-CimInstance Win32_Process -Filter "Name='msedge.exe'" -ErrorAction SilentlyContinue |
@@ -726,7 +809,23 @@ if (-not $launched) {
       foreach($pinfo in $wmi){
         try { $gp = Get-Process -Id $pinfo.ProcessId -ErrorAction SilentlyContinue; if ($gp -and $gp.MainWindowHandle -ne 0) { $withWindow += $gp } } catch {}
       }
-      if ($withWindow.Count -gt 0) { $seenWindow = $true; $lastHadWindow = Get-Date }
+      if ($withWindow.Count -gt 0) {
+        $seenWindow = $true; $lastHadWindow = Get-Date
+        # If Edge ignored --window-position, force-move the actual window once.
+        if (-not $movedOnce -and $sixDesiredX -ne $null -and $sixDesiredY -ne $null) {
+          try {
+            Ensure-WindowPosType
+            $hwnd = $withWindow[0].MainWindowHandle
+            if ($hwnd -ne 0) {
+              $okMove = [SixWindowPos]::MoveOnly($hwnd, [int]$sixDesiredX, [int]$sixDesiredY)
+              $movedOnce = $true
+              if ($Diag) { try { Write-Host ("[winstate] MoveOnly hwnd={0} ok={1}" -f $hwnd, $okMove) } catch {} }
+            }
+          } catch {
+            if ($Diag) { try { Write-Host ("[winstate] MoveOnly failed: {0}" -f $_.Exception.Message) -ForegroundColor DarkYellow } catch {} }
+          }
+        }
+      }
       elseif ($seenWindow) { if ((Get-Date) -gt $lastHadWindow.AddSeconds(1)) { break } }
       else { try { $parent = Get-Process -Id $p.Id -ErrorAction SilentlyContinue } catch { $parent = $null }; if (-not $parent) { break } }
       Start-Sleep -Milliseconds 300

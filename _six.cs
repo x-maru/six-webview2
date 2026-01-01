@@ -474,6 +474,67 @@ public class __CLASSNAME__ {
               }
               shares.Append("]}"); body = shares.ToString();
             } catch { status = "400 Bad Request"; body = "{\"shares\":[]}"; }
+          } else if (path.StartsWith("/win/state")){
+            // GET  /win/state  -> returns saved JSON state (or {})
+            // POST /win/state  -> saves request body as JSON text to .six-winstate.json in current directory
+            try{
+              var statePath = Path.Combine(Directory.GetCurrentDirectory(), ".six-winstate.json");
+              if (string.Equals(method, "GET", StringComparison.OrdinalIgnoreCase)){
+                try{
+                  if (File.Exists(statePath)){
+                    body = File.ReadAllText(statePath, Encoding.UTF8);
+                    if (string.IsNullOrWhiteSpace(body)) body = "{}";
+                  } else {
+                    body = "{}";
+                  }
+                } catch { body = "{}"; }
+                contentType = "application/json; charset=utf-8"; status = "200 OK";
+              }
+              else if (string.Equals(method, "POST", StringComparison.OrdinalIgnoreCase) || string.Equals(method, "PUT", StringComparison.OrdinalIgnoreCase)){
+                // Parse headers for Content-Length
+                int headerEnd = req.IndexOf("\r\n\r\n"); if (headerEnd < 0) headerEnd = req.Length;
+                string headerText = (headerEnd > 0 ? req.Substring(0, headerEnd) : req);
+                int contentLength = 0;
+                try{
+                  foreach(var line in headerText.Split(new[]{"\r\n"}, StringSplitOptions.None)){
+                    var idx = line.IndexOf(':'); if (idx<=0) continue; var k=line.Substring(0,idx).Trim(); var v=line.Substring(idx+1).Trim();
+                    if (k.Equals("Content-Length", StringComparison.OrdinalIgnoreCase)) { int.TryParse(v, out contentLength); }
+                  }
+                }catch{}
+                // Read body bytes
+                var bodyStart = headerEnd + 4; if (bodyStart > reqBytesInitial.Length) bodyStart = reqBytesInitial.Length;
+                var receivedBody = new MemoryStream();
+                if (reqBytesInitial.Length > bodyStart){ receivedBody.Write(reqBytesInitial, bodyStart, reqBytesInitial.Length - bodyStart); }
+                int remaining = Math.Max(0, contentLength - (int)receivedBody.Length);
+                var bufBody = new byte[4096];
+                while(remaining > 0){
+                  int n; try{ n = sock.Receive(bufBody); } catch { break; }
+                  if (n<=0) break;
+                  receivedBody.Write(bufBody,0,n);
+                  remaining -= n;
+                  if (receivedBody.Length > 262144) break;
+                }
+                try{
+                  var outBytes = receivedBody.ToArray();
+                  // If empty body, treat as no-op
+                  if (outBytes == null || outBytes.Length == 0){
+                    body = "{\"ok\":false,\"error\":\"empty\"}";
+                  } else {
+                    File.WriteAllBytes(statePath, outBytes);
+                    body = "{\"ok\":true}";
+                  }
+                  contentType = "application/json; charset=utf-8"; status = "200 OK";
+                } catch (Exception ex) {
+                  contentType = "application/json; charset=utf-8"; status = "500 Internal Server Error";
+                  body = "{\"ok\":false,\"error\":\""+JsonEscape(ex.Message)+"\"}";
+                }
+              }
+              else {
+                contentType = "application/json; charset=utf-8"; status = "405 Method Not Allowed"; body = "{}";
+              }
+            } catch {
+              contentType = "application/json; charset=utf-8"; status = "500 Internal Server Error"; body = "{\"ok\":false}";
+            }
           } else if (path.StartsWith("/win/minimize")){
             // Minimize the current foreground window (resolve to root window)
             try{

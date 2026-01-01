@@ -1,4 +1,4 @@
-const VERSION = '0.9.1.x';
+const VERSION = '0.9.1';
 // Build stamp (for verifying which _six.js is actually running)
 // NOTE: Intentionally ASCII-only; fullwidth variants should be treated as invalid.
 try{ window.__sixBuildTs = '2025-12-29T00:00:00Z'; }catch{}
@@ -1798,6 +1798,9 @@ try{
     }catch{ return { st: 0, why: 'err' }; }
   }
   let _persistTimer = null;
+  function _geometryIgnoreSnap(){
+    try{ return !!(window && window.SIX_OPTIONS && window.SIX_OPTIONS.GEOMETRY_IGNORE_SNAP); }catch{ return false; }
+  }
   // Update normal (restored) bounds cache on demand
   function _updateNormalBoundsFromWindow(){
     try{
@@ -1811,7 +1814,17 @@ try{
         const availH = (screen && screen.availHeight) ? (screen.availHeight|0) : 0;
         const tol = 6;
         if (availW>0 && availH>0){ if (Math.abs(availW-ow)<=tol && Math.abs(availH-oh)<=tol) isMax = true; }
-        const edgeTol = 10; if (!isMax && availW>0){ if (sx<=edgeTol) snap='left'; else if (Math.abs((sx+ow)-availW)<=edgeTol) snap='right'; }
+        // Treat snap only when geometry matches typical Win snap (half-width, full-height-ish).
+        // This prevents misclassifying a manually resized window that happens to touch the screen edge.
+        const edgeTol = 10;
+        const halfTol = Math.max(14, Math.floor(availW * 0.06));
+        const halfW = (availW>0) ? Math.floor(availW/2) : 0;
+        const looksHalf = (availW>0) ? (Math.abs(ow - halfW) <= halfTol) : false;
+        const looksTall = (availH>0) ? (Math.abs(oh - availH) <= Math.max(12, Math.floor(availH * 0.08))) : false;
+        if (!_geometryIgnoreSnap() && !isMax && availW>0 && looksHalf && looksTall){
+          if (sx<=edgeTol) snap='left';
+          else if (Math.abs((sx+ow)-availW)<=edgeTol) snap='right';
+        }
       }catch{}
       if (!isMax && !snap){
         if (!window.__sixNormalBounds) window.__sixNormalBounds = { innerW: iw, innerH: ih, outerW: ow, outerH: oh, x: sx, y: sy };
@@ -1833,7 +1846,16 @@ try{
         availH = (screen && screen.availHeight) ? (screen.availHeight|0) : 0;
         const tol = 6;
         if (availW>0 && availH>0){ if (Math.abs(availW-ow)<=tol && Math.abs(availH-oh)<=tol) isMax = true; }
-        const edgeTol = 10; if (!isMax && availW>0){ if (sx<=edgeTol) snap='left'; else if (Math.abs((sx+ow)-availW)<=edgeTol) snap='right'; }
+        // See _updateNormalBoundsFromWindow: don't treat "edge" alone as snap.
+        const edgeTol = 10;
+        const halfTol = Math.max(14, Math.floor(availW * 0.06));
+        const halfW = (availW>0) ? Math.floor(availW/2) : 0;
+        const looksHalf = (availW>0) ? (Math.abs(ow - halfW) <= halfTol) : false;
+        const looksTall = (availH>0) ? (Math.abs(oh - availH) <= Math.max(12, Math.floor(availH * 0.08))) : false;
+        if (!_geometryIgnoreSnap() && !isMax && availW>0 && looksHalf && looksTall){
+          if (sx<=edgeTol) snap='left';
+          else if (Math.abs((sx+ow)-availW)<=edgeTol) snap='right';
+        }
       }catch{}
       if (!window.__sixNormalBounds) window.__sixNormalBounds = { innerW: iw, innerH: ih, outerW: ow, outerH: oh };
       try{ if (!isMax && !snap){ window.__sixNormalBounds.innerW = iw; window.__sixNormalBounds.innerH = ih; window.__sixNormalBounds.outerW = ow; window.__sixNormalBounds.outerH = oh; window.__sixNormalBounds.x = sx; window.__sixNormalBounds.y = sy; } }catch{}
@@ -2114,17 +2136,36 @@ try{
       const p = _collectSessionPayload({ lite:true });
           try {
               localStorage.setItem(_SESSION_KEY, JSON.stringify(p));
+              // Also persist window bounds externally for Edge app-mode restore (no WebView2 host).
+              try{ _persistWindowStateExternal && _persistWindowStateExternal(null, 'persist'); }catch{}
             return true;
         } catch (e) {
         // fallback: retry with lite payload (already lite) to handle transient failures
             try {
                 const p2 = _collectSessionPayload({ lite: true });
                 localStorage.setItem(_SESSION_KEY, JSON.stringify(p2));
+                try{ _persistWindowStateExternal && _persistWindowStateExternal(null, 'persist-retry'); }catch{}
                 return true;
             } catch {
                 return false;
             }
         }
+    }catch{ return false; }
+  }
+
+  // Persist window state to local NanoApi as a plain JSON object.
+  // This enables Edge app-mode to restore bounds via ps1 flags without accessing Edge profile data.
+  function _persistWindowStateExternal(ws, reason){
+    try{
+      // Capture fresh state by default.
+      if (!ws) { try{ ws = _captureWindowStateForSession(); }catch{ ws = null; } }
+      if (!ws || typeof ws !== 'object') return false;
+      // Ignore circuit breaker for writes; only require base.
+      if (!_apiBase) return false;
+      const url = _apiBase + 'win/state';
+      const body = JSON.stringify(ws);
+      fetch(url, { method:'POST', headers:{ 'Content-Type':'application/json' }, body }).catch(()=>{});
+      return true;
     }catch{ return false; }
   }
   function _schedulePersist(reason){
