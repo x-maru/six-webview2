@@ -1,4 +1,4 @@
-const VERSION = '0.9.1.h';
+const VERSION = '0.9.1.j';
 // Build stamp (for verifying which _six.js is actually running)
 // NOTE: Intentionally ASCII-only; fullwidth variants should be treated as invalid.
 try{ window.__sixBuildTs = '2025-12-29T00:00:00Z'; }catch{}
@@ -3192,6 +3192,10 @@ try{
   let _suppressInsertSnapshotOnce = false;
   // INSERT内の分割Undo: 直近の入力後にキャレットだけを動かした最初のタイミングで1回だけスナップショットを積む
   let _insertSegDirty = false;
+  // INSERT内の分割Undo: 入力後に非編集カーソル移動が発生したら、次の編集直前に一度だけsnapshotを積む
+  let _insertSegPending = false;
+  // INSERT内の分割Undo: 入力直後の selection 変化（通常のタイピング）では pending を立てないための短期ガード
+  let _insertSegIgnoreSelectUntil = 0;
   // global key routing guard (to avoid recursion when synthesizing events)
   let _globalKeyRouting = false;
   // encoding options (limited set)
@@ -15749,6 +15753,8 @@ try{
       _suppressInsertSnapshotOnce = false;
       // 分割Undo状態を初期化（INSERT開幕時は未編集）
       _insertSegDirty = false;
+      _insertSegPending = false;
+      _insertSegIgnoreSelectUntil = 0;
       // ensure native textarea caret matches overlay caret position
       try{ editor && editor.focus && editor.focus(); }catch{}
       // md-rich: preserve scroll position if caret is already visible; setSelectionRange can scroll unexpectedly.
@@ -17706,6 +17712,22 @@ try{
         }
       }catch{}
 
+      // INSERT内の分割Undo: pending が立っている場合、次の編集が始まる直前に一度だけsnapshotを積む。
+      // これにより undo が「カーソル移動位置」へ飛ぶ/戻り過ぎる副作用を避ける。
+      try{
+        if (_mode === 'INSERT' && _insertSegPending){
+          const it0 = String((e && e.inputType) || '');
+          const isEdit = !!(it0 && (it0.startsWith('insert') || it0.startsWith('delete')));
+          if (isEdit){
+            _pushUndoSnapshot('insert-seg');
+            _insertSegPending = false;
+            _insertSegDirty = false;
+            // selection は編集開始と同時に動くので、直後の select では pending を立てない
+            _insertSegIgnoreSelectUntil = Date.now() + 120;
+          }
+        }
+      }catch{}
+
       // #624: INSERTモードで削除/改行操作前のテキストを保持（直後差分判定用）
       try{
         const itCap = String(e.inputType||'');
@@ -18068,7 +18090,10 @@ try{
         if (_mode==='INSERT' && _insertSegDirty){
           const s = editor.selectionStart|0;
           const t = editor.selectionEnd|0;
-          if (s===t){ _pushUndoSnapshot('insert-seg'); _insertSegDirty=false; }
+          if (s===t){
+            const now = Date.now();
+            if (now >= (+_insertSegIgnoreSelectUntil || 0)) _insertSegPending = true;
+          }
         }
       }catch{}
     });
@@ -18087,18 +18112,37 @@ try{
         // IME composition can cause noisy selection churn; keep this handler light.
         try{ if (window && window._imeComposing===true) return; }catch{}
         // Ignore redundant events where selection did not actually change.
+        const sNow = (editor.selectionStart|0);
+        const eNow = (editor.selectionEnd|0);
+        const dNow = String(editor.selectionDirection||'');
+        const prevS = (_lastSelectS|0);
+        const prevE = (_lastSelectE|0);
+        const prevD = String(_lastSelectDir||'');
+        if (sNow === prevS && eNow === prevE && dNow === prevD){
+          _selChanged = false;
+          return;
+        }
+
+        // INSERT内の分割Undo: 直近で入力があり、かつ今回の selection 変化が caret-only（collapsed）で
+        // 非編集のカーソル移動（Arrow/Home/End/Page）と判断できる場合は pending を立てる。
+        // 実際の snapshot push は「次の編集直前（beforeinput）」で行う。
         try{
-          const sNow = (editor.selectionStart|0);
-          const eNow = (editor.selectionEnd|0);
-          const dNow = String(editor.selectionDirection||'');
-          if (sNow === (_lastSelectS|0) && eNow === (_lastSelectE|0) && dNow === String(_lastSelectDir||'')){
-            _selChanged = false;
-            return;
+          if (_mode === 'INSERT' && _insertSegDirty && (sNow === eNow)){
+            const now = Date.now();
+            if (now >= (+_insertSegIgnoreSelectUntil || 0)){
+              const lk = String((_lastKeydownForAnom||{}).key||'');
+              const nav = (
+                lk === 'ArrowUp' || lk === 'ArrowDown' || lk === 'ArrowLeft' || lk === 'ArrowRight' ||
+                lk === 'Home' || lk === 'End' || lk === 'PageUp' || lk === 'PageDown'
+              );
+              if (nav) _insertSegPending = true;
+            }
           }
-          _lastSelectS = sNow|0;
-          _lastSelectE = eNow|0;
-          _lastSelectDir = dNow;
         }catch{}
+
+        _lastSelectS = sNow|0;
+        _lastSelectE = eNow|0;
+        _lastSelectDir = dNow;
         // md-rich single-click: native textarea hit-testing can be off; wait for mouseup/click correction.
         try{
           if (_mdMouseClickPendingAdjust && _mdRichActive()){
@@ -18857,6 +18901,8 @@ try{
               try{ _syncNativeSelectionToCaret(); }catch{}
               _touchBufferModified();
               try{ _insertSegDirty = true; }catch{}
+              // selection は通常タイピングでも動くため、直後の select では分割しない
+              try{ _insertSegIgnoreSelectUntil = Date.now() + 80; }catch{}
               ensureScrolloff(); _repositionCaret(); updateGutter();
               // TAB挿入は preventDefault + editor.value 直書きで input イベントが発火しないため、listchars を明示更新する (#1463)
               try{ if (typeof _scheduleListCharsRender === 'function') _scheduleListCharsRender('tab'); }catch{}
