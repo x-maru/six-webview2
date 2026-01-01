@@ -18774,6 +18774,7 @@ try{
                     try{ ensureScrolloff({ force:true, preferEOFPad:true, eofToBottom:true, keepCaret:true, immediate:true }); }catch{}
                     try{ _repositionCaret(); updateGutter(); }catch{}
                     try{ _renderHlMatchesVisible(); }catch{}
+                    try{ _scheduleListCharsRender && _scheduleListCharsRender('resize'); }catch{}
                     try{ _incPrevRefresh(); }catch{}
                     try{ _renderVisSelOverlay(); }catch{}
                     return;
@@ -18785,6 +18786,7 @@ try{
           }catch{}
           try{ _repositionCaret(); updateGutter(); }catch{}
           try{ _renderHlMatchesVisible(); }catch{}
+          try{ _scheduleListCharsRender && _scheduleListCharsRender('resize'); }catch{}
           try{ _incPrevRefresh(); }catch{}
           try{ _renderVisSelOverlay(); }catch{}
         };
@@ -18798,6 +18800,7 @@ try{
     _repositionCaret();
     updateGutter();
     _renderHlMatchesVisible();
+    try{ _scheduleListCharsRender && _scheduleListCharsRender('resize'); }catch{}
     _incPrevRefresh();
     _renderVisSelOverlay();
   });
