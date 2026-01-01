@@ -1,4 +1,4 @@
-const VERSION = '0.9.1.u';
+const VERSION = '0.9.1.x';
 // Build stamp (for verifying which _six.js is actually running)
 // NOTE: Intentionally ASCII-only; fullwidth variants should be treated as invalid.
 try{ window.__sixBuildTs = '2025-12-29T00:00:00Z'; }catch{}
@@ -7636,10 +7636,35 @@ try{
           // (text+pad) - floor(viewportHeight/LINE_HEIGHT)*LINE_HEIGHT.
           const lh = Math.max(1, (LINE_HEIGHT|0));
           const extraPx = Math.max(0, (_mdEofPadLastExtraPx|0))|0;
+          // If the buffer ends with '\n', the textarea renders a real final empty line.
+          // But NORMAL-mode line model (_splitLines) hides that phantom row (#495/#636).
+          // Without compensating, effective EOF padding becomes short by ~1 line.
+          let hiddenPhantom = 0;
+          try{
+            const t = (editor && typeof editor.value === 'string') ? editor.value : '';
+            const len = t ? (t.length|0) : 0;
+            if (len > 0 && t.charCodeAt(len-1) === 10){
+              let keep = false;
+              try{
+                if (_mode === 'INSERT'){
+                  const off = (editor && typeof editor.selectionStart === 'number') ? (editor.selectionStart|0) : -1;
+                  if (off === (len|0)) keep = true; // caret entered the phantom row
+                }
+              }catch{}
+              if (!keep) hiddenPhantom = 1;
+            }
+          }catch{ hiddenPhantom = 0; }
+          // IMPORTANT: use editor.clientHeight here.
+          // maxScroll is defined as (editor.scrollHeight - editor.clientHeight), so the
+          // remainder that must be preserved at EOF is based on editor.clientHeight.
+          // Using viewport.clientHeight can be off by ~1 line (overlay bars etc) and
+          // manifests as "5行+半端" instead of "6行+半端".
           let vh = 0;
-          try{ vh = (viewport && typeof viewport.clientHeight === 'number' && (viewport.clientHeight|0) > 0) ? (viewport.clientHeight|0) : ((editor.clientHeight||0)|0); }catch{ vh = ((editor && editor.clientHeight)||0)|0; }
+          try{ vh = ((editor && editor.clientHeight) ? (editor.clientHeight|0) : 0); }catch{ vh = 0; }
           const rem = (vh > 0) ? ((vh|0) % (lh|0))|0 : 0;
-          const eff = Math.max(0, ((maxScroll|0) - (extraPx|0) + (rem|0))|0);
+          // Add back one logical row when the phantom final blank line is hidden by the model.
+          // This keeps user-visible EOF pad stable ("6行+半端") across files ending with '\n'.
+          const eff = Math.max(0, ((maxScroll|0) - (extraPx|0) + (rem|0) + ((hiddenPhantom|0) ? (lh|0) : 0))|0);
           return Math.min((maxScroll|0), (eff|0))|0;
         }
       }catch{}
@@ -12171,11 +12196,14 @@ try{
         const nearEOF = caretL1 >= ((linesTotal|0) - Math.max(2, Math.floor((vis|0) / 2)));
         // Avoid treating generic `force` as a reason to recompute (j/k repeats can call ensureScrolloff often).
         // Only recompute on explicit EOF-related requests.
-        const explicit = !!(opts && (opts.preferEOFPad || opts.centerOnce));
+        const explicit = !!(opts && (opts.preferEOFPad || opts.centerOnce || opts.eofToBottom));
         // Treat as stale only when paddingBottom was never applied.
         // extraLines can legitimately be 0 when there are no wrapped visual lines.
         const looksStale = ((_mdEofPadLastPbPx|0) < 0);
-        const wants = explicit || (nearEOF && looksStale);
+        // IMPORTANT: Always refresh when we are at logical EOF.
+        // Otherwise, reaching EOF via `j` can leave the physical scrollTop below the
+        // compensation range (effective max not reached), resulting in 4/5 pad lines.
+        const wants = explicit || atLogicalEOF || (nearEOF && looksStale);
         if (wants && (now - last) >= 120){
           ensureScrolloff._mdEofSyncAt = now;
           try{ _mdSyncEofPadComp(); }catch{}
@@ -12210,7 +12238,32 @@ try{
     // 行数ベースの clamp に補正行を足すと過剰に下へ行ける計算になってブレる。
     const totalForClamp = (_wrapActive ? (_linesTotalVis|0) : (linesTotal|0));
     const baseMaxTop = Math.max(1, (totalForClamp|0) - vis + 1);
-    const _eofPad = _eofPadLines();
+    // EOF pad (line count): md-rich+wrap-on uses a logical-line grid, but the textarea can
+    // still render a final empty row when the buffer ends with '\n'. In NORMAL mode the
+    // model hides that phantom row, so we extend the *clamp* pad by 1 to keep the visible
+    // padding stable.
+    let _eofPad = _eofPadLines();
+    try{
+      const mdLogicalWrap = !!(
+        (_mdRichActive && _mdRichActive()) &&
+        (_wrapEnabled && _wrapEnabled()) &&
+        (_wrapUsesVisualScrollGrid && !_wrapUsesVisualScrollGrid())
+      );
+      if (mdLogicalWrap && (_eofPad|0) > 0 && editor){
+        const t = (typeof editor.value === 'string') ? editor.value : '';
+        const len = t ? (t.length|0) : 0;
+        if (len > 0 && t.charCodeAt(len-1) === 10){
+          let keep = false;
+          try{
+            if (_mode === 'INSERT'){
+              const off = (typeof editor.selectionStart === 'number') ? (editor.selectionStart|0) : -1;
+              if (off === (len|0)) keep = true;
+            }
+          }catch{}
+          if (!keep) _eofPad = ((_eofPad|0) + 1)|0;
+        }
+      }
+    }catch{}
     // NOTE: Do NOT cap by total lines; padding creates a virtual scroll range even when file < viewport.
     // In wrap-on + markdown-off, the *physical* scroll range can exceed any line-count-based estimate
     // (native soft wraps, delayed reflow after mutations). If we clamp using a stale estimate, we can
@@ -12256,6 +12309,18 @@ try{
         }catch{ bypassBottomLock = false; }
 
         if (!bypassBottomLock){
+          // md-rich + wrap-on: when caret is at logical EOF, we must allow a final
+          // downward pin to the true physical bottom; otherwise the "near bottom" early
+          // return can freeze us 1-2 lines above and shrink visible EOF padding.
+          let mdLogicalWrapAtEOF = false;
+          try{
+            mdLogicalWrapAtEOF = !!(
+              atLogicalEOF &&
+              (_mdRichActive && _mdRichActive()) &&
+              (_wrapEnabled && _wrapEnabled()) &&
+              (_wrapUsesVisualScrollGrid && !_wrapUsesVisualScrollGrid())
+            );
+          }catch{ mdLogicalWrapAtEOF = false; }
           const stNow = (editor && typeof editor.scrollTop === 'number') ? +editor.scrollTop : 0;
           const physMax = Math.max(0, ((editor && editor.scrollHeight) ? (editor.scrollHeight|0) : 0) - ((editor && editor.clientHeight) ? (editor.clientHeight|0) : 0));
           const nearBottomPx = Math.max(2, ((LINE_HEIGHT|0) * 2));
@@ -12276,6 +12341,16 @@ try{
             }catch{ violatesTopMargin = false; }
 
             if (caretInViewLock && !violatesTopMargin){
+              // For md-rich+wrap at EOF, only short-circuit if we are truly pinned.
+              // Otherwise allow downstream logic to pin to physMax.
+              if (mdLogicalWrapAtEOF){
+                if (Math.abs((stNow|0) - (physMax|0)) > 0.5){
+                  // fall through
+                } else {
+                  if (force){ try{ _repositionCaret(); }catch{} }
+                  return;
+                }
+              }
               // Keep overlays in sync when callers expect a caret render.
               if (force){ try{ _repositionCaret(); }catch{} }
               return;
@@ -12630,6 +12705,29 @@ try{
       topLine = _topLine();
       if (topLine > maxTop){ _setEditorScrollTop((maxTop-1)*LINE_HEIGHT, {}); }
     }
+
+    // md-rich + wrap-on: when at logical EOF, ensure the native scrollbar is pinned to
+    // the true physical bottom so effective scrollTop can clamp to the stable max.
+    // This makes EOF padding deterministic regardless of reaching EOF via `j` or `G`.
+    try{
+      const eofPadNow = (typeof _eofPadLines==='function') ? (_eofPadLines()|0) : 0;
+      const mdLogicalWrap = !!(
+        (eofPadNow|0) > 0 &&
+        atLogicalEOF &&
+        (_mdRichActive && _mdRichActive()) &&
+        (_wrapEnabled && _wrapEnabled()) &&
+        (_wrapUsesVisualScrollGrid && !_wrapUsesVisualScrollGrid())
+      );
+      if (mdLogicalWrap && typeof _mdPinThumbPhysBottom === 'function'){
+        const before = (editor && typeof editor.scrollTop === 'number') ? +editor.scrollTop : 0;
+        _mdPinThumbPhysBottom('ensure:atEOF');
+        const after = (editor && typeof editor.scrollTop === 'number') ? +editor.scrollTop : 0;
+        if (Math.abs(after - before) > 0.5){
+          try{ _repositionCaret(); }catch{}
+          try{ updateGutter(); }catch{}
+        }
+      }
+    }catch{}
 
     // md-rich debug: sample ensureScrolloff behavior (aggregated, throttled)
     try{
@@ -17250,6 +17348,40 @@ try{
       }, 220);
     }catch{}
   });
+
+  function _recoverMdEofOnActivate(reason){
+    try{
+      if (!editor) return;
+      const eofPadNow = (typeof _eofPadLines==='function') ? (_eofPadLines()|0) : 0;
+      if ((eofPadNow|0) <= 0) return;
+      const mdLogicalWrap = !!(
+        (_mdRichActive && _mdRichActive()) &&
+        (_wrapEnabled && _wrapEnabled()) &&
+        (_wrapUsesVisualScrollGrid && !_wrapUsesVisualScrollGrid())
+      );
+      if (!mdLogicalWrap) return;
+      const total = (typeof _totalLines === 'function') ? (_totalLines()|0) : 0;
+      const atEOF = (((caretRow|0) + 1) === (total|0));
+      if (!atEOF) return;
+
+      // Tokenize so focus+visibility+timers don't fight.
+      try{ _recoverMdEofOnActivate._seq = ((_recoverMdEofOnActivate._seq|0) + 1)|0; }catch{}
+      const seq = (_recoverMdEofOnActivate._seq|0);
+
+      const run = ()=>{
+        try{ if (((_recoverMdEofOnActivate._seq|0) !== (seq|0))) return; }catch{}
+        try{ if (document && document.hidden) return; }catch{}
+        try{ if (typeof _mdWrapEnsureCache === 'function') _mdWrapEnsureCache(true); }catch{}
+        try{ if (typeof _mdSyncEofPadComp === 'function') _mdSyncEofPadComp(); }catch{}
+        try{ if (typeof _mdPinThumbPhysBottom === 'function') _mdPinThumbPhysBottom('activate:' + String(reason||'')); }catch{}
+        try{ ensureScrolloff({ force:true, preferEOFPad:true, eofToBottom:true, keepCaret:true, immediate:true }); }catch{}
+      };
+
+      try{ if (window && window.requestAnimationFrame) requestAnimationFrame(run); else setTimeout(run, 0); }catch{}
+      try{ setTimeout(run, 80); }catch{}
+      try{ setTimeout(run, 220); }catch{}
+    }catch{}
+  }
   // タブ切替なしでアプリが不可視→可視になった場合も同様に確認
   document.addEventListener('visibilitychange', ()=>{
     try{
@@ -17261,6 +17393,8 @@ try{
         }
         // Long-idle recovery: reattach IME/keyboard by blurring+refocusing the editor
         try{ if (editor){ editor.blur(); editor.focus({ preventScroll:true }); } }catch{}
+        // md-rich EOF padding can drift across visibility changes; resync on return.
+        try{ _recoverMdEofOnActivate('visible'); }catch{}
         // 端末/環境により発火順が前後する場合のフォローとして遅延再試行
         setTimeout(()=>{
           try{
@@ -17270,6 +17404,7 @@ try{
               _maybeCheckExternalChangeOnActivate(idx2);
             }
             try{ if (editor){ editor.blur(); editor.focus({ preventScroll:true }); } }catch{}
+            try{ _recoverMdEofOnActivate('visible+220'); }catch{}
           }catch{}
         }, 220);
       }
