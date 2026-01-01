@@ -5508,6 +5508,30 @@ try{
         }
       }catch{ dispLine = line; dispPrefix = 0; }
 
+      const wrapOn = (function(){ try{ return !!(_wrapEnabled && _wrapEnabled()); }catch{ return false; } })();
+      let wPx = 0;
+      try{ if (wrapOn) wPx = _wrapAvailWidthPx()|0; }catch{ wPx = 0; }
+
+      const _wrapPosForCol = (cc)=>{
+        try{
+          const col = Math.max(0, cc|0);
+          if (!wrapOn) return { intra:0, x:null };
+          if (mdRich){
+            const fs = Math.max(6, Math.round(baseFontPx * (scale||1)));
+            let intra = 0;
+            let x = null;
+            try{ intra = _wrapProbeIntraFromColStyled(dispLine, col, wPx|0, rowHeightPx|0, fs|0) | 0; }catch{ intra = 0; }
+            try{ x = _wrapProbeXFromColStyled(dispLine, col, wPx|0, fs|0, rowHeightPx|0); }catch{ x = null; }
+            return { intra: Math.max(0, intra|0), x };
+          }
+          let intra = 0;
+          let x = null;
+          try{ intra = _wrapProbeIntraFromCol(dispLine, col, wPx|0) | 0; }catch{ intra = 0; }
+          try{ x = _wrapProbeXFromCol(dispLine, col, wPx|0); }catch{ x = null; }
+          return { intra: Math.max(0, intra|0), x };
+        }catch{ return { intra:0, x:null }; }
+      };
+
       // tab expander (same logic as full render)
       const _exp = (s)=>{
         if (!s || s.indexOf('\t')===-1) return s;
@@ -5540,12 +5564,18 @@ try{
       for (let c=0;c<dispLine.length;c++){
         const ch = dispLine.charAt(c);
         if (ch==='\t' || ch==='\u3000' || (c>=trailStart && ch===' ')){
-          _measureSpan.textContent = _exp(dispLine.slice(0,c));
-          const x1b = _measureSpan.getBoundingClientRect().width;
-          _measureSpan.textContent = _exp(dispLine.slice(0,c+1));
-          const x2b = _measureSpan.getBoundingClientRect().width;
-          const x1 = mdRich ? (x1b * scale) : x1b;
-          const x2 = mdRich ? (x2b * scale) : x2b;
+          let x1 = 0;
+          let y1 = yTop;
+          if (wrapOn){
+            const p = _wrapPosForCol(c|0);
+            const lh = mdRich ? (rowHeightPx|0) : (LINE_HEIGHT|0);
+            y1 = (yTop|0) + (Math.max(0, (p.intra|0)) * Math.max(1, lh|0));
+            x1 = Number.isFinite(p.x) ? Math.max(0, (+p.x||0)) : 0;
+          } else {
+            _measureSpan.textContent = _exp(dispLine.slice(0,c));
+            const x1b = _measureSpan.getBoundingClientRect().width;
+            x1 = mdRich ? (x1b * scale) : x1b;
+          }
           const el = document.createElement('div');
           el.className='listchar';
           let sym = '';
@@ -5554,8 +5584,8 @@ try{
           else sym='·';
           el.textContent = sym;
           try{ el.dataset.row = String(row1); }catch{}
-          let _hs=0; try{ _hs = mdRich ? 0 : (editor.scrollLeft||0); }catch{}
-          el.style.position='absolute'; el.style.left=(x1-_hs)+'px'; el.style.top=yTop+'px';
+          let _hs=0; try{ _hs = (mdRich || wrapOn) ? 0 : (editor.scrollLeft||0); }catch{}
+          el.style.position='absolute'; el.style.left=(x1-_hs)+'px'; el.style.top=y1+'px';
           el.style.height=(mdRich ? rowHeightPx : LINE_HEIGHT)+'px'; el.style.lineHeight=(mdRich ? rowHeightPx : LINE_HEIGHT)+'px';
           if (mdRich){ el.style.fontSize = Math.max(6, Math.round(baseFontPx * scale)) + 'px'; } else { el.style.fontSize='inherit'; }
           el.style.fontFamily='var(--controlCharFont, "Segoe UI Symbol","Noto Sans Symbols 2","Cascadia Mono","Consolas",monospace)'; el.style.padding='0'; el.style.margin='0'; el.style.color='var(--controlCharColor, yellow)';
@@ -5565,9 +5595,10 @@ try{
 
       // EOL marker
       if (!(window._imeComposing === true && row1 === (caretRow + 1))) {
-        let _hs=0; try{ _hs = mdRich ? 0 : (editor.scrollLeft||0); }catch{}
+        let _hs=0; try{ _hs = (mdRich || wrapOn) ? 0 : (editor.scrollLeft||0); }catch{}
         // If this row is rendered as a horizontal rule in clean display, place EOL at the rule's right edge.
         let xEnd = 0;
+        let yEnd = yTop;
         let hrEol = false;
         try{
           if (mdRich){
@@ -5599,9 +5630,16 @@ try{
           const vx = Math.max(0, w - marginPx);
           xEnd = (_hs + vx);
         } else {
-          _measureSpan.textContent = _exp(dispLine);
-          const xEndb = _measureSpan.getBoundingClientRect().width;
-          xEnd = mdRich ? (xEndb * scale) : xEndb;
+          if (wrapOn){
+            const pEnd = _wrapPosForCol(dispLine.length|0);
+            const lh = mdRich ? (rowHeightPx|0) : (LINE_HEIGHT|0);
+            yEnd = (yTop|0) + (Math.max(0, (pEnd.intra|0)) * Math.max(1, lh|0));
+            xEnd = Number.isFinite(pEnd.x) ? Math.max(0, (+pEnd.x||0)) : 0;
+          } else {
+            _measureSpan.textContent = _exp(dispLine);
+            const xEndb = _measureSpan.getBoundingClientRect().width;
+            xEnd = mdRich ? (xEndb * scale) : xEndb;
+          }
         }
         const elE = document.createElement('div');
         elE.className='listchar-eol';
@@ -5624,7 +5662,7 @@ try{
         }catch{}
         elE.textContent=eolSym;
         try{ elE.dataset.row = String(row1); }catch{}
-        elE.style.position='absolute'; elE.style.left=(xEnd-_hs)+'px'; elE.style.top=yTop+'px';
+        elE.style.position='absolute'; elE.style.left=(xEnd-_hs)+'px'; elE.style.top=yEnd+'px';
         elE.style.height=(mdRich ? rowHeightPx : LINE_HEIGHT)+'px'; elE.style.lineHeight=(mdRich ? rowHeightPx : LINE_HEIGHT)+'px';
         if (mdRich){ elE.style.fontSize = Math.max(6, Math.round(baseFontPx * scale)) + 'px'; } else { elE.style.fontSize='inherit'; }
         elE.style.fontFamily='var(--controlCharFont, "Segoe UI Symbol","Noto Sans Symbols 2","Cascadia Mono","Consolas",monospace)'; elE.style.color=ffColor; elE.style.margin='0'; elE.style.padding='0';
