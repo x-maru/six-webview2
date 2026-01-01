@@ -828,6 +828,41 @@ try{
   // IME未確定中の大量inputで重い処理が走るのを避ける（compositionendで一括反映）
   let _imeDeferredModifyPending = false;
   let _imeDeferredTickBumped = false;
+  // IME composing: schedule a minimal caret sync for markdown-rich so the very first key
+  // doesn't render the preedit text shifted relative to the overlay caret.
+  let _imeCompCaretSyncPending = false;
+  function _scheduleImeCompCaretSync(reason){
+    try{
+      if (_imeCompCaretSyncPending) return;
+      _imeCompCaretSyncPending = true;
+      const run = ()=>{
+        _imeCompCaretSyncPending = false;
+        try{ if (!(window && window._imeComposing===true)) return; }catch{}
+        try{ if (_mode !== 'INSERT') return; }catch{}
+        try{ if (!(editor && typeof editor.selectionEnd==='number')) return; }catch{}
+        // Keep this lightweight: avoid full snapshots; just sync caret from native selection
+        // and refresh caret/textLayer once.
+        try{
+          const off = (editor.selectionEnd|0);
+          const rc = _rcFromOffset(off|0);
+          if (rc && typeof rc.r==='number' && typeof rc.c==='number'){
+            caretRow = rc.r|0;
+            caretCol = rc.c|0;
+          }
+        }catch{}
+        try{ _mdImeUpdateRange && _mdImeUpdateRange(); }catch{}
+        try{ if (_mdRichActive && _mdRichActive()) _mdRenderTextLayer && _mdRenderTextLayer(); }catch{}
+        try{ _repositionCaret && _repositionCaret({ force:true }); }catch{}
+        try{ updateGutter && updateGutter({ force:true }); }catch{}
+      };
+      if (window && window.requestAnimationFrame){
+        requestAnimationFrame(()=>{ try{ run(); }catch{} });
+      } else {
+        setTimeout(()=>{ try{ run(); }catch{} }, 0);
+      }
+      try{ if (window && window.SIX_IME_METRICS){ window.SIX_IME_METRICS && (window.SIX_IME_METRICS.composingCalls && (window.SIX_IME_METRICS.composingCalls.beforeinputSync = (window.SIX_IME_METRICS.composingCalls.beforeinputSync|0) + 1)); } }catch{}
+    }catch{ _imeCompCaretSyncPending = false; }
+  }
   // タブバー水平スクロール: delta は方向単位。幅に応じて適度なピクセルへ変換。
   function _scrollTabsBy(delta){
     try{
@@ -1476,6 +1511,14 @@ try{
         _imeActive = true;
         try{ _imeVisualLockUntil = 0; }catch{}
         try{ _applyCaretGradient(); }catch{}
+        // markdown-rich: show native caret during composition so IME candidate popup anchors
+        // to the visible caret (overlay caret can be covered/misaligned).
+        try{
+          if (_mdRichActive && _mdRichActive()){
+            _nativeCaretForceUntil = Date.now() + 60*1000;
+            _setNativeCaretMode && _setNativeCaretMode(true);
+          }
+        }catch{}
         // タイピング中の重い再描画を少し長めに抑止（IME候補表示中のフレーム落ち対策）
         try{ _typingGuardUntil = Date.now() + 200; }catch{}
         try{ _applyCaretGradient(); }catch{}
@@ -1518,6 +1561,9 @@ try{
       editor.addEventListener('compositionend',   ()=>{
         try{ window._imeComposing = false; }catch{}
         try{ _mdImeRange = null; }catch{}
+
+        // markdown-rich: end native-caret forcing immediately (restore overlay caret behavior)
+        try{ _nativeCaretForceUntil = 0; _refreshCaretMode && _refreshCaretMode('compositionend-md'); }catch{}
 
         // Sync overlay caret position once at commit time (skip for huge buffers).
         try{
@@ -17909,6 +17955,9 @@ try{
         if (window && window._imeComposing===true){
           const itIme = String((e && e.inputType) || '');
           if (itIme === 'insertCompositionText' || itIme === 'insertFromComposition'){
+            // markdown-rich: even during composition, we must keep overlay caret aligned,
+            // otherwise the very first preedit glyph can appear shifted.
+            try{ if (_mdRichActive && _mdRichActive()) _scheduleImeCompCaretSync && _scheduleImeCompCaretSync('beforeinput-' + itIme); }catch{}
             try{ if (_optDebugKeys) _debugPush({ t:Date.now(), type:'beforeinput-ime', mode:_mode, inputType:itIme, isComp:true }); }catch{}
             return;
           }
