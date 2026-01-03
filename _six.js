@@ -8499,12 +8499,23 @@ try{
   function _mdEffectiveMaxScrollPx(){
     try{
       if (!editor) return 0;
-      const maxScroll = Math.max(0, (editor.scrollHeight||0) - (editor.clientHeight||0));
-      // md-rich + wrap-on: the native scroll range is expanded via paddingBottom (EOF pad + wrap/height compensation).
-      // The scrollbar thumb should be allowed to reach the true physical bottom.
-      // But the *effective* scrollTop used for mapping/rendering must clamp to a stable
-      // maximum so that user-visible EOF padding is EXACTLY eofPadLines (+ remainder)
-      // and never shrinks as wrap compensation grows.
+      // In md-rich, the visible viewport height is governed by `#viewport` overlays.
+      // Using `editor.clientHeight` can drift when padding/box-sizing adjustments are applied,
+      // which can make the effective max too small and prevent reaching EOF.
+      let clientH = 0;
+      try{
+        if ((_mdRichActive && _mdRichActive()) && viewport && (viewport.clientHeight|0) > 0){
+          clientH = (viewport.clientHeight|0);
+        } else {
+          clientH = (editor.clientHeight||0)|0;
+        }
+      }catch{ clientH = (editor.clientHeight||0)|0; }
+      const maxScroll = Math.max(0, (editor.scrollHeight||0) - (clientH|0));
+      // md-rich + wrap-on: the native scroll range is expanded via paddingBottom
+      // (EOF pad + wrap/height compensation). The scrollbar thumb should be allowed
+      // to reach the true physical bottom, but mapping/rendering must clamp to an
+      // *effective* maximum that hides the compensation range so the user-visible
+      // EOF padding stays at eofPadLines (+ remainder).
       try{
         const mdLogicalWrap = !!(
           (_mdRichActive && _mdRichActive()) &&
@@ -8512,48 +8523,23 @@ try{
           (_wrapUsesVisualScrollGrid && !_wrapUsesVisualScrollGrid())
         );
         if (mdLogicalWrap){
-          // Effective max must be line-grid-aligned so user-visible EOF padding stays
-          // EXACTLY eofPadLines + viewport remainder.
-          //
-          // Key detail: editor/viewport height is not always a multiple of LINE_HEIGHT.
-          // If we subtract extraPx using the *physical* clientHeight as-is, the remainder
-          // gets subtracted too, and the visible EOF padding can drop by ~1 line when
-          // wrap compensation is exactly 1 line.
-          //
-          // Fix: add back the viewport remainder so effective max corresponds to
-          // (text+pad) - floor(viewportHeight/LINE_HEIGHT)*LINE_HEIGHT.
-          const lh = Math.max(1, (LINE_HEIGHT|0));
-          const extraPx = Math.max(0, (_mdEofPadLastExtraPx|0))|0;
-          // If the buffer ends with '\n', the textarea renders a real final empty line.
-          // But NORMAL-mode line model (_splitLines) hides that phantom row (#495/#636).
-          // Without compensating, effective EOF padding becomes short by ~1 line.
-          let hiddenPhantom = 0;
+          // `extraPx` is the additional pixel range added to paddingBottom so the native thumb
+          // can reach the physical bottom even though the textarea stays unwrapped.
+          // Effective scroll must exclude this region; otherwise EOF shows far more than
+          // eofPadLines, and caret motions (k/j) can desync from the visible viewport.
+          let extraPx = 0;
+          try{ extraPx = Math.max(0, (_mdEofPadLastExtraPx|0)); }catch{ extraPx = 0; }
+          // If extraPx wasn't computed yet but we have the last applied paddingBottom, derive it.
           try{
-            const t = (editor && typeof editor.value === 'string') ? editor.value : '';
-            const len = t ? (t.length|0) : 0;
-            if (len > 0 && t.charCodeAt(len-1) === 10){
-              let keep = false;
-              try{
-                if (_mode === 'INSERT'){
-                  const off = (editor && typeof editor.selectionStart === 'number') ? (editor.selectionStart|0) : -1;
-                  if (off === (len|0)) keep = true; // caret entered the phantom row
-                }
-              }catch{}
-              if (!keep) hiddenPhantom = 1;
+            if ((extraPx|0) <= 0 && (_mdEofPadLastPbPx|0) >= 0){
+              const lh = Math.max(1, (LINE_HEIGHT|0));
+              const basePad = (typeof _eofPadLines === 'function') ? (_eofPadLines()|0) : 0;
+              const basePx = Math.max(0, (basePad|0) * (lh|0));
+              extraPx = Math.max(0, ((_mdEofPadLastPbPx|0) - (basePx|0))|0);
             }
-          }catch{ hiddenPhantom = 0; }
-          // IMPORTANT: use editor.clientHeight here.
-          // maxScroll is defined as (editor.scrollHeight - editor.clientHeight), so the
-          // remainder that must be preserved at EOF is based on editor.clientHeight.
-          // Using viewport.clientHeight can be off by ~1 line (overlay bars etc) and
-          // manifests as "5行+半端" instead of "6行+半端".
-          let vh = 0;
-          try{ vh = ((editor && editor.clientHeight) ? (editor.clientHeight|0) : 0); }catch{ vh = 0; }
-          const rem = (vh > 0) ? ((vh|0) % (lh|0))|0 : 0;
-          // Add back one logical row when the phantom final blank line is hidden by the model.
-          // This keeps user-visible EOF pad stable ("6行+半端") across files ending with '\n'.
-          const eff = Math.max(0, ((maxScroll|0) - (extraPx|0) + (rem|0) + ((hiddenPhantom|0) ? (lh|0) : 0))|0);
-          return Math.min((maxScroll|0), (eff|0))|0;
+          }catch{}
+          const eff = Math.max(0, ((maxScroll|0) - (extraPx|0))|0);
+          return Math.min((maxScroll|0), (eff|0));
         }
       }catch{}
       return maxScroll|0;
@@ -8723,30 +8709,14 @@ try{
             d.eofMeta.cond = ((d.eofMeta && d.eofMeta.cond)|0) + 1;
           }
         }catch{}
+        // With md-rich.wrap-on the textarea itself is wrapped (CSS), so native scrollHeight
+        // already reflects visual wraps. Do NOT add md-only scroll-range compensation here.
         const lines = _splitLines();
         linesTotal = (lines.length|0);
-        // Compute required extra scroll range in *pixels* (wrap + per-row line-height), then convert to LINE_HEIGHT units.
-        // NOTE: In md-rich + wrap-on, the textarea is intentionally kept UNWRAPPED (see CSS: body.md-rich.wrap-on #editor).
-        // Therefore the native scroll range is logical-line based, and we must compensate for visual wrap lines.
         totalPx = 0;
-        try{
-          const c = _mdWrapEnsureCache(false) || _mdWrapEnsureCache(true);
-          if (c){
-            if (Number.isFinite(c.totalPx)) totalPx = (c.totalPx|0);
-            if (Number.isFinite(c.wPx)) wPx = (c.wPx|0);
-            cacheTotalPx = (Number.isFinite(c.totalPx) ? (c.totalPx|0) : 0);
-            cacheWpx = (Number.isFinite(c.wPx) ? (c.wPx|0) : 0);
-          }
-        }catch{}
-        if (!(totalPx > 0)){
-          // Fallback: treat as simple visual-line count diff.
-          try{ totalPx = (_mdWrapTotalVisLines()|0) * (LINE_HEIGHT|0); }catch{ totalPx = linesTotal * (LINE_HEIGHT|0); }
-        }
         textPx = (linesTotal|0) * (LINE_HEIGHT|0);
-        extraPx = Math.max(0, (totalPx|0) - (textPx|0));
-        // Track the pixel compensation separately so we can clamp the *visible* EOF pad to basePad lines.
-        _mdEofPadLastExtraPx = (extraPx|0);
-        // NOTE: mdCompLines will be derived from actual scrollHeight (below) to avoid drift.
+        extraPx = 0;
+        _mdEofPadLastExtraPx = 0;
         extra = 0;
       }
       _mdEofPadExtraLines = extra|0;
@@ -8767,14 +8737,8 @@ try{
           }
         }catch{}
 
-        // Cheap md compensation lines estimate.
-        // NOTE: Avoid scrollHeight/clientHeight reads here (they can trigger forced reflow).
-        // The main purpose of this value is “staleness” tracking and optional diagnostics.
-        try{
-          const lh = Math.max(1, (LINE_HEIGHT|0));
-          const derivedExtra = Math.max(0, Math.ceil(Math.max(0, (extraPx|0)) / lh));
-          _mdEofPadExtraLines = derivedExtra|0;
-        }catch{ _mdEofPadExtraLines = 0; }
+        // No md-only compensation in this mode.
+        _mdEofPadExtraLines = 0;
 
         // Optional debug aggregation to DevTools console (throttled)
         try{
@@ -8807,8 +8771,9 @@ try{
   }
   function _wrapUsesVisualScrollGrid(){
     try{
-      // markdown-rich uses a logical-line scroll grid; do not switch to visual-line grid there.
-      return _wrapEnabled() && !(_mdRichEnabled && _mdRichEnabled());
+      // Use the visual-line scroll grid whenever wrapping is enabled.
+      // (md-rich also keeps the textarea wrapped so native scroll metrics stay consistent.)
+      return _wrapEnabled();
     }catch{ return false; }
   }
   function _wrapSpaceWidthPx(){
@@ -13165,6 +13130,27 @@ try{
         const physMaxPx = Math.max(0, ((editor.scrollHeight||0) - (editor.clientHeight||0))|0);
         const physMaxTopLine1 = (Math.floor(physMaxPx / (LINE_HEIGHT|0)) + 1)|0;
         if ((physMaxTopLine1|0) > (maxTopWithPad|0)) maxTopWithPad = physMaxTopLine1|0;
+      }
+    }catch{}
+
+    // md-rich + wrap-on (logical scroll grid): when physically pinned to the bottom,
+    // editor.scrollTop is in variable-height pixel space, so _topLine() (st/LINE_HEIGHT)
+    // can become much larger than the line-based clamp. That makes ensureScrolloff()
+    // think the caret is off-screen and it auto-scrolls upward (observed as oscillation
+    // after `G` and repeated Home/End). In that pinned-bottom state, treat topLine as the
+    // line-based maximum so we keep the EOF pin stable.
+    try{
+      const mdLogicalWrap = !!(
+        (_mdRichActive && _mdRichActive()) &&
+        (_wrapEnabled && _wrapEnabled()) &&
+        (_wrapUsesVisualScrollGrid && !_wrapUsesVisualScrollGrid())
+      );
+      if (mdLogicalWrap && editor){
+        const stNow = (editor && typeof editor.scrollTop === 'number') ? +editor.scrollTop : 0;
+        const physMax = Math.max(0, ((editor.scrollHeight||0) - (editor.clientHeight||0))|0);
+        if ((physMax - stNow) <= 1.5){
+          topLine = Math.min((topLine|0), (maxTopWithPad|0));
+        }
       }
     }catch{}
 

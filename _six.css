@@ -314,11 +314,12 @@ body.md-rich #editor {
 	scrollbar-gutter: stable;
 }
 
-/* md-rich: wrapping is rendered in #textLayer; keep textarea unwrapped so scroll metrics stay logical-line based. */
+/* md-rich: keep textarea wrapping enabled too so native scroll metrics match visual wraps.
+   This restores EOF reachability for ggG/G without md-only scroll compensation. */
 body.md-rich.wrap-on #editor {
-	white-space: pre !important;
-	word-break: normal !important;
-	overflow-wrap: normal !important;
+	white-space: pre-wrap !important;
+	word-break: break-all !important;
+	overflow-wrap: anywhere !important;
 	overflow-x: hidden !important;
 }
 
