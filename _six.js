@@ -1114,6 +1114,13 @@ try{
   let _imeBarPrevText = '';
   let _imeBarComposing = false;
   let _imeBarSnapshotTaken = false;
+  // md-rich IME bar: split undo segments on caret-only moves (like INSERT seg).
+  // dirty: we have modified the document via IME bar since the last boundary.
+  // pending: a caret-only move happened after dirty; next edit should start a new undo segment.
+  let _imeBarSegDirty = false;
+  let _imeBarSegPending = false;
+  // Ignore selection events caused by IME bar edits (they are part of the edit, not a caret-only move).
+  let _imeBarIgnoreSelectUntil = 0;
   let _imeBarWasEditorReadOnly = false;
   let _imeBarLastImeEvtAt = 0;
   let _imeBarJustOpenedUntil = 0;
@@ -1230,6 +1237,15 @@ try{
           _imeBarAnchorOff = delStart|0;
         }
       }catch{}
+      // If a caret-only move occurred after prior edits, start a new undo segment now.
+      // We do this by resetting snapshotTaken so the existing logic pushes a fresh snapshot.
+      try{
+        if (_imeBarSegPending){
+          _imeBarSegPending = false;
+          _imeBarSegDirty = false;
+          _imeBarSnapshotTaken = false;
+        }
+      }catch{}
       if (!_imeBarSnapshotTaken){
         _imeBarSnapshotTaken = true;
         try{ _pushUndoSnapshot && _pushUndoSnapshot('imebar'); }catch{}
@@ -1238,11 +1254,14 @@ try{
       const out = s.slice(0, delStart) + next + s.slice(delEnd);
       if (out !== s){
         editor.value = out;
+        try{ _imeBarSegDirty = true; }catch{}
         try{ const b=currentBuffer && currentBuffer(); if (b) b.text = out; }catch{}
         try{ _touchBufferModified && _touchBufferModified(); }catch{}
         try{ _afterTextMutation && _afterTextMutation(); }catch{}
       }
       const newOff = (delStart + next.length)|0;
+      // Guard: the selection update below is part of an edit, not a caret-only move.
+      try{ _imeBarIgnoreSelectUntil = Date.now() + 120; }catch{}
       try{ editor.selectionStart = editor.selectionEnd = newOff; }catch{ try{ editor.setSelectionRange(newOff, newOff); }catch{} }
       try{ const rc = _rcFromOffset(newOff); caretRow = rc.r|0; caretCol = rc.c|0; }catch{}
       try{ _repositionCaret && _repositionCaret({ force:true }); }catch{ try{ _repositionCaret && _repositionCaret(); }catch{} }
@@ -1315,6 +1334,8 @@ try{
       _imeBarComposing = false;
       _imeBarPrevText = '';
       _imeBarSnapshotTaken = false;
+      _imeBarSegDirty = false;
+      _imeBarSegPending = false;
       try{ _imeBarJustOpenedUntil = Date.now() + 260; }catch{}
       try{ cmdfloat.dataset.kind = 'ime'; }catch{}
       try{ const p=document.getElementById('cmdprefix'); if (p) p.textContent = ''; }catch{}
@@ -1359,6 +1380,8 @@ try{
       _imeBarComposing = false;
       _imeBarPrevText = '';
       _imeBarSnapshotTaken = false;
+      _imeBarSegDirty = false;
+      _imeBarSegPending = false;
       try{ if (cmdfloat && cmdfloat.dataset) cmdfloat.dataset.kind = 'cmd'; }catch{}
       // Hide only when not in CMD.
       try{ if (cmdfloat && _mode !== 'CMD') cmdfloat.style.display = 'none'; }catch{}
@@ -19192,6 +19215,21 @@ try{
           }
         }catch{}
 
+        // md-rich IMEバーの分割Undo: 編集後の「caret-only移動」を selection 変化として検出し、
+        // その時点で undo 境界を1回だけ作る。
+        // (矢印キーがどの要素で処理されるか、またはマウス/タップ移動かに依存しない)
+        try{
+          if (_mode === 'INSERT' && (sNow === eNow) && (typeof _imeBarActive !== 'undefined') && _imeBarActive && _imeBarSegDirty){
+            const now2 = Date.now();
+            if (now2 >= (+_imeBarIgnoreSelectUntil || 0)){
+              try{ _pushUndoSnapshot && _pushUndoSnapshot('imebar-seg'); }catch{}
+              try{ _imeBarSnapshotTaken = true; }catch{}
+              _imeBarSegDirty = false;
+              _imeBarSegPending = false;
+            }
+          }
+        }catch{}
+
         _lastSelectS = sNow|0;
         _lastSelectE = eNow|0;
         _lastSelectDir = dNow;
@@ -20100,6 +20138,44 @@ try{
         // Allow native editing behavior, but keep overlays in sync when moving the caret.
         if (e.key==='ArrowLeft' || e.key==='ArrowRight' || e.key==='ArrowUp' || e.key==='ArrowDown' ||
             e.key==='Home' || e.key==='End' || e.key==='PageUp' || e.key==='PageDown'){
+          // INSERT内の分割Undo: 編集後の「カーソル移動のみ」を検出して pending を立てる。
+          // selectイベントは環境/経路（md-richの独自移動、左右キー等）で発火しないことがあるため、
+          // keydown側で先に確実にマークしておく。
+          try{
+            if (_mode === 'INSERT' && _insertSegDirty){
+              let shiftHeld = false;
+              try{ shiftHeld = !!e.shiftKey; }catch{}
+              try{ if (!shiftHeld && e && typeof e.getModifierState==='function') shiftHeld = !!e.getModifierState('Shift'); }catch{}
+              try{ if (!shiftHeld) shiftHeld = !!_shiftHeld; }catch{}
+              if (!shiftHeld){
+                const s0 = (editor && typeof editor.selectionStart==='number') ? (editor.selectionStart|0) : 0;
+                const e0 = (editor && typeof editor.selectionEnd==='number') ? (editor.selectionEnd|0) : 0;
+                if ((s0|0) === (e0|0)){
+                  const now0 = Date.now();
+                  if (now0 >= (+_insertSegIgnoreSelectUntil || 0)) _insertSegPending = true;
+                }
+              }
+            }
+          }catch{}
+
+          // md-rich IMEバー表示中の分割Undo:
+          // IMEバー経由で本文が編集された後、非編集の移動キーが来た時点で undo 境界を作る。
+          // 矢印キーが imeinput ではなく editor 側で処理される環境差を吸収する。
+          try{
+            if (_mode === 'INSERT' && (typeof _imeBarActive !== 'undefined') && _imeBarActive && _imeBarSegDirty){
+              let shiftHeld = false;
+              try{ shiftHeld = !!e.shiftKey; }catch{}
+              try{ if (!shiftHeld && e && typeof e.getModifierState==='function') shiftHeld = !!e.getModifierState('Shift'); }catch{}
+              try{ if (!shiftHeld) shiftHeld = !!_shiftHeld; }catch{}
+              if (!shiftHeld){
+                try{ _pushUndoSnapshot && _pushUndoSnapshot('imebar-seg'); }catch{}
+                try{ _imeBarSnapshotTaken = true; }catch{}
+                _imeBarSegDirty = false;
+                _imeBarSegPending = false;
+              }
+            }
+          }catch{}
+
           // Spec change (#1658): In markdown-off INSERT + wrap-on, ArrowUp/Down should behave like gj/gk
           // (visual-line motion within wrapped lines; curswant is relative to the visual line start).
           try{
@@ -24371,10 +24447,82 @@ try{
                 const kD = (k === 'ArrowDown' || k === 'Down' || c === 'ArrowDown' || kc === 40);
                 const kH = (k === 'Home' || c === 'Home' || kc === 36);
                 const kE = (k === 'End' || c === 'End' || kc === 35);
+                const kPU = (k === 'PageUp' || c === 'PageUp' || kc === 33);
+                const kPD = (k === 'PageDown' || c === 'PageDown' || kc === 34);
                 const kB = (k === 'Backspace' || kc === 8);
                 const kX = (k === 'Delete' || k === 'Del' || kc === 46);
+                const isNavAny = (kL || kR || kU || kD || kH || kE || kPU || kPD);
                 const emptyBar = (!String(imeEl.value||''));
+
+                // md-rich IME bar: If a user hits navigation keys quickly after typing,
+                // the imeinput 'input' (commit) event can lag behind, so the document edit
+                // lands *after* the caret move and undo segmentation becomes impossible.
+                // Fix by flushing pending bar text into the document before applying navigation,
+                // then create an undo boundary once.
+                try{
+                  if (isNavAny && !composing){
+                    let shiftHeld = false;
+                    try{ shiftHeld = !!(e && e.shiftKey); }catch{}
+                    if (!shiftHeld){
+                      const vHold = String(imeEl.value||'');
+                      if (vHold){
+                        try{ _imeBarReplaceInsertedText(vHold, 'nav-flush'); }catch{}
+                        try{ imeEl.value = ''; }catch{}
+                        try{ _imeBarPrevText = ''; _imeBarAnchorOff = (editor && typeof editor.selectionStart==='number') ? (editor.selectionStart|0) : (_imeBarAnchorOff|0); }catch{}
+                      }
+                      if (_imeBarSegDirty){
+                        try{ _pushUndoSnapshot && _pushUndoSnapshot('imebar-seg'); }catch{}
+                        _imeBarSegDirty = false;
+                        _imeBarSegPending = false;
+                        try{ _imeBarSnapshotTaken = true; }catch{}
+                      }
+                    }
+                  }
+                }catch{}
+
+                // md-rich IME bar: robust split undo on caret-only navigation.
+                // If we already edited the document via the IME bar, then the first non-edit
+                // navigation key should create an undo boundary (like INSERT segmenting).
+                // Do this immediately here to avoid relying on environment-specific event ordering.
+                let _didSegSnap = false;
+                try{
+                  if (isNavAny && !composing && _imeBarSegDirty){
+                    let shiftHeld = false;
+                    try{ shiftHeld = !!(e && e.shiftKey); }catch{}
+                    if (!shiftHeld){
+                      // One-shot: do not keep pushing on repeated arrow repeats.
+                      if (!_imeBarSegPending){
+                        try{ _pushUndoSnapshot && _pushUndoSnapshot('imebar-seg'); }catch{}
+                        _imeBarSnapshotTaken = true;
+                        _imeBarSegDirty = false;
+                        _imeBarSegPending = false;
+                        _didSegSnap = true;
+                      }
+                    }
+                  }
+                }catch{}
+
+                // md-rich IME bar: if we already edited the document via the bar, and the user
+                // performs a non-edit navigation (caret move), split undo at the next edit.
+                // Do this even if the bar hasn't been cleared yet (timing races after typing).
+                try{
+                  if (isNavAny && !composing && _imeBarSegDirty){
+                    let shiftHeld = false;
+                    try{ shiftHeld = !!(e && e.shiftKey); }catch{}
+                    if (!shiftHeld) _imeBarSegPending = true;
+                  }
+                }catch{}
                 if (emptyBar){
+                  // INSERT内の分割Undo（md-rich/IME bar）:
+                  // 直前に編集があった状態で「編集なし移動」が発生したら、次の編集開始時に
+                  // 新しい imebar undo snapshot を積めるようにフラグをリセットする。
+                  try{
+                    const isNav = (kL || kR || kU || kD || kH || kE || kPU || kPD);
+                    if (isNav && _imeBarSnapshotTaken && !_didSegSnap){
+                      _imeBarSnapshotTaken = false;
+                    }
+                  }catch{}
+
                   // Shift+nav: keep selection in document while IME bar is empty.
                   const selecting = !!(e && e.shiftKey);
                   if (kL || kR){
@@ -24562,7 +24710,14 @@ try{
             // IME bar: mirror current input into the document.
             try{
               if (!_imeBarActive) return;
-              const composing = !!(e && e.isComposing===true) || !!_imeBarComposing;
+              let composing = !!(e && e.isComposing===true) || !!_imeBarComposing;
+              // Some environments keep isComposing=true even for non-IME input.
+              // If no IME-bar IME event has occurred recently, treat this as committed text.
+              try{
+                const now0 = Date.now();
+                const stale = (now0 - (+_imeBarLastImeEvtAt || 0)) > 450;
+                if (stale) composing = false;
+              }catch{}
               const vNow = String(imeEl.value||'');
               if (composing){
                 _imeBarReplaceInsertedText(vNow, 'input-comp');
