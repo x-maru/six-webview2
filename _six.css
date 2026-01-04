@@ -67,6 +67,25 @@ body { font: var(--fontBase, 18px)/20px Consolas, 'Courier New', monospace; over
 #cmdfloat #cmdinput,
 #cmdfloat #imeinput { flex:1; background: var(--cmdInputBg, transparent); color: var(--cmdInputFg, var(--tabBarFg)); border:0; outline:0; font: inherit; height:100%; }
 
+/* IME bar: keep it as a tiny, effectively invisible anchor for IME candidate popups. */
+#cmdfloat[data-kind="ime"] {
+	padding: 0 !important;
+	gap: 0 !important;
+	background: transparent !important;
+	border: 0 !important;
+	box-shadow: none !important;
+	border-radius: 0 !important;
+	color: transparent !important;
+}
+#cmdfloat[data-kind="ime"] #cmdprefix {
+	display: none !important;
+}
+#cmdfloat[data-kind="ime"] #imeinput {
+	background: transparent !important;
+	color: transparent !important;
+	caret-color: transparent !important;
+}
+
 /* CMD history button ("履歴 F4") */
 #cmdfloat #cmdHistBtn {
 	flex: 0 0 auto;

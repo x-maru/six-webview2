@@ -1198,15 +1198,8 @@ try{
       if (!(window && window.SIX_OPTIONS)){}
       // Only for markdown-rich mode.
       if (!(_mdRichActive && _mdRichActive())) return false;
-      // Only while IME is visually ON and we are in INSERT (typing intent).
+      // md-rich INSERT: keep IME bar visible to provide a stable anchor for IME candidate popups.
       if (_mode !== 'INSERT') return false;
-      // Final resort (#1683): keep IME bar visible throughout md-rich INSERT to reduce
-      // IME toggle races and bar open/close churn. This also allows half-width input.
-      // Respect explicit "keep IME off" guard (e.g. after Esc-close).
-      try{ if (Date.now() < (+_imeKeepOffUntil || 0)) return false; }catch{}
-      // #1684: allow user to hide the bar while staying in INSERT.
-      // When hidden by user, keep it hidden while IME is OFF; show again on IME ON.
-      try{ if (_imeBarUserHidden && !_imeActive) return false; }catch{}
       // Do not show while CMD is active (cmdfloat is reserved for CMD).
       if (_mode === 'CMD') return false;
       // Avoid during modal dialogs.
@@ -1277,50 +1270,81 @@ try{
     try{
       if (!cmdfloat || !_imeBarActive) return;
       const band = _computeOverlayBand();
-      // width = 1/4 window; left = 25% from window left
+      // width: cmdfloat is shared with CMD. For IME bar, keep it tiny (about 1 character)
+      // so it's effectively an anchor, not a UI element.
       const winW = (window.innerWidth||0);
-      const w = Math.max(0, Math.floor(winW / 4));
+      let w = Math.max(0, Math.floor(winW / 4));
+      try{
+        const kind = String((cmdfloat && cmdfloat.dataset && cmdfloat.dataset.kind) || '');
+        if (kind === 'ime'){
+          let fs = 18;
+          try{ fs = parseFloat((window.getComputedStyle(cmdfloat).fontSize)||'18') || 18; }catch{}
+          // Approximate 1ch for monospace; clamp to keep layout stable.
+          w = Math.max(10, Math.min(64, Math.round(fs * 1.05)));
+        }
+      }catch{}
       cmdfloat.style.width = w + 'px';
       cmdfloat.style.right = 'auto';
-      const baseL = (band && Number.isFinite(band.left)) ? (band.left|0) : 0;
-      const vw = (band && Number.isFinite(band.viewW)) ? (band.viewW|0) : (winW|0);
-      const left0 = baseL + Math.floor(vw * 0.25);
-      const maxL = baseL + Math.max(0, (vw - (w|0))|0);
-      const left = Math.max(baseL, Math.min(maxL, left0|0));
-      cmdfloat.style.left = left + 'px';
 
-      // One visual line above caret.
-      const h = cmdfloat.offsetHeight || 26;
-      let caretTopPx = (caretRow|0) * LINE_HEIGHT - (function(){ try{ return (editor && typeof editor.scrollTop==='number') ? +editor.scrollTop : 0; }catch{ return 0; } })();
+      // caret rect (viewport-relative) — used for both X and Y.
+      let vr = null;
+      let cr = null;
+      try{ vr = (viewport && viewport.getBoundingClientRect) ? viewport.getBoundingClientRect() : null; }catch{}
       try{
-        if (caretLayer && viewport && caretLayer.querySelector){
+        if (caretLayer && caretLayer.querySelector){
           const caretEl = caretLayer.querySelector('.caret');
-          if (caretEl && caretEl.getBoundingClientRect){
-            const vr = viewport.getBoundingClientRect();
-            const cr = caretEl.getBoundingClientRect();
-            if (Number.isFinite(cr.top) && Number.isFinite(vr.top)) caretTopPx = (cr.top - vr.top);
-          }
+          if (caretEl && caretEl.getBoundingClientRect) cr = caretEl.getBoundingClientRect();
         }
       }catch{}
-      try{
-        const wrapNow = (function(){ try{ return _wrapEnabled && _wrapEnabled(); }catch{ return false; } })();
-        const usesVisual = (function(){ try{ if (typeof _wrapUsesVisualScrollGrid === 'function') return !!_wrapUsesVisualScrollGrid(); }catch{} return false; })();
-        if (wrapNow && usesVisual && typeof _wrapVisualLine1ForRowCol === 'function'){
-          const st = (function(){ try{ return (editor && typeof editor.scrollTop==='number') ? +editor.scrollTop : 0; }catch{ return 0; } })();
-          const v1 = Math.max(1, (_wrapVisualLine1ForRowCol(caretRow|0, caretCol|0)|0));
-          caretTopPx = ((v1 - 1) * LINE_HEIGHT) - st;
-        }
-      }catch{}
-      // 1.75 visual lines above caret.
-      const lh = (typeof LINE_HEIGHT==='number' && LINE_HEIGHT>0) ? LINE_HEIGHT : 20;
-      let topPx = (caretTopPx|0) - Math.round(lh * 1.75);
-      // clamp
-      const minTop = 4;
-      const maxTop = Math.max(minTop, (band.viewH|0) - (h|0) - 4);
-      if (!Number.isFinite(topPx)) topPx = minTop;
-      if (topPx < minTop) topPx = minTop;
+
+      const viewW = (viewport && (viewport.clientWidth|0)) || (vr && (vr.width|0)) || (winW|0);
+      const viewH = (viewport && (viewport.clientHeight|0)) || (band && (band.viewH|0)) || ((window.innerHeight||0)|0);
+
+      let caretLeftPx = 0;
+      let caretRightPx = 0;
+      let caretTopPx = 0;
+      let caretHPx = (typeof LINE_HEIGHT==='number' && LINE_HEIGHT>0) ? (LINE_HEIGHT|0) : 20;
+
+      if (vr && cr && Number.isFinite(cr.left) && Number.isFinite(vr.left)){
+        caretLeftPx = (cr.left - vr.left);
+        caretRightPx = (cr.right - vr.left);
+        caretTopPx = (cr.top - vr.top);
+        caretHPx = Math.max(1, Math.round(Number.isFinite(cr.height) ? cr.height : caretHPx));
+      } else {
+        // Fallback: approximate Y from scrollTop; X from overlay band.
+        const st0 = (function(){ try{ return (editor && typeof editor.scrollTop==='number') ? +editor.scrollTop : 0; }catch{ return 0; } })();
+        caretTopPx = (caretRow|0) * LINE_HEIGHT - st0;
+        caretLeftPx = Math.max(0, ((band && Number.isFinite(band.left)) ? (band.left|0) : 0) - ((vr && Number.isFinite(vr.left)) ? (vr.left|0) : 0));
+        caretRightPx = caretLeftPx;
+      }
+
+      // Horizontal rule (#1707/#1708):
+      // - caret が左半分なら右へ2rem
+      // - caret が右半分なら左へ30rem（ただし画面外にはみ出さないようクランプ）
+      let rootFS = 16;
+      try{ rootFS = parseFloat(getComputedStyle(document.documentElement).fontSize)||16; }catch{}
+      const caretCenter = (caretLeftPx + caretRightPx) / 2;
+      const leftHalf = (caretCenter < (viewW / 2));
+      const gapPx = (leftHalf ? 2 : 20) * rootFS;
+      let leftPx = leftHalf ? (caretRightPx + gapPx) : (caretLeftPx - gapPx - (w|0));
+      // Keep a small margin so the IME candidate popup is less likely to touch screen edges.
+      const marginPx = Math.max(0, Math.round(2 * rootFS));
+      const maxL = Math.max(0, (viewW|0) - (w|0) - (marginPx|0));
+      if (!Number.isFinite(leftPx)) leftPx = 0;
+      if (leftPx < marginPx) leftPx = marginPx;
+      if (leftPx > maxL) leftPx = maxL;
+      cmdfloat.style.left = Math.round(leftPx) + 'px';
+
+      // Vertical rule: height equals caret height; align top to caret top.
+      const h = Math.max(1, (caretHPx|0));
+      try{ cmdfloat.style.height = h + 'px'; }catch{}
+      try{ cmdfloat.style.minHeight = h + 'px'; }catch{}
+      let topPx = caretTopPx;
+      const maxTop = Math.max(0, (viewH|0) - (h|0));
+      if (!Number.isFinite(topPx)) topPx = 0;
+      if (topPx < 0) topPx = 0;
       if (topPx > maxTop) topPx = maxTop;
-      cmdfloat.style.top = topPx + 'px';
+      cmdfloat.style.top = Math.round(topPx) + 'px';
     }catch{}
   }
 
@@ -1387,6 +1411,9 @@ try{
       try{ if (cmdfloat && _mode !== 'CMD') cmdfloat.style.display = 'none'; }catch{}
       try{ if (cmdfloat) cmdfloat.style.visibility = ''; }catch{}
 
+      // Clear IME-only inline sizing so CMD mode uses CSS defaults.
+      try{ if (cmdfloat){ cmdfloat.style.height = ''; cmdfloat.style.minHeight = ''; } }catch{}
+
       // Restore visible input element.
       try{ const imeEl = _imeBarInputEl(); if (imeEl && imeEl.id === 'imeinput'){ imeEl.value = ''; imeEl.style.display = 'none'; } }catch{}
       try{ if (typeof cmdinput !== 'undefined' && cmdinput){ cmdinput.disabled = false; cmdinput.style.display = ''; } }catch{}
@@ -1409,8 +1436,9 @@ try{
       let caretOff = off|0;
 
       // Optional: keep a selection (Shift+arrows in empty bar).
+      const keepSel = !!(opt && typeof opt.selectionStart === 'number' && typeof opt.selectionEnd === 'number');
       try{
-        if (opt && typeof opt.selectionStart === 'number' && typeof opt.selectionEnd === 'number'){
+        if (keepSel){
           const a = (opt.selectionStart|0);
           const b = (opt.selectionEnd|0);
           const dir = String(opt.selectionDirection||'');
@@ -1445,12 +1473,143 @@ try{
         }
       }catch{}
 
-      try{ _syncNativeSelectionToCaret && _syncNativeSelectionToCaret(); }catch{}
+      // Do not collapse the native selection when a range is explicitly requested.
+      // Collapsing here makes Shift+Arrow/Home/End appear to do nothing while IME bar is active.
+      try{ if (!keepSel) _syncNativeSelectionToCaret && _syncNativeSelectionToCaret(); }catch{}
       try{ ensureScrolloff && ensureScrolloff({ force:true }); }catch{ try{ ensureScrolloff && ensureScrolloff(); }catch{} }
       try{ _repositionCaret && _repositionCaret({ force:true }); }catch{ try{ _repositionCaret && _repositionCaret(); }catch{} }
       try{ updateGutter && updateGutter({ force:true }); }catch{ try{ updateGutter && updateGutter(); }catch{} }
+      // md-rich: re-render selection highlight inside #textLayer for INSERT range selection.
+      try{ if (keepSel && _mdRichActive && _mdRichActive()){ _mdRenderTextLayer && _mdRenderTextLayer(); } }catch{}
       try{ if (_imeBarActive) _positionImeBar && _positionImeBar(); }catch{}
     }catch{}
+  }
+
+  function _imeBarEscToNormal(e, why){
+    try{
+      if (!editor) return true;
+
+      // Clear any visible/latent bar text and preedit mirror.
+      try{
+        if (_imeBarActive){
+          const barEl = (typeof _imeBarInputEl==='function') ? _imeBarInputEl() : null;
+          if (barEl){ try{ barEl.value = ''; }catch{} }
+        }
+      }catch{}
+      try{ _imeBarReplaceInsertedText && _imeBarReplaceInsertedText('', 'esc-' + String(why||'')); }catch{}
+      try{ _imeBarPrevText = ''; }catch{}
+      try{ _imeBarSelAnchorOff = null; }catch{}
+
+      // #1626: INSERT で範囲選択が存在する場合、Esc は選択クリアのみ。
+      try{
+        const s = (editor && typeof editor.selectionStart==='number') ? (editor.selectionStart|0) : 0;
+        const t = (editor && typeof editor.selectionEnd==='number') ? (editor.selectionEnd|0) : 0;
+        if ((s|0) !== (t|0)){
+          let off = (t|0);
+          try{ const dir = String(editor.selectionDirection||''); if (dir === 'backward') off = (s|0); }catch{}
+          try{ editor.setSelectionRange(off|0, off|0); }catch{ try{ editor.selectionStart = off|0; editor.selectionEnd = off|0; }catch{} }
+          try{ const rc = _rcFromOffset(off|0); caretRow = rc.r; caretCol = rc.c; _setCaret && _setCaret(caretRow, caretCol); }catch{}
+          try{ if (_imeBarActive) _imeBarApplyCaretAndSync && _imeBarApplyCaretAndSync('esc-collapse'); }catch{}
+          return true;
+        }
+      }catch{}
+
+      // Otherwise: leave INSERT -> NORMAL.
+      try{
+        const off = (editor && typeof editor.selectionStart==='number') ? (editor.selectionStart|0) : (_offsetFromRC(caretRow|0, caretCol|0)|0);
+        try{ const rc = _rcFromOffset(off); caretRow = rc.r; caretCol = rc.c; }catch{}
+      }catch{}
+      try{ _imeActive = false; _imeVisualLockUntil = Date.now() + 600; _applyCaretGradient && _applyCaretGradient(); }catch{}
+      try{ _setMode && _setMode('NORMAL'); }catch{}
+      try{ _applyCaretGradient && _applyCaretGradient(); }catch{}
+      try{ ensureScrolloff && ensureScrolloff(); }catch{}
+      try{ _repositionCaret && _repositionCaret(); updateGutter && updateGutter(); _updatePosInfo && _updatePosInfo(); }catch{}
+      try{ editor && editor.focus && editor.focus({ preventScroll:true }); }catch{ try{ editor && editor.focus && editor.focus(); }catch{} }
+      return true;
+    }catch{ return true; }
+  }
+
+  async function _imeBarCopySelectionToClipboard(reason){
+    try{
+      if (!editor) return false;
+      let ss=0, se=0;
+      try{ ss = editor.selectionStart|0; se = editor.selectionEnd|0; }catch{}
+      if ((ss|0) === (se|0)) return false;
+      const s = String(editor.value||'');
+      const a = Math.max(0, Math.min(s.length, Math.min(ss|0, se|0)));
+      const b = Math.max(0, Math.min(s.length, Math.max(ss|0, se|0)));
+      const txt = s.slice(a|0, b|0);
+      const ok = await (_copyToClipboard ? _copyToClipboard(txt) : Promise.resolve(false));
+      return !!ok;
+    }catch{ return false; }
+  }
+
+  async function _imeBarCutSelectionToClipboard(reason){
+    try{
+      if (!editor) return false;
+      let ss=0, se=0;
+      try{ ss = editor.selectionStart|0; se = editor.selectionEnd|0; }catch{}
+      if ((ss|0) === (se|0)) return false;
+      const s = String(editor.value||'');
+      const a = Math.max(0, Math.min(s.length, Math.min(ss|0, se|0)));
+      const b = Math.max(0, Math.min(s.length, Math.max(ss|0, se|0)));
+      const txt = s.slice(a|0, b|0);
+      const ok = await (_copyToClipboard ? _copyToClipboard(txt) : Promise.resolve(false));
+      if (!ok){
+        try{ toast && toast('Clipboard write failed.', 1500); }catch{}
+        return false;
+      }
+      // record undo snapshot before mutation
+      try{ _pushUndoSnapshot && _pushUndoSnapshot('imebar-cut'); }catch{}
+      const out = s.slice(0, a|0) + s.slice(b|0);
+      if (out !== s){
+        editor.value = out;
+        try{ const bb=currentBuffer && currentBuffer(); if (bb) bb.text = out; }catch{}
+        try{ _touchBufferModified && _touchBufferModified(); }catch{}
+        try{ _afterTextMutation && _afterTextMutation(); }catch{}
+      }
+      try{ editor.selectionStart = editor.selectionEnd = (a|0); }catch{ try{ editor.setSelectionRange(a|0, a|0); }catch{} }
+      try{ const rc = _rcFromOffset(a|0); caretRow = rc.r|0; caretCol = rc.c|0; }catch{}
+      try{ _setCaret && _setCaret(caretRow|0, caretCol|0, { suppressWrapDesired:true }); }catch{}
+      try{ _imeBarApplyCaretAndSync && _imeBarApplyCaretAndSync('cut:' + String(reason||'')); }catch{}
+      try{ _scheduleListCharsRender && _scheduleListCharsRender('imebar-cut'); }catch{}
+      try{ if (_imeBarActive) _positionImeBar && _positionImeBar(); }catch{}
+      return true;
+    }catch{ return false; }
+  }
+
+  function _imeBarInsertTabInDoc(reason){
+    try{
+      if (!editor) return false;
+      // Match INSERT-mode Tab behavior: insert shiftwidth (or literal TAB when shiftwidth=TAB)
+      const sw = (typeof _getShiftWidth === 'function') ? _getShiftWidth() : 4;
+      const insStr = (sw === 'TAB') ? '\t' : ' '.repeat(Math.max(1, sw|0));
+
+      if (!_imeBarSnapshotTaken){ _imeBarSnapshotTaken = true; try{ _pushUndoSnapshot && _pushUndoSnapshot('imebar'); }catch{} }
+
+      let ss=0, se=0;
+      try{ ss = editor.selectionStart|0; se = editor.selectionEnd|0; }catch{}
+      const s = String(editor.value||'');
+      const a = Math.max(0, Math.min(s.length, Math.min(ss|0, se|0)));
+      const b = Math.max(0, Math.min(s.length, Math.max(ss|0, se|0)));
+      const out = s.slice(0, a|0) + insStr + s.slice(b|0);
+      if (out !== s){
+        editor.value = out;
+        try{ const bb=currentBuffer && currentBuffer(); if (bb) bb.text = out; }catch{}
+        try{ _imeBarSegDirty = true; }catch{}
+        try{ _touchBufferModified && _touchBufferModified(); }catch{}
+        try{ _afterTextMutation && _afterTextMutation(); }catch{}
+      }
+      const newOff = (a + insStr.length)|0;
+      try{ editor.selectionStart = editor.selectionEnd = newOff; }catch{ try{ editor.setSelectionRange(newOff, newOff); }catch{} }
+      try{ const rc = _rcFromOffset(newOff|0); caretRow = rc.r|0; caretCol = rc.c|0; }catch{}
+      try{ _setCaret && _setCaret(caretRow|0, caretCol|0, { suppressWrapDesired:true }); }catch{}
+      try{ _imeBarSelAnchorOff = null; }catch{}
+      try{ _imeBarApplyCaretAndSync && _imeBarApplyCaretAndSync('tab:' + String(reason||'')); }catch{}
+      try{ _scheduleListCharsRender && _scheduleListCharsRender('imebar-tab'); }catch{}
+      try{ if (_imeBarActive) _positionImeBar && _positionImeBar(); }catch{}
+      return true;
+    }catch{ return false; }
   }
 
   function _imeBarBackspaceInDoc(){
@@ -3565,46 +3724,247 @@ try{
           const k = String((e && e.key) || '');
           const c = String((e && e.code) || '');
           const kc = (typeof e.keyCode==='number') ? (e.keyCode|0) : 0;
-          // Block function keys from reaching the browser while IME bar is active.
+          // F1–F8: direct tab switching (match global handler behavior).
+          // IME bar capture must not swallow these; otherwise tab switching is impossible while the bar is active.
           if (/^F[1-8]$/.test(k)){
             try{ e.preventDefault(); e.stopImmediatePropagation(); e.stopPropagation(); }catch{}
-            try{ const el = (typeof _imeBarInputEl==='function') ? _imeBarInputEl() : null; el && el.focus && el.focus({ preventScroll:true }); }catch{}
+            try{
+              const plain = (!e.ctrlKey && !e.altKey && !e.metaKey);
+              const grepOpen = !!(document.getElementById('grepDialog') || (window && window._grepDialogOpen===true));
+              if (plain && !grepOpen && _mode !== 'CMD'){
+                const n = parseInt(String(k).slice(1), 10);
+                const targetIdx = (n|0) - 1;
+                if (targetIdx >= 0 && targetIdx < buffers.length){
+                  try{ if (targetIdx !== currentIdx) _switchToBuffer && _switchToBuffer(targetIdx); }catch{}
+                }
+              }
+            }catch{}
+            // Restore focus to the IME input so IME bar stays usable after switching.
+            try{ setTimeout(()=>{ try{ const el = (typeof _imeBarInputEl==='function') ? _imeBarInputEl() : null; el && el.focus && el.focus({ preventScroll:true }); }catch{} try{ if (_imeBarActive) _positionImeBar && _positionImeBar(); }catch{} }, 0); }catch{}
             return;
           }
           // Empty-bar navigation routing (even if cmdinput handler doesn't see reliable key values).
           const barEl = (typeof _imeBarInputEl==='function') ? _imeBarInputEl() : null;
           const emptyBar = !!barEl && !String(barEl.value||'');
+          const isLeft = (k==='ArrowLeft' || k==='Left' || c==='ArrowLeft' || kc===37);
+          const isRight = (k==='ArrowRight' || k==='Right' || c==='ArrowRight' || kc===39);
+          const isHome = (k==='Home' || c==='Home' || kc===36);
+          const isEnd = (k==='End' || c==='End' || kc===35);
+          const isUp = (k==='ArrowUp' || k==='Up' || c==='ArrowUp' || kc===38);
+          const isDown = (k==='ArrowDown' || k==='Down' || c==='ArrowDown' || kc===40);
+          const isBS = (k==='Backspace' || kc===8);
+          const isDel = (k==='Delete' || k==='Del' || kc===46);
+
+          // Shift+nav: keep selection in the document even while focus is on the IME bar input.
+          // Handle this regardless of whether the bar is empty (as long as not composing).
+          let selecting = false;
+          try{ selecting = !!(e && e.shiftKey); }catch{}
+          try{ if (!selecting && e && typeof e.getModifierState==='function') selecting = !!e.getModifierState('Shift'); }catch{}
+          try{ if (!selecting) selecting = !!_shiftHeld; }catch{}
+          let composing2 = false;
+          try{ composing2 = !!(e && e.isComposing===true) || !!_imeBarComposing || !!(window && window._imeComposing===true); }catch{ composing2 = false; }
+
+          // Route common editor shortcuts while the IME bar is active and empty.
+          // When the bar has text, that implies active IME composition; do not hijack.
+          try{
+            const isCtrl = !!(e && e.ctrlKey && !e.altKey && !e.metaKey);
+            const isCtrlC = isCtrl && (k==='c' || k==='C');
+            const isCtrlX = isCtrl && (k==='x' || k==='X');
+            const isCtrlZ = isCtrl && !e.shiftKey && (k==='z' || k==='Z');
+            const isCtrlI = isCtrl && (k==='i' || k==='I');
+            const isTab = (k==='Tab' || c==='Tab' || kc===9);
+            if (emptyBar && !composing2 && (isCtrlC || isCtrlX || isCtrlZ || isTab || isCtrlI)){
+              try{ e.preventDefault(); e.stopImmediatePropagation(); e.stopPropagation(); }catch{}
+              if (isCtrlC){
+                (async()=>{
+                  try{ const ok = await _imeBarCopySelectionToClipboard('ctrlc'); if (!ok){ /* no selection or failed */ } }catch{}
+                })();
+                return;
+              }
+              if (isCtrlX){
+                (async()=>{ try{ await _imeBarCutSelectionToClipboard('ctrlx'); }catch{} })();
+                return;
+              }
+              if (isCtrlZ){
+                try{ _undo && _undo(); }catch{}
+                try{ _imeBarSelAnchorOff = null; }catch{}
+                try{ _imeBarApplyCaretAndSync && _imeBarApplyCaretAndSync('ctrlz'); }catch{}
+                return;
+              }
+              if (isTab || isCtrlI){
+                try{ _imeBarInsertTabInDoc && _imeBarInsertTabInDoc(isCtrlI ? 'ctrli' : 'tab'); }catch{}
+                return;
+              }
+            }
+          }catch{}
+
+          if (selecting && !composing2 && (isLeft || isRight || isUp || isDown || isHome || isEnd)){
+            // Route selection to the document. Use the same selection math as the IME bar keydown handler.
+            try{
+              if (isLeft || isRight){
+                let s=0, t=0; let dir='none';
+                try{ s=editor.selectionStart|0; t=editor.selectionEnd|0; dir=String(editor.selectionDirection||'none'); }catch{}
+                let caretOff0 = (_offsetFromRC(caretRow|0, caretCol|0)|0);
+                let anchor0 = caretOff0;
+                if ((s|0) !== (t|0)){
+                  const a = Math.min(s|0, t|0), b = Math.max(s|0, t|0);
+                  if (dir === 'backward'){ caretOff0 = a|0; anchor0 = b|0; }
+                  else { caretOff0 = b|0; anchor0 = a|0; }
+                }
+                try{ if (_imeBarSelAnchorOff === null || typeof _imeBarSelAnchorOff !== 'number') _imeBarSelAnchorOff = anchor0|0; }catch{}
+                try{ const rc0 = _rcFromOffset(caretOff0|0); caretRow = rc0.r|0; caretCol = rc0.c|0; _setCaret && _setCaret(caretRow|0, caretCol|0, { suppressWrapDesired:true }); }catch{}
+                try{ _moveCaretCols && _moveCaretCols(isLeft ? -1 : 1); }catch{}
+                const caretOff1 = (_offsetFromRC(caretRow|0, caretCol|0)|0);
+                const anch = (typeof _imeBarSelAnchorOff==='number') ? (_imeBarSelAnchorOff|0) : (anchor0|0);
+                const a1 = Math.min(anch|0, caretOff1|0);
+                const b1 = Math.max(anch|0, caretOff1|0);
+                const d1 = (caretOff1 < anch) ? 'backward' : 'forward';
+                try{ _imeBarApplyCaretAndSync && _imeBarApplyCaretAndSync('cap-arrow-sel', { selectionStart:a1|0, selectionEnd:b1|0, selectionDirection:d1, caretOff:caretOff1|0 }); }catch{}
+              } else if (isUp || isDown){
+                const d = (isUp) ? -1 : 1;
+                let s=0, t=0; let dir='none';
+                try{ s=editor.selectionStart|0; t=editor.selectionEnd|0; dir=String(editor.selectionDirection||'none'); }catch{}
+                let caretOff0 = (_offsetFromRC(caretRow|0, caretCol|0)|0);
+                let anchor0 = caretOff0;
+                if ((s|0) !== (t|0)){
+                  const a = Math.min(s|0, t|0), b = Math.max(s|0, t|0);
+                  if (dir === 'backward'){ caretOff0 = a|0; anchor0 = b|0; }
+                  else { caretOff0 = b|0; anchor0 = a|0; }
+                }
+                try{ if (_imeBarSelAnchorOff === null || typeof _imeBarSelAnchorOff !== 'number') _imeBarSelAnchorOff = anchor0|0; }catch{}
+                try{ const rc0 = _rcFromOffset(caretOff0|0); caretRow = rc0.r|0; caretCol = rc0.c|0; _setCaret && _setCaret(caretRow|0, caretCol|0, { suppressWrapDesired:true }); }catch{}
+                try{ if (_mdRichActive && _mdRichActive()) _moveCaretVisualLines && _moveCaretVisualLines(d|0); else _moveCaretLines && _moveCaretLines(d|0); }catch{}
+                const caretOff1 = (_offsetFromRC(caretRow|0, caretCol|0)|0);
+                const anch = (typeof _imeBarSelAnchorOff==='number') ? (_imeBarSelAnchorOff|0) : (anchor0|0);
+                const a1 = Math.min(anch|0, caretOff1|0);
+                const b1 = Math.max(anch|0, caretOff1|0);
+                const d1 = (caretOff1 < anch) ? 'backward' : 'forward';
+                try{ _imeBarApplyCaretAndSync && _imeBarApplyCaretAndSync('cap-arrow-ud-sel', { selectionStart:a1|0, selectionEnd:b1|0, selectionDirection:d1, caretOff:caretOff1|0 }); }catch{}
+              } else if (isHome || isEnd){
+                let s=0, t=0; let dir='none';
+                try{ s=editor.selectionStart|0; t=editor.selectionEnd|0; dir=String(editor.selectionDirection||'none'); }catch{}
+                let caretOff0 = (_offsetFromRC(caretRow|0, caretCol|0)|0);
+                let anchor0 = caretOff0;
+                if ((s|0) !== (t|0)){
+                  const a = Math.min(s|0, t|0), b = Math.max(s|0, t|0);
+                  if (dir === 'backward'){ caretOff0 = a|0; anchor0 = b|0; }
+                  else { caretOff0 = b|0; anchor0 = a|0; }
+                }
+                try{ if (_imeBarSelAnchorOff === null || typeof _imeBarSelAnchorOff !== 'number') _imeBarSelAnchorOff = anchor0|0; }catch{}
+                try{ const rc0 = _rcFromOffset(caretOff0|0); caretRow = rc0.r|0; caretCol = rc0.c|0; _setCaret && _setCaret(caretRow|0, caretCol|0, { suppressWrapDesired:true }); }catch{}
+                try{ _imeBarMoveHomeEnd && _imeBarMoveHomeEnd(!!isEnd); }catch{}
+                const caretOff1 = (_offsetFromRC(caretRow|0, caretCol|0)|0);
+                const anch = (typeof _imeBarSelAnchorOff==='number') ? (_imeBarSelAnchorOff|0) : (anchor0|0);
+                const a1 = Math.min(anch|0, caretOff1|0);
+                const b1 = Math.max(anch|0, caretOff1|0);
+                const d1 = (caretOff1 < anch) ? 'backward' : 'forward';
+                try{ _imeBarApplyCaretAndSync && _imeBarApplyCaretAndSync(isEnd ? 'cap-end-sel' : 'cap-home-sel', { selectionStart:a1|0, selectionEnd:b1|0, selectionDirection:d1, caretOff:caretOff1|0 }); }catch{}
+              }
+            }catch{}
+            try{ e.preventDefault(); e.stopImmediatePropagation(); e.stopPropagation(); }catch{}
+            return;
+          }
+
           if (emptyBar){
-            const isLeft = (k==='ArrowLeft' || k==='Left' || c==='ArrowLeft' || kc===37);
-            const isRight = (k==='ArrowRight' || k==='Right' || c==='ArrowRight' || kc===39);
-            const isHome = (k==='Home' || c==='Home' || kc===36);
-            const isEnd = (k==='End' || c==='End' || kc===35);
-            const isUp = (k==='ArrowUp' || k==='Up' || c==='ArrowUp' || kc===38);
-            const isDown = (k==='ArrowDown' || k==='Down' || c==='ArrowDown' || kc===40);
-            const isBS = (k==='Backspace' || kc===8);
-            const isDel = (k==='Delete' || k==='Del' || kc===46);
             if (isLeft || isRight){
-              try{ _moveCaretCols && _moveCaretCols(isLeft ? -1 : 1); }catch{}
-              try{ _imeBarApplyCaretAndSync && _imeBarApplyCaretAndSync('cap-lr'); }catch{}
+              try{
+                let s=0, t=0; let dir='none';
+                try{ s=editor.selectionStart|0; t=editor.selectionEnd|0; dir=String(editor.selectionDirection||'none'); }catch{}
+                if (selecting){
+                  let caretOff0 = (_offsetFromRC(caretRow|0, caretCol|0)|0);
+                  let anchor0 = caretOff0;
+                  if ((s|0) !== (t|0)){
+                    const a = Math.min(s|0, t|0), b = Math.max(s|0, t|0);
+                    if (dir === 'backward'){ caretOff0 = a|0; anchor0 = b|0; }
+                    else { caretOff0 = b|0; anchor0 = a|0; }
+                  }
+                  try{ if (_imeBarSelAnchorOff === null || typeof _imeBarSelAnchorOff !== 'number') _imeBarSelAnchorOff = anchor0|0; }catch{}
+                  try{ const rc0 = _rcFromOffset(caretOff0|0); caretRow = rc0.r|0; caretCol = rc0.c|0; _setCaret && _setCaret(caretRow|0, caretCol|0, { suppressWrapDesired:true }); }catch{}
+                  try{ _moveCaretCols && _moveCaretCols(isLeft ? -1 : 1); }catch{}
+                  const caretOff1 = (_offsetFromRC(caretRow|0, caretCol|0)|0);
+                  const anch = (typeof _imeBarSelAnchorOff==='number') ? (_imeBarSelAnchorOff|0) : (anchor0|0);
+                  const a1 = Math.min(anch|0, caretOff1|0);
+                  const b1 = Math.max(anch|0, caretOff1|0);
+                  const d1 = (caretOff1 < anch) ? 'backward' : 'forward';
+                  try{ _imeBarApplyCaretAndSync && _imeBarApplyCaretAndSync('cap-arrow-sel', { selectionStart:a1|0, selectionEnd:b1|0, selectionDirection:d1, caretOff:caretOff1|0 }); }catch{}
+                } else {
+                  try{ _imeBarSelAnchorOff = null; }catch{}
+                  if (s !== t){
+                    const off = (isLeft) ? Math.min(s,t) : Math.max(s,t);
+                    try{ const rc = _rcFromOffset(off|0); caretRow = rc.r|0; caretCol = rc.c|0; }catch{}
+                    try{ _setCaret && _setCaret(caretRow|0, caretCol|0, { suppressWrapDesired:true }); }catch{}
+                    try{ _imeBarApplyCaretAndSync && _imeBarApplyCaretAndSync('cap-arrow-collapse'); }catch{}
+                  } else {
+                    try{ _moveCaretCols && _moveCaretCols(isLeft ? -1 : 1); }catch{}
+                    try{ _imeBarApplyCaretAndSync && _imeBarApplyCaretAndSync('cap-arrow'); }catch{}
+                  }
+                }
+              }catch{}
               try{ e.preventDefault(); e.stopImmediatePropagation(); e.stopPropagation(); }catch{}
               return;
             }
             if (isHome || isEnd){
-              try{ _imeBarMoveHomeEnd && _imeBarMoveHomeEnd(!!isEnd); }catch{}
+              try{
+                if (selecting){
+                  let s=0, t=0; let dir='none';
+                  try{ s=editor.selectionStart|0; t=editor.selectionEnd|0; dir=String(editor.selectionDirection||'none'); }catch{}
+                  let caretOff0 = (_offsetFromRC(caretRow|0, caretCol|0)|0);
+                  let anchor0 = caretOff0;
+                  if ((s|0) !== (t|0)){
+                    const a = Math.min(s|0, t|0), b = Math.max(s|0, t|0);
+                    if (dir === 'backward'){ caretOff0 = a|0; anchor0 = b|0; }
+                    else { caretOff0 = b|0; anchor0 = a|0; }
+                  }
+                  try{ if (_imeBarSelAnchorOff === null || typeof _imeBarSelAnchorOff !== 'number') _imeBarSelAnchorOff = anchor0|0; }catch{}
+                  try{ const rc0 = _rcFromOffset(caretOff0|0); caretRow = rc0.r|0; caretCol = rc0.c|0; _setCaret && _setCaret(caretRow|0, caretCol|0, { suppressWrapDesired:true }); }catch{}
+                  try{ _imeBarMoveHomeEnd && _imeBarMoveHomeEnd(!!isEnd); }catch{}
+                  const caretOff1 = (_offsetFromRC(caretRow|0, caretCol|0)|0);
+                  const anch = (typeof _imeBarSelAnchorOff==='number') ? (_imeBarSelAnchorOff|0) : (anchor0|0);
+                  const a1 = Math.min(anch|0, caretOff1|0);
+                  const b1 = Math.max(anch|0, caretOff1|0);
+                  const d1 = (caretOff1 < anch) ? 'backward' : 'forward';
+                  try{ _imeBarApplyCaretAndSync && _imeBarApplyCaretAndSync(isEnd ? 'cap-end-sel' : 'cap-home-sel', { selectionStart:a1|0, selectionEnd:b1|0, selectionDirection:d1, caretOff:caretOff1|0 }); }catch{}
+                } else {
+                  try{ _imeBarSelAnchorOff = null; }catch{}
+                  try{ _imeBarMoveHomeEnd && _imeBarMoveHomeEnd(!!isEnd); }catch{}
+                }
+              }catch{}
               try{ e.preventDefault(); e.stopImmediatePropagation(); e.stopPropagation(); }catch{}
               return;
             }
             if (isUp || isDown){
               try{
                 const d = isUp ? -1 : 1;
-                try{
-                  if (_mdRichActive && _mdRichActive()){
-                    _moveCaretVisualLines && _moveCaretVisualLines(d|0);
-                  } else {
-                    _moveCaretLines && _moveCaretLines(d|0);
+                if (selecting){
+                  let s=0, t=0; let dir='none';
+                  try{ s=editor.selectionStart|0; t=editor.selectionEnd|0; dir=String(editor.selectionDirection||'none'); }catch{}
+                  let caretOff0 = (_offsetFromRC(caretRow|0, caretCol|0)|0);
+                  let anchor0 = caretOff0;
+                  if ((s|0) !== (t|0)){
+                    const a = Math.min(s|0, t|0), b = Math.max(s|0, t|0);
+                    if (dir === 'backward'){ caretOff0 = a|0; anchor0 = b|0; }
+                    else { caretOff0 = b|0; anchor0 = a|0; }
                   }
-                }catch{}
-                try{ _imeBarApplyCaretAndSync && _imeBarApplyCaretAndSync('cap-ud'); }catch{}
+                  try{ if (_imeBarSelAnchorOff === null || typeof _imeBarSelAnchorOff !== 'number') _imeBarSelAnchorOff = anchor0|0; }catch{}
+                  try{ const rc0 = _rcFromOffset(caretOff0|0); caretRow = rc0.r|0; caretCol = rc0.c|0; _setCaret && _setCaret(caretRow|0, caretCol|0, { suppressWrapDesired:true }); }catch{}
+                  try{
+                    if (_mdRichActive && _mdRichActive()) _moveCaretVisualLines && _moveCaretVisualLines(d|0);
+                    else _moveCaretLines && _moveCaretLines(d|0);
+                  }catch{}
+                  const caretOff1 = (_offsetFromRC(caretRow|0, caretCol|0)|0);
+                  const anch = (typeof _imeBarSelAnchorOff==='number') ? (_imeBarSelAnchorOff|0) : (anchor0|0);
+                  const a1 = Math.min(anch|0, caretOff1|0);
+                  const b1 = Math.max(anch|0, caretOff1|0);
+                  const d1 = (caretOff1 < anch) ? 'backward' : 'forward';
+                  try{ _imeBarApplyCaretAndSync && _imeBarApplyCaretAndSync('cap-arrow-ud-sel', { selectionStart:a1|0, selectionEnd:b1|0, selectionDirection:d1, caretOff:caretOff1|0 }); }catch{}
+                } else {
+                  try{ _imeBarSelAnchorOff = null; }catch{}
+                  try{
+                    if (_mdRichActive && _mdRichActive()) _moveCaretVisualLines && _moveCaretVisualLines(d|0);
+                    else _moveCaretLines && _moveCaretLines(d|0);
+                  }catch{}
+                  try{ _imeBarApplyCaretAndSync && _imeBarApplyCaretAndSync('cap-arrow-ud'); }catch{}
+                }
               }catch{}
               try{ e.preventDefault(); e.stopImmediatePropagation(); e.stopPropagation(); }catch{}
               return;
@@ -24320,14 +24680,10 @@ try{
               try{
                 if (_imeBarActive){
                   const barEl = (typeof _imeBarInputEl==='function') ? _imeBarInputEl() : null;
-                  const vNow = (barEl ? String(barEl.value||'') : '');
                   const composing2 = !!(e && (e.isComposing===true)) || !!_imeBarComposing || !!(window && window._imeComposing===true);
                   if (!composing2){
-                    // #1684: Esc while IME bar is visible should hide the bar + IME OFF but keep INSERT.
-                    try{ if (barEl) barEl.value = ''; }catch{}
-                    try{ _imeBarReplaceInsertedText && _imeBarReplaceInsertedText('', 'emergency-esc-clear'); }catch{}
-                    try{ _imeBarPrevText = ''; }catch{}
-                    try{ if (typeof _imeBarHideByUser === 'function') _imeBarHideByUser('emergency-esc', e); }catch{}
+                    // IME bar active: Esc should behave like INSERT->NORMAL (unless selection exists).
+                    try{ _imeBarEscToNormal && _imeBarEscToNormal(e, 'emergency'); }catch{}
                     return;
                   }
                 }
@@ -24679,17 +25035,10 @@ try{
               }catch{}
 
               if (esc){
+                if (composing) return; // composing: let IME handle Esc
                 try{ e.preventDefault(); e.stopPropagation(); }catch{}
-                const vNow = String(imeEl.value||'');
-                if (!composing){
-                  // #1684: Esc hides IME bar + IME OFF, but keeps INSERT.
-                  try{ imeEl.value = ''; }catch{}
-                  try{ _imeBarReplaceInsertedText && _imeBarReplaceInsertedText('', 'esc-clear'); }catch{}
-                  try{ _imeBarPrevText = ''; }catch{}
-                  try{ if (typeof _imeBarHideByUser === 'function') _imeBarHideByUser('esc', e); }catch{}
-                  return;
-                }
-                return; // composing: let IME handle Esc
+                try{ _imeBarEscToNormal && _imeBarEscToNormal(e, 'imeinput'); }catch{}
+                return;
               }
               if (k === 'Enter' && !composing){
                 try{ e.preventDefault(); e.stopPropagation(); }catch{}
@@ -24700,12 +25049,41 @@ try{
                   try{ imeEl.value = ''; }catch{}
                   try{ _imeBarPrevText = ''; _imeBarAnchorOff = (editor && typeof editor.selectionStart==='number') ? (editor.selectionStart|0) : (_imeBarAnchorOff|0); }catch{}
                 } else {
-                  // Insert newline into the document.
-                  try{ _imeBarAnchorOff = (editor && typeof editor.selectionStart==='number') ? (editor.selectionStart|0) : (_offsetFromRC(caretRow|0, caretCol|0)|0); }catch{}
-                  try{ _imeBarPrevText = ''; }catch{}
-                  try{ _imeBarReplaceInsertedText('\n', 'enter-nl'); }catch{}
-                  // Advance anchor and clear prev so next segment doesn't delete the newline.
-                  try{ _imeBarPrevText = ''; _imeBarAnchorOff = (editor && typeof editor.selectionStart==='number') ? (editor.selectionStart|0) : (_imeBarAnchorOff|0); }catch{}
+                  // Empty bar + Enter:
+                  // Match markdown-off INSERT behavior (#600): if caret is at dummy EOF newline position
+                  // (no final LF and caret at EOF), promote dummy -> real '\n' without creating a visible blank line.
+                  let didDummy = false;
+                  try{
+                    const b = (typeof currentBuffer==='function') ? currentBuffer() : null;
+                    const v = (b && typeof b.text === 'string') ? b.text : String(editor.value||'');
+                    const atEnd = (editor.selectionStart|0) === (editor.selectionEnd|0) && (editor.selectionStart|0) === (v.length|0);
+                    const dummyActive = !v.endsWith('\n');
+                    if (atEnd && dummyActive){
+                      didDummy = true;
+                      const offEOF = (v.length|0);
+                      try{ _imeBarAnchorOff = offEOF; }catch{}
+                      try{ _imeBarPrevText = ''; }catch{}
+                      // Insert '\n' at EOF, then move caret back onto the newline char (offEOF).
+                      try{ _imeBarReplaceInsertedText('\n', 'dummy-eof-enter'); }catch{}
+                      const newOff = offEOF;
+                      try{ editor.setSelectionRange(newOff|0, newOff|0); }catch{ try{ editor.selectionStart = newOff|0; editor.selectionEnd = newOff|0; }catch{} }
+                      try{ const rc = _rcFromOffset(newOff|0); caretRow = rc.r|0; caretCol = rc.c|0; }catch{}
+                      try{ _setCaret && _setCaret(caretRow|0, caretCol|0, { suppressWrapDesired:true }); }catch{}
+                      try{ _imeBarPrevText = ''; _imeBarAnchorOff = newOff|0; }catch{}
+                      try{ ensureScrolloff && ensureScrolloff({ force:true }); }catch{ try{ ensureScrolloff && ensureScrolloff(); }catch{} }
+                      try{ _repositionCaret && _repositionCaret({ force:true }); }catch{ try{ _repositionCaret && _repositionCaret(); }catch{} }
+                      try{ updateGutter && updateGutter({ force:true }); }catch{ try{ updateGutter && updateGutter(); }catch{} }
+                      try{ _scheduleListCharsRender && _scheduleListCharsRender('dummy-eof-enter'); }catch{}
+                    }
+                  }catch{}
+                  if (!didDummy){
+                    // Insert newline into the document.
+                    try{ _imeBarAnchorOff = (editor && typeof editor.selectionStart==='number') ? (editor.selectionStart|0) : (_offsetFromRC(caretRow|0, caretCol|0)|0); }catch{}
+                    try{ _imeBarPrevText = ''; }catch{}
+                    try{ _imeBarReplaceInsertedText('\n', 'enter-nl'); }catch{}
+                    // Advance anchor and clear prev so next segment doesn't delete the newline.
+                    try{ _imeBarPrevText = ''; _imeBarAnchorOff = (editor && typeof editor.selectionStart==='number') ? (editor.selectionStart|0) : (_imeBarAnchorOff|0); }catch{}
+                  }
                 }
                 try{ _positionImeBar && _positionImeBar(); }catch{}
                 return;
@@ -24863,17 +25241,10 @@ try{
             }catch{}
 
             if (esc){
+              if (composing) return; // composing: let IME handle Esc
               try{ e.preventDefault(); e.stopPropagation(); }catch{}
-              const vNow = String(cmdinput.value||'');
-              if (!composing){
-                // #1684: Esc hides IME bar + IME OFF, but keeps INSERT.
-                try{ cmdinput.value = ''; }catch{}
-                try{ _imeBarReplaceInsertedText && _imeBarReplaceInsertedText('', 'esc-clear'); }catch{}
-                try{ _imeBarPrevText = ''; }catch{}
-                try{ if (typeof _imeBarHideByUser === 'function') _imeBarHideByUser('esc-legacy', e); }catch{}
-                return;
-              }
-              return; // composing: let IME handle Esc
+              try{ _imeBarEscToNormal && _imeBarEscToNormal(e, 'cmdinput-legacy'); }catch{}
+              return;
             }
             if (k === 'Enter' && !composing){
               try{ e.preventDefault(); e.stopPropagation(); }catch{}
@@ -24884,12 +25255,38 @@ try{
                 try{ cmdinput.value = ''; }catch{}
                 try{ _imeBarPrevText = ''; _imeBarAnchorOff = (editor && typeof editor.selectionStart==='number') ? (editor.selectionStart|0) : (_imeBarAnchorOff|0); }catch{}
               } else {
-                // Insert newline into the document.
-                try{ _imeBarAnchorOff = (editor && typeof editor.selectionStart==='number') ? (editor.selectionStart|0) : (_offsetFromRC(caretRow|0, caretCol|0)|0); }catch{}
-                try{ _imeBarPrevText = ''; }catch{}
-                try{ _imeBarReplaceInsertedText('\n', 'enter-nl'); }catch{}
-                // Advance anchor and clear prev so next segment doesn't delete the newline.
-                try{ _imeBarPrevText = ''; _imeBarAnchorOff = (editor && typeof editor.selectionStart==='number') ? (editor.selectionStart|0) : (_imeBarAnchorOff|0); }catch{}
+                // Empty bar + Enter: match markdown-off INSERT dummy EOF promotion (#600).
+                let didDummy = false;
+                try{
+                  const b = (typeof currentBuffer==='function') ? currentBuffer() : null;
+                  const v = (b && typeof b.text === 'string') ? b.text : String(editor.value||'');
+                  const atEnd = (editor.selectionStart|0) === (editor.selectionEnd|0) && (editor.selectionStart|0) === (v.length|0);
+                  const dummyActive = !v.endsWith('\n');
+                  if (atEnd && dummyActive){
+                    didDummy = true;
+                    const offEOF = (v.length|0);
+                    try{ _imeBarAnchorOff = offEOF; }catch{}
+                    try{ _imeBarPrevText = ''; }catch{}
+                    try{ _imeBarReplaceInsertedText('\n', 'dummy-eof-enter'); }catch{}
+                    const newOff = offEOF;
+                    try{ editor.setSelectionRange(newOff|0, newOff|0); }catch{ try{ editor.selectionStart = newOff|0; editor.selectionEnd = newOff|0; }catch{} }
+                    try{ const rc = _rcFromOffset(newOff|0); caretRow = rc.r|0; caretCol = rc.c|0; }catch{}
+                    try{ _setCaret && _setCaret(caretRow|0, caretCol|0, { suppressWrapDesired:true }); }catch{}
+                    try{ _imeBarPrevText = ''; _imeBarAnchorOff = newOff|0; }catch{}
+                    try{ ensureScrolloff && ensureScrolloff({ force:true }); }catch{ try{ ensureScrolloff && ensureScrolloff(); }catch{} }
+                    try{ _repositionCaret && _repositionCaret({ force:true }); }catch{ try{ _repositionCaret && _repositionCaret(); }catch{} }
+                    try{ updateGutter && updateGutter({ force:true }); }catch{ try{ updateGutter && updateGutter(); }catch{} }
+                    try{ _scheduleListCharsRender && _scheduleListCharsRender('dummy-eof-enter'); }catch{}
+                  }
+                }catch{}
+                if (!didDummy){
+                  // Insert newline into the document.
+                  try{ _imeBarAnchorOff = (editor && typeof editor.selectionStart==='number') ? (editor.selectionStart|0) : (_offsetFromRC(caretRow|0, caretCol|0)|0); }catch{}
+                  try{ _imeBarPrevText = ''; }catch{}
+                  try{ _imeBarReplaceInsertedText('\n', 'enter-nl'); }catch{}
+                  // Advance anchor and clear prev so next segment doesn't delete the newline.
+                  try{ _imeBarPrevText = ''; _imeBarAnchorOff = (editor && typeof editor.selectionStart==='number') ? (editor.selectionStart|0) : (_imeBarAnchorOff|0); }catch{}
+                }
               }
               try{ _positionImeBar && _positionImeBar(); }catch{}
               return;
