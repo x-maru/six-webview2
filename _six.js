@@ -24794,12 +24794,14 @@ try{
               const esc = (typeof _isEsc === 'function') ? _isEsc(e) : (k === 'Escape' || k === 'Esc');
               let composing = !!(e && (e.isComposing===true)) || !!_imeBarComposing || !!(window && window._imeComposing===true);
               // Some environments get stuck in isComposing=true after rapid Kana/Eisu toggles.
-              // If no IME-bar IME event has occurred recently and the bar is empty, treat as not composing.
+              // DO NOT blindly override composing=false here: it can cause IME-internal Enter to be treated
+              // as a real Enter and insert a newline. Apply stale override only in nav/edit routing below.
+              let staleEmpty = false;
               try{
                 const now0 = Date.now();
                 const stale = (now0 - (+_imeBarLastImeEvtAt || 0)) > 450;
-                if (stale && !String(imeEl.value||'') && !String(_imeBarPrevText||'')) composing = false;
-              }catch{}
+                staleEmpty = !!(stale && !String(imeEl.value||'') && !String(_imeBarPrevText||''));
+              }catch{ staleEmpty = false; }
 
               // When the bar is open but empty, navigation/edit keys should affect the document.
               try{
@@ -24818,13 +24820,18 @@ try{
                 const isNavAny = (kL || kR || kU || kD || kH || kE || kPU || kPD);
                 const emptyBar = (!String(imeEl.value||''));
 
+                // Stale composing override is ONLY for navigation/edit routing.
+                // This keeps Shift+arrows etc usable even if isComposing gets stuck,
+                // while preventing accidental newline insertion from bogus Enter events.
+                const composingForNav = staleEmpty ? false : composing;
+
                 // md-rich IME bar: If a user hits navigation keys quickly after typing,
                 // the imeinput 'input' (commit) event can lag behind, so the document edit
                 // lands *after* the caret move and undo segmentation becomes impossible.
                 // Fix by flushing pending bar text into the document before applying navigation,
                 // then create an undo boundary once.
                 try{
-                  if (isNavAny && !composing){
+                  if (isNavAny && !composingForNav){
                     let shiftHeld = false;
                     try{ shiftHeld = !!(e && e.shiftKey); }catch{}
                     if (!shiftHeld){
@@ -24850,7 +24857,7 @@ try{
                 // Do this immediately here to avoid relying on environment-specific event ordering.
                 let _didSegSnap = false;
                 try{
-                  if (isNavAny && !composing && _imeBarSegDirty){
+                  if (isNavAny && !composingForNav && _imeBarSegDirty){
                     let shiftHeld = false;
                     try{ shiftHeld = !!(e && e.shiftKey); }catch{}
                     if (!shiftHeld){
@@ -24870,7 +24877,7 @@ try{
                 // performs a non-edit navigation (caret move), split undo at the next edit.
                 // Do this even if the bar hasn't been cleared yet (timing races after typing).
                 try{
-                  if (isNavAny && !composing && _imeBarSegDirty){
+                  if (isNavAny && !composingForNav && _imeBarSegDirty){
                     let shiftHeld = false;
                     try{ shiftHeld = !!(e && e.shiftKey); }catch{}
                     if (!shiftHeld) _imeBarSegPending = true;
@@ -25035,12 +25042,25 @@ try{
               }catch{}
 
               if (esc){
-                if (composing) return; // composing: let IME handle Esc
+                // composing: let IME handle Esc.
+                // But if the composing flag looks stale and the bar is empty, force-clear composition
+                // to recover from the sticky yellow-underscore/dead-key state.
+                try{
+                  if (composing && staleEmpty){
+                    try{ if (typeof _forceEndComposition === 'function') _forceEndComposition('imebar-esc-stale'); }catch{}
+                    composing = false;
+                  }
+                }catch{}
+                if (composing) return;
                 try{ e.preventDefault(); e.stopPropagation(); }catch{}
                 try{ _imeBarEscToNormal && _imeBarEscToNormal(e, 'imeinput'); }catch{}
                 return;
               }
-              if (k === 'Enter' && !composing){
+              // Only treat as a real Enter when it looks like an actual Enter key.
+              const code0 = String((e && e.code) || '');
+              const kc0 = (e && typeof e.keyCode === 'number') ? (e.keyCode|0) : 0;
+              const isRealEnter = (k === 'Enter') && (code0 === 'Enter' || code0 === 'NumpadEnter' || (kc0|0) === 13);
+              if (isRealEnter && !composing){
                 try{ e.preventDefault(); e.stopPropagation(); }catch{}
                 const vNow = String(imeEl.value||'');
                 if (vNow){
@@ -25163,12 +25183,14 @@ try{
             const esc = (typeof _isEsc === 'function') ? _isEsc(e) : (k === 'Escape' || k === 'Esc');
             let composing = !!(e && (e.isComposing===true)) || !!_imeBarComposing || !!(window && window._imeComposing===true);
             // Some environments get stuck in isComposing=true after rapid Kana/Eisu toggles.
-            // If no IME-bar IME event has occurred recently and the bar is empty, treat as not composing.
+            // Keep a stale+empty hint for limited recovery, but do not blindly override composing
+            // (otherwise bogus Enter can insert a newline).
+            let staleEmpty = false;
             try{
               const now0 = Date.now();
               const stale = (now0 - (+_imeBarLastImeEvtAt || 0)) > 450;
-              if (stale && !String(cmdinput.value||'') && !String(_imeBarPrevText||'')) composing = false;
-            }catch{}
+              staleEmpty = !!(stale && !String(cmdinput.value||'') && !String(_imeBarPrevText||''));
+            }catch{ staleEmpty = false; }
 
             // When the bar is open but empty, navigation/edit keys should affect the document.
             try{
@@ -25241,12 +25263,21 @@ try{
             }catch{}
 
             if (esc){
+              try{
+                if (composing && staleEmpty){
+                  try{ if (typeof _forceEndComposition === 'function') _forceEndComposition('imebar-esc-stale-legacy'); }catch{}
+                  composing = false;
+                }
+              }catch{}
               if (composing) return; // composing: let IME handle Esc
               try{ e.preventDefault(); e.stopPropagation(); }catch{}
               try{ _imeBarEscToNormal && _imeBarEscToNormal(e, 'cmdinput-legacy'); }catch{}
               return;
             }
-            if (k === 'Enter' && !composing){
+            const code0 = String((e && e.code) || '');
+            const kc0 = (e && typeof e.keyCode === 'number') ? (e.keyCode|0) : 0;
+            const isRealEnter = (k === 'Enter') && (code0 === 'Enter' || code0 === 'NumpadEnter' || (kc0|0) === 13);
+            if (isRealEnter && !composing){
               try{ e.preventDefault(); e.stopPropagation(); }catch{}
               const vNow = String(cmdinput.value||'');
               if (vNow){
