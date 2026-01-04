@@ -376,6 +376,39 @@ body.md-rich #editor::selection {
 	box-decoration-break: clone;
 }
 
+/* Markdown-rich unordered list marker (fixed fullwidth box, smaller glyph centered) */
+#textLayer .md-ulbox {
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	width: 2ch; /* occupy fullwidth (2 monospace columns) */
+	vertical-align: middle;
+}
+#textLayer .md-ulbox .md-ulbullet {
+	display: block;
+	width: 0.32em;
+	height: 0.32em;
+	box-sizing: border-box;
+	line-height: 1;
+	background: transparent;
+	transform: translateY(-0.06em);
+}
+
+/* disc/circle/square drawn in CSS (font-independent) */
+#textLayer .md-ulbox .md-ulbullet.md-ulb0 {
+	background: currentColor;
+	border-radius: 50%;
+}
+#textLayer .md-ulbox .md-ulbullet.md-ulb1 {
+	background: transparent;
+	border: 1px solid currentColor;
+	border-radius: 50%;
+}
+#textLayer .md-ulbox .md-ulbullet.md-ulb2 {
+	background: currentColor;
+	border-radius: 0;
+}
+
 /* Control character overlay scaling & weight (#464) */
 .listchar, .listchar-eol {
 	/* Base scale variables (user can override via :root) */

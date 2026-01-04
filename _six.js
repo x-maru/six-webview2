@@ -375,6 +375,222 @@ try{
       return { ch };
     }catch{ return null; }
   }
+
+  // GFM/CommonMark unordered list item (basic)
+  // Per request (#1712):
+  // - marker: '-', '*', '+'
+  // - requires 1..4 ASCII spaces after marker (strict; tab after marker is NOT accepted)
+  // - nesting is determined by parent list item's (marker + spaces) indentation width (CommonMark-like)
+  // - display: replace (marker + the first following space) with a fullwidth glyph (disc/circle/square)
+  //            while keeping string length stable via a zero-width character.
+  let _mdListCache = null;
+
+  function _mdCharIndexForIndentCols(s, targetCols){
+    try{
+      const text = String(s||'');
+      const TAB = 4;
+      const tgt = Math.max(0, targetCols|0);
+      let idx = 0;
+      let cols = 0;
+      while (idx < (text.length|0)){
+        const ch = text[idx];
+        if (ch === ' '){
+          if (((cols|0) + 1) > tgt) break;
+          cols += 1; idx += 1; continue;
+        }
+        if (ch === '\t'){
+          const adv = (TAB - (cols % TAB)) || TAB;
+          if (((cols|0) + (adv|0)) > tgt) break;
+          cols += adv; idx += 1; continue;
+        }
+        break;
+      }
+      return idx|0;
+    }catch{ return 0; }
+  }
+
+  // Markdown list hanging-indent options for wrap probe.
+  // - item: keep leading indentation; hang only (marker + spaces) width
+  // - cont: keep indentation for all wrapped visuals (no negative indent)
+  function _mdIndentOptsForListLine(srcText, ul, widthPx, fontSizePx, lineHeightPx){
+    try{
+      const s = String(srcText||'');
+      const ww = (widthPx|0);
+      const fs = (fontSizePx|0);
+      const lh = (lineHeightPx|0);
+      if (!ul) return null;
+
+      if (ul.kind === 'item'){
+        if (!Number.isFinite(ul.markerIdx) || !Number.isFinite(ul.contentStartIdx)) return null;
+        const mi = Math.max(0, ul.markerIdx|0);
+        const ci = Math.max(mi, ul.contentStartIdx|0);
+        const xContent = _wrapProbeXFromColStyled(s, ci|0, ww, fs, lh);
+        if (!Number.isFinite(xContent) || (xContent||0) <= 0.5) return null;
+        const xc = (+xContent||0);
+        // IMPORTANT: first line stays at x=0 (prefix is in the text), wrapped lines start at content start.
+        return { padLeftPx: xc, textIndentPx: -xc };
+      }
+
+      if (ul.kind === 'cont'){
+        if (!Number.isFinite(ul.contentIndentCol)) return null;
+        const idx = _mdCharIndexForIndentCols(s, ul.contentIndentCol|0);
+        if (!((idx|0) > 0)) return null;
+        const xIndent = _wrapProbeXFromColStyled(s, idx|0, ww, fs, lh);
+        if (!Number.isFinite(xIndent) || (xIndent||0) <= 0.5) return null;
+        const xi = (+xIndent||0);
+        return { padLeftPx: xi, textIndentPx: -xi };
+      }
+
+      return null;
+    }catch{ return null; }
+  }
+  function _mdListInvalidateCache(_reason){
+    try{ if (_mdListCache) _mdListCache.dirty = true; }catch{}
+  }
+  function _mdListEnsureCache(force){
+    try{
+      if (!(_mdRichEnabled && _mdRichEnabled())) { _mdListCache = null; return null; }
+      const lines = _splitLines();
+      const b = currentBuffer && currentBuffer();
+      const tick = (b && Number.isFinite(b._changeTick)) ? (b._changeTick|0) : 0;
+      const need = !!(force || !_mdListCache || _mdListCache.dirty || _mdListCache.tick !== tick || _mdListCache.lineCount !== (lines.length|0));
+      if (!need) return _mdListCache;
+
+      const items = new Array(lines.length|0);
+      const stack = [];
+      const TAB = 4;
+
+      // Helper: compute indentation columns up to first non-space/tab.
+      const _indentInfo = (s)=>{
+        let idx = 0;
+        let cols = 0;
+        while (idx < (s.length|0)){
+          const ch = s[idx];
+          if (ch === ' '){ cols += 1; idx += 1; continue; }
+          if (ch === '\t'){ cols += (TAB - (cols % TAB)) || TAB; idx += 1; continue; }
+          break;
+        }
+        return { idx, cols };
+      };
+
+      for (let row=0; row<(lines.length|0); row++){
+        const s = String(lines[row]||'');
+        if (!s || s.trim()===''){
+          items[row] = null;
+          // Reset list context across blank lines (prevents accidental nesting after a paragraph break).
+          stack.length = 0;
+          continue;
+        }
+
+        const ind = _indentInfo(s);
+        const idx0 = ind.idx|0;
+        const cols0 = ind.cols|0;
+
+        // Close list contexts when this line can't be a continuation of the current item.
+        while (stack.length > 0 && (cols0|0) < (stack[stack.length-1].contentIndentCol|0)) stack.pop();
+
+        // Candidate marker
+        const marker = s[idx0];
+        if (!(marker==='-' || marker==='*' || marker==='+')){
+          // Continuation line within a list item (simple: indentation must be >= current content indent)
+          if (stack.length > 0 && (cols0|0) >= (stack[stack.length-1].contentIndentCol|0)){
+            items[row] = { kind:'cont', contentIndentCol: (stack[stack.length-1].contentIndentCol|0) };
+          } else {
+            items[row] = null;
+          }
+          continue;
+        }
+
+        // For a new list item marker, nesting is governed by parent content indent (CommonMark-like).
+        // Thematic break must win.
+        try{ if (_mdThematicBreakInfo && _mdThematicBreakInfo(s)) { items[row] = null; continue; } }catch{}
+
+        // Count 1..4 ASCII spaces after marker.
+        let sp = 0;
+        let j = (idx0 + 1)|0;
+        while (j < (s.length|0) && s[j] === ' ' && sp < 5){ sp++; j++; }
+        if (sp < 1 || sp > 4){ items[row] = null; continue; }
+        // Reject tab immediately after marker (strict)
+        if (s[(idx0 + 1)|0] === '\t'){ items[row] = null; continue; }
+
+        const depth = (stack.length + 1)|0;
+        const mod = ((depth - 1) % 3 + 3) % 3;
+        // disc/circle/square (ul list-style-type cycle)
+        // NOTE: glyph is kept for back-compat/debug; rendering uses bulletKind CSS drawing.
+        const glyph = (mod === 0) ? '●' : (mod === 1 ? '○' : '■');
+        const bulletKind = mod|0; // 0:disc, 1:circle, 2:square
+
+        const contentIndentCol = (cols0 + 1 + sp)|0;
+        items[row] = {
+          kind: 'item',
+          depth,
+          indentCol: cols0,
+          markerIdx: idx0,
+          spaceCount: sp,
+          contentIndentCol,
+          contentStartIdx: ((idx0 + 1 + sp)|0),
+          glyph,
+          bulletKind,
+        };
+        stack.push({ contentIndentCol });
+      }
+
+      _mdListCache = { tick, lineCount:(lines.length|0), items, dirty:false, builtAt: Date.now() };
+      return _mdListCache;
+    }catch{ return _mdListCache; }
+  }
+  function _mdUListInfo(line, row, lines){
+    // Back-compat shim: prefer cached row-based info when available.
+    try{
+      const c = _mdListEnsureCache(false) || _mdListEnsureCache(true);
+      const r = (row|0);
+      if (c && c.items && r>=0 && r<(c.items.length|0)) return c.items[r];
+    }catch{}
+    return null;
+  }
+
+  function _mdUListBulletHtml(ul){
+    try{
+      const k = (ul && Number.isFinite(ul.bulletKind)) ? ((ul.bulletKind|0) % 3 + 3) % 3 : 0;
+      const cls = (k===1) ? 'md-ulb1' : (k===2 ? 'md-ulb2' : 'md-ulb0');
+      // CSS draws the shape; keep element width stable (2ch) via .md-ulbox.
+      return '<span class="md-ulbox"><span class="md-ulbullet ' + cls + '"></span></span>';
+    }catch{ return '<span class="md-ulbox"><span class="md-ulbullet md-ulb0"></span></span>'; }
+  }
+  function _mdUListHtmlWithRange(text, ul, rangeClass, rangeStart, rangeEnd){
+    try{
+      const s = String(text||'');
+      const len = (s.length|0);
+      if (!ul || !Number.isFinite(ul.markerIdx)) return _mdEscHtml(s);
+      const ms = Math.max(0, Math.min(len, (ul.markerIdx|0)));
+      const me = Math.max(ms, Math.min(len, ms + 2));
+      const hasRange = (rangeClass && Number.isFinite(rangeStart) && Number.isFinite(rangeEnd));
+      const rs = hasRange ? Math.max(0, Math.min(len, rangeStart|0)) : 0;
+      const re = hasRange ? Math.max(0, Math.min(len, rangeEnd|0)) : 0;
+
+      const esc = _mdEscHtml;
+      const wrap = (cls, inner)=>{ try{ return '<span class="' + cls + '">' + inner + '</span>'; }catch{ return inner; } };
+      const emitText = (a, b)=>{
+        a = Math.max(0, Math.min(len, a|0));
+        b = Math.max(a, Math.min(len, b|0));
+        if (!hasRange || re <= a || rs >= b) return esc(s.slice(a, b));
+        const x0 = Math.max(a, rs);
+        const x1 = Math.min(b, re);
+        let out = '';
+        if (a < x0) out += esc(s.slice(a, x0));
+        if (x1 > x0) out += wrap(rangeClass, esc(s.slice(x0, x1)));
+        if (x1 < b) out += esc(s.slice(x1, b));
+        return out;
+      };
+
+      const bullet = _mdUListBulletHtml(ul);
+      const markerSelected = hasRange && (re > ms) && (rs < me);
+      const bulletOut = markerSelected ? wrap(rangeClass, bullet) : bullet;
+
+      return emitText(0, ms) + bulletOut + emitText(me, len);
+    }catch{ return _mdEscHtml(String(text||'')); }
+  }
+
   function _mdRenderTextLayer(){
     try{
       if (!_mdRichActive()) return;
@@ -455,6 +671,8 @@ try{
       // Also keep it unaffected by horizontal scrolling.
       try{ _mdBgInner.style.transform = ''; }catch{}
 
+      // Ensure list nesting cache is ready (used for bullet rendering).
+      try{ _mdListEnsureCache && _mdListEnsureCache(false); }catch{}
       const children = Array.from(_mdTextInner.children);
       const bgChildren = Array.from(_mdBgInner.children);
       let y = 0;
@@ -529,6 +747,24 @@ try{
           if (prefixLen>0) text = srcText.slice(prefixLen);
         }
 
+        // Unordered list item marker rendering (GFM-ish, #1712/#1713):
+        // Render marker+first-space as a fixed-width (2ch) span with a smaller glyph centered.
+        // We do NOT change the underlying string, so caret mapping stays based on the source text.
+        let ulInfo = null;
+        let ulItem = null;
+        if (!renderHr && !renderSetextUnderlineRow && !(prefixLen>0)){
+          try{ ulInfo = _mdUListInfo && _mdUListInfo(srcText, row, lines); }catch{ ulInfo = null; }
+          // Show disc/circle/square on:
+          // - clean mode (always)
+          // - draft mode: non-caret rows only
+          // Keep caret row raw in draft mode.
+          try{
+            const draft = !!(_mdDraftEditEnabled && _mdDraftEditEnabled());
+            const show = (!draft) || (!isActiveRow);
+            if (show && ulInfo && ulInfo.kind === 'item') ulItem = ulInfo;
+          }catch{ ulItem = null; }
+        }
+
         if (renderSetextUnderlineRow){
           text = '';
           prefixLen = 0;
@@ -578,7 +814,11 @@ try{
                 const pre = text.slice(0, c1);
                 const mid = text.slice(c1, c2);
                 const post = text.slice(c2);
-                el.innerHTML = _mdEscHtml(pre) + '<span class="md-sel">' + _mdEscHtml(mid) + '</span>' + _mdEscHtml(post);
+                if (ulItem){
+                  el.innerHTML = _mdUListHtmlWithRange(text, ulItem, 'md-sel', c1|0, c2|0);
+                } else {
+                  el.innerHTML = _mdEscHtml(pre) + '<span class="md-sel">' + _mdEscHtml(mid) + '</span>' + _mdEscHtml(post);
+                }
                 usedHtml = true;
               }
             }
@@ -620,7 +860,12 @@ try{
                 const preH = headingCjkHtml ? (_mdHeadingCjkHtml(pre, lv) || _mdEscHtml(pre)) : _mdEscHtml(pre);
                 const midH = headingCjkHtml ? (_mdHeadingCjkHtml(mid || ' ', lv) || _mdEscHtml(mid || ' ')) : _mdEscHtml(mid || ' ');
                 const postH = headingCjkHtml ? (_mdHeadingCjkHtml(post, lv) || _mdEscHtml(post)) : _mdEscHtml(post);
-                el.innerHTML = preH + '<span class="md-ime-uline">' + midH + '</span>' + postH;
+                if (ulItem){
+                  // For list lines we don't need headingCjkHtml; keep it simple and stable.
+                  el.innerHTML = _mdUListHtmlWithRange(text, ulItem, 'md-ime-uline', a|0, b|0);
+                } else {
+                  el.innerHTML = preH + '<span class="md-ime-uline">' + midH + '</span>' + postH;
+                }
                 usedHtml = true;
               }
             }
@@ -634,8 +879,19 @@ try{
         if (!usedHtml){
           // Ensure we don't keep stale HTML
           if (el.innerHTML !== ''){ try{ el.textContent = ''; }catch{} }
-          el.textContent = text;
+          if (ulItem){
+            try{ el.innerHTML = _mdUListHtmlWithRange(text, ulItem, null, 0, 0); usedHtml = true; }catch{ usedHtml = false; }
+          }
+          if (!usedHtml) el.textContent = text;
         }
+
+        // List hanging indent (md-rich+wrap): keep leading indent; hang only marker-width.
+        let indentOpts = null;
+        if (wrapOn && hideSymbols && ulInfo){
+          try{ indentOpts = _mdIndentOptsForListLine(srcText, ulInfo, wPx|0, fs|0, lh|0); }catch{ indentOpts = null; }
+        }
+        try{ el.style.paddingLeft = (indentOpts ? ((indentOpts.padLeftPx||0) + 'px') : ''); }catch{}
+        try{ el.style.textIndent = (indentOpts ? ((indentOpts.textIndentPx||0) + 'px') : ''); }catch{}
 
         // #1495: Active line background is rendered by bg layer (not by edstripe under a transparent md-line).
         // This avoids 1-frame flicker during smooth scroll.
@@ -654,7 +910,7 @@ try{
           try{
             // Use the displayed text (after symbol hiding) for wrap measurement.
             const disp = String(text||'');
-            const n0 = _wrapProbeLineCountStyled(disp, wPx|0, lh|0, fs|0);
+            const n0 = _wrapProbeLineCountStyled(disp, wPx|0, lh|0, fs|0, indentOpts);
             const n = (Number.isFinite(n0) && (n0|0) > 0) ? (n0|0) : 1;
             hPx = Math.max(1, n|0) * (lh|0);
           }catch{ hPx = lh; }
@@ -1621,10 +1877,12 @@ try{
       let s = String(editor.value||'');
       start = Math.max(0, Math.min(s.length, start|0));
       end = Math.max(0, Math.min(s.length, end|0));
+      let newOff = start|0;
       if (start !== end){
         const a = Math.min(start, end), b = Math.max(start, end);
         editor.value = s.slice(0, a) + s.slice(b);
         try{ editor.selectionStart = editor.selectionEnd = a; }catch{}
+        newOff = a|0;
         try{ const rc = _rcFromOffset(a|0); caretRow = rc.r|0; caretCol = rc.c|0; }catch{}
       } else if (start > 0){
         // delete previous code point (surrogate-aware)
@@ -1636,10 +1894,16 @@ try{
         }
         editor.value = s.slice(0, delStart) + s.slice(start);
         try{ editor.selectionStart = editor.selectionEnd = delStart; }catch{}
+        newOff = delStart|0;
         try{ const rc = _rcFromOffset(delStart|0); caretRow = rc.r|0; caretCol = rc.c|0; }catch{}
       } else {
         return;
       }
+      // Root-fix (#1724/#1725): keep the insertion anchor in sync after doc edits.
+      // Otherwise the next printable key (mirrored via _imeBarReplaceInsertedText) can insert at a stale offset.
+      try{ _imeBarPrevText = ''; }catch{}
+      try{ _imeBarAnchorOff = newOff|0; }catch{}
+      try{ _imeBarSelAnchorOff = null; }catch{}
       try{ const out = String(editor.value||''); const b=currentBuffer && currentBuffer(); if (b) b.text = out; }catch{}
       try{ _touchBufferModified && _touchBufferModified(); }catch{}
       try{ _afterTextMutation && _afterTextMutation(); }catch{}
@@ -1662,10 +1926,12 @@ try{
       let s = String(editor.value||'');
       start = Math.max(0, Math.min(s.length, start|0));
       end = Math.max(0, Math.min(s.length, end|0));
+      let newOff = start|0;
       if (start !== end){
         const a = Math.min(start, end), b = Math.max(start, end);
         editor.value = s.slice(0, a) + s.slice(b);
         try{ editor.selectionStart = editor.selectionEnd = a; }catch{}
+        newOff = a|0;
         try{ const rc = _rcFromOffset(a|0); caretRow = rc.r|0; caretCol = rc.c|0; }catch{}
       } else if (start < s.length){
         // delete next code point (surrogate-aware)
@@ -1677,10 +1943,15 @@ try{
         }
         editor.value = s.slice(0, start) + s.slice(delEnd);
         try{ editor.selectionStart = editor.selectionEnd = start; }catch{}
+        newOff = start|0;
         try{ const rc = _rcFromOffset(start|0); caretRow = rc.r|0; caretCol = rc.c|0; }catch{}
       } else {
         return;
       }
+      // Keep insertion anchor synced after doc edits (see _imeBarBackspaceInDoc).
+      try{ _imeBarPrevText = ''; }catch{}
+      try{ _imeBarAnchorOff = newOff|0; }catch{}
+      try{ _imeBarSelAnchorOff = null; }catch{}
       try{ const out = String(editor.value||''); const b=currentBuffer && currentBuffer(); if (b) b.text = out; }catch{}
       try{ _touchBufferModified && _touchBufferModified(); }catch{}
       try{ _afterTextMutation && _afterTextMutation(); }catch{}
@@ -5775,6 +6046,11 @@ try{
   let _hlLayer = null;               // container for match rectangles
   // #624 直前テキスト保持 (INSERT beforeinput/delete 用)
   let _prevTextBeforeInput = '';
+  let _prevSelBeforeInputS = 0;
+  let _prevSelBeforeInputE = 0;
+  let _prevInputTypeBeforeInput = '';
+  // EOL Backspace snap (workaround for environments where inputType/selection updates are inconsistent)
+  let _bsEolSnap = null;
   // --- Visual Bell ---
   let _optVisualBell = (function(){ try{ const o=(window&&window.SIX_OPTIONS)||{}; return (o.visualbell!==false); }catch{} return true; })(); // :set visualbell (default ON)
   // URL hover/link open
@@ -5784,6 +6060,26 @@ try{
   let _optDebugKeys = false;
   const _debugKeyRing = [];
   const _DEBUG_KEY_MAX = 300;
+  function _dbgSelState(){
+    try{
+      const s = (editor && typeof editor.selectionStart==='number') ? (editor.selectionStart|0) : -1;
+      const e = (editor && typeof editor.selectionEnd==='number') ? (editor.selectionEnd|0) : -1;
+      let off = -1;
+      try{ off = _offsetFromRC(caretRow|0, caretCol|0)|0; }catch{ off = -1; }
+      let ch = '';
+      let ctx = '';
+      try{
+        const txt = String(editor && editor.value || '');
+        if ((s|0) >= 0 && (s|0) <= (txt.length|0)){
+          ch = (s < txt.length) ? String(txt[s]||'') : '';
+          const a = Math.max(0, (s|0) - 4);
+          const b = Math.min(txt.length, (s|0) + 4);
+          ctx = txt.slice(a, b);
+        }
+      }catch{}
+      return { selS:s, selE:e, caretR:(caretRow|0), caretC:(caretCol|0), caretOff:(off|0), selCh:ch, selCtx:ctx };
+    }catch{ return { selS:-1, selE:-1, caretR:(caretRow|0), caretC:(caretCol|0), caretOff:-1, selCh:'', selCtx:'' }; }
+  }
   function _debugPush(ev){
     try{
       if(!_optDebugKeys) return;
@@ -6729,6 +7025,7 @@ try{
       // - draft mode: strip heading prefix only on non-caret lines
       let dispLine = line;
       let dispPrefix = 0;
+      let _mdUlSkipSpaceCol = -1; // skip listchars for the first space after bullet marker
       try{
         if (mdRich){
           const isActiveRow = (row1 === ((caretRow|0) + 1));
@@ -6737,6 +7034,19 @@ try{
             const p = _mdHeadingPrefixLen(line)|0;
             if (p>0){ dispPrefix = p; dispLine = line.slice(p); }
           }
+
+          // #1715: When listchars shows trailing spaces, a list item like "-   " would draw a dot
+          // for the first post-bullet space, which visually sticks to the bullet. Suppress only that 1 space.
+          try{
+            if (hide && (dispPrefix|0) === 0){
+              _mdListEnsureCache && _mdListEnsureCache(false);
+              const ul = _mdUListInfo && _mdUListInfo(line, idx|0, lines);
+              if (ul && Number.isFinite(ul.markerIdx)){
+                const sc = ((ul.markerIdx|0) - (dispPrefix|0) + 1)|0;
+                if ((sc|0) >= 0) _mdUlSkipSpaceCol = sc|0;
+              }
+            }
+          }catch{ _mdUlSkipSpaceCol = -1; }
         }
       }catch{ dispLine = line; dispPrefix = 0; }
 
@@ -6750,10 +7060,20 @@ try{
           if (!wrapOn) return { intra:0, x:null };
           if (mdRich){
             const fs = Math.max(6, Math.round(baseFontPx * (scale||1)));
+            // Hanging indent for list items/continuation in clean display.
+            let indentOpts = null;
+            try{
+              const isActiveRow = (row1 === ((caretRow|0) + 1));
+              const hide = !!(_mdHideSymbolsForRow && _mdHideSymbolsForRow(!!isActiveRow));
+              if (hide){
+                const ul = _mdUListInfo && _mdUListInfo(line, idx|0, lines);
+                if (ul) indentOpts = _mdIndentOptsForListLine(dispLine, ul, wPx|0, fs|0, rowHeightPx|0);
+              }
+            }catch{ indentOpts = null; }
             let intra = 0;
             let x = null;
-            try{ intra = _wrapProbeIntraFromColStyled(dispLine, col, wPx|0, rowHeightPx|0, fs|0) | 0; }catch{ intra = 0; }
-            try{ x = _wrapProbeXFromColStyled(dispLine, col, wPx|0, fs|0, rowHeightPx|0); }catch{ x = null; }
+            try{ intra = _wrapProbeIntraFromColStyled(dispLine, col, wPx|0, rowHeightPx|0, fs|0, indentOpts) | 0; }catch{ intra = 0; }
+            try{ x = _wrapProbeXFromColStyled(dispLine, col, wPx|0, fs|0, rowHeightPx|0, indentOpts); }catch{ x = null; }
             return { intra: Math.max(0, intra|0), x };
           }
           let intra = 0;
@@ -6795,6 +7115,7 @@ try{
       }
       for (let c=0;c<dispLine.length;c++){
         const ch = dispLine.charAt(c);
+        if ((_mdUlSkipSpaceCol|0) >= 0 && (c|0) === (_mdUlSkipSpaceCol|0) && ch===' ') continue;
         if (ch==='\t' || ch==='\u3000' || (c>=trailStart && ch===' ')){
           let x1 = 0;
           let y1 = yTop;
@@ -8307,7 +8628,7 @@ try{
   }
 
   // Styled wrap probe helpers for markdown-rich (per-line font size/line-height)
-  function _wrapProbeLineCountStyled(text, widthPx, lineHeightPx, fontSizePx){
+  function _wrapProbeLineCountStyled(text, widthPx, lineHeightPx, fontSizePx, opts){
     try{
       const s = String(text||'');
       if (s.length === 0) return 1;
@@ -8316,6 +8637,22 @@ try{
       _wrapSyncProbeStyles();
       if (Number.isFinite(fontSizePx) && (fontSizePx||0) > 0) p.style.fontSize = (fontSizePx||0) + 'px';
       if (Number.isFinite(lineHeightPx) && (lineHeightPx||0) > 0) p.style.lineHeight = (lineHeightPx||0) + 'px';
+      // Optional hanging indent (match md-line: box-sizing:border-box)
+      let padLeft = 0;
+      let tIndent = 0;
+      try{
+        if (opts && Number.isFinite(opts.padLeftPx)) padLeft = Math.max(0, (+opts.padLeftPx||0));
+        if (opts && Number.isFinite(opts.textIndentPx)) tIndent = (+opts.textIndentPx||0);
+      }catch{ padLeft = 0; tIndent = 0; }
+      if ((padLeft|0) !== 0 || (tIndent|0) !== 0){
+        try{ p.style.boxSizing = 'border-box'; }catch{}
+        try{ p.style.paddingLeft = padLeft + 'px'; }catch{}
+        try{ p.style.textIndent = tIndent + 'px'; }catch{}
+      } else {
+        try{ p.style.boxSizing = 'content-box'; }catch{}
+        try{ p.style.paddingLeft = '0px'; }catch{}
+        try{ p.style.textIndent = '0px'; }catch{}
+      }
       p.style.width = Math.max(20, (widthPx||80)) + 'px';
       p.textContent = s;
       const h = p.getBoundingClientRect().height;
@@ -8324,7 +8661,7 @@ try{
       return Math.max(1, Math.round(h / lh));
     }catch{ return null; }
   }
-  function _wrapProbeIntraFromColStyled(text, col, widthPx, lineHeightPx, fontSizePx){
+  function _wrapProbeIntraFromColStyled(text, col, widthPx, lineHeightPx, fontSizePx, opts){
     try{
       const s = String(text||'');
       const cc = Math.max(0, Math.min((s.length|0), (col|0)));
@@ -8334,6 +8671,22 @@ try{
       _wrapSyncProbeStyles();
       if (Number.isFinite(fontSizePx) && (fontSizePx||0) > 0) p.style.fontSize = (fontSizePx||0) + 'px';
       if (Number.isFinite(lineHeightPx) && (lineHeightPx||0) > 0) p.style.lineHeight = (lineHeightPx||0) + 'px';
+      // Optional hanging indent
+      let padLeft = 0;
+      let tIndent = 0;
+      try{
+        if (opts && Number.isFinite(opts.padLeftPx)) padLeft = Math.max(0, (+opts.padLeftPx||0));
+        if (opts && Number.isFinite(opts.textIndentPx)) tIndent = (+opts.textIndentPx||0);
+      }catch{ padLeft = 0; tIndent = 0; }
+      if ((padLeft|0) !== 0 || (tIndent|0) !== 0){
+        try{ p.style.boxSizing = 'border-box'; }catch{}
+        try{ p.style.paddingLeft = padLeft + 'px'; }catch{}
+        try{ p.style.textIndent = tIndent + 'px'; }catch{}
+      } else {
+        try{ p.style.boxSizing = 'content-box'; }catch{}
+        try{ p.style.paddingLeft = '0px'; }catch{}
+        try{ p.style.textIndent = '0px'; }catch{}
+      }
       p.style.width = Math.max(20, (widthPx||80)) + 'px';
       p.textContent = s.slice(0, cc);
       const h = p.getBoundingClientRect().height;
@@ -8343,7 +8696,7 @@ try{
       return Math.max(0, (linesUsed|0) - 1);
     }catch{ return 0; }
   }
-  function _wrapProbeXFromColStyled(text, col, widthPx, fontSizePx, lineHeightPx){
+  function _wrapProbeXFromColStyled(text, col, widthPx, fontSizePx, lineHeightPx, opts){
     try{
       const s = String(text||'');
       const cc = Math.max(0, Math.min((s.length|0), (col|0)));
@@ -8352,6 +8705,22 @@ try{
       _wrapSyncProbeStyles();
       if (Number.isFinite(fontSizePx) && (fontSizePx||0) > 0) p.style.fontSize = (fontSizePx||0) + 'px';
       if (Number.isFinite(lineHeightPx) && (lineHeightPx||0) > 0) p.style.lineHeight = (lineHeightPx||0) + 'px';
+      // Optional hanging indent
+      let padLeft = 0;
+      let tIndent = 0;
+      try{
+        if (opts && Number.isFinite(opts.padLeftPx)) padLeft = Math.max(0, (+opts.padLeftPx||0));
+        if (opts && Number.isFinite(opts.textIndentPx)) tIndent = (+opts.textIndentPx||0);
+      }catch{ padLeft = 0; tIndent = 0; }
+      if ((padLeft|0) !== 0 || (tIndent|0) !== 0){
+        try{ p.style.boxSizing = 'border-box'; }catch{}
+        try{ p.style.paddingLeft = padLeft + 'px'; }catch{}
+        try{ p.style.textIndent = tIndent + 'px'; }catch{}
+      } else {
+        try{ p.style.boxSizing = 'content-box'; }catch{}
+        try{ p.style.paddingLeft = '0px'; }catch{}
+        try{ p.style.textIndent = '0px'; }catch{}
+      }
       p.style.width = Math.max(20, (widthPx||80)) + 'px';
       // Build marker nodes once.
       if (!_wrapProbeMarker || !_wrapProbeTextA || !_wrapProbeTextB || _wrapProbeMarker.parentNode !== p){
@@ -8538,9 +8907,18 @@ try{
         const sc = (info && info.scale) ? (+info.scale || 1) : 1;
         const fs = Math.max(6, Math.round(baseFontPx * sc));
 
+        // List hanging indent affects wrap count.
+        let indentOpts = null;
+        try{
+          if (hideSymbolsDefault){
+            const ul = _mdUListInfo && _mdUListInfo(src, i, lines);
+            if (ul) indentOpts = _mdIndentOptsForListLine(src, ul, wPx|0, fs|0, lh|0);
+          }
+        }catch{ indentOpts = null; }
+
         let n = 1;
         if (!heavy){
-          const n0 = _wrapProbeLineCountStyled(disp, wPx|0, lh|0, fs|0);
+          const n0 = _wrapProbeLineCountStyled(disp, wPx|0, lh|0, fs|0, indentOpts);
           if (Number.isFinite(n0) && (n0|0) > 0) n = (n0|0);
         } else {
           n = 1;
@@ -8598,13 +8976,24 @@ try{
       const adj = _mdWysiwygAdjust(src, col|0);
       const dispLine = String(adj.line||'');
       const cc = Math.max(0, Math.min((dispLine.length|0), (adj.col|0)));
+
+      // Hanging indent for list items / continuation lines in clean display.
+      let indentOpts = null;
+      try{
+        const isActiveRow = (r === (caretRow|0));
+        const hide = !!(_mdHideSymbolsForRow && _mdHideSymbolsForRow(!!isActiveRow));
+        if (hide){
+          const ul = _mdUListInfo && _mdUListInfo(src, r, lines);
+          if (ul) indentOpts = _mdIndentOptsForListLine(dispLine, ul, wPx|0, fs|0, lh|0);
+        }
+      }catch{ indentOpts = null; }
       let intra = 0;
-      try{ intra = _wrapProbeIntraFromColStyled(dispLine, cc|0, wPx|0, lh|0, fs|0) | 0; }catch{ intra = 0; }
+      try{ intra = _wrapProbeIntraFromColStyled(dispLine, cc|0, wPx|0, lh|0, fs|0, indentOpts) | 0; }catch{ intra = 0; }
       intra = Math.max(0, Math.min(((c.counts[r]|0)-1)|0, intra|0));
       return ((c.prefix[r]|0) + intra + 1);
     }catch{ return (row|0)+1; }
   }
-  function _mdWrapColForIntraXStyled(text, intra, desiredX, widthPx, lineHeightPx, fontSizePx){
+  function _mdWrapColForIntraXStyled(text, intra, desiredX, widthPx, lineHeightPx, fontSizePx, indentOpts){
     try{
       const s = String(text||'');
       const ww = Math.max(20, (widthPx||80));
@@ -8612,8 +9001,8 @@ try{
       const desired = Number(desiredX||0);
       const len = (s.length|0);
 
-      const _intraAt = (col)=>{ try{ return _wrapProbeIntraFromColStyled(s, col|0, ww, lineHeightPx|0, fontSizePx|0) | 0; }catch{ return 0; } };
-      const _xAt = (col)=>{ try{ const x = _wrapProbeXFromColStyled(s, col|0, ww, fontSizePx|0, lineHeightPx|0); return Number.isFinite(x) ? (x||0) : 0; }catch{ return 0; } };
+      const _intraAt = (col)=>{ try{ return _wrapProbeIntraFromColStyled(s, col|0, ww, lineHeightPx|0, fontSizePx|0, indentOpts) | 0; }catch{ return 0; } };
+      const _xAt = (col)=>{ try{ const x = _wrapProbeXFromColStyled(s, col|0, ww, fontSizePx|0, lineHeightPx|0, indentOpts); return Number.isFinite(x) ? (x||0) : 0; }catch{ return 0; } };
 
       // Find segment [start,end] where intra==tgtIntra.
       let lo = 0, hi = len;
@@ -10004,6 +10393,7 @@ try{
           try{
             if (_mdRichActive && _mdRichActive() && _wrapEnabled && _wrapEnabled()){
               try{ _mdWrapInvalidateCache && _mdWrapInvalidateCache('switch-post'); }catch{}
+              try{ _mdListInvalidateCache && _mdListInvalidateCache('switch-post'); }catch{}
               try{ _mdWrapEnsureCache && _mdWrapEnsureCache(true); }catch{}
               try{ _mdSyncEofPadComp && _mdSyncEofPadComp(); }catch{}
               try{ _mdRenderTextLayer && _mdRenderTextLayer(); }catch{}
@@ -11656,7 +12046,17 @@ try{
         const caretColVis0 = (adj0.col|0);
         let intra = 0;
         if (wrapOn){
-          try{ intra = _wrapProbeIntraFromColStyled(dispLine, caretColVis0|0, wPx|0, _mdCaretLineHeightPx|0, _mdCaretFontSizePx|0) | 0; }catch{ intra = 0; }
+          // Apply list hanging indent to probe so wrapped intra matches rendered line.
+          let indentOpts = null;
+          try{
+            const isActiveRow = true;
+            const hide = !!(_mdHideSymbolsForRow && _mdHideSymbolsForRow(!!isActiveRow));
+            if (hide){
+              const ul = _mdUListInfo && _mdUListInfo(srcLine0, targetIdx|0, lines);
+              if (ul) indentOpts = _mdIndentOptsForListLine(dispLine, ul, wPx|0, _mdCaretFontSizePx|0, _mdCaretLineHeightPx|0);
+            }
+          }catch{ indentOpts = null; }
+          try{ intra = _wrapProbeIntraFromColStyled(dispLine, caretColVis0|0, wPx|0, _mdCaretLineHeightPx|0, _mdCaretFontSizePx|0, indentOpts) | 0; }catch{ intra = 0; }
           intra = Math.max(0, intra|0);
         }
         topPx = y + intra * (_mdCaretLineHeightPx|0);
@@ -11904,8 +12304,21 @@ try{
       if (_wrapEnabled()){
         const c = _wrapEnsureCache(false);
         const wPx = (c && Number.isFinite(c.wPx)) ? (c.wPx||80) : _wrapAvailWidthPx();
+        // md-rich list hanging indent (only in clean display)
+        let indentOpts = null;
+        try{
+          if (_mdRichActive && _mdRichActive()){
+            const hide = !!(_mdHideSymbolsForRow && _mdHideSymbolsForRow(true));
+            if (hide){
+              const lines2 = _splitLines();
+              const src = String(lines2[caretRow|0]||'');
+              const ul = _mdUListInfo && _mdUListInfo(src, caretRow|0, lines2);
+              if (ul) indentOpts = _mdIndentOptsForListLine(String(line||''), ul, wPx|0, (_mdCaretFontSizePx||Math.max(6, Math.round(FONT_SIZE)))|0, (_mdCaretLineHeightPx||LINE_HEIGHT)|0);
+            }
+          }
+        }catch{ indentOpts = null; }
         const xp = _mdRichActive()
-          ? _wrapProbeXFromColStyled(line, caretColVis|0, wPx, (_mdCaretFontSizePx||Math.max(6, Math.round(FONT_SIZE)))|0, (_mdCaretLineHeightPx||LINE_HEIGHT)|0)
+          ? _wrapProbeXFromColStyled(line, caretColVis|0, wPx, (_mdCaretFontSizePx||Math.max(6, Math.round(FONT_SIZE)))|0, (_mdCaretLineHeightPx||LINE_HEIGHT)|0, indentOpts)
           : _wrapProbeXFromCol(line, caretColVis|0, wPx);
         if (Number.isFinite(xp)) x = xp;
       }
@@ -11927,7 +12340,7 @@ try{
           const c = _wrapEnsureCache(false);
           const wPx = (c && Number.isFinite(c.wPx)) ? (c.wPx||80) : _wrapAvailWidthPx();
           const xp2 = _mdRichActive()
-            ? _wrapProbeXFromColStyled(line, (caretColVis+1)|0, wPx, (_mdCaretFontSizePx||Math.max(6, Math.round(FONT_SIZE)))|0, (_mdCaretLineHeightPx||LINE_HEIGHT)|0)
+            ? _wrapProbeXFromColStyled(line, (caretColVis+1)|0, wPx, (_mdCaretFontSizePx||Math.max(6, Math.round(FONT_SIZE)))|0, (_mdCaretLineHeightPx||LINE_HEIGHT)|0, indentOpts)
             : _wrapProbeXFromCol(line, (caretColVis+1)|0, wPx);
           if (Number.isFinite(xp2)) x2 = xp2;
         }
@@ -12377,6 +12790,7 @@ try{
   function _afterTextMutation(){
     // 強制同期順序: CaseA/B の EOF 削除/undo 直後に表示が旧状態で残る問題 (#614)
     try{ _mdWrapInvalidateCache('text-mutation'); _mdWrapEnsureCache(false); }catch{}
+    try{ _mdListInvalidateCache && _mdListInvalidateCache('text-mutation'); }catch{}
     try{ _mdSyncEofPadComp(); }catch{}
     try{ _syncEofPadGridComp && _syncEofPadGridComp(); }catch{}
     // 1) caret を raw でクランプ
@@ -14352,6 +14766,9 @@ try{
         const lines = _splitLines();
         let baseFontPx = 16;
         try{ baseFontPx = parseFloat(getComputedStyle(editor).fontSize)||baseFontPx; }catch{}
+
+        // Ensure unordered-list nesting cache exists (used for bullet rendering width).
+        try{ _mdListEnsureCache && _mdListEnsureCache(false); }catch{}
         let wPx = 80;
         try{ if (wrapOn) wPx = _wrapAvailWidthPx()|0; }catch{ wPx = 80; }
         const children = Array.from(gutter.children).filter(c => !c.classList.contains('gutter-stripe'));
@@ -14781,7 +15198,15 @@ try{
             const adj0 = _mdWysiwygAdjust(src0, caretCol|0);
             const disp0 = String(adj0.line||'');
             const col0 = Math.max(0, Math.min((disp0.length|0), (adj0.col|0)));
-            const x0 = _wrapProbeXFromColStyled(disp0, col0|0, wPx0|0, fs0|0, lh0|0);
+            let indent0 = null;
+            try{
+              const hide0 = !!(_mdHideSymbolsForRow && _mdHideSymbolsForRow(true));
+              if (hide0){
+                const ul0 = _mdUListInfo && _mdUListInfo(src0, caretRow|0, lines);
+                if (ul0) indent0 = _mdIndentOptsForListLine(disp0, ul0, wPx0|0, fs0|0, lh0|0);
+              }
+            }catch{ indent0 = null; }
+            const x0 = _wrapProbeXFromColStyled(disp0, col0|0, wPx0|0, fs0|0, lh0|0, indent0);
             if (Number.isFinite(x0)) _desiredWrapXPx = Math.max(0, Number(x0||0));
           }
         }catch{}
@@ -14798,7 +15223,16 @@ try{
         const srcT = String(lines[row|0]||'');
         const adjT = _mdWysiwygAdjust(srcT, 0);
         const dispT = String(adjT.line||'');
-        const dispCol = _mdWrapColForIntraXStyled(dispT, intra|0, desiredX, wPxT|0, lhT|0, fsT|0);
+        // Hanging indent for list items / continuation lines in clean display.
+        let indentOpts = null;
+        try{
+          const hide = !!(_mdHideSymbolsForRow && _mdHideSymbolsForRow(true));
+          if (hide){
+            const ul = _mdUListInfo && _mdUListInfo(srcT, row|0, lines);
+            if (ul) indentOpts = _mdIndentOptsForListLine(dispT, ul, wPxT|0, fsT|0, lhT|0);
+          }
+        }catch{ indentOpts = null; }
+        const dispCol = _mdWrapColForIntraXStyled(dispT, intra|0, desiredX, wPxT|0, lhT|0, fsT|0, indentOpts);
         // Convert display col back to source col (clean display hides heading markers).
         let srcCol = dispCol|0;
         try{ if (_mdWysiwygActive && _mdWysiwygActive()) srcCol = (dispCol|0) + (_mdHeadingPrefixLen(srcT)|0); }catch{}
@@ -14812,7 +15246,15 @@ try{
           const adjC = _mdWysiwygAdjust(srcT, caretCol|0);
           const dispC = String(adjC.line||'');
           const colC = Math.max(0, Math.min((dispC.length|0), (adjC.col|0)));
-          const xC = _wrapProbeXFromColStyled(dispC, colC|0, wPxT|0, fsT|0, lhT|0);
+          let indentC = null;
+          try{
+            const hideC = !!(_mdHideSymbolsForRow && _mdHideSymbolsForRow(true));
+            if (hideC){
+              const ulC = _mdUListInfo && _mdUListInfo(srcT, row|0, lines);
+              if (ulC) indentC = _mdIndentOptsForListLine(dispC, ulC, wPxT|0, fsT|0, lhT|0);
+            }
+          }catch{ indentC = null; }
+          const xC = _wrapProbeXFromColStyled(dispC, colC|0, wPxT|0, fsT|0, lhT|0, indentC);
           if (Number.isFinite(xC)){
             const prev = (_desiredWrapXPx == null) ? null : Number(_desiredWrapXPx||0);
             const nx = Math.max(0, Number(xC||0));
@@ -16513,6 +16955,7 @@ try{
         const s2 = arr.map((e,i)=>{
           return i.toString().padStart(3,'0')+' '+new Date(e.t).toISOString()+` ${e.type}`+
             ` m=${e.mode}`+
+            (e.stage?` stage=${e.stage}`:'')+
             (e.key!==undefined?` key=${JSON.stringify(e.key)}`:'')+
             (e.code?` code=${e.code}`:'')+
             (e.keyCode!=null?` keyCode=${e.keyCode}`:'')+
@@ -16533,6 +16976,14 @@ try{
             (e.inputType?` inputType=${e.inputType}`:'')+
             (e.data!==undefined?` data=${JSON.stringify(e.data)}`:'')+
             (e.compData!==undefined?` comp=${JSON.stringify(e.compData)}`:'')+
+            (e.src?` src=${e.src}`:'')+
+            (e.selS!=null?` selS=${e.selS}`:'')+
+            (e.selE!=null?` selE=${e.selE}`:'')+
+            (e.caretOff!=null?` caretOff=${e.caretOff}`:'')+
+            (e.caretR!=null?` caretR=${(e.caretR|0)+1}`:'')+
+            (e.caretC!=null?` caretC=${(e.caretC|0)}`:'')+
+            (e.selCh!==undefined?` selCh=${JSON.stringify(e.selCh)}`:'')+
+            (e.selCtx!==undefined?` selCtx=${JSON.stringify(e.selCtx)}`:'')+
             ` ctrl=${e.ctrl?'1':'0'} alt=${e.alt?'1':'0'} shift=${e.shift?'1':'0'} meta=${e.meta?'1':'0'} isComp=${e.isComp?'1':'0'}`;
         }).join('\n');
         (async()=>{ const ok = await _copyToClipboard(s2); toast(ok?`dumped ${arr.length} events to clipboard.`:'Clipboard write failed.', ok?1000:1500); })();
@@ -19164,6 +19615,9 @@ try{
       // #624: INSERTモードで削除/改行操作前のテキストを保持（直後差分判定用）
       try{
         const itCap = String(e.inputType||'');
+        _prevInputTypeBeforeInput = itCap;
+        try{ _prevSelBeforeInputS = (editor && typeof editor.selectionStart==='number') ? (editor.selectionStart|0) : 0; }catch{ _prevSelBeforeInputS = 0; }
+        try{ _prevSelBeforeInputE = (editor && typeof editor.selectionEnd==='number') ? (editor.selectionEnd|0) : (_prevSelBeforeInputS|0); }catch{ _prevSelBeforeInputE = (_prevSelBeforeInputS|0); }
         if (itCap && (itCap.startsWith('delete') || itCap==='insertLineBreak' || itCap==='insertParagraph')){
           // Prefer buffer text to avoid expensive textarea.value materialization.
           // During IME composition, do not capture large text snapshots.
@@ -19202,6 +19656,15 @@ try{
         }
       }catch{}
       try{ if (_optDebugKeys) _debugPush({ t:Date.now(), type:'beforeinput', mode:_mode, inputType:e.inputType, data:e.data, ctrl:e.ctrlKey, alt:e.altKey, meta:e.metaKey, isComp:false }); }catch{}
+      try{
+        if (_optDebugKeys){
+          const it = String((e && e.inputType) || '');
+          if (it && (it.startsWith('delete') || it.startsWith('insert'))){
+            const st = _dbgSelState();
+            _debugPush({ t:Date.now(), type:'sel', stage:'beforeinput', mode:_mode, inputType:it, selS:st.selS, selE:st.selE, caretR:st.caretR, caretC:st.caretC, caretOff:st.caretOff, selCh:st.selCh, selCtx:st.selCtx, ctrl:e.ctrlKey, alt:e.altKey, shift:e.shiftKey, meta:e.metaKey, isComp:false });
+          }
+        }
+      }catch{}
     });
     // NORMAL/VISUAL/CMD 時の入力フォールバックガード (#491, #492, #522)
     // beforeinput で止めきれない実装差分（特に IME の insertFromComposition/insertCompositionText）に備え、
@@ -19248,6 +19711,15 @@ try{
     });
     editor.addEventListener('input', (e)=>{
       if (_mode === 'INSERT'){
+        try{
+          if (_optDebugKeys){
+            const it = String((e && e.inputType) || '');
+            if (it && (it.startsWith('delete') || it.startsWith('insert'))){
+              const st = _dbgSelState();
+              _debugPush({ t:Date.now(), type:'sel', stage:'input', mode:_mode, inputType:it, selS:st.selS, selE:st.selE, caretR:st.caretR, caretC:st.caretC, caretOff:st.caretOff, selCh:st.selCh, selCtx:st.selCtx, ctrl:false, alt:false, shift:false, meta:false, isComp:false });
+            }
+          }
+        }catch{}
         // centralize modified tracking (bump change tick on each input)
         _touchBufferModified();
         try{ _wrapInvalidateCache('input'); }catch{}
@@ -19258,6 +19730,56 @@ try{
         if (window && window._imeComposing===true){
           return;
         }
+
+        // Some environments keep selectionStart unchanged after Backspace at EOL,
+        // effectively placing the caret "after" the newline. Correct it so the next
+        // insert doesn't go to the next line head.
+        // Do NOT rely on e.inputType (it can be missing/empty). Use a diff match instead.
+        try{
+          if (!(window && window._imeComposing===true)){
+            const snap = (function(){
+              try{
+                if (_prevTextBeforeInput){
+                  return { prev:String(_prevTextBeforeInput), s:(_prevSelBeforeInputS|0), e:(_prevSelBeforeInputE|0), t:Date.now(), src:'beforeinput' };
+                }
+              }catch{}
+              try{
+                const s = _bsEolSnap;
+                if (s && typeof s.prev === 'string' && Number.isFinite(s.s) && Number.isFinite(s.e)){
+                  // expire quickly
+                  if ((Date.now() - (s.t|0)) <= 250) return s;
+                }
+              }catch{}
+              return null;
+            })();
+            if (snap && snap.prev){
+              const prev = String(snap.prev);
+              const cur = String(editor.value||'');
+              const s0 = (snap.s|0);
+              const e0 = (snap.e|0);
+              const s1 = (editor.selectionStart|0);
+              const e1 = (editor.selectionEnd|0);
+              if ((s0|0) === (e0|0) && (s1|0) === (e1|0) && (s1|0) === (s0|0) && (s0|0) > 0 && prev[s0|0] === '\n'){
+                let delStart = (s0|0) - 1;
+                // surrogate pair check (UTF-16)
+                try{
+                  const prevCh = prev[delStart];
+                  if (prevCh && /[\uDC00-\uDFFF]/.test(prevCh) && delStart-1 >= 0){
+                    const lead = prev[delStart-1];
+                    if (lead && /[\uD800-\uDBFF]/.test(lead)) delStart = delStart - 1;
+                  }
+                }catch{}
+                const expect = prev.slice(0, delStart) + prev.slice(s0|0);
+                if (expect === cur && (s1|0) !== (delStart|0)){
+                  const newOff = Math.max(0, delStart|0);
+                  try{ editor.selectionStart = editor.selectionEnd = newOff; }catch{}
+                  try{ const rc = _rcFromOffset(newOff); caretRow = rc.r; caretCol = rc.c; }catch{}
+                  try{ if (_optDebugKeys) _debugPush({ t:Date.now(), type:'bs-eol-fix', mode:_mode, inputType:(e&&e.inputType)||'', data:(e&&e.data), src:(snap.src||'snap'), ctrl:false, alt:false, meta:false, isComp:false }); }catch{}
+                }
+              }
+            }
+          }
+        }catch{}
 
         // sync overlay caret to native insertion point
         // During IME composition, avoid costly offset->(row,col) mapping on every keystroke.
@@ -19310,6 +19832,8 @@ try{
             // 特殊フラグは使わず、静的状態による描画へ（#629）
           }
           _prevTextBeforeInput='';
+          _prevInputTypeBeforeInput='';
+          _bsEolSnap = null;
         }catch{}
         // #637/#638: caret がダミー位置（末尾LF欠落 かつ EOF）での「文字挿入」では
         // 直ちに通常LFへ昇格: 末尾に\nを追加し caret を改行直前へ戻す（保存時LF無しを回避）。
@@ -20176,6 +20700,22 @@ try{
     // Globally consume Ctrl+U to avoid Edge opening view-source window (#447)
     if (e && e.ctrlKey && !e.altKey && !e.metaKey && (e.key==='u' || e.key==='U')){ try{ e.preventDefault(); e.stopPropagation(); }catch{} return; }
     try{ if (_optDebugKeys) _debugPush({ t:Date.now(), type:'keydown', mode:_mode, key:e.key, code:e.code, keyCode:e.keyCode, which:e.which, ctrl:e.ctrlKey, alt:e.altKey, shift:e.shiftKey, meta:e.metaKey, isComp:_imeComposing }); }catch{}
+    // When debugkeys is enabled, also snapshot native selection vs overlay caret for key steps.
+    try{
+      if (_optDebugKeys && _mode === 'INSERT'){
+        const k = String((e && e.key) || '');
+        const kc = (typeof e.keyCode==='number') ? (e.keyCode|0) : 0;
+        const isBS = (k==='Backspace' || (kc|0)===8);
+        const isDel = (k==='Delete' || (kc|0)===46);
+        const isLR = (k==='ArrowLeft' || k==='ArrowRight');
+        const isUndo = (!!e.ctrlKey && !e.altKey && !e.metaKey && (k==='z' || k==='Z'));
+        const isX = (k==='X' || k==='x');
+        if (isBS || isDel || isLR || isUndo || isX){
+          const st = _dbgSelState();
+          _debugPush({ t:Date.now(), type:'sel', stage:'keydown', mode:_mode, key:k, code:e.code, keyCode:e.keyCode, which:e.which, selS:st.selS, selE:st.selE, caretR:st.caretR, caretC:st.caretC, caretOff:st.caretOff, selCh:st.selCh, selCtx:st.selCtx, ctrl:e.ctrlKey, alt:e.altKey, shift:e.shiftKey, meta:e.metaKey, isComp:!!(e && e.isComposing) });
+        }
+      }
+    }catch{}
     // DEBUG GUARD (#523): investigate spurious 'l' motions in NORMAL with IME ON.
     // If key is reported as 'l' but original event has a printable key pressed that differs and no modifiers,
     // add lightweight console trace. (Will be removed after root cause isolated.)
@@ -20439,6 +20979,65 @@ try{
           return;
         }
         // #603: INSERTモードの下方向移動は最終行以降へ進めない。'j' 文字としての入力以外で改行を合成しない。
+        // Workaround: Some environments place caret after '\n' after Backspace at EOL,
+        // causing the next typed character to be inserted at the next line head.
+        // Snapshot this condition on keydown so input-side correction can work even if beforeinput is missing.
+        try{
+          const k0 = String((e && e.key) || '');
+          const kc0 = (typeof e.keyCode === 'number') ? (e.keyCode|0) : 0;
+          const isBS0 = (k0 === 'Backspace' || (kc0|0) === 8);
+          if (isBS0 && !e.ctrlKey && !e.altKey && !e.metaKey && !(window && window._imeComposing===true) && !(e && e.isComposing===true)){
+            const s0 = (editor && typeof editor.selectionStart==='number') ? (editor.selectionStart|0) : 0;
+            const e0 = (editor && typeof editor.selectionEnd==='number') ? (editor.selectionEnd|0) : s0;
+            if ((s0|0) === (e0|0) && (s0|0) > 0){
+              const txt0 = String(editor.value||'');
+              if (txt0 && txt0[s0|0] === '\n'){
+                _bsEolSnap = { prev:txt0, s:(s0|0), e:(e0|0), t:Date.now(), src:'keydown' };
+              } else {
+                _bsEolSnap = null;
+              }
+            } else {
+              _bsEolSnap = null;
+            }
+          }
+        }catch{}
+
+        // When caret is immediately before a newline (selection points to '\n'), handle Backspace ourselves.
+        try{
+          const k0 = String((e && e.key) || '');
+          const kc0 = (typeof e.keyCode === 'number') ? (e.keyCode|0) : 0;
+          const isBS = (k0 === 'Backspace' || (kc0|0) === 8);
+          if (isBS && !e.ctrlKey && !e.altKey && !e.metaKey && !(window && window._imeComposing===true) && !(e && e.isComposing===true)){
+            const start0 = (editor && typeof editor.selectionStart==='number') ? (editor.selectionStart|0) : 0;
+            const end0   = (editor && typeof editor.selectionEnd==='number') ? (editor.selectionEnd|0) : start0;
+            if ((start0|0) === (end0|0) && (start0|0) > 0){
+              const s0 = String(editor.value||'');
+              if (s0 && s0[start0|0] === '\n'){
+                e.preventDefault(); e.stopPropagation();
+                // delete previous codepoint (surrogate-aware)
+                let delStart = (start0|0) - 1;
+                try{
+                  const prevCh = s0[delStart];
+                  if (prevCh && /[\uDC00-\uDFFF]/.test(prevCh) && delStart-1 >= 0){
+                    const lead = s0[delStart-1];
+                    if (lead && /[\uD800-\uDBFF]/.test(lead)) delStart = delStart - 1;
+                  }
+                }catch{}
+                editor.value = s0.slice(0, delStart) + s0.slice(start0|0);
+                try{ editor.selectionStart = editor.selectionEnd = (delStart|0); }catch{}
+                try{ const rc = _rcFromOffset(delStart|0); caretRow = rc.r; caretCol = rc.c; }catch{}
+                _setCaret(caretRow, caretCol);
+                _touchBufferModified();
+                try{ _insertSegDirty = true; }catch{}
+                try{ _wrapInvalidateCache && _wrapInvalidateCache('bs-eol'); }catch{}
+                try{ _mdWrapInvalidateCache && _mdWrapInvalidateCache('bs-eol'); }catch{}
+                ensureScrolloff(); _repositionCaret(); updateGutter();
+                try{ _scheduleListCharsRender && _scheduleListCharsRender('bs-eol'); }catch{}
+                return;
+              }
+            }
+          }
+        }catch{}
         // Ctrl+H を Backspace と同等に扱う (#460)
         if (e.ctrlKey && !e.altKey && !e.metaKey && (e.key==='h' || e.key==='H')){
           e.preventDefault(); e.stopPropagation();
