@@ -1423,7 +1423,10 @@ try{
 
       // Sync caret position from the actual caret offset (selection end).
       try{ const rc = _rcFromOffset(caretOff|0); caretRow = rc.r|0; caretCol = rc.c|0; }catch{}
-      try{ _setCaret && _setCaret(caretRow|0, caretCol|0); }catch{}
+      // IMPORTANT: do not reset wrap curswant here.
+      // Motions (e.g. _moveCaretVisualLines) manage _desiredWrapXPx themselves; resetting it
+      // on every sync makes curswant appear to be "not working" while the IME bar is active.
+      try{ _setCaret && _setCaret(caretRow|0, caretCol|0, { suppressWrapDesired: true }); }catch{}
 
       // #1684: when the bar is empty (no active preedit), the next 1key should insert at the moved caret.
       // So keep the insertion anchor synced to current caret/selection.
@@ -8093,7 +8096,10 @@ try{
         const mid = (lo + hi) >> 1;
         if (_intraAt(mid) > tgtIntra) hi = mid; else lo = mid + 1;
       }
-      const end = Math.max(start, Math.min(len, (lo-1)|0));
+      // IMPORTANT: allow end==len so the caret can land at the logical EOL position
+      // (i.e. just before the newline character). Without this, vertical motions from
+      // an EOL position collapse to the last glyph (len-1).
+      const end = Math.max(start, Math.min(len, lo|0));
 
       if (desiredX <= 0) return start;
 
@@ -8261,7 +8267,9 @@ try{
         const mid = (lo + hi) >> 1;
         if (_intraAt(mid) > tgtIntra) hi = mid; else lo = mid + 1;
       }
-      const end = Math.max(start, Math.min(len, (lo-1)|0));
+      // IMPORTANT: allow end==len so the caret can land at the logical EOL position
+      // (just before '\n').
+      const end = Math.max(start, Math.min(len, lo|0));
       if (!(desired > 0)) return start;
 
       let a = start, b = end;
