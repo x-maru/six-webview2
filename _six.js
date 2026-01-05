@@ -19596,6 +19596,32 @@ try{
         }
       }catch{}
 
+      // INSERT開幕直後: 編集が始まるまでのカーソル移動は undo 対象にしない。
+      // ただし、開幕スナップショット(kind='insert')の caret が「INSERT突入位置」のままだと、
+      // 1回目の Ctrl+Z で「編集の取り消し + カーソル移動まで巻き戻る」ように見える。
+      // そこで 1回目の edit(beforeinput)直前に限り、直近の insert スナップショットの caret を
+      // 現在の native selection へ更新して、戻り過ぎを防ぐ。
+      try{
+        if (_mode === 'INSERT' && !_insertSegDirty){
+          const itPre = String((e && e.inputType) || '');
+          const isEditPre = !!(itPre && (itPre.startsWith('insert') || itPre.startsWith('delete')));
+          if (isEditPre){
+            const st = _currentStacks && _currentStacks();
+            const u0 = st && st._undo;
+            if (u0 && u0.length){
+              const top = u0[u0.length - 1];
+              if (top && top.kind === 'insert'){
+                let ss0 = 0, se0 = 0;
+                try{ ss0 = editor.selectionStart|0; se0 = editor.selectionEnd|0; }catch{ ss0 = se0 = (_offsetFromRC(caretRow|0, caretCol|0)|0); }
+                const off0 = Math.max(0, Math.min(String(editor.value||'').length, Math.min(ss0|0, se0|0)));
+                try{ const rc0 = _rcFromOffset(off0|0); if (rc0){ top.caretRow = rc0.r|0; top.caretCol = rc0.c|0; } }catch{}
+                try{ top.scrollTop = (editor && typeof editor.scrollTop==='number') ? (editor.scrollTop|0) : (top.scrollTop|0); }catch{}
+              }
+            }
+          }
+        }
+      }catch{}
+
       // INSERT内の分割Undo: pending が立っている場合、次の編集が始まる直前に一度だけsnapshotを積む。
       // これにより undo が「カーソル移動位置」へ飛ぶ/戻り過ぎる副作用を避ける。
       try{
