@@ -283,9 +283,39 @@ try{
       const total = (lines && lines.length) ? (lines.length|0) : 0;
       const r = row|0;
       const srcText = (r>=0 && r<total) ? String(lines[r]||'') : '';
+      const isBlankRow = (!srcText || srcText.trim()==='');
       const lv0 = _mdHeadingLevel(srcText);
       const setextOn = _mdSetextEnabled();
       const hideSymbols = !!_mdHideSymbolsForRow(!!isActiveRow);
+
+      // Loose list spacer blanks (#1730)
+      // - clean: collapse ALL blank rows in the run (block height = 0)
+      // - draft: behave like clean by default, but expand raw blank run when caret is on the preceding list item
+      let isLooseGap = false;
+      let blockHeightOverridePx = null; // when set, this row's block height ignores wrap measurement
+      let blockPadTopPx = 0;
+      let blockPadBottomPx = 0;
+      const draft = !!(_mdDraftEditEnabled && _mdDraftEditEnabled());
+      if (isBlankRow){
+        let looseGap = null;
+        try{ looseGap = _mdUListLooseGapInfo && _mdUListLooseGapInfo(r|0, lines); }catch{ looseGap = null; }
+        if (looseGap){
+          isLooseGap = true;
+          const expand = !!(draft && (
+            ((caretRow|0) === (looseGap.prevItemRow|0)) ||
+            (((caretRow|0) >= (looseGap.start|0)) && ((caretRow|0) <= (looseGap.end|0)))
+          ));
+          if (expand){
+            // Raw blank rows: normal line height.
+            const lh = (_mdLineHeightPx('')|0);
+            blockHeightOverridePx = lh;
+            return { srcText:'', lv0:0, setextLv:0, lv:0, scale:1, lineHeightPx:lh, hideSymbols, setextOn, isLooseGap:true, looseGapStart:(looseGap.start|0), looseGapEnd:(looseGap.end|0), blockHeightOverridePx, blockPadTopPx:0, blockPadBottomPx:0 };
+          }
+          // Collapsed: zero height
+          blockHeightOverridePx = 0;
+          return { srcText:'', lv0:0, setextLv:0, lv:0, scale:1, lineHeightPx:(_mdLineHeightPx('')|0), hideSymbols, setextOn, isLooseGap:true, looseGapStart:(looseGap.start|0), looseGapEnd:(looseGap.end|0), blockHeightOverridePx, blockPadTopPx:0, blockPadBottomPx:0 };
+        }
+      }
       let setextLv = 0;
       try{
         if (setextOn && hideSymbols && (r+1) < total){
@@ -294,12 +324,58 @@ try{
           if (infoN && (String(srcText||'').trim() !== '')) setextLv = infoN.level|0;
         }
       }catch{ setextLv = 0; }
-      const lv = (setextLv>0 ? setextLv : (lv0|0));
-      const scale = (setextLv>0 ? _mdHeadingScale(lv) : _mdLineScale(srcText));
-      const lineHeightPx = (setextLv>0 ? _mdHeadingLineHeightPxFromLevel(lv) : _mdLineHeightPx(srcText));
-      return { srcText, lv0, setextLv, lv, scale: (scale||1), lineHeightPx: (lineHeightPx||LINE_HEIGHT), hideSymbols, setextOn };
+      let lv = (setextLv>0 ? setextLv : (lv0|0));
+      let scale = (setextLv>0 ? _mdHeadingScale(lv) : _mdLineScale(srcText));
+      let lineHeightPx = (setextLv>0 ? _mdHeadingLineHeightPxFromLevel(lv) : _mdLineHeightPx(srcText));
+
+      // Loose list spacing (#1730): apply H1 line-height to the two adjacent nonblank rows.
+      if (!isBlankRow && (lv|0) === 0){
+        let edge = false;
+        let expandedEdge = false;
+        try{
+          if ((r+1) < total && String(lines[r+1]||'').trim() === ''){
+            const g = _mdUListLooseGapInfo && _mdUListLooseGapInfo((r+1)|0, lines);
+            if (g && ((g.prevItemRow|0) === (r|0))){
+              edge = true;
+              if (draft){
+                try{
+                  if (((caretRow|0) === (g.prevItemRow|0)) || (((caretRow|0) >= (g.start|0)) && ((caretRow|0) <= (g.end|0)))) expandedEdge = true;
+                }catch{}
+              }
+            }
+          }
+        }catch{}
+        try{
+          if (!edge && r > 0 && String(lines[r-1]||'').trim() === ''){
+            const g = _mdUListLooseGapInfo && _mdUListLooseGapInfo((r-1)|0, lines);
+            if (g && ((g.nextRow|0) === (r|0))){
+              edge = true;
+              if (draft){
+                try{
+                  if (((caretRow|0) === (g.prevItemRow|0)) || (((caretRow|0) >= (g.start|0)) && ((caretRow|0) <= (g.end|0)))) expandedEdge = true;
+                }catch{}
+              }
+            }
+          }
+        }catch{}
+        if (edge && !expandedEdge){
+          // #1736: Keep the logical row's wrapped lines tight (normal line-height),
+          // and distribute the loose extra height as top/bottom padding for the whole block.
+          // This makes multi-wrap rows look tight internally but still have loose spacing between list items.
+          scale = 1;
+          const tightLh = (LINE_HEIGHT|0);
+          const looseLh = (_mdHeadingLineHeightPxFromLevel(1)|0);
+          const extra = Math.max(0, (looseLh|0) - (tightLh|0));
+          const topPad = Math.floor((extra|0) / 2);
+          const botPad = (extra|0) - (topPad|0);
+          blockPadTopPx = (topPad|0);
+          blockPadBottomPx = (botPad|0);
+          lineHeightPx = (tightLh|0);
+        }
+      }
+      return { srcText, lv0, setextLv, lv, scale: (scale||1), lineHeightPx: (lineHeightPx||LINE_HEIGHT), hideSymbols, setextOn, isLooseGap:false, looseGapStart:-1, looseGapEnd:-1, blockHeightOverridePx:null, blockPadTopPx:(blockPadTopPx|0), blockPadBottomPx:(blockPadBottomPx|0) };
     }catch{
-      return { srcText:'', lv0:0, setextLv:0, lv:0, scale:1, lineHeightPx:LINE_HEIGHT, hideSymbols:false, setextOn:false };
+      return { srcText:'', lv0:0, setextLv:0, lv:0, scale:1, lineHeightPx:LINE_HEIGHT, hideSymbols:false, setextOn:false, isLooseGap:false, looseGapStart:-1, looseGapEnd:-1, blockHeightOverridePx:null, blockPadTopPx:0, blockPadBottomPx:0 };
     }
   }
 
@@ -477,8 +553,6 @@ try{
         const s = String(lines[row]||'');
         if (!s || s.trim()===''){
           items[row] = null;
-          // Reset list context across blank lines (prevents accidental nesting after a paragraph break).
-          stack.length = 0;
           continue;
         }
 
@@ -591,6 +665,59 @@ try{
     }catch{ return _mdEscHtml(String(text||'')); }
   }
 
+  // Markdown list (ul) loose-gap detection:
+  // Detect one-or-more blank lines that occur after an unordered list item.
+  // Rendering rule (per #1730):
+  // - clean: collapse ALL blank lines in the run (no remaining blank line)
+  // - clean: apply H1 line-height to the two adjacent nonblank lines (prev item line and next nonblank line)
+  // - draft: keep original blank lines (no collapsing)
+  function _mdUListLooseGapInfo(row, lines){
+    try{
+      const r0 = row|0;
+      const arr = lines || [];
+      const total = (arr.length|0);
+      if (r0 < 0 || r0 >= total) return null;
+      const s0 = String(arr[r0]||'');
+      if (s0.trim() !== '') return null;
+
+      // Blank run bounds
+      let a = r0;
+      while (a > 0 && String(arr[a-1]||'').trim() === '') a--;
+      let b = r0;
+      while ((b+1) < total && String(arr[b+1]||'').trim() === '') b++;
+
+      // Previous list context: allow trailing continuation lines; find the closest preceding ul item.
+      let prev = a - 1;
+      while (prev >= 0){
+        const t = String(arr[prev]||'');
+        if (t.trim() === ''){ prev--; continue; }
+        let infoP = null;
+        try{ infoP = _mdUListInfo && _mdUListInfo(t, prev|0, arr); }catch{ infoP = null; }
+        if (!infoP) return null;
+        if (infoP.kind === 'item') break;
+        if (infoP.kind === 'cont'){ prev--; continue; }
+        return null;
+      }
+      if (prev < 0) return null;
+      const prevInfo = _mdUListInfo(String(arr[prev]||''), prev|0, arr);
+      if (!(prevInfo && prevInfo.kind === 'item')) return null;
+
+      // Next nonblank must be a sibling ul item (same indent).
+      let next = b + 1;
+      while (next < total && String(arr[next]||'').trim() === '') next++;
+      if (next >= total) return null;
+
+      try{
+        const nextInfo = _mdUListInfo(String(arr[next]||''), next|0, arr);
+        if (!(nextInfo && nextInfo.kind === 'item')) return null;
+        if (!Number.isFinite(prevInfo.indentCol) || !Number.isFinite(nextInfo.indentCol)) return null;
+        if ((prevInfo.indentCol|0) !== (nextInfo.indentCol|0)) return null;
+      }catch{}
+
+      return { start:(a|0), end:(b|0), len:((b-a+1)|0), prevItemRow:(prev|0), nextRow:(next|0) };
+    }catch{ return null; }
+  }
+
   function _mdRenderTextLayer(){
     try{
       if (!_mdRichActive()) return;
@@ -679,10 +806,23 @@ try{
       for (let i=0; i<want; i++){
         const row = start + i;
         const srcText = (row>=0 && row<total) ? String(lines[row]||'') : '';
+        const isBlankRow = (!srcText || srcText.trim()==='');
         const lv0 = _mdHeadingLevel(srcText);
         const isActiveRow = (row === (caretRow|0));
         const tb = _mdThematicBreakInfo(srcText);
         const setextOn = _mdSetextEnabled();
+
+        const draftMode0 = (function(){ try{ return !!(_mdDraftEditEnabled && _mdDraftEditEnabled()); }catch{ return false; } })();
+
+        // Loose list blank-line spacer rendering (#1730/#1731)
+        // - clean: collapse ALL blank lines in the run (height=0)
+        // - draft: behave like clean by default, but expand raw blank run when caret is on the preceding list item
+        let looseGap = null;
+        try{ if (isBlankRow) looseGap = _mdUListLooseGapInfo && _mdUListLooseGapInfo(row|0, lines); }catch{ looseGap = null; }
+        const expandLooseGap = !!(draftMode0 && looseGap && (
+          ((caretRow|0) === (looseGap.prevItemRow|0)) ||
+          (((caretRow|0) >= (looseGap.start|0)) && ((caretRow|0) <= (looseGap.end|0)))
+        ));
 
         // Hide markdown symbols for display.
         // - clean mode: always hide
@@ -702,12 +842,66 @@ try{
         }catch{ setextLv = 0; }
 
         const lv = (setextLv>0 ? setextLv : lv0);
-        const scale = (setextLv>0 ? _mdHeadingScale(lv) : _mdLineScale(srcText));
-        const lh = (setextLv>0 ? _mdHeadingLineHeightPxFromLevel(lv) : _mdLineHeightPx(srcText));
-        const fs = Math.max(6, Math.round(baseFontPx * scale));
+        let scale = (setextLv>0 ? _mdHeadingScale(lv) : _mdLineScale(srcText));
+        let lh = (setextLv>0 ? _mdHeadingLineHeightPxFromLevel(lv) : _mdLineHeightPx(srcText));
+        let fs = Math.max(6, Math.round(baseFontPx * scale));
+        let padTopPx = 0;
+        let padBottomPx = 0;
+
+        // Loose list spacing (#1730): apply H1 line-height to the two adjacent nonblank rows.
+        // (Do NOT create a remaining blank line.)
+        if (!isBlankRow && (lv===0) && !tb && (setextLv|0)===0){
+          let edge = false;
+          let expandedEdge = false;
+          try{
+            if ((row+1) < total && String(lines[row+1]||'').trim() === ''){
+              const g = _mdUListLooseGapInfo && _mdUListLooseGapInfo((row+1)|0, lines);
+              if (g && ((g.prevItemRow|0) === (row|0))){
+                edge = true;
+                if (draftMode0){
+                  try{
+                    if (((caretRow|0) === (g.prevItemRow|0)) || (((caretRow|0) >= (g.start|0)) && ((caretRow|0) <= (g.end|0)))) expandedEdge = true;
+                  }catch{}
+                }
+              }
+            }
+          }catch{}
+          try{
+            if (!edge && row > 0 && String(lines[row-1]||'').trim() === ''){
+              const g = _mdUListLooseGapInfo && _mdUListLooseGapInfo((row-1)|0, lines);
+              if (g && ((g.nextRow|0) === (row|0))){
+                edge = true;
+                if (draftMode0){
+                  try{
+                    if (((caretRow|0) === (g.prevItemRow|0)) || (((caretRow|0) >= (g.start|0)) && ((caretRow|0) <= (g.end|0)))) expandedEdge = true;
+                  }catch{}
+                }
+              }
+            }
+          }catch{}
+          if (edge && !expandedEdge){
+            // #1736: keep wrapped lines tight; add loose extra height as block padding.
+            const tightLh = (LINE_HEIGHT|0);
+            const looseLh = (_mdHeadingLineHeightPxFromLevel(1)|0);
+            const extra = Math.max(0, (looseLh|0) - (tightLh|0));
+            const tp = Math.floor((extra|0) / 2);
+            const bp = (extra|0) - (tp|0);
+            padTopPx = (tp|0);
+            padBottomPx = (bp|0);
+            lh = (tightLh|0);
+            scale = 1;
+            fs = Math.max(6, Math.round(baseFontPx));
+          }
+        }
 
         let text = srcText;
         let prefixLen = 0;
+
+        // Loose-gap rows: never treat as heading/HR/list; render as blank.
+        if (looseGap){
+          text = '';
+          prefixLen = 0;
+        }
 
         // setext underline line itself ("===" / "---"): in clean display, hide the marker line.
         // (We keep the source-line height to preserve scroll/caret mapping.)
@@ -752,7 +946,7 @@ try{
         // We do NOT change the underlying string, so caret mapping stays based on the source text.
         let ulInfo = null;
         let ulItem = null;
-        if (!renderHr && !renderSetextUnderlineRow && !(prefixLen>0)){
+        if (!looseGap && !renderHr && !renderSetextUnderlineRow && !(prefixLen>0)){
           try{ ulInfo = _mdUListInfo && _mdUListInfo(srcText, row, lines); }catch{ ulInfo = null; }
           // Show disc/circle/square on:
           // - clean mode (always)
@@ -893,6 +1087,11 @@ try{
         try{ el.style.paddingLeft = (indentOpts ? ((indentOpts.padLeftPx||0) + 'px') : ''); }catch{}
         try{ el.style.textIndent = (indentOpts ? ((indentOpts.textIndentPx||0) + 'px') : ''); }catch{}
 
+        // #1736: block padding for loose-gap adjacent rows (tight internal line-height).
+        try{ el.style.boxSizing = 'border-box'; }catch{}
+        try{ el.style.paddingTop = (padTopPx ? (padTopPx + 'px') : ''); }catch{}
+        try{ el.style.paddingBottom = (padBottomPx ? (padBottomPx + 'px') : ''); }catch{}
+
         // #1495: Active line background is rendered by bg layer (not by edstripe under a transparent md-line).
         // This avoids 1-frame flicker during smooth scroll.
         try{
@@ -914,6 +1113,17 @@ try{
             const n = (Number.isFinite(n0) && (n0|0) > 0) ? (n0|0) : 1;
             hPx = Math.max(1, n|0) * (lh|0);
           }catch{ hPx = lh; }
+        }
+
+        // Add block padding (kept within the element height via border-box).
+        try{ hPx = (hPx|0) + (padTopPx|0) + (padBottomPx|0); }catch{}
+
+        // Collapse ALL blank lines inside a loose-gap run in clean mode.
+        // Draft: collapse by default, but expand raw blank run when caret is on the preceding list item.
+        if (looseGap && !(draftMode0 && expandLooseGap)){
+          const a0 = (looseGap.start|0);
+          const b0 = (looseGap.end|0);
+          if ((row|0) >= a0 && (row|0) <= b0) hPx = 0;
         }
         el.style.top = y + 'px';
         el.style.height = hPx + 'px';
@@ -5580,10 +5790,14 @@ try{
           const info = (typeof _mdLineLayoutInfoAtRow === 'function') ? _mdLineLayoutInfoAtRow(lines, rr, !!isActiveRow) : null;
           const hideSymbols = !!(info && info.hideSymbols);
           const rowHeightPx = (info && info.lineHeightPx) ? (info.lineHeightPx|0) : (LINE_HEIGHT|0);
+          const bhOverride = (info && Number.isFinite(info.blockHeightOverridePx)) ? (info.blockHeightOverridePx|0) : null;
+          const padTopPx = (info && Number.isFinite(info.blockPadTopPx)) ? (info.blockPadTopPx|0) : 0;
+          const padBottomPx = (info && Number.isFinite(info.blockPadBottomPx)) ? (info.blockPadBottomPx|0) : 0;
           const scale = (info && info.scale) ? (+info.scale || 1) : 1;
           const fontSizePx = Math.max(6, Math.round((_incMdBaseFontPx||16) * (scale||1)));
           let disp = srcText;
           let prefixLen = 0;
+          try{ if (info && info.isLooseGap){ disp = ''; prefixLen = 0; } }catch{}
           if (hideSymbols){
             let renderHr = false;
             let renderSetextUnderlineRow = false;
@@ -5602,20 +5816,21 @@ try{
               }catch{}
             }
           }
-          return { srcText, disp, prefixLen:(prefixLen|0), hideSymbols:!!hideSymbols, rowHeightPx:(rowHeightPx|0), fontSizePx:(fontSizePx|0) };
-        }catch{ return { srcText:'', disp:'', prefixLen:0, hideSymbols:false, rowHeightPx:(LINE_HEIGHT|0), fontSizePx:Math.max(6, Math.round(_incMdBaseFontPx||16)) }; }
+          return { srcText, disp, prefixLen:(prefixLen|0), hideSymbols:!!hideSymbols, rowHeightPx:(rowHeightPx|0), fontSizePx:(fontSizePx|0), blockHeightOverridePx:bhOverride, padTopPx:(padTopPx|0), padBottomPx:(padBottomPx|0) };
+        }catch{ return { srcText:'', disp:'', prefixLen:0, hideSymbols:false, rowHeightPx:(LINE_HEIGHT|0), fontSizePx:Math.max(6, Math.round(_incMdBaseFontPx||16)), blockHeightOverridePx:null, padTopPx:0, padBottomPx:0 }; }
       };
       const _incMdRowBlockHeightPx = (row0)=>{
         try{
           const m = _incMdDispInfoAtRow(row0|0);
+          if (m && Number.isFinite(m.blockHeightOverridePx)) return (m.blockHeightOverridePx|0);
           const lh = Math.max(1, (m.rowHeightPx|0));
           if (_incWrapOn){
             let n0 = 1;
             try{ n0 = _wrapProbeLineCountStyled(String(m.disp||''), (_incMdWrapWidthPx|0), lh|0, (m.fontSizePx|0))|0; }catch{ n0 = 1; }
             const n = (n0 && (n0|0) > 0) ? (n0|0) : 1;
-            return (Math.max(1, n|0) * (lh|0))|0;
+            return ((Math.max(1, n|0) * (lh|0)) + (m.padTopPx|0) + (m.padBottomPx|0))|0;
           }
-          return lh|0;
+          return ((lh|0) + (m.padTopPx|0) + (m.padBottomPx|0))|0;
         }catch{ return (LINE_HEIGHT|0); }
       };
       const _incMdRowStartYpx = (row0)=>{
@@ -6399,6 +6614,9 @@ try{
         const off1 = (off0 + (lineSrc.length|0))|0; // exclude newline
 
         let rowHeightPx = LINE_HEIGHT;
+        let blockHeightOverridePx = null;
+        let padTopPx = 0;
+        let padBottomPx = 0;
         let scale = 1;
         let fontSizePx = Math.max(6, Math.round(baseFontPx));
         let hideSymbols = false;
@@ -6410,9 +6628,13 @@ try{
           if (mdRich){
             const info = _mdLineLayoutInfoAtRow(lines, r, (r === (caretRow|0)));
             rowHeightPx = (info && info.lineHeightPx) ? (info.lineHeightPx|0) : LINE_HEIGHT;
+            blockHeightOverridePx = (info && Number.isFinite(info.blockHeightOverridePx)) ? (info.blockHeightOverridePx|0) : null;
+            padTopPx = (info && Number.isFinite(info.blockPadTopPx)) ? (info.blockPadTopPx|0) : 0;
+            padBottomPx = (info && Number.isFinite(info.blockPadBottomPx)) ? (info.blockPadBottomPx|0) : 0;
             scale = (info && info.scale) ? (+info.scale || 1) : 1;
             fontSizePx = Math.max(6, Math.round(baseFontPx * (scale||1)));
             hideSymbols = !!(info && info.hideSymbols);
+            try{ if (info && info.isLooseGap){ dispText=''; prefixLen=0; renderHr=false; renderSetextUnderlineRow=false; } }catch{}
             try{ renderHr = _mdIsHrLineForDisplay(lineSrc, lines, r, (r === (caretRow|0))); }catch{ renderHr = false; }
             try{ renderSetextUnderlineRow = _mdIsSetextUnderlineRowForDisplay(lineSrc, lines, r, (r === (caretRow|0))); }catch{ renderSetextUnderlineRow = false; }
             if (!renderHr && !renderSetextUnderlineRow && hideSymbols){
@@ -6458,7 +6680,7 @@ try{
                 const el = document.createElement('div');
                 el.className = 'viscmdsel';
                 el.style.left = (x1 - _hs) + 'px';
-                el.style.top = (yAcc + (intra|0) * (rowHeightPx|0)) + 'px';
+                el.style.top = (yAcc + (padTopPx|0) + (intra|0) * (rowHeightPx|0)) + 'px';
                 el.style.width = Math.max(1, Math.round(x2 - x1)) + 'px';
                 el.style.height = Math.max(1, Math.round(rowHeightPx)) + 'px';
                 _visSelLayer.appendChild(el);
@@ -6493,13 +6715,15 @@ try{
 
         // In wrap mode we place rows by visual mapping (not by accumulated logical lines).
         if (mdRich){
-          if (wrapOn){
+          if (Number.isFinite(blockHeightOverridePx)){
+            yAcc += (blockHeightOverridePx|0);
+          } else if (wrapOn){
             let n0 = 1;
             try{ n0 = _wrapProbeLineCountStyled(dispText, wPx|0, rowHeightPx|0, fontSizePx|0) | 0; }catch{ n0 = 1; }
             const n = (n0 && n0>0) ? (n0|0) : 1;
-            yAcc += Math.max(1, n) * (rowHeightPx||LINE_HEIGHT);
+            yAcc += (Math.max(1, n) * (rowHeightPx||LINE_HEIGHT)) + (padTopPx|0) + (padBottomPx|0);
           } else {
-            yAcc += (rowHeightPx||LINE_HEIGHT);
+            yAcc += (rowHeightPx||LINE_HEIGHT) + (padTopPx|0) + (padBottomPx|0);
           }
         } else if (!_wrapEnabled()){
           yAcc += LINE_HEIGHT;
@@ -6697,6 +6921,9 @@ try{
           const srcText = (row>=0 && row<(lines.length|0)) ? String(lines[row]||'') : '';
           const info = _mdLineLayoutInfoAtRow(lines, row, !!isActiveRow);
           const lh = (info && info.lineHeightPx) ? (info.lineHeightPx|0) : LINE_HEIGHT;
+          const bhOverride = (info && Number.isFinite(info.blockHeightOverridePx)) ? (info.blockHeightOverridePx|0) : null;
+          const padTopPx = (info && Number.isFinite(info.blockPadTopPx)) ? (info.blockPadTopPx|0) : 0;
+          const padBottomPx = (info && Number.isFinite(info.blockPadBottomPx)) ? (info.blockPadBottomPx|0) : 0;
           const sc = (info && info.scale) ? (+info.scale || 1) : 1;
           const fs = Math.max(6, Math.round(baseFontPx * sc));
           const hideSymbols = !!(info && info.hideSymbols);
@@ -6704,6 +6931,7 @@ try{
           let prefixLen = 0;
           let renderHr = false;
           let renderSetextUnderlineRow = false;
+          try{ if (info && info.isLooseGap){ dispText=''; prefixLen=0; renderHr=false; renderSetextUnderlineRow=false; } }catch{}
           if (hideSymbols){
             try{ renderHr = _mdIsHrLineForDisplay(srcText, lines, row, !!isActiveRow); }catch{ renderHr = false; }
             try{ renderSetextUnderlineRow = _mdIsSetextUnderlineRowForDisplay(srcText, lines, row, !!isActiveRow); }catch{ renderSetextUnderlineRow = false; }
@@ -6714,7 +6942,7 @@ try{
             }
             if (renderHr || renderSetextUnderlineRow){ dispText = ''; prefixLen = 0; }
           }
-          return { dispText, prefixLen, lh, fs, hideSymbols };
+          return { dispText, prefixLen, lh, fs, hideSymbols, blockHeightOverridePx:bhOverride, padTopPx:(padTopPx|0), padBottomPx:(padBottomPx|0) };
         };
 
         for (const seg of _yankFlashSegs){
@@ -6741,12 +6969,15 @@ try{
             const inf = _dispForRow(rr, false);
             const dtext = String(inf.dispText||'');
             let hPx = (inf.lh|0) || LINE_HEIGHT;
-            if (wrapOn){
+            if (Number.isFinite(inf.blockHeightOverridePx)){
+              hPx = (inf.blockHeightOverridePx|0);
+            } else if (wrapOn){
               let n0 = 1;
               try{ n0 = _wrapProbeLineCountStyled(dtext, wPx|0, (inf.lh|0)||LINE_HEIGHT, (inf.fs|0)||Math.max(6,Math.round(baseFontPx))) | 0; }catch{ n0 = 1; }
               const n = (n0 && n0>0) ? (n0|0) : 1;
               hPx = Math.max(1, n) * ((inf.lh|0)||LINE_HEIGHT);
             }
+            try{ hPx = (hPx|0) + ((inf.padTopPx|0) + (inf.padBottomPx|0)); }catch{}
             yAcc += hPx;
           }
 
@@ -6985,6 +7216,10 @@ try{
           const info = _mdLineLayoutInfoAtRow(lines, idx, isActiveRow);
           scale = info.scale || 1;
           rowHeightPx = info.lineHeightPx || LINE_HEIGHT;
+          // #1730: Clean-mode loose-gap blank rows are fully collapsed (height=0). Do not render listchars for them.
+          try{
+            if (info && info.isLooseGap && Number.isFinite(info.blockHeightOverridePx) && ((info.blockHeightOverridePx|0) === 0)) return;
+          }catch{}
         }catch{ scale = 1; rowHeightPx = LINE_HEIGHT; }
         // Match md-rich text layer positioning: use the rendered row element's top.
         try{
@@ -11997,6 +12232,8 @@ try{
           const info = _mdLineLayoutInfoAtRow(lines, r, !!isActiveRow);
           const hideSymbols = !!(info && info.hideSymbols);
           let disp = srcText;
+          // Loose-gap rows are displayed as blank regardless of symbol hiding.
+          try{ if (info && info.isLooseGap) disp = ''; }catch{}
           if (hideSymbols){
             let renderHr = false;
             let renderSetextUnderlineRow = false;
@@ -12020,22 +12257,29 @@ try{
           const a = _dispTextForRow(r, false);
           const infoR = a.info;
           const lh = (infoR && infoR.lineHeightPx) ? (infoR.lineHeightPx|0) : LINE_HEIGHT;
+          const padTopPx = (infoR && Number.isFinite(infoR.blockPadTopPx)) ? (infoR.blockPadTopPx|0) : 0;
+          const padBottomPx = (infoR && Number.isFinite(infoR.blockPadBottomPx)) ? (infoR.blockPadBottomPx|0) : 0;
           const sc = (infoR && infoR.scale) ? (+infoR.scale || 1) : 1;
           const fs = Math.max(6, Math.round(baseFontPx * sc));
           let hPx = lh;
-          if (wrapOn){
+          // Loose-gap: fixed/zero block-height overrides (collapse/expand behavior).
+          let hasOverride = false;
+          try{ if (infoR && Number.isFinite(infoR.blockHeightOverridePx)){ hPx = (infoR.blockHeightOverridePx|0); hasOverride = true; } }catch{ hasOverride = false; }
+          if (wrapOn && !hasOverride){
             try{
               const n0 = _wrapProbeLineCountStyled(String(a.disp||''), wPx|0, lh|0, fs|0);
               const n = (Number.isFinite(n0) && (n0|0) > 0) ? (n0|0) : 1;
               hPx = Math.max(1, (n|0)) * (lh|0);
             }catch{ hPx = lh; }
           }
+          try{ hPx = (hPx|0) + (padTopPx|0) + (padBottomPx|0); }catch{}
           y += hPx;
         }
 
         const t = _dispTextForRow(targetIdx, true);
         const infoT = t.info;
         _mdCaretLineHeightPx = (infoT && infoT.lineHeightPx) ? (infoT.lineHeightPx|0) : LINE_HEIGHT;
+        const padTopT = (infoT && Number.isFinite(infoT.blockPadTopPx)) ? (infoT.blockPadTopPx|0) : 0;
         const scT = (infoT && infoT.scale) ? (+infoT.scale || 1) : 1;
         _mdCaretFontSizePx = Math.max(6, Math.round(baseFontPx * scT));
 
@@ -12059,7 +12303,7 @@ try{
           try{ intra = _wrapProbeIntraFromColStyled(dispLine, caretColVis0|0, wPx|0, _mdCaretLineHeightPx|0, _mdCaretFontSizePx|0, indentOpts) | 0; }catch{ intra = 0; }
           intra = Math.max(0, intra|0);
         }
-        topPx = y + intra * (_mdCaretLineHeightPx|0);
+        topPx = y + (padTopT|0) + intra * (_mdCaretLineHeightPx|0);
         rowHeightPx = _mdCaretLineHeightPx|0;
       }
     }catch{}
@@ -14790,11 +15034,15 @@ try{
             const isActiveRow = ((idx0|0) === (caretRow|0));
             const info = _mdLineLayoutInfoAtRow(lines, idx0|0, isActiveRow);
             lh = (info && info.lineHeightPx) ? (info.lineHeightPx|0) : LINE_HEIGHT;
+            const bhOverride = (info && Number.isFinite(info.blockHeightOverridePx)) ? (info.blockHeightOverridePx|0) : null;
+            const padTopPx = (info && Number.isFinite(info.blockPadTopPx)) ? (info.blockPadTopPx|0) : 0;
+            const padBottomPx = (info && Number.isFinite(info.blockPadBottomPx)) ? (info.blockPadBottomPx|0) : 0;
             const sc = (info && info.scale) ? (+info.scale || 1) : 1;
             const fs = Math.max(6, Math.round(baseFontPx * sc));
             // Use the displayed text (after symbol hiding) for wrap measurement.
             let dispText = text;
             try{
+              if (info && info.isLooseGap){ dispText = ''; }
               const hideSymbols = !!(info && info.hideSymbols);
               if (hideSymbols){
                 let renderHr = false;
@@ -14813,13 +15061,38 @@ try{
               }
             }catch{}
             hPx = lh;
-            if (wrapOn){
+            if (Number.isFinite(bhOverride)){
+              hPx = (bhOverride|0);
+            } else if (wrapOn){
               try{
                 const n0 = _wrapProbeLineCountStyled(String(dispText||''), wPx|0, lh|0, fs|0);
                 const n = (Number.isFinite(n0) && (n0|0) > 0) ? (n0|0) : 1;
                 hPx = Math.max(1, (n|0)) * (lh|0);
               }catch{ hPx = lh; }
             }
+
+            // Add block padding (loose-gap adjacent rows; tight internal line-height).
+            try{ hPx = (hPx|0) + (padTopPx|0) + (padBottomPx|0); }catch{}
+
+            // #1735: Collapsed loose-gap rows (height=0) must not paint line numbers.
+            // If we leave line-height > 0, the glyphs can overflow and overlap other numbers.
+            try{
+              const isCollapsedLooseGap = !!(info && info.isLooseGap && Number.isFinite(bhOverride) && ((bhOverride|0) === 0));
+              if (isCollapsedLooseGap){
+                el.textContent = '';
+                el.style.display = 'none';
+                el.style.height = '0px';
+                el.style.lineHeight = '0px';
+                el.style.background = '';
+                el.style.color = 'var(--gutterNumberColor, yellow)';
+                // keep flow layout consistent: zero height contributes nothing
+                continue;
+              }
+            }catch{}
+
+            try{ el.style.boxSizing = 'border-box'; }catch{}
+            try{ el.style.paddingTop = (padTopPx ? (padTopPx + 'px') : ''); }catch{}
+            try{ el.style.paddingBottom = (padBottomPx ? (padBottomPx + 'px') : ''); }catch{}
           }
           try{
             el.style.display = 'block';
@@ -14892,7 +15165,9 @@ try{
             if (atEofEff2 || noSnap2) rem = 0;
           }catch{}
           const children2 = Array.from(gutter.children).filter(c => !c.classList.contains('gutter-stripe'));
-          const first = children2[0];
+          // Use the first *visible* row as the anchor for subpixel remainder.
+          let first = null;
+          try{ first = children2.find(e=>{ try{ return !!e && (!e.style || e.style.display !== 'none'); }catch{ return true; } }); }catch{ first = children2[0]; }
           if (first){
             let mt = (Math.abs(rem) > 0.01) ? (-rem) : 0;
             first.style.marginTop = (mt ? (mt + 'px') : '0px');
@@ -15111,7 +15386,27 @@ try{
     const lines = _splitLines();
     const prevRow = caretRow|0;
     const prevCol = caretCol|0;
-    const newRow = Math.max(0, Math.min(lines.length-1, (prevRow|0) + (delta|0)));
+    let newRow = Math.max(0, Math.min(lines.length-1, (prevRow|0) + (delta|0)));
+
+    // md-rich clean mode: skip fully-collapsed (height=0) loose-gap blank rows (#1731)
+    try{
+      const mdRich = !!(_mdRichActive && _mdRichActive());
+      const draft = !!(_mdDraftEditEnabled && _mdDraftEditEnabled());
+      const dir = (delta|0) > 0 ? 1 : ((delta|0) < 0 ? -1 : 0);
+      if (mdRich && !draft && dir){
+        const maxR = Math.max(0, (lines.length|0) - 1);
+        let guard = 0;
+        while (newRow >= 0 && newRow <= maxR && guard < 200){
+          guard++;
+          const info = _mdLineLayoutInfoAtRow(lines, newRow|0, false);
+          if (info && info.isLooseGap && Number.isFinite(info.blockHeightOverridePx) && ((info.blockHeightOverridePx|0) === 0)){
+            newRow = Math.max(0, Math.min(maxR, (newRow|0) + dir));
+            continue;
+          }
+          break;
+        }
+      }
+    }catch{}
 
     // No-op at BOF/EOF: do not enforce scrolloff or snap scrollTop.
     // This prevents: at physical bottom (thumb already at end) `j` still causing a tiny scroll
@@ -15140,7 +15435,8 @@ try{
     caretRow = newRow;
     _suppressDesiredOnce = true;
     // Preserve wrap curswant across vertical motions.
-    _setCaret(newRow, newCol, { suppressDesired: true, suppressWrapDesired: true });
+    const dir2 = (delta|0) > 0 ? 1 : ((delta|0) < 0 ? -1 : 0);
+    _setCaret(newRow, newCol, { suppressDesired: true, suppressWrapDesired: true, skipCollapsedDir: dir2 });
     // EOF パッドスクロール試行 (NORMAL) #864/#867 共通ヘルパー利用
     if (delta>0 && newRow===prevRow && newRow===lines.length-1){
       if (_maybeScrollEofPadStep('normal-eof-pad-scroll')) return;
@@ -15239,7 +15535,7 @@ try{
         srcCol = Math.max(0, Math.min((srcT.length|0), srcCol|0));
 
         caretRow = row;
-        _setCaret(row, srcCol, { suppressWrapDesired: true });
+        _setCaret(row, srcCol, { suppressWrapDesired: true, skipCollapsedDir: (d>0?1:-1) });
 
         // Update wrap curswant from current X, but never decrease.
         try{
@@ -15293,7 +15589,7 @@ try{
 
       caretRow = row;
       // Preserve wrap desired X across gj/gk; update desiredVisualCol normally.
-      _setCaret(row, col, { suppressWrapDesired: true });
+      _setCaret(row, col, { suppressWrapDesired: true, skipCollapsedDir: (d>0?1:-1) });
 
       // Update wrap curswant by the *current* visual X within the wrapped segment,
       // but never decrease it. (If the segment is shorter, keep the previous curswant.)
@@ -15459,8 +15755,59 @@ try{
   // ---- Motion helpers ----
   function _lineLen(r){ const lines=_splitLines(); return (r>=0 && r<lines.length) ? (lines[r]||'').length : 0; }
   function _firstNonBlankColOf(line){ const m = String(line||'').match(/^\s*/); return m ? (m[0]||'').length : 0; }
+
+  function _mdIsCollapsedLooseGapRowForCaret(lines, row){
+    try{
+      if (!_mdWysiwygActive || !_mdWysiwygActive()) return false;
+      const info = (_mdLineLayoutInfoAtRow && lines) ? _mdLineLayoutInfoAtRow(lines, row|0, false) : null;
+      if (!info || !info.isLooseGap) return false;
+      if (typeof info.blockHeightOverridePx !== 'number') return false;
+      return ((info.blockHeightOverridePx|0) === 0);
+    }catch{ return false; }
+  }
+
+  function _mdClampRowOutOfCollapsed(lines, row, opt){
+    try{
+      const total = (lines && lines.length) ? (lines.length|0) : 0;
+      if (!total) return 0;
+      let r = Math.max(0, Math.min((total-1)|0, row|0));
+      if (!_mdIsCollapsedLooseGapRowForCaret(lines, r|0)) return r|0;
+
+      let up = (r-1)|0;
+      while (up >= 0 && _mdIsCollapsedLooseGapRowForCaret(lines, up|0)) up = (up-1)|0;
+      let dn = (r+1)|0;
+      while (dn < total && _mdIsCollapsedLooseGapRowForCaret(lines, dn|0)) dn = (dn+1)|0;
+
+      const dir = (opt && typeof opt.skipCollapsedDir === 'number') ? (opt.skipCollapsedDir|0) : 0;
+      if (dir > 0 && dn < total) return dn|0;
+      if (dir < 0 && up >= 0) return up|0;
+
+      if (up < 0) return (dn < total) ? (dn|0) : (r|0);
+      if (dn >= total) return up|0;
+      const upDist = (r - up)|0;
+      const dnDist = (dn - r)|0;
+      // Tie-break toward down.
+      return (dnDist <= upDist) ? (dn|0) : (up|0);
+    }catch{ return row|0; }
+  }
+
   function _setCaret(r,c,opt){
-    const lines=_splitLines(); r=Math.max(0, Math.min(lines.length-1, r|0)); const len=(lines[r]||'').length; caretRow=r; caretCol=Math.max(0, Math.min(len, c|0));
+    const lines=_splitLines();
+    r=Math.max(0, Math.min(lines.length-1, r|0));
+    // #1733: In markdown clean (wysiwyg) mode, collapsed loose-gap rows are not directly editable.
+    // Skip landing the caret on those invisible rows; edit them via draft or markdown-off.
+    try{
+      // If caller doesn't specify direction, infer from requested row vs current caretRow.
+      // (Some motion paths pre-set caretRow before calling _setCaret; those should pass skipCollapsedDir explicitly.)
+      let opt2 = opt;
+      if (!(opt && typeof opt.skipCollapsedDir === 'number')){
+        const d = (r|0) - (caretRow|0);
+        const dir = (d>0) ? 1 : ((d<0) ? -1 : 0);
+        if (dir){ opt2 = Object.assign({}, (opt||null), { skipCollapsedDir: dir }); }
+      }
+      r = _mdClampRowOutOfCollapsed(lines, r|0, opt2);
+    }catch{}
+    const len=(lines[r]||'').length; caretRow=r; caretCol=Math.max(0, Math.min(len, c|0));
     // Keep per-buffer view state fresh even when we don't switch tabs or scroll.
     // This improves session restore reliability for caret position.
     try{
