@@ -409,6 +409,28 @@ body.md-rich #editor::selection {
 	border-radius: 0;
 }
 
+/* Markdown-rich ordered list marker (text, marker+first space) */
+#textLayer .md-olbox {
+	display: inline-flex;
+	align-items: baseline;
+	vertical-align: baseline;
+	line-height: inherit;
+	white-space: pre;
+	font-variant-numeric: tabular-nums;
+	font-feature-settings: "tnum" 1;
+}
+
+#textLayer .md-olbox .md-olpad {
+	display: inline-block;
+	pointer-events: none;
+}
+#textLayer .md-olbox .md-olpadL {
+	width: calc((var(--olpad, 0) * 1ch) + 0.5ch);
+}
+#textLayer .md-olbox .md-olpadR {
+	width: 0.5ch;
+}
+
 /* Control character overlay scaling & weight (#464) */
 .listchar, .listchar-eol {
 	/* Base scale variables (user can override via :root) */

@@ -1,4 +1,4 @@
-const VERSION = '0.9.1.a';
+const VERSION = '0.9.1.j';
 // Build stamp (for verifying which _six.js is actually running)
 // NOTE: Intentionally ASCII-only; fullwidth variants should be treated as invalid.
 try{ window.__sixBuildTs = '2025-12-29T00:00:00Z'; }catch{}
@@ -61,6 +61,7 @@ try{
   let _mdBgInner = null;
   let _mdVisualSuppressed = false; // reserved: temporarily disable rich visuals if needed
   let _mdImeRange = null; // { sOff,eOff, sRow,eRow, sCol,eCol }
+  let _mdLastHorzDir = 0; // -1:left, +1:right (for md clean caret clamps)
 
   // Japanese/CJK ranges for heading emphasis (#1486)
   // - Hiragana, Katakana, CJK Unified Ideographs (+ Ext A), iteration marks, halfwidth katakana
@@ -423,6 +424,33 @@ try{
     }catch{ return false; }
   }
 
+  function _mdClampCaretForCleanOListHalfSpaces(){
+    // #1756: In clean display, the ordered-list marker uses visual-only half-spaces.
+    // Skip the source's first post-marker space so caret never stops inside the visual gap.
+    try{
+      if (!_mdWysiwygActive()) return false;
+      if (!(_mdHideSymbolsForRow && _mdHideSymbolsForRow(true))) return false;
+      const lines = _splitLinesRaw();
+      if (!Array.isArray(lines) || lines.length===0) return false;
+      const r = Math.max(0, Math.min(lines.length-1, caretRow|0));
+      const src = String(lines[r]||'');
+      const ul = _mdUListInfo && _mdUListInfo(src, r|0, lines);
+      if (!(ul && ul.kind==='item' && String(ul.listType||'')==='ol')) return false;
+      if (!Number.isFinite(ul.markerIdx) || !Number.isFinite(ul.markerLen)) return false;
+      const idxSpace = (ul.markerIdx|0) + (ul.markerLen|0); // first space after '.'
+      if ((caretCol|0) === (idxSpace|0)){
+        // Direction-aware so we can pass through both ways.
+        if ((_mdLastHorzDir|0) < 0){
+          caretCol = Math.max(0, Math.min((src.length|0), (idxSpace|0) - 1)); // to '.'
+        } else {
+          caretCol = Math.min((src.length|0), (idxSpace|0) + 1); // to first content char
+        }
+        return true;
+      }
+      return false;
+    }catch{ return false; }
+  }
+
   // Setext heading underline line info: "===" => H1, "---" => H2
   // Rules (per request): 2+ markers, prev line must be non-blank (checked at call site).
   function _mdSetextUnderlineInfo(line){
@@ -452,13 +480,14 @@ try{
     }catch{ return null; }
   }
 
-  // GFM/CommonMark unordered list item (basic)
-  // Per request (#1712):
-  // - marker: '-', '*', '+'
+  // GFM/CommonMark list item (basic)
+  // Per request (#1712/#1739):
+  // - unordered marker: '-', '*', '+'
+  // - ordered marker: 1+ digits + '.' or ')' 
   // - requires 1..4 ASCII spaces after marker (strict; tab after marker is NOT accepted)
   // - nesting is determined by parent list item's (marker + spaces) indentation width (CommonMark-like)
-  // - display: replace (marker + the first following space) with a fullwidth glyph (disc/circle/square)
-  //            while keeping string length stable via a zero-width character.
+  // - display: replace (marker + the first following space) with a stable-width inline box
+  //            while keeping string length stable (source text is unchanged).
   let _mdListCache = null;
 
   function _mdCharIndexForIndentCols(s, targetCols){
@@ -487,7 +516,7 @@ try{
 
   // Markdown list hanging-indent options for wrap probe.
   // - item: keep leading indentation; hang only (marker + spaces) width
-  // - cont: keep indentation for all wrapped visuals (no negative indent)
+  // - cont: keep indentation for all wrapped visuals
   function _mdIndentOptsForListLine(srcText, ul, widthPx, fontSizePx, lineHeightPx){
     try{
       const s = String(srcText||'');
@@ -503,7 +532,12 @@ try{
         const xContent = _wrapProbeXFromColStyled(s, ci|0, ww, fs, lh);
         if (!Number.isFinite(xContent) || (xContent||0) <= 0.5) return null;
         const xc = (+xContent||0);
-        // IMPORTANT: first line stays at x=0 (prefix is in the text), wrapped lines start at content start.
+        // IMPORTANT: Our rendered text still contains the leading indentation and marker.
+        // To avoid double-indenting the first visual line (notably when the line starts with spaces),
+        // cancel the full padding on the first line via textIndent = -padLeft.
+        // Result:
+        // - first visual line: unchanged (starts at x=0, prefix spaces are in the text)
+        // - wrapped lines: start at content-start (padLeft)
         return { padLeftPx: xc, textIndentPx: -xc };
       }
 
@@ -514,6 +548,7 @@ try{
         const xIndent = _wrapProbeXFromColStyled(s, idx|0, ww, fs, lh);
         if (!Number.isFinite(xIndent) || (xIndent||0) <= 0.5) return null;
         const xi = (+xIndent||0);
+        // Same idea as list items: keep the first visual line unchanged; indent wrapped lines.
         return { padLeftPx: xi, textIndentPx: -xi };
       }
 
@@ -565,10 +600,73 @@ try{
 
         // Candidate marker
         const marker = s[idx0];
-        if (!(marker==='-' || marker==='*' || marker==='+')){
+
+        // Parse list marker (unordered or ordered). When not a marker, it may be a continuation.
+        let listType = '';
+        let markerLen = 0;     // marker length excluding following spaces (ul:1, ol:digits+delim)
+        let markerText = '';
+        let sp = 0;            // 1..4 spaces after marker
+        let contentIndentCol = 0;
+        let contentStartIdx = 0;
+        let depth = 0;
+        let bulletKind = 0;
+        let glyph = '';
+
+        // Unordered list: '-', '*', '+'
+        if (marker==='-' || marker==='*' || marker==='+'){
+          listType = 'ul';
+          markerLen = 1;
+          markerText = marker;
+          // Thematic break must win.
+          try{ if (_mdThematicBreakInfo && _mdThematicBreakInfo(s)) { items[row] = null; continue; } }catch{}
+
+          // Count 1..4 ASCII spaces after marker.
+          sp = 0;
+          let j = (idx0 + 1)|0;
+          while (j < (s.length|0) && s[j] === ' ' && sp < 5){ sp++; j++; }
+          if (sp < 1 || sp > 4){ items[row] = null; continue; }
+          // Reject tab immediately after marker (strict)
+          if (s[(idx0 + 1)|0] === '\t'){ items[row] = null; continue; }
+
+          depth = (stack.length + 1)|0;
+          const mod = ((depth - 1) % 3 + 3) % 3;
+          // disc/circle/square (ul list-style-type cycle)
+          // NOTE: glyph is kept for back-compat/debug; rendering uses bulletKind CSS drawing.
+          glyph = (mod === 0) ? '●' : (mod === 1 ? '○' : '■');
+          bulletKind = mod|0; // 0:disc, 1:circle, 2:square
+
+          contentIndentCol = (cols0 + markerLen + sp)|0;
+          contentStartIdx = ((idx0 + markerLen + sp)|0);
+        }
+
+        // Ordered list: 1+ digits + '.' or ')'
+        if (!listType && marker>='0' && marker<='9'){
+          let k = idx0|0;
+          while (k < (s.length|0) && s[k]>='0' && s[k]<='9') k++;
+          const digitsLen = (k - (idx0|0))|0;
+          const delim = (k < (s.length|0)) ? s[k] : '';
+          if ((digitsLen|0) > 0 && (delim==='.' || delim===')')){
+            listType = 'ol';
+            markerLen = (digitsLen + 1)|0;
+            markerText = s.slice(idx0, (idx0 + markerLen)|0);
+
+            sp = 0;
+            let j = (k + 1)|0;
+            while (j < (s.length|0) && s[j] === ' ' && sp < 5){ sp++; j++; }
+            if (sp < 1 || sp > 4){ items[row] = null; continue; }
+            if (s[(k + 1)|0] === '\t'){ items[row] = null; continue; }
+
+            depth = (stack.length + 1)|0;
+            contentIndentCol = (cols0 + markerLen + sp)|0;
+            contentStartIdx = ((idx0 + markerLen + sp)|0);
+          }
+        }
+
+        if (!listType){
           // Continuation line within a list item (simple: indentation must be >= current content indent)
           if (stack.length > 0 && (cols0|0) >= (stack[stack.length-1].contentIndentCol|0)){
-            items[row] = { kind:'cont', contentIndentCol: (stack[stack.length-1].contentIndentCol|0) };
+            const top = stack[stack.length-1] || {};
+            items[row] = { kind:'cont', listType: (top.listType||''), contentIndentCol: (top.contentIndentCol|0) };
           } else {
             items[row] = null;
           }
@@ -576,38 +674,90 @@ try{
         }
 
         // For a new list item marker, nesting is governed by parent content indent (CommonMark-like).
-        // Thematic break must win.
-        try{ if (_mdThematicBreakInfo && _mdThematicBreakInfo(s)) { items[row] = null; continue; } }catch{}
-
-        // Count 1..4 ASCII spaces after marker.
-        let sp = 0;
-        let j = (idx0 + 1)|0;
-        while (j < (s.length|0) && s[j] === ' ' && sp < 5){ sp++; j++; }
-        if (sp < 1 || sp > 4){ items[row] = null; continue; }
-        // Reject tab immediately after marker (strict)
-        if (s[(idx0 + 1)|0] === '\t'){ items[row] = null; continue; }
-
-        const depth = (stack.length + 1)|0;
-        const mod = ((depth - 1) % 3 + 3) % 3;
-        // disc/circle/square (ul list-style-type cycle)
-        // NOTE: glyph is kept for back-compat/debug; rendering uses bulletKind CSS drawing.
-        const glyph = (mod === 0) ? '●' : (mod === 1 ? '○' : '■');
-        const bulletKind = mod|0; // 0:disc, 1:circle, 2:square
-
-        const contentIndentCol = (cols0 + 1 + sp)|0;
         items[row] = {
           kind: 'item',
+          listType,
           depth,
           indentCol: cols0,
           markerIdx: idx0,
+          markerLen: (markerLen|0),
+          markerText,
           spaceCount: sp,
           contentIndentCol,
-          contentStartIdx: ((idx0 + 1 + sp)|0),
+          contentStartIdx: (contentStartIdx|0),
           glyph,
           bulletKind,
         };
-        stack.push({ contentIndentCol });
+        stack.push({ listType, contentIndentCol });
       }
+
+      // Ordered list marker alignment (#1754/#1755): compute max digit width per list block.
+      // - Applies only to clean display (render-time), but computed here for O(n).
+      // - Block boundary: a non-list nonblank line ends all active groups.
+      // - New item at same depth with different indent bucket/listType starts a new group.
+      try{
+        const TAB = 4;
+        const _indentBucket = (indentCol)=>{
+          const c = Math.max(0, indentCol|0);
+          // Allow up to 3-space slack for list markers (CommonMark-like).
+          // Bucket: 0..3 => 0, 4..7 => 4, 8..11 => 8, ...
+          return (c - (c % TAB))|0;
+        };
+        const groups = Object.create(null); // depth -> { indentBucket, rows:[], maxDigits }
+        const flushDepth = (d)=>{
+          const g = groups[d];
+          if (!g || !g.rows || g.rows.length===0) { try{ delete groups[d]; }catch{}; return; }
+          const md = Math.max(1, g.maxDigits|0);
+          for (const rr of g.rows){
+            const it = items[rr|0];
+            if (it && it.kind==='item' && String(it.listType||'')==='ol') it.olMaxDigits = md;
+          }
+          try{ delete groups[d]; }catch{}
+        };
+        const flushDeeperThan = (depth0)=>{
+          const d0 = depth0|0;
+          for (const k of Object.keys(groups)){
+            const d = (k|0);
+            if ((d|0) > (d0|0)) flushDepth(d|0);
+          }
+        };
+        const flushAll = ()=>{ try{ for (const k of Object.keys(groups)) flushDepth(k|0); }catch{} };
+
+        for (let row=0; row<(items.length|0); row++){
+          const it = items[row];
+          const line = String(lines[row]||'');
+          if (it && it.kind==='item'){
+            const d = Math.max(1, it.depth|0);
+            flushDeeperThan(d|0);
+            const lt = String(it.listType||'');
+            if (lt !== 'ol'){
+              // A different list type at this depth breaks the ordered-list group at this depth.
+              flushDepth(d|0);
+              continue;
+            }
+            const indentCol = (it.indentCol|0);
+            const ib = _indentBucket(indentCol|0);
+            const digitsLen = Math.max(1, ((it.markerLen|0) - 1));
+            const g0 = groups[d|0];
+            if (!g0 || (g0.indentBucket|0) !== (ib|0)){
+              // New block at this depth (different indent bucket or first time).
+              flushDepth(d|0);
+              groups[d|0] = { indentBucket:(ib|0), rows:[row|0], maxDigits:(digitsLen|0) };
+            } else {
+              g0.rows.push(row|0);
+              g0.maxDigits = Math.max(g0.maxDigits|0, digitsLen|0);
+            }
+            continue;
+          }
+          if (it && it.kind==='cont'){
+            // Keep groups alive across continuation lines.
+            continue;
+          }
+          // Non-list line: blank keeps groups (loose lists), nonblank ends all.
+          if (line.trim() !== '') flushAll();
+        }
+        flushAll();
+      }catch{}
 
       _mdListCache = { tick, lineCount:(lines.length|0), items, dirty:false, builtAt: Date.now() };
       return _mdListCache;
@@ -637,7 +787,9 @@ try{
       const len = (s.length|0);
       if (!ul || !Number.isFinite(ul.markerIdx)) return _mdEscHtml(s);
       const ms = Math.max(0, Math.min(len, (ul.markerIdx|0)));
-      const me = Math.max(ms, Math.min(len, ms + 2));
+      const ml0 = (ul && Number.isFinite(ul.markerLen)) ? (ul.markerLen|0) : 1;
+      const ml = Math.max(1, ml0|0);
+      const me = Math.max(ms, Math.min(len, ms + (ml|0) + 1));
       const hasRange = (rangeClass && Number.isFinite(rangeStart) && Number.isFinite(rangeEnd));
       const rs = hasRange ? Math.max(0, Math.min(len, rangeStart|0)) : 0;
       const re = hasRange ? Math.max(0, Math.min(len, rangeEnd|0)) : 0;
@@ -657,16 +809,63 @@ try{
         return out;
       };
 
-      const bullet = _mdUListBulletHtml(ul);
-      const markerSelected = hasRange && (re > ms) && (rs < me);
-      const bulletOut = markerSelected ? wrap(rangeClass, bullet) : bullet;
+      const type = (ul && ul.listType) ? String(ul.listType||'') : 'ul';
+      if (type === 'ol'){
+        // Ordered list marker rendering (#1739/#1741)
+        // - Replace (digits + '.' or ')' + first following space) with a fixed-width box.
+        // - Display is normalized to digits + '.'
+        // - Box width is (markerLen + 1)ch (the +1 is the single post-marker space)
+        // - Center the text within the box (effectively 0.5ch padding on both sides).
+        let digits = '';
+        try{
+          let p = ms|0;
+          while (p < (len|0) && s[p] >= '0' && s[p] <= '9'){
+            digits += s[p];
+            p++;
+          }
+          // Ensure this really is an ordered marker; otherwise don't rewrite.
+          const delim = (p < (len|0)) ? s[p] : '';
+          if (!(digits && (delim === '.' || delim === ')'))) digits = '';
+        }catch{ digits = ''; }
+        if (!digits){
+          // Safety: do not rewrite if parsing failed (avoid ".  abc" style artifacts)
+          return emitText(0, len);
+        }
+        // Emit a normalized visible marker padded on the left so '.' aligns to the max digits
+        // within the same list block in clean display (#1754/#1755).
+        // - Padding is *inside* the marker region (visual-only); source text is unchanged.
+        // - Draft caret line keeps raw because listItem isn't applied there.
+        let pad = 0;
+        try{
+          const maxDigits = (ul && Number.isFinite(ul.olMaxDigits)) ? (ul.olMaxDigits|0) : 0;
+          if ((maxDigits|0) > 0){
+            // If the user already indented the marker (up to 3 spaces at depth 1), don't add extra full-space pad.
+            const slack = ((ul.depth|0) === 1) ? Math.max(0, Math.min(3, (ul.indentCol|0))) : 0;
+            pad = Math.max(0, (maxDigits|0) - (digits.length|0) - (slack|0));
+          }
+        }catch{ pad = 0; }
+        // #1756: Use visual-only half-spaces: left 0.5ch + right 0.5ch.
+        // Keep dot alignment by adding integer pad (0..N) to the left.
+        const markerOut =
+          '<span class="md-olbox" style="--olpad:' + (pad|0) + '">'
+          + '<span class="md-olpad md-olpadL"></span>'
+          + _mdEscHtml(digits + '.')
+          + '<span class="md-olpad md-olpadR"></span>'
+          + '</span>';
+        const markerSelected = hasRange && (re > ms) && (rs < me);
+        const out = markerSelected ? wrap(rangeClass, markerOut) : markerOut;
+        return emitText(0, ms) + out + emitText(me, len);
+      }
 
+      const markerOut = _mdUListBulletHtml(ul);
+      const markerSelected = hasRange && (re > ms) && (rs < me);
+      const bulletOut = markerSelected ? wrap(rangeClass, markerOut) : markerOut;
       return emitText(0, ms) + bulletOut + emitText(me, len);
     }catch{ return _mdEscHtml(String(text||'')); }
   }
 
-  // Markdown list (ul) loose-gap detection:
-  // Detect one-or-more blank lines that occur after an unordered list item.
+  // Markdown list loose-gap detection:
+  // Detect one-or-more blank lines that occur after a list item.
   // Rendering rule (per #1730):
   // - clean: collapse ALL blank lines in the run (no remaining blank line)
   // - clean: apply H1 line-height to the two adjacent nonblank lines (prev item line and next nonblank line)
@@ -702,7 +901,7 @@ try{
       const prevInfo = _mdUListInfo(String(arr[prev]||''), prev|0, arr);
       if (!(prevInfo && prevInfo.kind === 'item')) return null;
 
-      // Next nonblank must be a sibling ul item (same indent).
+      // Next nonblank must be a sibling list item (same type/indent).
       let next = b + 1;
       while (next < total && String(arr[next]||'').trim() === '') next++;
       if (next >= total) return null;
@@ -712,6 +911,9 @@ try{
         if (!(nextInfo && nextInfo.kind === 'item')) return null;
         if (!Number.isFinite(prevInfo.indentCol) || !Number.isFinite(nextInfo.indentCol)) return null;
         if ((prevInfo.indentCol|0) !== (nextInfo.indentCol|0)) return null;
+        const t0 = (prevInfo && prevInfo.listType) ? String(prevInfo.listType||'') : '';
+        const t1 = (nextInfo && nextInfo.listType) ? String(nextInfo.listType||'') : '';
+        if (t0 && t1 && t0 !== t1) return null;
       }catch{}
 
       return { start:(a|0), end:(b|0), len:((b-a+1)|0), prevItemRow:(prev|0), nextRow:(next|0) };
@@ -941,13 +1143,13 @@ try{
           if (prefixLen>0) text = srcText.slice(prefixLen);
         }
 
-        // Unordered list item marker rendering (GFM-ish, #1712/#1713):
-        // Render marker+first-space as a fixed-width (2ch) span with a smaller glyph centered.
+        // List item marker rendering (GFM-ish, #1712/#1713/#1739):
+        // Render marker+first-space as a stable-width span.
         // We do NOT change the underlying string, so caret mapping stays based on the source text.
-        let ulInfo = null;
-        let ulItem = null;
+        let listInfo = null;
+        let listItem = null;
         if (!looseGap && !renderHr && !renderSetextUnderlineRow && !(prefixLen>0)){
-          try{ ulInfo = _mdUListInfo && _mdUListInfo(srcText, row, lines); }catch{ ulInfo = null; }
+          try{ listInfo = _mdUListInfo && _mdUListInfo(srcText, row, lines); }catch{ listInfo = null; }
           // Show disc/circle/square on:
           // - clean mode (always)
           // - draft mode: non-caret rows only
@@ -955,8 +1157,8 @@ try{
           try{
             const draft = !!(_mdDraftEditEnabled && _mdDraftEditEnabled());
             const show = (!draft) || (!isActiveRow);
-            if (show && ulInfo && ulInfo.kind === 'item') ulItem = ulInfo;
-          }catch{ ulItem = null; }
+            if (show && listInfo && listInfo.kind === 'item') listItem = listInfo;
+          }catch{ listItem = null; }
         }
 
         if (renderSetextUnderlineRow){
@@ -1008,8 +1210,8 @@ try{
                 const pre = text.slice(0, c1);
                 const mid = text.slice(c1, c2);
                 const post = text.slice(c2);
-                if (ulItem){
-                  el.innerHTML = _mdUListHtmlWithRange(text, ulItem, 'md-sel', c1|0, c2|0);
+                if (listItem){
+                  el.innerHTML = _mdUListHtmlWithRange(text, listItem, 'md-sel', c1|0, c2|0);
                 } else {
                   el.innerHTML = _mdEscHtml(pre) + '<span class="md-sel">' + _mdEscHtml(mid) + '</span>' + _mdEscHtml(post);
                 }
@@ -1054,9 +1256,9 @@ try{
                 const preH = headingCjkHtml ? (_mdHeadingCjkHtml(pre, lv) || _mdEscHtml(pre)) : _mdEscHtml(pre);
                 const midH = headingCjkHtml ? (_mdHeadingCjkHtml(mid || ' ', lv) || _mdEscHtml(mid || ' ')) : _mdEscHtml(mid || ' ');
                 const postH = headingCjkHtml ? (_mdHeadingCjkHtml(post, lv) || _mdEscHtml(post)) : _mdEscHtml(post);
-                if (ulItem){
+                if (listItem){
                   // For list lines we don't need headingCjkHtml; keep it simple and stable.
-                  el.innerHTML = _mdUListHtmlWithRange(text, ulItem, 'md-ime-uline', a|0, b|0);
+                  el.innerHTML = _mdUListHtmlWithRange(text, listItem, 'md-ime-uline', a|0, b|0);
                 } else {
                   el.innerHTML = preH + '<span class="md-ime-uline">' + midH + '</span>' + postH;
                 }
@@ -1073,16 +1275,21 @@ try{
         if (!usedHtml){
           // Ensure we don't keep stale HTML
           if (el.innerHTML !== ''){ try{ el.textContent = ''; }catch{} }
-          if (ulItem){
-            try{ el.innerHTML = _mdUListHtmlWithRange(text, ulItem, null, 0, 0); usedHtml = true; }catch{ usedHtml = false; }
+          if (listItem){
+            try{ el.innerHTML = _mdUListHtmlWithRange(text, listItem, null, 0, 0); usedHtml = true; }catch{ usedHtml = false; }
           }
           if (!usedHtml) el.textContent = text;
         }
 
         // List hanging indent (md-rich+wrap): keep leading indent; hang only marker-width.
         let indentOpts = null;
-        if (wrapOn && hideSymbols && ulInfo){
-          try{ indentOpts = _mdIndentOptsForListLine(srcText, ulInfo, wPx|0, fs|0, lh|0); }catch{ indentOpts = null; }
+        if (wrapOn && hideSymbols && listInfo){
+          // #1752: Ordered-list markers were being shifted/clipped by hanging-indent math under WebView2.
+          // Keep hanging-indent for unordered lists only.
+          const lt = (listInfo && listInfo.listType) ? String(listInfo.listType||'') : '';
+          if (lt !== 'ol'){
+            try{ indentOpts = _mdIndentOptsForListLine(srcText, listInfo, wPx|0, fs|0, lh|0); }catch{ indentOpts = null; }
+          }
         }
         try{ el.style.paddingLeft = (indentOpts ? ((indentOpts.padLeftPx||0) + 'px') : ''); }catch{}
         try{ el.style.textIndent = (indentOpts ? ((indentOpts.textIndentPx||0) + 'px') : ''); }catch{}
@@ -7285,7 +7492,9 @@ try{
               _mdListEnsureCache && _mdListEnsureCache(false);
               const ul = _mdUListInfo && _mdUListInfo(line, idx|0, lines);
               if (ul && Number.isFinite(ul.markerIdx)){
-                const sc = ((ul.markerIdx|0) - (dispPrefix|0) + 1)|0;
+                const ml0 = (ul && Number.isFinite(ul.markerLen)) ? (ul.markerLen|0) : 1;
+                const ml = Math.max(1, ml0|0);
+                const sc = ((ul.markerIdx|0) - (dispPrefix|0) + (ml|0))|0;
                 if ((sc|0) >= 0) _mdUlSkipSpaceCol = sc|0;
               }
             }
@@ -7310,7 +7519,8 @@ try{
               const hide = !!(_mdHideSymbolsForRow && _mdHideSymbolsForRow(!!isActiveRow));
               if (hide){
                 const ul = _mdUListInfo && _mdUListInfo(line, idx|0, lines);
-                if (ul) indentOpts = _mdIndentOptsForListLine(dispLine, ul, wPx|0, fs|0, rowHeightPx|0);
+                const lt = (ul && ul.listType) ? String(ul.listType||'') : '';
+                if (ul && lt !== 'ol') indentOpts = _mdIndentOptsForListLine(dispLine, ul, wPx|0, fs|0, rowHeightPx|0);
               }
             }catch{ indentOpts = null; }
             let intra = 0;
@@ -7325,6 +7535,47 @@ try{
           try{ x = _wrapProbeXFromCol(dispLine, col, wPx|0); }catch{ x = null; }
           return { intra: Math.max(0, intra|0), x };
         }catch{ return { intra:0, x:null }; }
+      };
+
+      // #1758: md-rich ordered list visual padding (right-aligned digits) shifts the rendered text,
+      // but listchars is rendered as a separate overlay. Apply the same shift so markers (esp. EOL)
+      // do not lag behind.
+      const _mdOlExtraXpxList = (colN)=>{
+        try{
+          if (!mdRich) return 0;
+          const isActiveRow = (row1 === ((caretRow|0) + 1));
+          const hide = !!(_mdHideSymbolsForRow && _mdHideSymbolsForRow(!!isActiveRow));
+          if (!hide) return 0;
+          const ul = _mdUListInfo && _mdUListInfo(line, idx|0, lines);
+          if (!(ul && ul.kind==='item' && String(ul.listType||'')==='ol')) return 0;
+          const maxDigits = (ul && Number.isFinite(ul.olMaxDigits)) ? (ul.olMaxDigits|0) : 0;
+          if (!(maxDigits > 0)) return 0;
+          const digitsLen = Math.max(1, ((ul.markerLen|0) - 1));
+          const slack = ((ul.depth|0) === 1) ? Math.max(0, Math.min(3, (ul.indentCol|0))) : 0;
+          const pad = Math.max(0, (maxDigits|0) - (digitsLen|0) - (slack|0));
+          if (!(pad > 0)) return 0;
+
+          // Measure 1ch (space) width in px for this row.
+          let spaceW = 0;
+          if (wrapOn){
+            try{
+              const fs = Math.max(6, Math.round(baseFontPx * (scale||1)));
+              const spx = _wrapProbeXFromColStyled(' ', 1, 1000000, fs|0, rowHeightPx|0, null);
+              if (Number.isFinite(spx) && (spx||0) > 0) spaceW = (+spx||0);
+            }catch{ spaceW = 0; }
+          } else {
+            try{ _measureSpan.textContent = ' '; const swb = _measureSpan.getBoundingClientRect().width || 0; spaceW = (swb * (scale||1)); }catch{ spaceW = 0; }
+          }
+          if (!(spaceW > 0)) return 0;
+          const half = spaceW * 0.5;
+
+          const mi = ((ul.markerIdx|0) - (dispPrefix|0))|0;
+          const dotEnd = (mi|0) + (ul.markerLen|0);
+          const col = colN|0;
+          if (col < (mi|0)) return 0;
+          if (col <= (dotEnd|0)) return (pad * spaceW) + half;
+          return (pad * spaceW);
+        }catch{ return 0; }
       };
 
       // tab expander (same logic as full render)
@@ -7367,10 +7618,12 @@ try{
             const lh = mdRich ? (rowHeightPx|0) : (LINE_HEIGHT|0);
             y1 = (yTop|0) + (Math.max(0, (p.intra|0)) * Math.max(1, lh|0));
             x1 = Number.isFinite(p.x) ? Math.max(0, (+p.x||0)) : 0;
+            try{ x1 += _mdOlExtraXpxList(c|0); }catch{}
           } else {
             _measureSpan.textContent = _exp(dispLine.slice(0,c));
             const x1b = _measureSpan.getBoundingClientRect().width;
             x1 = mdRich ? (x1b * scale) : x1b;
+            try{ x1 += _mdOlExtraXpxList(c|0); }catch{}
           }
           const el = document.createElement('div');
           el.className='listchar';
@@ -7431,10 +7684,12 @@ try{
             const lh = mdRich ? (rowHeightPx|0) : (LINE_HEIGHT|0);
             yEnd = (yTop|0) + (Math.max(0, (pEnd.intra|0)) * Math.max(1, lh|0));
             xEnd = Number.isFinite(pEnd.x) ? Math.max(0, (+pEnd.x||0)) : 0;
+            try{ xEnd += _mdOlExtraXpxList(dispLine.length|0); }catch{}
           } else {
             _measureSpan.textContent = _exp(dispLine);
             const xEndb = _measureSpan.getBoundingClientRect().width;
             xEnd = mdRich ? (xEndb * scale) : xEndb;
+            try{ xEnd += _mdOlExtraXpxList(dispLine.length|0); }catch{}
           }
         }
         const elE = document.createElement('div');
@@ -12180,6 +12435,15 @@ try{
       }
     }catch{}
 
+    // #1756: In markdown clean display, skip ordered-list marker space.
+    try{
+      const changed2 = _mdClampCaretForCleanOListHalfSpaces();
+      if (changed2){
+        if (_visualActive) _updateVisualSelection();
+        else _syncNativeSelectionToCaret();
+      }
+    }catch{}
+
     const row1 = caretRow + 1;
     const topLine = _topLine();
     let offsetLines = row1 - topLine;
@@ -12550,6 +12814,40 @@ try{
     };
 
     let x = _measureXAbsToCol(caretColVis);
+
+    // #1756: md-rich ordered list marker uses visual-only padding (pad spaces + 0.5ch).
+    // Add the same delta to caret X so the overlay caret matches rendered marker alignment.
+    const _mdOlExtraXpx = (colN)=>{
+      try{
+        if (!(_mdWysiwygActive && _mdWysiwygActive())) return 0;
+        if (!(_mdHideSymbolsForRow && _mdHideSymbolsForRow(true))) return 0;
+        const lines2 = _splitLinesRaw();
+        const r = Math.max(0, Math.min((lines2.length|0)-1, caretRow|0));
+        const src = String(lines2[r]||'');
+        const ul = _mdUListInfo && _mdUListInfo(src, r|0, lines2);
+        if (!(ul && ul.kind==='item' && String(ul.listType||'')==='ol')) return 0;
+        const maxDigits = (ul && Number.isFinite(ul.olMaxDigits)) ? (ul.olMaxDigits|0) : 0;
+        if (!(maxDigits > 0)) return 0;
+        const digitsLen = Math.max(1, ((ul.markerLen|0) - 1));
+        // Match render-time pad logic (accounts for up-to-3-space slack at depth 1).
+        const slack = ((ul.depth|0) === 1) ? Math.max(0, Math.min(3, (ul.indentCol|0))) : 0;
+        const pad = Math.max(0, (maxDigits|0) - (digitsLen|0) - (slack|0));
+        // space width (scaled)
+        _measureSpan.textContent = ' ';
+        const spaceW = ((_measureSpan.getBoundingClientRect().width || 0) * (_mdScaleX||1)) || 0;
+        if (!(spaceW > 0)) return 0;
+        const half = spaceW * 0.5;
+        const mi = (ul.markerIdx|0);
+        const dotEndCol = (mi|0) + (ul.markerLen|0);
+        const col = colN|0;
+        if (col < (mi|0)) return 0;
+        // Within marker (digits + '.'), shift by pad + left-half.
+        if (col <= (dotEndCol|0)) return (pad * spaceW) + half;
+        // After marker+first-space replacement: net shift is integer pad only.
+        return (pad * spaceW);
+      }catch{ return 0; }
+    };
+    try{ x += _mdOlExtraXpx(caretCol|0); }catch{}
     // Wrap mode: x should be measured from the start of the current visual wrapped line.
     // Use probe-based x to match native textarea wrapping.
     try{
@@ -12565,7 +12863,8 @@ try{
               const lines2 = _splitLines();
               const src = String(lines2[caretRow|0]||'');
               const ul = _mdUListInfo && _mdUListInfo(src, caretRow|0, lines2);
-              if (ul) indentOpts = _mdIndentOptsForListLine(String(line||''), ul, wPx|0, (_mdCaretFontSizePx||Math.max(6, Math.round(FONT_SIZE)))|0, (_mdCaretLineHeightPx||LINE_HEIGHT)|0);
+              const lt = (ul && ul.listType) ? String(ul.listType||'') : '';
+              if (ul && lt !== 'ol') indentOpts = _mdIndentOptsForListLine(String(line||''), ul, wPx|0, (_mdCaretFontSizePx||Math.max(6, Math.round(FONT_SIZE)))|0, (_mdCaretLineHeightPx||LINE_HEIGHT)|0);
             }
           }
         }catch{ indentOpts = null; }
@@ -12573,6 +12872,7 @@ try{
           ? _wrapProbeXFromColStyled(line, caretColVis|0, wPx, (_mdCaretFontSizePx||Math.max(6, Math.round(FONT_SIZE)))|0, (_mdCaretLineHeightPx||LINE_HEIGHT)|0, indentOpts)
           : _wrapProbeXFromCol(line, caretColVis|0, wPx);
         if (Number.isFinite(xp)) x = xp;
+        try{ x += _mdOlExtraXpx(caretCol|0); }catch{}
       }
     }catch{}
   // Make caret height match the full line box
@@ -12587,6 +12887,7 @@ try{
     if (caretColVis < line.length){
       // width of the next character box
       let x2 = _measureXAbsToCol((caretColVis+1)|0);
+      try{ x2 += _mdOlExtraXpx((caretCol|0) + 1); }catch{}
       try{
         if (_wrapEnabled()){
           const c = _wrapEnsureCache(false);
@@ -12595,6 +12896,7 @@ try{
             ? _wrapProbeXFromColStyled(line, (caretColVis+1)|0, wPx, (_mdCaretFontSizePx||Math.max(6, Math.round(FONT_SIZE)))|0, (_mdCaretLineHeightPx||LINE_HEIGHT)|0, indentOpts)
             : _wrapProbeXFromCol(line, (caretColVis+1)|0, wPx);
           if (Number.isFinite(xp2)) x2 = xp2;
+          try{ x2 += _mdOlExtraXpx((caretCol|0) + 1); }catch{}
         }
       }catch{}
       chW = Math.max(0, x2 - x);
@@ -15730,6 +16032,9 @@ try{
     const fromR = caretRow|0, fromC = caretCol|0;
     let nc = caretCol;
 
+    // Remember last horizontal direction for md clean caret clamps.
+    _mdLastHorzDir = (delta > 0) ? 1 : (delta < 0 ? -1 : 0);
+
     // Horizontal motion resets wrap curswant.
     try{ _desiredWrapXPx = null; }catch{}
 
@@ -15753,6 +16058,24 @@ try{
       const count = -delta;
       for (let i=0; i<count; i++) nc = _prevIndex(line, nc);
     }
+
+    // #1757: In markdown clean mode, the first post-marker space of ordered lists is visual-only.
+    // Skip it so the caret can pass through both directions.
+    try{
+      if (_mdWysiwygActive && _mdWysiwygActive() && (_mdHideSymbolsForRow && _mdHideSymbolsForRow(true))){
+        const linesRaw = _splitLinesRaw();
+        const src = String((linesRaw && linesRaw.length) ? (linesRaw[caretRow]||'') : line);
+        const ul = _mdUListInfo && _mdUListInfo(src, caretRow|0, linesRaw);
+        if (ul && ul.kind==='item' && String(ul.listType||'')==='ol' && Number.isFinite(ul.markerIdx) && Number.isFinite(ul.markerLen)){
+          const idxSpace = (ul.markerIdx|0) + (ul.markerLen|0); // first space after '.'
+          if ((nc|0) === (idxSpace|0)){
+            if ((delta|0) > 0) nc = (idxSpace|0) + 1;
+            else nc = (idxSpace|0) - 1;
+          }
+        }
+      }
+    }catch{}
+
     nc = Math.max(minCol, Math.min(line.length, nc));
     _setCaret(caretRow, nc);
     // Detect unexpected row change (should not happen here); if it does, tag anomaly
@@ -20423,11 +20746,65 @@ try{
         // Map X+intra -> display column (styled probe), then -> source column.
         let colDisp = 0;
         try{
+          // #1758: Ordered list markers may be visually shifted by (pad*1ch + 0.5ch).
+          // Invert that shift for hit-testing, otherwise a click on digits can map to left indent spaces
+          // when the source already has leading spaces.
+          let desiredX = (xInContent||0);
+          let forceCol = null;
+          try{
+            if (infoR && infoR.hideSymbols){
+              const ul = _mdUListInfo && _mdUListInfo(String(infoR.srcText||''), r|0, lines);
+              if (ul && ul.kind==='item' && String(ul.listType||'')==='ol' && Number.isFinite(ul.markerIdx) && Number.isFinite(ul.markerLen) && Number.isFinite(ul.olMaxDigits)){
+                const maxDigits = (ul.olMaxDigits|0);
+                const digitsLen = Math.max(1, ((ul.markerLen|0) - 1));
+                const slack = ((ul.depth|0) === 1) ? Math.max(0, Math.min(3, (ul.indentCol|0))) : 0;
+                const pad = Math.max(0, (maxDigits|0) - (digitsLen|0) - (slack|0));
+                // Measure 1ch (space) width at this row style.
+                let spaceW = 0;
+                try{
+                  const spx = _wrapProbeXFromColStyled(' ', 1, 1000000, (infoR.fs|0), (infoR.lh|0), null);
+                  if (Number.isFinite(spx) && (spx||0) > 0) spaceW = (+spx||0);
+                }catch{ spaceW = 0; }
+                if (spaceW > 0){
+                  const half = spaceW * 0.5;
+                  const padPx = (pad|0) * spaceW;
+                  const shiftMarker = padPx + half;
+                  const shiftAfter = padPx;
+                  const mi = ((ul.markerIdx|0) - (infoR.prefixLen|0))|0;
+                  const dotEnd = (mi|0) + (ul.markerLen|0);
+                  const ww = wrapOn ? (wPx|0) : 1000000;
+                  const xAt = (col)=>{
+                    try{
+                      const x = _wrapProbeXFromColStyled(String(infoR.dispText||''), col|0, ww, (infoR.fs|0), (infoR.lh|0), (wrapOn ? infoR.indentOpts : null));
+                      return Number.isFinite(x) ? (+x||0) : 0;
+                    }catch{ return 0; }
+                  };
+                  const xMarker = xAt(mi|0);
+                  const xDotEnd = xAt(dotEnd|0);
+                  const xDotEndRendered = xDotEnd + shiftMarker;
+                  const clickX = (+desiredX||0);
+
+                  if (clickX >= xMarker){
+                    // Clicking inside the marker's left visual padding should land on the first digit.
+                    if (clickX < (xMarker + shiftMarker)){
+                      forceCol = (mi|0);
+                    } else {
+                      desiredX = clickX - ((clickX < xDotEndRendered) ? shiftMarker : shiftAfter);
+                      if (desiredX < 0) desiredX = 0;
+                    }
+                  }
+                }
+              }
+            }
+          }catch{ desiredX = (xInContent||0); forceCol = null; }
+
           if (wrapOn){
-            colDisp = _mdWrapColForIntraXStyled(String(infoR.dispText||''), intra|0, (xInContent||0), wPx|0, (infoR.lh|0), (infoR.fs|0), infoR.indentOpts) | 0;
+            colDisp = (forceCol != null) ? (forceCol|0)
+              : (_mdWrapColForIntraXStyled(String(infoR.dispText||''), intra|0, (desiredX||0), wPx|0, (infoR.lh|0), (infoR.fs|0), infoR.indentOpts) | 0);
           } else {
             // Use a very large width and intra=0 to map X in an unwrapped line.
-            colDisp = _mdWrapColForIntraXStyled(String(infoR.dispText||''), 0, (xInContent||0), 1000000, (infoR.lh|0), (infoR.fs|0), null) | 0;
+            colDisp = (forceCol != null) ? (forceCol|0)
+              : (_mdWrapColForIntraXStyled(String(infoR.dispText||''), 0, (desiredX||0), 1000000, (infoR.lh|0), (infoR.fs|0), null) | 0);
           }
         }catch{ colDisp = 0; }
         colDisp = Math.max(0, Math.min((String(infoR.dispText||'').length|0), colDisp|0));
