@@ -4101,7 +4101,15 @@ try{
   let _scrolloffPauseAnchorC = -1;
   // global mouse cursor visibility state and helpers (used across modules)
   const _hideCursor = ()=>{ try{ if (!_cursorHidden){ document.body.classList.add('hide-cursor'); _cursorHidden=true; } }catch{} };
-  const _showCursor = ()=>{ try{ if (_cursorHidden){ document.body.classList.remove('hide-cursor'); _cursorHidden=false; } }catch{} };
+  const _showCursor = (_reason)=>{
+    try{
+      // キーボード操作直後は塗りつぶしcaretを強制維持。
+      // md-rich では水平/短距離移動で scroll が発生しないことがあり、
+      // その場合でもタッチパッド等の微小 mousemove で即座に非アクティブへ戻らないようにする。
+      if (_reason === 'mousemove' && Date.now() < (_cursorForceHiddenUntil|0)) return;
+    }catch{}
+    try{ if (_cursorHidden){ document.body.classList.remove('hide-cursor'); _cursorHidden=false; } }catch{}
+  };
   function _flagCaretMotion(){
     _lastCaretMovedAt = Date.now();
     // caret移動時は塗りつぶしcaretへ復帰し、一定時間維持
@@ -19409,8 +19417,8 @@ try{
     };
 
   // Show cursor on any mouse move or window blur
-  window.addEventListener('mousemove', _showCursor, { passive:true });
-  window.addEventListener('blur', _showCursor);
+  window.addEventListener('mousemove', ()=>{ try{ _showCursor('mousemove'); }catch{} }, { passive:true });
+  window.addEventListener('blur', ()=>{ try{ _showCursor('blur'); }catch{} });
   // When window becomes active, make caret active (hide mouse cursor briefly)
   window.addEventListener('focus', ()=>{
     try{ _hideCursor(); _repositionCaret(); updateGutter(); }catch{}
