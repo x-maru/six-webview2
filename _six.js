@@ -20297,92 +20297,134 @@ try{
         // Use editor rect (excludes gutter) for X; Y aligns with the edit area.
         const rectE = editor.getBoundingClientRect();
         const yInView = (ev.clientY - rectE.top);
-        const xInContent = (ev.clientX - rectE.left) + (editor.scrollLeft||0);
 
-        // Invert overlay remainder compensation: overlays are translated by -rem.
+        const wrapOn = (function(){ try{ return _wrapEnabled(); }catch{ return false; } })();
+        const hs = wrapOn ? 0 : (editor.scrollLeft||0);
+        const xInContent = (ev.clientX - rectE.left) + (hs|0);
+
+        // Invert md-rich remainder compensation: md text layer uses effective scrollTop.
         let rem = 0;
         try{
-          const st = (editor.scrollTop||0);
-          rem = st - Math.floor(st/LINE_HEIGHT)*LINE_HEIGHT;
-          if (Math.abs(rem) < 0.01) rem = 0;
+          const atEofEff = (typeof _mdAtEofEffective === 'function') ? !!_mdAtEofEffective() : false;
+          if (atEofEff){
+            rem = 0;
+          } else {
+            let snap = true;
+            try{ snap = !(_lastNativeScrollAt && (Date.now() - (_lastNativeScrollAt|0) <= 120)); }catch{}
+            let st = (typeof _mdEffectiveScrollTopPx === 'function') ? _mdEffectiveScrollTopPx({ snap }) : (editor.scrollTop||0);
+            rem = st - Math.floor(st/LINE_HEIGHT)*LINE_HEIGHT;
+            if (Math.abs(rem) < 0.01) rem = 0;
+          }
         }catch{ rem = 0; }
         const yTarget = (yInView||0) + rem;
 
-        // Find row by accumulating md line heights from current topLine.
+        // Shared helpers: match md-rich rendering rules (symbol hiding + list indent).
+        let baseFontPx = 16;
+        try{ baseFontPx = parseFloat(getComputedStyle(editor).fontSize)||baseFontPx; }catch{}
+        let wPx = 80;
+        try{ if (wrapOn) wPx = _wrapAvailWidthPx()|0; }catch{ wPx = 80; }
+        const total = (lines.length|0);
+        const _dispInfoAtRow = (row0, isActiveRow)=>{
+          const r0 = (row0|0);
+          const srcText = (r0>=0 && r0<total) ? String(lines[r0]||'') : '';
+          const info = _mdLineLayoutInfoAtRow(lines, r0, !!isActiveRow);
+          const lh = (info && info.lineHeightPx) ? (info.lineHeightPx|0) : (LINE_HEIGHT|0);
+          const sc = (info && info.scale) ? (+info.scale || 1) : 1;
+          const fs = Math.max(6, Math.round(baseFontPx * sc));
+          const bhOverride = (info && Number.isFinite(info.blockHeightOverridePx)) ? (info.blockHeightOverridePx|0) : null;
+          const padTopPx = (info && Number.isFinite(info.blockPadTopPx)) ? (info.blockPadTopPx|0) : 0;
+          const padBottomPx = (info && Number.isFinite(info.blockPadBottomPx)) ? (info.blockPadBottomPx|0) : 0;
+          const hideSymbols = !!(info && info.hideSymbols);
+
+          let dispText = srcText;
+          let prefixLen = 0;
+          let renderHr = false;
+          let renderSetextUnderlineRow = false;
+          try{ if (info && info.isLooseGap){ dispText = ''; prefixLen = 0; renderHr = false; renderSetextUnderlineRow = false; } }catch{}
+          if (hideSymbols){
+            try{ renderHr = _mdIsHrLineForDisplay(srcText, lines, r0, !!isActiveRow); }catch{ renderHr = false; }
+            try{ renderSetextUnderlineRow = _mdIsSetextUnderlineRowForDisplay(srcText, lines, r0, !!isActiveRow); }catch{ renderSetextUnderlineRow = false; }
+            if (renderHr || renderSetextUnderlineRow){
+              dispText = '';
+              prefixLen = 0;
+            } else {
+              try{
+                const lv0 = _mdHeadingLevel(srcText)|0;
+                if (lv0>=1 && lv0<=6){
+                  prefixLen = (_mdHeadingPrefixLen(srcText)|0);
+                  if (prefixLen>0) dispText = srcText.slice(prefixLen);
+                }
+              }catch{}
+            }
+          }
+
+          // Hanging indent for list items/continuations in clean display.
+          let indentOpts = null;
+          try{
+            if (wrapOn && hideSymbols){
+              const ul = _mdUListInfo && _mdUListInfo(srcText, r0|0, lines);
+              if (ul) indentOpts = _mdIndentOptsForListLine(dispText, ul, wPx|0, fs|0, lh|0);
+            }
+          }catch{ indentOpts = null; }
+
+          // Block height in px.
+          let hBlock = lh|0;
+          if (Number.isFinite(bhOverride)){
+            hBlock = (bhOverride|0);
+          } else if (wrapOn){
+            let n0 = 1;
+            try{ n0 = _wrapProbeLineCountStyled(String(dispText||''), wPx|0, lh|0, fs|0, indentOpts) | 0; }catch{ n0 = 1; }
+            const n = (n0 && (n0|0) > 0) ? (n0|0) : 1;
+            hBlock = (Math.max(1, n|0) * (lh|0))|0;
+          }
+          try{ hBlock = (hBlock|0) + (padTopPx|0) + (padBottomPx|0); }catch{}
+          return { srcText, dispText, prefixLen:(prefixLen|0), lh:(lh|0), fs:(fs|0), hideSymbols:!!hideSymbols, bhOverride, padTopPx:(padTopPx|0), padBottomPx:(padBottomPx|0), indentOpts, hBlock:(hBlock|0) };
+        };
+
+        // Find row by accumulating per-row block heights from current topLine.
         const topLine = _topLine()|0;
-        let r = Math.max(0, (topLine|0) - 1);
+        const startIdx = Math.max(0, (topLine|0) - 1);
+        const maxScan = Math.min(total, startIdx + Math.max(200, (_visibleLinesExact()|0) * 6));
+        let r = startIdx|0;
         let accY = 0;
-        for (let i=r; i<lines.length; i++){
-          const info = _mdLineLayoutInfoAtRow(lines, i, false);
-          const h = (info && info.lineHeightPx) ? (info.lineHeightPx||LINE_HEIGHT) : LINE_HEIGHT;
-          if (yTarget < accY + h){ r = i; break; }
-          accY += h;
-          r = i;
+        let infoR = null;
+        for (let i=startIdx; i<maxScan; i++){
+          const inf = _dispInfoAtRow(i|0, false);
+          const h = (inf && Number.isFinite(inf.hBlock)) ? (inf.hBlock|0) : (LINE_HEIGHT|0);
+          if (yTarget < (accY + (h|0))){ r = i|0; infoR = inf; break; }
+          accY += (h|0);
+          r = i|0;
+          infoR = inf;
         }
         if (r < 0) r = 0;
-        if (r >= lines.length) r = Math.max(0, lines.length-1);
+        if (r >= total) r = Math.max(0, total-1);
+        if (!infoR || (infoR && (infoR.srcText == null))) infoR = _dispInfoAtRow(r|0, true);
 
-        const lineStr = String(lines[r]||'');
-        const scale = (function(){ try{ return _mdLineScale(lineStr) || 1; }catch{ return 1; } })();
+        // Determine intra (wrapped) line index within this logical row.
+        const yWithin = Math.max(0, (yTarget|0) - (accY|0));
+        const yTight = Math.max(0, (yWithin|0) - (infoR.padTopPx|0));
+        let intra = 0;
+        let nLines = 1;
+        if (!Number.isFinite(infoR.bhOverride) && wrapOn){
+          try{ nLines = _wrapProbeLineCountStyled(String(infoR.dispText||''), wPx|0, (infoR.lh|0), (infoR.fs|0), infoR.indentOpts) | 0; }catch{ nLines = 1; }
+          if (!(nLines && (nLines|0) > 0)) nLines = 1;
+          intra = Math.floor((yTight|0) / Math.max(1, (infoR.lh|0)));
+          intra = Math.max(0, Math.min(((nLines|0) - 1)|0, intra|0));
+        }
 
-        // Determine whether this row is rendered with heading prefix hidden.
-        // Use post-click assumption: this row becomes active.
-        let prefixLen = 0;
+        // Map X+intra -> display column (styled probe), then -> source column.
+        let colDisp = 0;
         try{
-          const hide = _mdHideSymbolsForRow(true);
-          if (hide){
-            const p = _mdHeadingPrefixLen(lineStr)|0;
-            if (p>0) prefixLen = p;
+          if (wrapOn){
+            colDisp = _mdWrapColForIntraXStyled(String(infoR.dispText||''), intra|0, (xInContent||0), wPx|0, (infoR.lh|0), (infoR.fs|0), infoR.indentOpts) | 0;
+          } else {
+            // Use a very large width and intra=0 to map X in an unwrapped line.
+            colDisp = _mdWrapColForIntraXStyled(String(infoR.dispText||''), 0, (xInContent||0), 1000000, (infoR.lh|0), (infoR.fs|0), null) | 0;
           }
-        }catch{ prefixLen = 0; }
+        }catch{ colDisp = 0; }
+        colDisp = Math.max(0, Math.min((String(infoR.dispText||'').length|0), colDisp|0));
 
-        const dispLine = (prefixLen>0) ? lineStr.slice(prefixLen) : lineStr;
-
-        const colDisp = (function(line, xAbsPx, sc){
-          try{
-            if (!line) return 0;
-            const xTarget = Math.max(0, xAbsPx||0);
-            // tabstop from SIX_OPTIONS (default 8, min 1)
-            let _ts = 8; try{ const tsRaw = (window && window.SIX_OPTIONS && window.SIX_OPTIONS.tabstop); const ts = parseInt(tsRaw,10); if (ts && ts>0) _ts = ts; }catch{}
-            _measureSpan.textContent = ' ';
-            const spaceW = _measureSpan.getBoundingClientRect().width || 1;
-            const _charW = (ch)=>{ _measureSpan.textContent = ch; const w=_measureSpan.getBoundingClientRect().width; return (w && w>0)?w:spaceW; };
-            const _exp = (s)=>{
-              if (!s || s.indexOf('\t')===-1) return s;
-              let out=''; let x=0;
-              for (let i=0;i<s.length;i++){
-                const ch=s[i];
-                if (ch==='\t'){
-                  const col = Math.floor((x/spaceW)+1e-6);
-                  const spaces = _ts - (col % _ts);
-                  out += ' '.repeat(spaces);
-                  x += spaces * spaceW;
-                } else {
-                  out += ch;
-                  x += _charW(ch);
-                }
-              }
-              return out;
-            };
-            const _w = (s)=>{ _measureSpan.textContent = _exp(s); return ((_measureSpan.getBoundingClientRect().width||0) * (sc||1)); };
-
-            let lo = 0, hi = line.length;
-            while (lo < hi){
-              const mid = (lo + hi + 1) >> 1;
-              if (_w(line.slice(0, mid)) <= xTarget) lo = mid; else hi = mid - 1;
-            }
-            // Snap to nearest boundary
-            const wLo = _w(line.slice(0, lo));
-            if (lo < line.length){
-              const wHi = _w(line.slice(0, lo+1));
-              const half = (wHi - wLo) * 0.5;
-              if ((xTarget - wLo) > half) lo++;
-            }
-            return Math.max(0, Math.min(line.length, lo|0));
-          }catch{ return 0; }
-        })(dispLine, xInContent, scale);
-
-        const c = Math.max(0, Math.min(lineStr.length, (prefixLen|0) + (colDisp|0)));
+        const c = Math.max(0, Math.min((String(infoR.srcText||'').length|0), ((infoR.prefixLen|0) + (colDisp|0))|0));
         const off = _offsetFromRC(r|0, c|0) | 0;
         // Apply native selection so all existing downstream logic stays consistent.
         try{ editor.selectionStart = editor.selectionEnd = off; }catch{}
