@@ -1,4 +1,4 @@
-const VERSION = '0.9.1.m';
+const VERSION = '0.9.1.o';
 // Build stamp (for verifying which _six.js is actually running)
 // NOTE: Intentionally ASCII-only; fullwidth variants should be treated as invalid.
 try{ window.__sixBuildTs = '2025-12-29T00:00:00Z'; }catch{}
@@ -357,6 +357,14 @@ try{
                 }catch{}
               }
             }
+          }
+        }catch{}
+
+        // #1762: Propagate loose spacing to all sibling items in a loose list block.
+        try{
+          if (!edge){
+            const info = _mdUListInfo && _mdUListInfo(srcText, r|0, lines);
+            if (info && info.kind==='item' && info.listLoose) edge = true;
           }
         }catch{}
         if (edge && !expandedEdge){
@@ -759,6 +767,106 @@ try{
         flushAll();
       }catch{}
 
+      // Loose list propagation (#1762): if a list has a loose-gap (blank line between sibling items),
+      // treat the whole sibling block as loose so later items also get loose spacing.
+      // Performance: O(n) for block assignment + O(n) for blank-run scanning.
+      try{
+        const total = (items.length|0);
+
+        // 1) Assign a block id per sibling list block (same depth/indentCol/listType), separated by non-list nonblank lines.
+        let nextBlockId = 1;
+        const groups2 = Object.create(null); // depth -> { indentCol, listType, id }
+        const flushDepth2 = (d)=>{ try{ delete groups2[d|0]; }catch{} };
+        const flushDeeperThan2 = (depth0)=>{
+          const d0 = depth0|0;
+          for (const k of Object.keys(groups2)){
+            const d = (k|0);
+            if ((d|0) > (d0|0)) flushDepth2(d|0);
+          }
+        };
+        const flushAll2 = ()=>{ try{ for (const k of Object.keys(groups2)) flushDepth2(k|0); }catch{} };
+
+        for (let row=0; row<total; row++){
+          const it = items[row|0];
+          const line = String(lines[row|0]||'');
+          if (it && it.kind==='item'){
+            const d = Math.max(1, it.depth|0);
+            flushDeeperThan2(d|0);
+            const ic = (it.indentCol|0);
+            const lt = String(it.listType||'');
+            const g0 = groups2[d|0];
+            if (!g0 || (g0.indentCol|0) !== (ic|0) || String(g0.listType||'') !== lt){
+              flushDepth2(d|0);
+              groups2[d|0] = { indentCol:(ic|0), listType: lt, id:(nextBlockId++|0) };
+            }
+            try{ it.listBlockId = (groups2[d|0].id|0); }catch{}
+            continue;
+          }
+          if (it && it.kind==='cont'){
+            // Keep groups alive across continuation lines and blanks.
+            continue;
+          }
+          // Non-list line: blank keeps groups (loose lists), nonblank ends all.
+          if (line.trim() !== '') flushAll2();
+        }
+        flushAll2();
+
+        // 2) Detect loose-gaps via blank runs and mark the involved blocks as loose.
+        const blockLoose = Object.create(null); // id -> 1
+        let row = 0;
+        while (row < total){
+          const s = String(lines[row]||'');
+          if (s.trim() !== ''){ row++; continue; }
+
+          // Blank run [a..b]
+          let a = row;
+          while (a > 0 && String(lines[(a-1)|0]||'').trim() === '') a--;
+          let b = row;
+          while (((b+1)|0) < total && String(lines[(b+1)|0]||'').trim() === '') b++;
+
+          // Find preceding list item marker row (skip blank and cont lines).
+          let prev = (a - 1)|0;
+          while (prev >= 0){
+            const t = String(lines[prev]||'');
+            if (t.trim() === ''){ prev--; continue; }
+            const itP = items[prev];
+            if (itP && itP.kind==='cont'){ prev--; continue; }
+            if (itP && itP.kind==='item') break;
+            prev = -1;
+            break;
+          }
+
+          if (prev >= 0){
+            // Find next nonblank row.
+            let next = (b + 1)|0;
+            while (next < total && String(lines[next]||'').trim() === '') next++;
+            if (next < total){
+              const itP = items[prev];
+              const itN = items[next];
+              if (itP && itP.kind==='item' && itN && itN.kind==='item'){
+                // Sibling check: same indent and listType.
+                if ((itP.indentCol|0) === (itN.indentCol|0) && String(itP.listType||'') === String(itN.listType||'')){
+                  const id0 = (itP.listBlockId|0);
+                  const id1 = (itN.listBlockId|0);
+                  if ((id0|0) > 0 && (id0|0) === (id1|0)) blockLoose[id0|0] = 1;
+                }
+              }
+            }
+          }
+
+          row = (b + 1)|0;
+        }
+
+        // 3) Apply loose flag to all items in loose blocks.
+        for (let r=0; r<total; r++){
+          const it = items[r|0];
+          if (it && it.kind==='item'){
+            const id = (it.listBlockId|0);
+            if ((id|0) > 0 && blockLoose[id|0]) it.listLoose = true;
+          }
+        }
+      }catch{}
+
       _mdListCache = { tick, lineCount:(lines.length|0), items, dirty:false, builtAt: Date.now() };
       return _mdListCache;
     }catch{ return _mdListCache; }
@@ -1081,6 +1189,14 @@ try{
                   }catch{}
                 }
               }
+            }
+          }catch{}
+
+          // #1762: Propagate loose spacing to all sibling items in a loose list block.
+          try{
+            if (!edge){
+              const info = _mdUListInfo && _mdUListInfo(srcText, row|0, lines);
+              if (info && info.kind==='item' && info.listLoose) edge = true;
             }
           }catch{}
           if (edge && !expandedEdge){
