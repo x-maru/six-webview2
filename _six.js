@@ -1,4 +1,4 @@
-const VERSION = '0.9.1.o';
+const VERSION = '0.9.1.p';
 // Build stamp (for verifying which _six.js is actually running)
 // NOTE: Intentionally ASCII-only; fullwidth variants should be treated as invalid.
 try{ window.__sixBuildTs = '2025-12-29T00:00:00Z'; }catch{}
@@ -773,9 +773,12 @@ try{
       try{
         const total = (items.length|0);
 
-        // 1) Assign a block id per sibling list block (same depth/indentCol/listType), separated by non-list nonblank lines.
+        const TAB = 4;
+        const _bucket = (c)=>{ c = Math.max(0, c|0); return (c - (c % TAB))|0; };
+
+        // 1) Assign a block id per sibling list block (same depth/indent bucket/listType), separated by non-list nonblank lines.
         let nextBlockId = 1;
-        const groups2 = Object.create(null); // depth -> { indentCol, listType, id }
+        const groups2 = Object.create(null); // depth -> { indentBucket, listType, id }
         const flushDepth2 = (d)=>{ try{ delete groups2[d|0]; }catch{} };
         const flushDeeperThan2 = (depth0)=>{
           const d0 = depth0|0;
@@ -792,12 +795,12 @@ try{
           if (it && it.kind==='item'){
             const d = Math.max(1, it.depth|0);
             flushDeeperThan2(d|0);
-            const ic = (it.indentCol|0);
+            const ib = _bucket(it.indentCol|0);
             const lt = String(it.listType||'');
             const g0 = groups2[d|0];
-            if (!g0 || (g0.indentCol|0) !== (ic|0) || String(g0.listType||'') !== lt){
+            if (!g0 || (g0.indentBucket|0) !== (ib|0) || String(g0.listType||'') !== lt){
               flushDepth2(d|0);
-              groups2[d|0] = { indentCol:(ic|0), listType: lt, id:(nextBlockId++|0) };
+              groups2[d|0] = { indentBucket:(ib|0), listType: lt, id:(nextBlockId++|0) };
             }
             try{ it.listBlockId = (groups2[d|0].id|0); }catch{}
             continue;
@@ -845,7 +848,7 @@ try{
               const itN = items[next];
               if (itP && itP.kind==='item' && itN && itN.kind==='item'){
                 // Sibling check: same indent and listType.
-                if ((itP.indentCol|0) === (itN.indentCol|0) && String(itP.listType||'') === String(itN.listType||'')){
+                if ((_bucket(itP.indentCol|0)|0) === (_bucket(itN.indentCol|0)|0) && String(itP.listType||'') === String(itN.listType||'')){
                   const id0 = (itP.listBlockId|0);
                   const id1 = (itN.listBlockId|0);
                   if ((id0|0) > 0 && (id0|0) === (id1|0)) blockLoose[id0|0] = 1;
@@ -1018,7 +1021,10 @@ try{
         const nextInfo = _mdUListInfo(String(arr[next]||''), next|0, arr);
         if (!(nextInfo && nextInfo.kind === 'item')) return null;
         if (!Number.isFinite(prevInfo.indentCol) || !Number.isFinite(nextInfo.indentCol)) return null;
-        if ((prevInfo.indentCol|0) !== (nextInfo.indentCol|0)) return null;
+        // #1764: Allow up to 3-space slack by comparing indent buckets.
+        const TAB = 4;
+        const _bucket = (c)=>{ c = Math.max(0, c|0); return (c - (c % TAB))|0; };
+        if ((_bucket(prevInfo.indentCol)|0) !== (_bucket(nextInfo.indentCol)|0)) return null;
         const t0 = (prevInfo && prevInfo.listType) ? String(prevInfo.listType||'') : '';
         const t1 = (nextInfo && nextInfo.listType) ? String(nextInfo.listType||'') : '';
         if (t0 && t1 && t0 !== t1) return null;
