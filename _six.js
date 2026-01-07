@@ -1,4 +1,4 @@
-const VERSION = '0.9.1.p';
+const VERSION = '0.9.1.q';
 // Build stamp (for verifying which _six.js is actually running)
 // NOTE: Intentionally ASCII-only; fullwidth variants should be treated as invalid.
 try{ window.__sixBuildTs = '2025-12-29T00:00:00Z'; }catch{}
@@ -699,11 +699,12 @@ try{
         stack.push({ listType, contentIndentCol });
       }
 
-      // Ordered list marker alignment (#1754/#1755): compute max digit width per list block.
-      // - Applies only to clean display (render-time), but computed here for O(n).
-      // - Block boundary: a non-list nonblank line ends all active groups.
-      // - New item at same depth with different indent bucket/listType starts a new group.
+      // Ordered list marker alignment (#1754/#1755/#1765):
+      // - Compute max digit width per list block.
+      // - Optionally compute display digits with auto-increment (display-only).
+      //   Enabled only when window.SIX_OPTIONS.md_autoIncrement === true.
       try{
+        const autoInc = !!(window && window.SIX_OPTIONS && (window.SIX_OPTIONS.md_autoIncrement === true));
         const TAB = 4;
         const _indentBucket = (indentCol)=>{
           const c = Math.max(0, indentCol|0);
@@ -711,7 +712,7 @@ try{
           // Bucket: 0..3 => 0, 4..7 => 4, 8..11 => 8, ...
           return (c - (c % TAB))|0;
         };
-        const groups = Object.create(null); // depth -> { indentBucket, rows:[], maxDigits }
+        const groups = Object.create(null); // depth -> { indentBucket, rows:[], maxDigits, nextNum, started }
         const flushDepth = (d)=>{
           const g = groups[d];
           if (!g || !g.rows || g.rows.length===0) { try{ delete groups[d]; }catch{}; return; }
@@ -745,16 +746,45 @@ try{
             }
             const indentCol = (it.indentCol|0);
             const ib = _indentBucket(indentCol|0);
-            const digitsLen = Math.max(1, ((it.markerLen|0) - 1));
             const g0 = groups[d|0];
             if (!g0 || (g0.indentBucket|0) !== (ib|0)){
               // New block at this depth (different indent bucket or first time).
               flushDepth(d|0);
-              groups[d|0] = { indentBucket:(ib|0), rows:[row|0], maxDigits:(digitsLen|0) };
-            } else {
-              g0.rows.push(row|0);
-              g0.maxDigits = Math.max(g0.maxDigits|0, digitsLen|0);
+              groups[d|0] = { indentBucket:(ib|0), rows:[], maxDigits:1, nextNum:null, started:false };
             }
+
+            const g1 = groups[d|0];
+
+            // Source digits (string) from markerText like "123." or "123)".
+            let srcDigits = '';
+            try{ srcDigits = String(it.markerText||'').replace(/[.)]$/,''); }catch{ srcDigits = ''; }
+            if (!srcDigits) srcDigits = '1';
+
+            // Display digits.
+            let dispDigits = srcDigits;
+            if (autoInc){
+              if (!g1.started){
+                // First item: keep source digits as-is.
+                dispDigits = srcDigits;
+                let n0 = null;
+                try{ n0 = parseInt(srcDigits,10); }catch{ n0 = null; }
+                if (!Number.isFinite(n0)) n0 = 1;
+                g1.nextNum = (+n0) + 1;
+                g1.started = true;
+              } else {
+                let n1 = null;
+                try{ n1 = (g1.nextNum!=null) ? (+g1.nextNum) : (parseInt(srcDigits,10) + 1); }catch{ n1 = null; }
+                if (!Number.isFinite(n1)) n1 = 1;
+                dispDigits = String(Math.trunc(n1));
+                g1.nextNum = (+n1) + 1;
+              }
+            }
+
+            try{ it.olDispDigitsText = String(dispDigits||''); }catch{}
+
+            const digitsLen = Math.max(1, (String(dispDigits||'').length|0));
+            g1.rows.push(row|0);
+            g1.maxDigits = Math.max(g1.maxDigits|0, digitsLen|0);
             continue;
           }
           if (it && it.kind==='cont'){
@@ -947,12 +977,14 @@ try{
         // - Padding is *inside* the marker region (visual-only); source text is unchanged.
         // - Draft caret line keeps raw because listItem isn't applied there.
         let pad = 0;
+        let dispDigits = digits;
+        try{ if (ul && ul.olDispDigitsText != null) dispDigits = String(ul.olDispDigitsText||dispDigits); }catch{ dispDigits = digits; }
         try{
           const maxDigits = (ul && Number.isFinite(ul.olMaxDigits)) ? (ul.olMaxDigits|0) : 0;
           if ((maxDigits|0) > 0){
             // If the user already indented the marker (up to 3 spaces at depth 1), don't add extra full-space pad.
             const slack = ((ul.depth|0) === 1) ? Math.max(0, Math.min(3, (ul.indentCol|0))) : 0;
-            pad = Math.max(0, (maxDigits|0) - (digits.length|0) - (slack|0));
+            pad = Math.max(0, (maxDigits|0) - ((dispDigits.length|0)||1) - (slack|0));
           }
         }catch{ pad = 0; }
         // #1756: Use visual-only half-spaces: left 0.5ch + right 0.5ch.
@@ -960,7 +992,7 @@ try{
         const markerOut =
           '<span class="md-olbox" style="--olpad:' + (pad|0) + '">'
           + '<span class="md-olpad md-olpadL"></span>'
-          + _mdEscHtml(digits + '.')
+          + _mdEscHtml(String(dispDigits||digits) + '.')
           + '<span class="md-olpad md-olpadR"></span>'
           + '</span>';
         const markerSelected = hasRange && (re > ms) && (rs < me);
@@ -7674,10 +7706,11 @@ try{
           if (!(ul && ul.kind==='item' && String(ul.listType||'')==='ol')) return 0;
           const maxDigits = (ul && Number.isFinite(ul.olMaxDigits)) ? (ul.olMaxDigits|0) : 0;
           if (!(maxDigits > 0)) return 0;
-          const digitsLen = Math.max(1, ((ul.markerLen|0) - 1));
+          const srcDigitsLen = Math.max(1, ((ul.markerLen|0) - 1));
+          let dispDigitsLen = srcDigitsLen|0;
+          try{ if (ul && ul.olDispDigitsText != null) dispDigitsLen = Math.max(1, (String(ul.olDispDigitsText||'').length|0)); }catch{ dispDigitsLen = srcDigitsLen|0; }
           const slack = ((ul.depth|0) === 1) ? Math.max(0, Math.min(3, (ul.indentCol|0))) : 0;
-          const pad = Math.max(0, (maxDigits|0) - (digitsLen|0) - (slack|0));
-          if (!(pad > 0)) return 0;
+          const pad = Math.max(0, (maxDigits|0) - (dispDigitsLen|0) - (slack|0));
 
           // Measure 1ch (space) width in px for this row.
           let spaceW = 0;
@@ -7695,10 +7728,16 @@ try{
 
           const mi = ((ul.markerIdx|0) - (dispPrefix|0))|0;
           const dotEnd = (mi|0) + (ul.markerLen|0);
+          const digitEnd = (mi|0) + (srcDigitsLen|0);
           const col = colN|0;
           if (col < (mi|0)) return 0;
-          if (col <= (dotEnd|0)) return (pad * spaceW) + half;
-          return (pad * spaceW);
+          const deltaDigits = (dispDigitsLen|0) - (srcDigitsLen|0);
+          const shiftAfter = ((pad + deltaDigits) * spaceW);
+          const shiftDigit = (pad * spaceW) + half;
+          const shiftDot = shiftAfter + half;
+          if (col < (digitEnd|0)) return shiftDigit;
+          if (col <= (dotEnd|0)) return shiftDot;
+          return shiftAfter;
         }catch{ return 0; }
       };
 
@@ -12967,10 +13006,12 @@ try{
         if (!(ul && ul.kind==='item' && String(ul.listType||'')==='ol')) return 0;
         const maxDigits = (ul && Number.isFinite(ul.olMaxDigits)) ? (ul.olMaxDigits|0) : 0;
         if (!(maxDigits > 0)) return 0;
-        const digitsLen = Math.max(1, ((ul.markerLen|0) - 1));
+        const srcDigitsLen = Math.max(1, ((ul.markerLen|0) - 1));
+        let dispDigitsLen = srcDigitsLen|0;
+        try{ if (ul && ul.olDispDigitsText != null) dispDigitsLen = Math.max(1, (String(ul.olDispDigitsText||'').length|0)); }catch{ dispDigitsLen = srcDigitsLen|0; }
         // Match render-time pad logic (accounts for up-to-3-space slack at depth 1).
         const slack = ((ul.depth|0) === 1) ? Math.max(0, Math.min(3, (ul.indentCol|0))) : 0;
-        const pad = Math.max(0, (maxDigits|0) - (digitsLen|0) - (slack|0));
+        const pad = Math.max(0, (maxDigits|0) - (dispDigitsLen|0) - (slack|0));
         // space width (scaled)
         _measureSpan.textContent = ' ';
         const spaceW = ((_measureSpan.getBoundingClientRect().width || 0) * (_mdScaleX||1)) || 0;
@@ -12978,12 +13019,19 @@ try{
         const half = spaceW * 0.5;
         const mi = (ul.markerIdx|0);
         const dotEndCol = (mi|0) + (ul.markerLen|0);
+        const digitEndCol = (mi|0) + (srcDigitsLen|0);
         const col = colN|0;
         if (col < (mi|0)) return 0;
-        // Within marker (digits + '.'), shift by pad + left-half.
-        if (col <= (dotEndCol|0)) return (pad * spaceW) + half;
-        // After marker+first-space replacement: net shift is integer pad only.
-        return (pad * spaceW);
+        const deltaDigits = (dispDigitsLen|0) - (srcDigitsLen|0);
+        const shiftAfter = ((pad + deltaDigits) * spaceW);
+        const shiftDigit = (pad * spaceW) + half;
+        const shiftDot = shiftAfter + half;
+        // Digits area: shift by pad + left-half.
+        if (col < (digitEndCol|0)) return shiftDigit;
+        // Dot/space area: include the digit-count delta as well.
+        if (col <= (dotEndCol|0)) return shiftDot;
+        // After marker+first-space replacement.
+        return shiftAfter;
       }catch{ return 0; }
     };
     try{ x += _mdOlExtraXpx(caretCol|0); }catch{}
@@ -20897,9 +20945,11 @@ try{
               const ul = _mdUListInfo && _mdUListInfo(String(infoR.srcText||''), r|0, lines);
               if (ul && ul.kind==='item' && String(ul.listType||'')==='ol' && Number.isFinite(ul.markerIdx) && Number.isFinite(ul.markerLen) && Number.isFinite(ul.olMaxDigits)){
                 const maxDigits = (ul.olMaxDigits|0);
-                const digitsLen = Math.max(1, ((ul.markerLen|0) - 1));
+                const srcDigitsLen = Math.max(1, ((ul.markerLen|0) - 1));
+                let dispDigitsLen = srcDigitsLen|0;
+                try{ if (ul && ul.olDispDigitsText != null) dispDigitsLen = Math.max(1, (String(ul.olDispDigitsText||'').length|0)); }catch{ dispDigitsLen = srcDigitsLen|0; }
                 const slack = ((ul.depth|0) === 1) ? Math.max(0, Math.min(3, (ul.indentCol|0))) : 0;
-                const pad = Math.max(0, (maxDigits|0) - (digitsLen|0) - (slack|0));
+                const pad = Math.max(0, (maxDigits|0) - (dispDigitsLen|0) - (slack|0));
                 // Measure 1ch (space) width at this row style.
                 let spaceW = 0;
                 try{
@@ -20909,10 +20959,13 @@ try{
                 if (spaceW > 0){
                   const half = spaceW * 0.5;
                   const padPx = (pad|0) * spaceW;
-                  const shiftMarker = padPx + half;
-                  const shiftAfter = padPx;
+                  const deltaDigits = (dispDigitsLen|0) - (srcDigitsLen|0);
+                  const shiftAfter = padPx + (deltaDigits * spaceW);
+                  const shiftDigit = padPx + half;
+                  const shiftDot = shiftAfter + half;
                   const mi = ((ul.markerIdx|0) - (infoR.prefixLen|0))|0;
                   const dotEnd = (mi|0) + (ul.markerLen|0);
+                  const digitEnd = (mi|0) + (srcDigitsLen|0);
                   const ww = wrapOn ? (wPx|0) : 1000000;
                   const xAt = (col)=>{
                     try{
@@ -20922,15 +20975,16 @@ try{
                   };
                   const xMarker = xAt(mi|0);
                   const xDotEnd = xAt(dotEnd|0);
-                  const xDotEndRendered = xDotEnd + shiftMarker;
+                  const xDotEndRendered = xDotEnd + shiftDot;
                   const clickX = (+desiredX||0);
 
                   if (clickX >= xMarker){
                     // Clicking inside the marker's left visual padding should land on the first digit.
-                    if (clickX < (xMarker + shiftMarker)){
+                    if (clickX < (xMarker + shiftDigit)){
                       forceCol = (mi|0);
                     } else {
-                      desiredX = clickX - ((clickX < xDotEndRendered) ? shiftMarker : shiftAfter);
+                      // For X within digits area, subtract only the digit pad; for dot/after, include digit-count delta.
+                      desiredX = clickX - ((clickX < xDotEndRendered) ? shiftDot : shiftAfter);
                       if (desiredX < 0) desiredX = 0;
                     }
                   }
