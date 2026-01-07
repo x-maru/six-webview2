@@ -1,4 +1,4 @@
-const VERSION = '0.9.1.j';
+const VERSION = '0.9.1.m';
 // Build stamp (for verifying which _six.js is actually running)
 // NOTE: Intentionally ASCII-only; fullwidth variants should be treated as invalid.
 try{ window.__sixBuildTs = '2025-12-29T00:00:00Z'; }catch{}
@@ -962,7 +962,9 @@ try{
       // INSERT range selection (native selection) for md-rich rendering.
       // This avoids textarea selection drift when wrap/variable per-line heights are active.
       try{
-        if (_mode === 'INSERT' && editor && typeof editor.selectionStart === 'number' && typeof editor.selectionEnd === 'number'){
+        // #1759: In md-rich, textarea glyphs are hidden; render the native selection range
+        // for any mode (INSERT/NORMAL) so mouse selection (drag/dblclick) stays visible.
+        if (!_selStart && !_selEnd && editor && typeof editor.selectionStart === 'number' && typeof editor.selectionEnd === 'number'){
           const sOff = (editor.selectionStart|0);
           const eOff = (editor.selectionEnd|0);
           const ss = Math.min(sOff, eOff)|0;
@@ -12426,21 +12428,36 @@ try{
     // (Stripe and gutter-stripe can jitter due to line-boundary delta sync.)
     const _altScrolling = !!(document && document.body && document.body.classList && document.body.classList.contains('alt-scrolling'));
 
+    // Helper: avoid collapsing native range selections (mouse drag/dblclick) in md-rich.
+    const _hasNativeRangeSel = ()=>{
+      try{
+        if (!editor) return false;
+        const s = (editor.selectionStart|0);
+        const e = (editor.selectionEnd|0);
+        return (s !== e);
+      }catch{ return false; }
+    };
+
     // #1494: In markdown clean display, prevent horizontal caret moves on HR/setext underline lines.
     try{
-      const changed = _mdClampCaretForSpecialCleanLines();
-      if (changed){
-        if (_visualActive) _updateVisualSelection();
-        else _syncNativeSelectionToCaret();
+      if (!_hasNativeRangeSel()){
+        const changed = _mdClampCaretForSpecialCleanLines();
+        if (changed){
+          if (_visualActive) _updateVisualSelection();
+          else _syncNativeSelectionToCaret();
+        }
       }
     }catch{}
 
-    // #1756: In markdown clean display, skip ordered-list marker space.
+    // #1756/#1759: In markdown clean display, skip ordered-list marker space.
+    // Do NOT collapse native range selections (mouse drag/dblclick).
     try{
-      const changed2 = _mdClampCaretForCleanOListHalfSpaces();
-      if (changed2){
-        if (_visualActive) _updateVisualSelection();
-        else _syncNativeSelectionToCaret();
+      if (!_hasNativeRangeSel()){
+        const changed2 = _mdClampCaretForCleanOListHalfSpaces();
+        if (changed2){
+          if (_visualActive) _updateVisualSelection();
+          else _syncNativeSelectionToCaret();
+        }
       }
     }catch{}
 
@@ -20610,17 +20627,19 @@ try{
     // md-rich click suppression flag: avoid briefly rendering caret based on native textarea hit-testing.
     // (Native textarea assumes fixed LINE_HEIGHT; md-rich has variable line heights.)
     let _mdMouseClickPendingAdjust = false;
-    const _tryAdjustCaretFromMouseMdRich = (ev)=>{
+    const _tryAdjustCaretFromMouseMdRich = (ev, opt)=>{
       try{
         if (!_mdRichActive()) return false;
         if (!ev) return false;
         try{ if (window && window._imeComposing===true) return false; }catch{}
         // Only primary button single-click; don't interfere with selection drag/double-click.
         try{ if (typeof ev.button === 'number' && ev.button !== 0) return false; }catch{}
-        try{ if ((ev.detail|0) >= 2) return false; }catch{}
+        try{ if ((ev.detail|0) >= 2 && !(opt && opt.allowMultiClick)) return false; }catch{}
         const s0 = editor.selectionStart|0;
         const e0 = editor.selectionEnd|0;
-        if (s0 !== e0) return false;
+        // By default, do not interfere with native range selection (drag). For dbl/triple/drag correction,
+        // allow hit-testing even when a range exists.
+        if (s0 !== e0 && !(opt && opt.allowRange)) return false;
 
         const lines = _splitLines();
         if (!lines || !lines.length) return false;
@@ -20811,6 +20830,8 @@ try{
 
         const c = Math.max(0, Math.min((String(infoR.srcText||'').length|0), ((infoR.prefixLen|0) + (colDisp|0))|0));
         const off = _offsetFromRC(r|0, c|0) | 0;
+        // Optional: return hit without applying selection (for dblclick custom selection).
+        try{ if (opt && opt.returnHit){ return { ok:true, r:(r|0), c:(c|0), off:(off|0) }; } }catch{}
         // Apply native selection so all existing downstream logic stays consistent.
         try{ editor.selectionStart = editor.selectionEnd = off; }catch{}
         caretRow = r|0;
@@ -20819,27 +20840,82 @@ try{
       }catch{}
       return false;
     };
+    // md-rich mouse selection correction state (#1760)
+    let _mdMouseSelActive = false;
+    let _mdMouseSelDragging = false;
+    let _mdMouseSelAnchorOff = 0;
+
     // Ensure single-click updates after browser updates selection
     // 未確定中は選択同期の遅延呼び出しを抑制（不要なレイアウト測定を避ける）
     editor.addEventListener('mousedown', (e)=>{
       if (window._imeComposing===true) return;
       try{
         if (_mdRichActive()){
-          // For single-click, suppress early select-sync until we can correct caret from mouse coords.
-          // Drag selection (range) is not suppressed (see select handler guard).
-          _mdMouseClickPendingAdjust = true;
+          // #1761: Native textarea hit-testing assumes fixed line height and can jump the anchor.
+          // Take over mousedown for single-click/drag (detail==1) and set the anchor from md-rich hit-test.
+          try{ if ((e && (e.detail|0) >= 2)) { return; } }catch{}
+          try{ if (e && typeof e.preventDefault==='function') e.preventDefault(); }catch{}
+          try{ if (e && typeof e.stopPropagation==='function') e.stopPropagation(); }catch{}
+
+          const hit = (function(){
+            try{ return _tryAdjustCaretFromMouseMdRich(e, { allowMultiClick:true, allowRange:true, returnHit:true }); }catch{ return null; }
+          })();
+          const off0 = (hit && hit.ok) ? (hit.off|0) : (editor.selectionStart|0);
+
+          // Initialize anchor and collapse selection at the corrected caret.
+          try{ editor.setSelectionRange(off0|0, off0|0, 'none'); }catch{ try{ editor.selectionStart = off0|0; editor.selectionEnd = off0|0; }catch{} }
+          try{ const rc0 = _rcFromOffset(off0|0); caretRow = rc0.r; caretCol = rc0.c; }catch{}
+          try{ _repositionCaret(); updateGutter(); }catch{}
+
+          _mdMouseSelActive = true;
+          _mdMouseSelDragging = false;
+          _mdMouseSelAnchorOff = (off0|0);
+          _mdMouseClickPendingAdjust = false;
           return;
         }
       }catch{}
       setTimeout(syncCaretFromSelection, 0);
     });
+
+    // md-rich drag selection correction: map mouse coords to row/col and update selectionRange.
+    // This fixes fixed-LINE_HEIGHT native hit-testing drift under variable line heights/wrap.
+    editor.addEventListener('mousemove', (e)=>{
+      try{
+        if (window._imeComposing===true) return;
+        if (!_mdRichActive()) return;
+        if (!_mdMouseSelActive) return;
+        // Only while primary button is down.
+        try{ if (!e || ((e.buttons|0) & 1) === 0) return; }catch{ return; }
+        // Don't override modified selections (Shift/Ctrl), keep minimal.
+        try{ if (e.shiftKey || e.ctrlKey || e.metaKey || e.altKey) return; }catch{}
+
+        const hit = _tryAdjustCaretFromMouseMdRich(e, { allowMultiClick:true, allowRange:true, returnHit:true });
+        if (!(hit && hit.ok)) return;
+        const curOff = (hit.off|0);
+        const a = (_mdMouseSelAnchorOff|0);
+        const sOff = Math.min(a|0, curOff|0);
+        const eOff = Math.max(a|0, curOff|0);
+        const dir = (curOff >= a) ? 'forward' : 'backward';
+        try{ editor.setSelectionRange(sOff|0, eOff|0, dir); }catch{ try{ editor.selectionStart = sOff|0; editor.selectionEnd = eOff|0; }catch{} }
+        _mdMouseSelDragging = true;
+        // Keep overlays in sync during drag.
+        try{ caretRow = (_rcFromOffset(curOff|0).r|0); caretCol = (_rcFromOffset(curOff|0).c|0); }catch{}
+        try{ _repositionCaret(); updateGutter(); }catch{}
+        try{ _scheduleListCharsRender && _scheduleListCharsRender('md-drag'); }catch{}
+        try{ _mdRenderTextLayer && _mdRenderTextLayer(); }catch{}
+      }catch{}
+    }, { passive:false });
     editor.addEventListener('mouseup', (e)=>{
       try{
         if (_mdMouseClickPendingAdjust){
-          try{ _tryAdjustCaretFromMouseMdRich(e); }catch{}
+          // If we were dragging a range, don't collapse/adjust to a single caret.
+          if (!_mdMouseSelDragging){
+            try{ _tryAdjustCaretFromMouseMdRich(e); }catch{}
+          }
           _mdMouseClickPendingAdjust = false;
         }
       }catch{}
+      try{ _mdMouseSelActive = false; }catch{}
       syncCaretFromSelection();
     });
     editor.addEventListener('click', (e)=>{
@@ -20849,7 +20925,141 @@ try{
           _mdMouseClickPendingAdjust = false;
         }
       }catch{}
+      try{ _mdMouseSelActive = false; }catch{}
       syncCaretFromSelection();
+    });
+
+    // #1760: md-rich triple-click line selection (fix drift)
+    editor.addEventListener('click', (e)=>{
+      try{
+        if (window._imeComposing===true) return;
+        if (!_mdRichActive()) return;
+        if (((e && e.detail)|0) !== 3) return;
+        try{ if (e && typeof e.preventDefault==='function') e.preventDefault(); }catch{}
+        try{ if (e && typeof e.stopPropagation==='function') e.stopPropagation(); }catch{}
+
+        const hit = _tryAdjustCaretFromMouseMdRich(e, { allowMultiClick:true, allowRange:true, returnHit:true });
+        if (!(hit && hit.ok)) return;
+        const r = (hit.r|0);
+        const lines = _splitLines();
+        const line = String((lines && r>=0 && r<lines.length) ? (lines[r]||'') : '');
+        const sOff = _offsetFromRC(r|0, 0) | 0;
+        const eOff = _offsetFromRC(r|0, (line.length|0)) | 0;
+        try{ editor.setSelectionRange(sOff|0, eOff|0, 'forward'); }catch{ try{ editor.selectionStart = sOff|0; editor.selectionEnd = eOff|0; }catch{} }
+        try{ caretRow = r|0; caretCol = (line.length|0); }catch{}
+        try{ _repositionCaret(); updateGutter(); }catch{}
+        try{ _mdRenderTextLayer && _mdRenderTextLayer(); }catch{}
+      }catch{}
+    }, true);
+
+    // #1759: md-rich dblclick selection
+    // - NORMAL: make selection visible (rendered in #textLayer)
+    // - INSERT: fix drift from native fixed-line-height hit-testing
+    editor.addEventListener('dblclick', (e)=>{
+      try{
+        if (window._imeComposing===true) return;
+        if (!_mdRichActive()) return;
+        try{ if (e && typeof e.preventDefault==='function') e.preventDefault(); }catch{}
+        try{ if (e && typeof e.stopPropagation==='function') e.stopPropagation(); }catch{}
+        try{ _mdMouseClickPendingAdjust = false; }catch{}
+
+        // Hit-test row/col using md-rich layout.
+        let hit = null;
+        try{ hit = _tryAdjustCaretFromMouseMdRich(e, { allowMultiClick:true, allowRange:true, returnHit:true }); }catch{ hit = null; }
+        if (!(hit && hit.ok)){
+          // Fallback: sync to native selection
+          syncCaretFromSelection();
+          return;
+        }
+
+        const r = (hit.r|0);
+        let c = (hit.c|0);
+        const lines = _splitLines();
+        const line = String((lines && r>=0 && r<lines.length) ? (lines[r]||'') : '');
+        const n = (line.length|0);
+        c = Math.max(0, Math.min(n, c|0));
+
+        // If on spaces, bias to the next non-space; if none, bias left.
+        try{
+          if (c < n && _wordTypeAtInLine(line, c|0) === _WT_SPACE){
+            let cr = c|0;
+            while (cr < n && _wordTypeAtInLine(line, cr) === _WT_SPACE) cr = _nextIndex(line, cr);
+            if (cr < n) c = cr|0;
+            else {
+              let cl = c|0;
+              while (cl > 0){
+                const p = _prevIndex(line, cl);
+                if (_wordTypeAtInLine(line, p) !== _WT_SPACE){ cl = p; break; }
+                if (p <= 0){ cl = 0; break; }
+                cl = p;
+              }
+              c = Math.max(0, Math.min(n, cl|0));
+            }
+          }
+        }catch{}
+
+        // Compute word range (JP-aware-ish, aligned with existing word-type logic).
+        let sCol = c|0;
+        let eCol = c|0;
+        try{
+          if (c >= n){ sCol = n; eCol = n; }
+          else {
+            const tRun = _wordTypeAtInLine(line, c|0);
+
+            // Right boundary: reuse JP-aware end-of-word logic.
+            try{ eCol = (_wordEndInLine(r|0, c|0).c|0); }catch{ eCol = (c|0) + 1; }
+            eCol = Math.max(0, Math.min(n, eCol|0));
+
+            // Left boundary: mirror the run grouping used by prev-word logic (line-local).
+            let cc = c|0;
+            if (tRun === _WT_HAN){
+              while (cc > 0){
+                const p = _prevIndex(line, cc);
+                if (_wordTypeAtInLine(line, p) !== _WT_HAN) break;
+                cc = p;
+              }
+              sCol = cc|0;
+            } else if (tRun === _WT_HIRA || tRun === _WT_KATA){
+              while (cc > 0){
+                const p = _prevIndex(line, cc);
+                const tp = _wordTypeAtInLine(line, p);
+                const cp = _cpAt(line, p);
+                if (tp === tRun || _isKanaLongLikeCp(cp)) { cc = p; continue; }
+                break;
+              }
+              // Include one preceding Han block (matches _prevWordStart behavior).
+              if (cc > 0){
+                const p2 = _prevIndex(line, cc);
+                if (_wordTypeAtInLine(line, p2) === _WT_HAN){
+                  let hh = p2;
+                  while (hh > 0){
+                    const p3 = _prevIndex(line, hh);
+                    if (_wordTypeAtInLine(line, p3) !== _WT_HAN) break;
+                    hh = p3;
+                  }
+                  cc = hh|0;
+                }
+              }
+              sCol = cc|0;
+            } else {
+              while (cc > 0){
+                const p = _prevIndex(line, cc);
+                if (_wordTypeAtInLine(line, p) !== tRun) break;
+                cc = p;
+              }
+              sCol = cc|0;
+            }
+          }
+        }catch{ sCol = c|0; eCol = Math.min(n, (c|0) + 1); }
+
+        const sOff = _offsetFromRC(r|0, sCol|0) | 0;
+        const eOff = _offsetFromRC(r|0, eCol|0) | 0;
+        try{ editor.setSelectionRange(sOff, eOff, 'forward'); }catch{ try{ editor.selectionStart = sOff; editor.selectionEnd = eOff; }catch{} }
+        // Ensure overlay sync now (select event should also fire, but be robust).
+        try{ const rc2 = _rcFromOffset(eOff|0); caretRow = rc2.r; caretCol = rc2.c; }catch{}
+        try{ _repositionCaret(); updateGutter(); }catch{}
+        try{ if (_mdRichActive && _mdRichActive()) _mdRenderTextLayer && _mdRenderTextLayer(); }catch{}
+      }catch{}
     });
     // INSERT中の単純クリックによるカーソル再配置でも、直前に入力があればUndoを区切る
     editor.addEventListener('click', ()=>{
