@@ -59,6 +59,12 @@ try{
   let _mdTextInner = null;
   let _mdBgLayer = null;
   let _mdBgInner = null;
+  let _mdCodeBgInner = null; // fenced code block background rectangles
+  let _mdCodeStripeInner = null; // active-line overlay inside fenced code blocks
+  let _mdCodeToolsEl = null; // hover tools for fenced code blocks
+  let _mdCodeToolsState = null; // { row, s, e } content range
+  let _mdLastCodeHoverAt = 0;
+  let _mdRenderGeom = null; // last md-rich render geometry (for hover hit-testing)
   let _mdVisualSuppressed = false; // reserved: temporarily disable rich visuals if needed
   let _mdImeRange = null; // { sOff,eOff }
   let _mdLastHorzDir = 0; // -1:left, +1:right (for md clean caret clamps)
@@ -275,6 +281,22 @@ try{
     try{ return _mdInlineCodeHtmlWithRange(s, null, 0, 0); }catch{ return _mdEscHtml(String(s||'')); }
   }
 
+  function _mdPlainHtmlWithRange(s, rangeClass, rs, re){
+    try{
+      const text = String(s||'');
+      if (!rangeClass) return _mdEscHtml(text);
+      const a = Math.max(0, Math.min(text.length|0, rs|0));
+      const b = Math.max(0, Math.min(text.length|0, re|0));
+      const x0 = Math.min(a|0, b|0);
+      const x1 = Math.max(a|0, b|0);
+      if ((x1|0) <= (x0|0)) return _mdEscHtml(text);
+      const pre = text.slice(0, x0|0);
+      const mid = text.slice(x0|0, x1|0);
+      const post = text.slice(x1|0);
+      return _mdEscHtml(pre) + '<span class="' + String(rangeClass||'') + '">' + _mdEscHtml(mid || ' ') + '</span>' + _mdEscHtml(post);
+    }catch{ return _mdEscHtml(String(s||'')); }
+  }
+
   function _mdImeUpdateRange(){
     try{
       if (!editor) return;
@@ -368,6 +390,34 @@ try{
         _mdBgLayer.appendChild(_mdBgInner);
       }
 
+      // Code block rect container (kept last so it can paint over md-bgline fills)
+      _mdCodeBgInner = _mdBgInner.querySelector('.md-codebg');
+      if (!_mdCodeBgInner){
+        _mdCodeBgInner = document.createElement('div');
+        _mdCodeBgInner.className = 'md-codebg';
+        _mdCodeBgInner.style.position = 'absolute';
+        _mdCodeBgInner.style.left = '0';
+        _mdCodeBgInner.style.right = '0';
+        _mdCodeBgInner.style.top = '0';
+        _mdCodeBgInner.style.bottom = '0';
+        _mdCodeBgInner.style.pointerEvents = 'none';
+        _mdBgInner.appendChild(_mdCodeBgInner);
+      }
+
+      // Active line overlay inside fenced code blocks (must be above .md-codebg)
+      _mdCodeStripeInner = _mdBgInner.querySelector('.md-codestripe');
+      if (!_mdCodeStripeInner){
+        _mdCodeStripeInner = document.createElement('div');
+        _mdCodeStripeInner.className = 'md-codestripe';
+        _mdCodeStripeInner.style.position = 'absolute';
+        _mdCodeStripeInner.style.left = '0';
+        _mdCodeStripeInner.style.right = '0';
+        _mdCodeStripeInner.style.top = '0';
+        _mdCodeStripeInner.style.bottom = '0';
+        _mdCodeStripeInner.style.pointerEvents = 'none';
+        _mdBgInner.appendChild(_mdCodeStripeInner);
+      }
+
       _mdTextLayer = document.getElementById('textLayer');
       if (!_mdTextLayer){
         _mdTextLayer = document.createElement('div');
@@ -386,9 +436,164 @@ try{
       try{ if (_mdBgLayer.parentNode !== parent){ parent.insertBefore(_mdBgLayer, caretLayer); } }catch{}
       try{ if (_mdTextLayer.parentNode !== parent){ parent.insertBefore(_mdTextLayer, caretLayer); } }catch{}
       try{ if (_mdBgLayer.nextSibling !== _mdTextLayer){ parent.insertBefore(_mdTextLayer, _mdBgLayer.nextSibling); } }catch{}
+
+      // Hover tools for fenced code blocks (must be above caret layer; pointer-events enabled)
+      try{
+        if (!_mdCodeToolsEl){
+          _mdCodeToolsEl = document.getElementById('mdCodeTools');
+          if (!_mdCodeToolsEl){
+            _mdCodeToolsEl = document.createElement('div');
+            _mdCodeToolsEl.id = 'mdCodeTools';
+            _mdCodeToolsEl.className = 'md-code-tools';
+            _mdCodeToolsEl.style.position = 'absolute';
+            _mdCodeToolsEl.style.display = 'none';
+            _mdCodeToolsEl.style.pointerEvents = 'auto';
+            _mdCodeToolsEl.style.zIndex = '5';
+
+            const mkBtn = (cls, title, label)=>{
+              const b = document.createElement('button');
+              b.type = 'button';
+              b.className = 'md-code-tool-btn ' + cls;
+              b.title = title;
+              const ico = document.createElement('span');
+              ico.className = 'md-code-tool-ico';
+              const p1 = document.createElement('span'); p1.className='p p1'; p1.textContent='📄';
+              const p2 = document.createElement('span'); p2.className='p p2'; p2.textContent='📄';
+              const arr = document.createElement('span'); arr.className='arr'; arr.textContent='➜';
+              ico.appendChild(p1); ico.appendChild(p2); ico.appendChild(arr);
+              const txt = document.createElement('span');
+              txt.className = 'md-code-tool-txt';
+              txt.textContent = label;
+              b.appendChild(ico);
+              b.appendChild(txt);
+              return b;
+            };
+            const bY = mkBtn('is-yank', 'コードブロック内を行yank', 'yank');
+            const bC = mkBtn('is-clip', 'コードブロック内をWindowsクリップボードへ行コピー', 'clip');
+
+            bY.addEventListener('mousedown', (e)=>{ try{ e.preventDefault(); e.stopPropagation(); }catch{} }, true);
+            bC.addEventListener('mousedown', (e)=>{ try{ e.preventDefault(); e.stopPropagation(); }catch{} }, true);
+            bY.addEventListener('click', (e)=>{ try{ e.preventDefault(); e.stopPropagation(); }catch{} try{ _mdCodeToolsDoYank(); }catch{} }, true);
+            bC.addEventListener('click', (e)=>{ try{ e.preventDefault(); e.stopPropagation(); }catch{} try{ _mdCodeToolsDoClip(); }catch{} }, true);
+
+            _mdCodeToolsEl.appendChild(bY);
+            _mdCodeToolsEl.appendChild(bC);
+          }
+        }
+        if (_mdCodeToolsEl && _mdCodeToolsEl.parentNode !== parent){ parent.appendChild(_mdCodeToolsEl); }
+      }catch{}
       _mdTextLayer.style.display = 'none';
       try{ _mdBgLayer.style.display = 'none'; }catch{}
     }catch{}
+  }
+
+  function _mdCodeBlockContentRangeAtRow(row, fc){
+    try{
+      if (!fc || !fc.kind) return null;
+      const k = (fc.kind[row|0]|0);
+      if ((k|0) !== 2) return null;
+      let s = (row|0);
+      let e = (row|0);
+      while ((s|0) > 0 && ((fc.kind[(s-1)|0]|0) === 2)) s = (s-1)|0;
+      while (((e+1)|0) < (fc.kind.length|0) && ((fc.kind[(e+1)|0]|0) === 2)) e = (e+1)|0;
+      return { s:s|0, e:e|0 };
+    }catch{ return null; }
+  }
+  function _mdCodeToolsHide(){
+    try{ _mdCodeToolsState = null; }catch{}
+    try{ if (_mdCodeToolsEl){ _mdCodeToolsEl.style.display='none'; _mdCodeToolsEl.style.left=''; _mdCodeToolsEl.style.top=''; _mdCodeToolsEl.style.right=''; } }catch{}
+  }
+  function _mdCodeToolsShowAt(topPx, rightPx){
+    try{
+      if (!_mdCodeToolsEl) return;
+      _mdCodeToolsEl.style.top = (topPx|0) + 'px';
+      _mdCodeToolsEl.style.right = (rightPx|0) + 'px';
+      _mdCodeToolsEl.style.display = 'flex';
+    }catch{}
+  }
+  function _mdCodeToolsDoYank(){
+    try{
+      const st = _mdCodeToolsState;
+      if (!st) return;
+      const s = (st.s|0), e = (st.e|0);
+      if ((e|0) < (s|0)) return;
+      _yankWholeLines && _yankWholeLines(s|0, ((e - s + 1)|0));
+      try{ toast('yanked code block (linewise).', 900); }catch{}
+      try{ editor && editor.focus && editor.focus(); }catch{}
+    }catch{}
+  }
+  function _mdCodeToolsDoClip(){
+    try{
+      const st = _mdCodeToolsState;
+      if (!st) return;
+      const s = (st.s|0), e = (st.e|0);
+      if ((e|0) < (s|0)) return;
+      const lines = _splitLines();
+      const txt = lines.slice(s|0, (e|0)+1).join('\n');
+      try{
+        const endLen = (String(lines[e|0]||'').length|0);
+        _flashYanked && _flashYanked({ r:(s|0), c:0 }, { r:(e|0), c:(endLen|0) });
+      }catch{}
+      (async()=>{
+        try{
+          const ok = await (_copyToClipboard ? _copyToClipboard(txt) : Promise.resolve(false));
+          try{ toast(ok ? 'Copied to Windows clipboard.' : 'Clipboard write failed.', ok? 1000:1500); }catch{}
+        }catch{ try{ toast('Clipboard write failed.', 1500); }catch{} }
+      })();
+      try{ editor && editor.focus && editor.focus(); }catch{}
+    }catch{}
+  }
+  function _mdCodeToolsUpdateFromMouse(e){
+    try{
+      if (!_mdRichActive || !_mdRichActive()) { _mdCodeToolsHide(); return; }
+      if (!_mdBgLayer || !_mdCodeToolsEl || !_mdRenderGeom) { _mdCodeToolsHide(); return; }
+
+      // If the mouse event originates from the tools itself, keep it visible.
+      try{ if (e && e.target && _mdCodeToolsEl && _mdCodeToolsEl.contains(e.target)) return; }catch{}
+      const now = Date.now();
+      if ((now - (_mdLastCodeHoverAt|0)) < 25) return;
+      _mdLastCodeHoverAt = now;
+
+      const g = _mdRenderGeom;
+      const bgRect = _mdBgLayer.getBoundingClientRect();
+      const x = (e.clientX - bgRect.left);
+      const y = (e.clientY - bgRect.top);
+      if (!(x >= 0 && y >= 0 && x <= bgRect.width && y <= bgRect.height)) { _mdCodeToolsHide(); return; }
+      const leftInset = (g.cbRectLeftPx|0);
+      const rightInset = (g.cbRectRightPx|0);
+      if ((x|0) < (leftInset|0) || x > (bgRect.width - (rightInset|0))) { _mdCodeToolsHide(); return; }
+
+      // Map Y to visible row index using last render geometry.
+      let idx = -1;
+      const yy = (y|0);
+      for (let i=0; i<(g.want|0); i++){
+        const t = (g.rowY[i]|0);
+        const h = (g.rowH[i]|0);
+        if (yy >= (t|0) && yy < ((t|0) + (h|0))){ idx = i|0; break; }
+      }
+      if ((idx|0) < 0) { _mdCodeToolsHide(); return; }
+      if (!g.rowIsCode[idx|0]) { _mdCodeToolsHide(); return; }
+      const row = ((g.start|0) + (idx|0))|0;
+
+      const lines = _splitLines();
+      const fc = _mdCodeFenceEnsureCache && _mdCodeFenceEnsureCache(false, lines);
+      const rng = _mdCodeBlockContentRangeAtRow(row|0, fc);
+      if (!rng) { _mdCodeToolsHide(); return; }
+
+      // Compute visible top of this block (within viewport).
+      let topIdx = idx|0;
+      while ((topIdx|0) > 0){
+        const rr = ((g.start|0) + (topIdx|0) - 1)|0;
+        if (!g.rowIsCode[(topIdx-1)|0]) break;
+        if ((rr|0) < (rng.s|0)) break;
+        topIdx = (topIdx-1)|0;
+      }
+      const topPx = ((g.rowY[topIdx|0]|0) + 4)|0;
+      const rightPx = Math.max(0, (rightInset|0) + 6);
+
+      _mdCodeToolsState = { row:row|0, s:(rng.s|0), e:(rng.e|0) };
+      _mdCodeToolsShowAt(topPx|0, rightPx|0);
+    }catch{ _mdCodeToolsHide(); }
   }
   function _mdHeadingLevel(line){
     try{
@@ -451,9 +656,23 @@ try{
       const r = row|0;
       const srcText = (r>=0 && r<total) ? String(lines[r]||'') : '';
       const isBlankRow = (!srcText || srcText.trim()==='');
-      const lv0 = _mdHeadingLevel(srcText);
-      const setextOn = _mdSetextEnabled();
-      const hideSymbols = !!_mdHideSymbolsForRow(!!isActiveRow);
+      // Fenced code blocks: inside code blocks we must not apply heading/list/setext rules.
+      let fenceKind = 0;
+      try{
+        const fc = _mdCodeFenceEnsureCache && _mdCodeFenceEnsureCache(false, lines);
+        if (fc && fc.kind && r>=0 && r<total) fenceKind = (fc.kind[r]|0);
+      }catch{ fenceKind = 0; }
+      const isFenceRow = ((fenceKind|0) === 1);
+      const isCodeRow = ((fenceKind|0) === 2);
+
+      let lv0 = _mdHeadingLevel(srcText);
+      let setextOn = _mdSetextEnabled();
+      let hideSymbols = !!_mdHideSymbolsForRow(!!isActiveRow);
+
+      if (isCodeRow){
+        // Keep LINE_HEIGHT grid; code is plain text.
+        return { srcText, lv0:0, setextLv:0, lv:0, scale:1, lineHeightPx:(LINE_HEIGHT|0), hideSymbols:false, setextOn:false, isLooseGap:false, looseGapStart:-1, looseGapEnd:-1, blockHeightOverridePx:null, blockPadTopPx:0, blockPadBottomPx:0, isFenceRow:false, isCodeRow:true };
+      }
 
       // Loose list spacer blanks (#1730)
       // - clean: collapse ALL blank rows in the run (block height = 0)
@@ -485,7 +704,7 @@ try{
       }
       let setextLv = 0;
       try{
-        if (setextOn && hideSymbols && (r+1) < total){
+        if (!isFenceRow && setextOn && hideSymbols && (r+1) < total){
           const next = String(lines[r+1]||'');
           const infoN = _mdSetextUnderlineInfo(next);
           if (infoN && (String(srcText||'').trim() !== '')) setextLv = infoN.level|0;
@@ -496,7 +715,7 @@ try{
       let lineHeightPx = (setextLv>0 ? _mdHeadingLineHeightPxFromLevel(lv) : _mdLineHeightPx(srcText));
 
       // Loose list spacing (#1730): apply H1 line-height to the two adjacent nonblank rows.
-      if (!isBlankRow && (lv|0) === 0){
+      if (!isFenceRow && !isBlankRow && (lv|0) === 0){
         let edge = false;
         let expandedEdge = false;
         try{
@@ -548,9 +767,9 @@ try{
           lineHeightPx = (tightLh|0);
         }
       }
-      return { srcText, lv0, setextLv, lv, scale: (scale||1), lineHeightPx: (lineHeightPx||LINE_HEIGHT), hideSymbols, setextOn, isLooseGap:false, looseGapStart:-1, looseGapEnd:-1, blockHeightOverridePx:null, blockPadTopPx:(blockPadTopPx|0), blockPadBottomPx:(blockPadBottomPx|0) };
+      return { srcText, lv0, setextLv, lv, scale: (scale||1), lineHeightPx: (lineHeightPx||LINE_HEIGHT), hideSymbols, setextOn, isLooseGap:false, looseGapStart:-1, looseGapEnd:-1, blockHeightOverridePx:null, blockPadTopPx:(blockPadTopPx|0), blockPadBottomPx:(blockPadBottomPx|0), isFenceRow:!!isFenceRow, isCodeRow:false };
     }catch{
-      return { srcText:'', lv0:0, setextLv:0, lv:0, scale:1, lineHeightPx:LINE_HEIGHT, hideSymbols:false, setextOn:false, isLooseGap:false, looseGapStart:-1, looseGapEnd:-1, blockHeightOverridePx:null, blockPadTopPx:0, blockPadBottomPx:0 };
+      return { srcText:'', lv0:0, setextLv:0, lv:0, scale:1, lineHeightPx:LINE_HEIGHT, hideSymbols:false, setextOn:false, isLooseGap:false, looseGapStart:-1, looseGapEnd:-1, blockHeightOverridePx:null, blockPadTopPx:0, blockPadBottomPx:0, isFenceRow:false, isCodeRow:false };
     }
   }
 
@@ -663,6 +882,68 @@ try{
   // - display: replace (marker + the first following space) with a stable-width inline box
   //            while keeping string length stable (source text is unchanged).
   let _mdListCache = null;
+
+  // Fenced code blocks (``` ... ```). Minimal CommonMark-ish behavior:
+  // - start: up to 3 spaces + 3+ backticks
+  // - end: up to 3 spaces + >= start backticks + only spaces/tabs
+  // Cache per-row kind:
+  // 0 none, 1 fence, 2 code content.
+  let _mdCodeFenceCache = null;
+  function _mdCodeFenceEnsureCache(force, lines){
+    try{
+      if (!(_mdRichEnabled && _mdRichEnabled())) { _mdCodeFenceCache = null; return null; }
+      const arr = Array.isArray(lines) ? lines : _splitLines();
+      const total = (arr && arr.length) ? (arr.length|0) : 0;
+      const b = currentBuffer && currentBuffer();
+      const tick = (b && Number.isFinite(b._changeTick)) ? (b._changeTick|0) : 0;
+      const prev = _mdCodeFenceCache;
+      const same = (!!prev && !prev.dirty && (prev.tick|0)===(tick|0) && (prev.total|0)===(total|0));
+      if (!force && same) return prev;
+
+      const kind = new Uint8Array(total);
+      const first = new Uint8Array(total);
+      const last = new Uint8Array(total);
+
+      let inFence = false;
+      let fenceLen = 0;
+      let contentStart = -1;
+      for (let r=0; r<total; r++){
+        const s = String(arr[r]||'');
+        if (!inFence){
+          const m = s.match(/^[ ]{0,3}(`{3,})([^`]*)$/);
+          if (m){
+            inFence = true;
+            fenceLen = (m[1] ? (m[1].length|0) : 3);
+            contentStart = (r+1)|0;
+            kind[r] = 1;
+          }
+        } else {
+          const re = new RegExp('^[ ]{0,3}`{' + (fenceLen|0) + ',}[\\t ]*$');
+          if (re.test(s)){
+            kind[r] = 1;
+            const contentEnd = (r-1)|0;
+            if ((contentStart|0) >= 0 && (contentStart|0) <= (contentEnd|0)){
+              first[contentStart|0] = 1;
+              last[contentEnd|0] = 1;
+              for (let k=(contentStart|0); k<=(contentEnd|0); k++) kind[k] = 2;
+            }
+            inFence = false;
+            fenceLen = 0;
+            contentStart = -1;
+          }
+        }
+      }
+      // Unclosed fence: treat remaining lines as code content.
+      if (inFence && (contentStart|0) >= 0 && (contentStart|0) < total){
+        first[contentStart|0] = 1;
+        last[(total-1)|0] = 1;
+        for (let k=(contentStart|0); k<total; k++) kind[k] = 2;
+      }
+
+      _mdCodeFenceCache = { tick, total, dirty:false, kind, first, last };
+      return _mdCodeFenceCache;
+    }catch{ return _mdCodeFenceCache; }
+  }
 
   function _mdCharIndexForIndentCols(s, targetCols){
     try{
@@ -1436,17 +1717,85 @@ try{
 
       // Ensure list nesting cache is ready (used for bullet rendering).
       try{ _mdListEnsureCache && _mdListEnsureCache(false); }catch{}
+
+      // Ensure fenced code block cache is ready.
+      let _fence = null;
+      try{ _fence = _mdCodeFenceEnsureCache && _mdCodeFenceEnsureCache(false, lines); }catch{ _fence = null; }
+
+      // 1ch width in px (base font). Used for codeblock margin/padding (0.5ch).
+      let chPxBase = 0;
+      try{
+        if (typeof _measureSpan !== 'undefined' && _measureSpan){
+          _measureSpan.textContent = '0';
+          chPxBase = +(_measureSpan.getBoundingClientRect().width||0);
+        }
+      }catch{ chPxBase = 0; }
+      if (!(chPxBase > 0)){
+        try{ chPxBase = Math.max(1, (baseFontPx||16) * 0.60); }catch{ chPxBase = 10; }
+      }
+
+      // Code block rectangle insets + text padding (px)
+      let _cbRectLeftPx = Math.max(0, Math.round((chPxBase||10) * 0.5));   // 0.5ch
+      let _cbRectRightPx = Math.max(0, Math.round((chPxBase||10) * 12));   // 12ch
+      const _cbPadPx = Math.max(0, Math.round((chPxBase||10) * 0.5));      // 0.5ch
+      // Clamp right inset for very narrow viewports.
+      try{
+        const w = (_mdBgLayer && (_mdBgLayer.clientWidth|0) > 0) ? (_mdBgLayer.clientWidth|0) : 0;
+        if (w > 0){
+          const minW = 4;
+          if (((_cbRectLeftPx|0) + (_cbRectRightPx|0) + minW) > (w|0)){
+            _cbRectRightPx = Math.max(0, (w|0) - (minW|0) - (_cbRectLeftPx|0));
+          }
+        }
+      }catch{}
+      // IMPORTANT: In wrap-on, #textLayer is inset by textarea padding-right.
+      // Code block rectangles are drawn in #textBgLayer (full width), so we must
+      // subtract the reserved padding-right when computing text padding/right wrap width.
+      let _edPadRightPx = 0;
+      try{ const csE = getComputedStyle(editor); _edPadRightPx = Math.max(0, Math.round(parseFloat(csE.paddingRight||'0')||0)); }catch{ _edPadRightPx = 0; }
+      let _cbRectRightEffPx = Math.max(0, (_cbRectRightPx|0) - (_edPadRightPx|0));
+      try{
+        const minW = 4;
+        if (((_cbRectLeftPx|0) + (_cbRectRightEffPx|0) + minW) > (wPx|0)) _cbRectRightEffPx = Math.max(0, (wPx|0) - (minW|0) - (_cbRectLeftPx|0));
+      }catch{}
+      const _cbTextPadLeftPx = ((_cbRectLeftPx|0) + (_cbPadPx|0))|0;
+      const _cbTextPadRightPx = ((_cbRectRightEffPx|0) + (_cbPadPx|0))|0;
+      const _cbIndentOpts = { padLeftPx: (_cbTextPadLeftPx|0), textIndentPx: 0 };
       const children = Array.from(_mdTextInner.children);
-      const bgChildren = Array.from(_mdBgInner.children);
+      // Only md-bgline children; _mdBgInner also contains .md-codebg.
+      const bgChildren = (function(){
+        try{
+          const out = [];
+          const ch = Array.from(_mdBgInner.children);
+          for (let k=0;k<ch.length;k++){
+            const n = ch[k];
+            try{ if (n && n.classList && n.classList.contains('md-bgline')) out.push(n); }catch{}
+          }
+          return out;
+        }catch{ return []; }
+      })();
+
+      // Record visible-row Y extents for code block rectangle drawing.
+      const rowY = new Array(want);
+      const rowH = new Array(want);
+      const rowIsCode = new Array(want);
+      const rowCodeFirst = new Array(want);
+      const rowCodeLast = new Array(want);
       let y = 0;
       for (let i=0; i<want; i++){
         const row = start + i;
         const srcText = (row>=0 && row<total) ? String(lines[row]||'') : '';
         const isBlankRow = (!srcText || srcText.trim()==='');
-        const lv0 = _mdHeadingLevel(srcText);
+        const fenceKind = (_fence && _fence.kind && row>=0 && row<total) ? (_fence.kind[row]|0) : 0;
+        const isFenceRow = ((fenceKind|0) === 1);
+        const isCodeRow = ((fenceKind|0) === 2);
+        const isCodeFirst = !!(isCodeRow && _fence && _fence.first && _fence.first[row|0]);
+        const isCodeLast = !!(isCodeRow && _fence && _fence.last && _fence.last[row|0]);
+
+        const lv0 = (isCodeRow ? 0 : _mdHeadingLevel(srcText));
         const isActiveRow = (row === (caretRow|0));
-        const tb = _mdThematicBreakInfo(srcText);
-        const setextOn = _mdSetextEnabled();
+        const tb = (isCodeRow ? null : _mdThematicBreakInfo(srcText));
+        const setextOn = (isCodeRow ? false : _mdSetextEnabled());
 
         const draftMode0 = (function(){ try{ return !!(_mdDraftEditEnabled && _mdDraftEditEnabled()); }catch{ return false; } })();
 
@@ -1484,9 +1833,19 @@ try{
         let padTopPx = 0;
         let padBottomPx = 0;
 
+        // Code block content lines: keep LINE_HEIGHT grid to avoid scroll/caret drift.
+        // (Spacing is handled purely by the background rectangle drawing.)
+        if (isCodeRow){
+          scale = 1;
+          lh = (LINE_HEIGHT|0);
+          fs = Math.max(6, Math.round(baseFontPx));
+          padTopPx = 0;
+          padBottomPx = 0;
+        }
+
         // Loose list spacing (#1730): apply H1 line-height to the two adjacent nonblank rows.
         // (Do NOT create a remaining blank line.)
-        if (!isBlankRow && (lv===0) && !tb && (setextLv|0)===0){
+        if (!isCodeRow && !isFenceRow && !isBlankRow && (lv===0) && !tb && (setextLv|0)===0){
           let edge = false;
           let expandedEdge = false;
           try{
@@ -1541,6 +1900,12 @@ try{
         let text = srcText;
         let prefixLen = 0;
 
+        // Fence rows in clean display: hide text (but keep as a margin spacer; see height logic below).
+        if (isFenceRow && hideSymbols){
+          text = '';
+          prefixLen = 0;
+        }
+
         // Loose-gap rows: never treat as heading/HR/list; render as blank.
         if (looseGap){
           text = '';
@@ -1580,7 +1945,7 @@ try{
         // If this row is a setext underline marker, never render as HR in clean display.
         if (renderSetextUnderlineRow) renderHr = false;
 
-        if (!renderHr && !renderSetextUnderlineRow && hideSymbols && lv0>=1 && lv0<=6){
+        if (!isCodeRow && !isFenceRow && !renderHr && !renderSetextUnderlineRow && hideSymbols && lv0>=1 && lv0<=6){
           prefixLen = _mdHeadingPrefixLen(srcText)|0;
           if (prefixLen>0) text = srcText.slice(prefixLen);
         }
@@ -1590,7 +1955,7 @@ try{
         // We do NOT change the underlying string, so caret mapping stays based on the source text.
         let listInfo = null;
         let listItem = null;
-        if (!looseGap && !renderHr && !renderSetextUnderlineRow && !(prefixLen>0)){
+        if (!isCodeRow && !isFenceRow && !looseGap && !renderHr && !renderSetextUnderlineRow && !(prefixLen>0)){
           try{ listInfo = _mdUListInfo && _mdUListInfo(srcText, row, lines); }catch{ listInfo = null; }
           // Show disc/circle/square on:
           // - clean mode (always)
@@ -1608,7 +1973,7 @@ try{
         let dispPrefixLen = (prefixLen|0);
         let listInfoDisp = listInfo;
         let listItemDisp = listItem;
-        if (hideSymbols && (dispPrefixLen|0) === 0 && listInfo && (listInfo.kind==='item' || listInfo.kind==='cont')){
+        if (!isCodeRow && !isFenceRow && hideSymbols && (dispPrefixLen|0) === 0 && listInfo && (listInfo.kind==='item' || listInfo.kind==='cont')){
           let baseSlack = 0;
           try{ baseSlack = Math.max(0, Math.min(3, (listInfo.rootLeadSlackCols|0) || 0)); }catch{ baseSlack = 0; }
           if ((baseSlack|0) > 0){
@@ -1652,7 +2017,13 @@ try{
         if (!bg){
           bg = document.createElement('div');
           bg.className = 'md-bgline';
-          _mdBgInner.appendChild(bg);
+          try{
+            if (_mdCodeBgInner && _mdCodeBgInner.parentNode === _mdBgInner){
+              _mdBgInner.insertBefore(bg, _mdCodeBgInner);
+            } else {
+              _mdBgInner.appendChild(bg);
+            }
+          }catch{ try{ _mdBgInner.appendChild(bg); }catch{} }
         }
 
         // Per-line display classes (clean palette + setext underline)
@@ -1661,6 +2032,10 @@ try{
         try{ el.classList.toggle('md-h1', (lv===1)); }catch{}
         try{ el.classList.toggle('md-h2', (lv===2)); }catch{}
         try{ bg.classList.toggle('md-clean', hideSymbols); }catch{}
+
+        // Fenced code block visuals
+        try{ el.classList.toggle('md-codeblock', isCodeRow); }catch{}
+        // Background fill is drawn as a single rectangle (not per row).
 
         // IME/heading rendering may set innerHTML; keep a shared flag to avoid overwriting HR.
         let usedHtml = false;
@@ -1684,7 +2059,9 @@ try{
                 const pre = text.slice(0, c1);
                 const mid = text.slice(c1, c2);
                 const post = text.slice(c2);
-                if (listItemDisp){
+                if (isCodeRow || isFenceRow){
+                  el.innerHTML = _mdPlainHtmlWithRange(text, 'md-sel', c1|0, c2|0);
+                } else if (listItemDisp){
                   el.innerHTML = _mdUListHtmlWithRange(text, listItemDisp, 'md-sel', c1|0, c2|0);
                 } else {
                   el.innerHTML = _mdInlineCodeHtmlWithRange(text, 'md-sel', c1|0, c2|0);
@@ -1727,7 +2104,9 @@ try{
               const a = Math.min(c1|0, c2|0);
               const b = Math.max(c1|0, c2|0);
               if (b >= a){
-                if (listItemDisp){
+                if (isCodeRow || isFenceRow){
+                  el.innerHTML = _mdPlainHtmlWithRange(text, 'md-ime-uline', a|0, b|0);
+                } else if (listItemDisp){
                   // For list lines we don't need headingCjkHtml; keep it simple and stable.
                   el.innerHTML = _mdUListHtmlWithRange(text, listItemDisp, 'md-ime-uline', a|0, b|0);
                 } else {
@@ -1741,17 +2120,17 @@ try{
         }catch{ usedHtml = false; }
 
         // Heading H2-H6: make Japanese/CJK runs slightly bolder while keeping ASCII weight as-is (#1486)
-        if (!usedHtml && headingCjkHtml){
+        if (!usedHtml && !isCodeRow && !isFenceRow && headingCjkHtml){
           try{ el.innerHTML = headingCjkHtml; usedHtml = true; }catch{ usedHtml = false; }
         }
         if (!usedHtml){
           // Ensure we don't keep stale HTML
           if (el.innerHTML !== ''){ try{ el.textContent = ''; }catch{} }
-          if (listItemDisp){
+          if (!isCodeRow && !isFenceRow && listItemDisp){
             try{ el.innerHTML = _mdUListHtmlWithRange(text, listItemDisp, null, 0, 0); usedHtml = true; }catch{ usedHtml = false; }
           }
           // Inline code spans (`code`) in clean display (#1772)
-          if (!usedHtml && hideSymbols){
+          if (!usedHtml && !isCodeRow && !isFenceRow && hideSymbols){
             try{
               const html = _mdInlineCodeHtml(text);
               if (html && html !== _mdEscHtml(text)){
@@ -1766,7 +2145,7 @@ try{
         // List hanging indent (md-rich+wrap): keep leading indent; hang only marker-width.
         // NOTE: During IME composition, skip indent probing (it calls DOM measurement and is expensive).
         let indentOpts = null;
-        if (wrapOn && hideSymbols && listInfoDisp && !imeComp){
+        if (!isCodeRow && !isFenceRow && wrapOn && hideSymbols && listInfoDisp && !imeComp){
           // #1752: Ordered-list markers were being shifted/clipped by hanging-indent math under WebView2.
           // Keep hanging-indent for unordered lists only.
           const lt = (listInfoDisp && listInfoDisp.listType) ? String(listInfoDisp.listType||'') : '';
@@ -1787,6 +2166,14 @@ try{
         }catch{ ulHangHackPx = 0; }
         try{ el.style.paddingLeft = (indentOpts ? ((indentOpts.padLeftPx||0) + 'px') : ''); }catch{}
         try{ el.style.textIndent = (indentOpts ? (((ulHangHackPx>0)? 0 : (indentOpts.textIndentPx||0)) + 'px') : ''); }catch{}
+        // Code block: enforce inner padding so text stays inside the code block rectangle.
+        if (isCodeRow){
+          try{ el.style.paddingLeft = (_cbTextPadLeftPx|0) + 'px'; }catch{}
+          try{ el.style.paddingRight = (_cbTextPadRightPx|0) + 'px'; }catch{}
+          try{ el.style.textIndent = '0px'; }catch{}
+        } else {
+          try{ el.style.paddingRight = ''; }catch{}
+        }
         if ((ulHangHackPx||0) > 0 && usedHtml){
           try{
             const prefix = '<span class="md-hang0" style="margin-left:-' + (ulHangHackPx||0) + 'px"></span>';
@@ -1805,7 +2192,7 @@ try{
         // This avoids 1-frame flicker during smooth scroll.
         try{
           const hideActiveLine = !!(document && document.body && document.body.classList && document.body.classList.contains('alt-scrolling'));
-          if (isActiveRow && !hideActiveLine){
+          if (isActiveRow && !hideActiveLine && !isCodeRow){
             if (_mode === 'INSERT') bg.style.background = 'linear-gradient(to bottom, var(--activeEditLineGradStart, yellow), var(--activeEditLineGradEnd, yellow))';
             else bg.style.background = 'linear-gradient(to bottom, var(--activeLineGradStart, rgb(231,255,231)), var(--activeLineGradEnd, rgb(219,243,219)))';
           } else {
@@ -1823,11 +2210,19 @@ try{
               const visCols = _visualWidthUpToLine(disp, (disp.length|0))|0;
               const sc = (baseFontPx>0) ? (fs / baseFontPx) : 1;
               const chPx = Math.max(1, (imeChPxBase||10) * (Number.isFinite(sc) ? sc : 1));
-              const colsPerLine = Math.max(1, Math.floor((wPx|0) / chPx));
+              let wEffPx = (wPx|0);
+              if (isCodeRow) wEffPx = Math.max(20, (wEffPx|0) - (_cbTextPadLeftPx|0) - (_cbTextPadRightPx|0));
+              const colsPerLine = Math.max(1, Math.floor((wEffPx|0) / chPx));
               const n = Math.max(1, Math.ceil((visCols||0) / (colsPerLine||1))|0);
               hPx = Math.max(1, n|0) * (lh|0);
             } else {
-              const n0 = _wrapProbeLineCountStyled(disp, wPx|0, lh|0, fs|0, indentOpts);
+              let ww = (wPx|0);
+              let io = indentOpts;
+              if (isCodeRow){
+                ww = Math.max(20, (ww|0) - (_cbTextPadRightPx|0));
+                io = _cbIndentOpts;
+              }
+              const n0 = _wrapProbeLineCountStyled(disp, ww|0, lh|0, fs|0, io);
               const n = (Number.isFinite(n0) && (n0|0) > 0) ? (n0|0) : 1;
               hPx = Math.max(1, n|0) * (lh|0);
             }
@@ -1852,6 +2247,13 @@ try{
           bg.style.top = y + 'px';
           bg.style.height = hPx + 'px';
         }catch{}
+
+        // Record for code block rectangle drawing.
+        rowY[i] = (y|0);
+        rowH[i] = (hPx|0);
+        rowIsCode[i] = !!isCodeRow;
+        rowCodeFirst[i] = !!isCodeFirst;
+        rowCodeLast[i] = !!isCodeLast;
         try{
           if (lv === 1) el.style.fontWeight = 'var(--mdHeadingWeightH1, 750)';
           else if (lv >= 2 && lv <= 6) el.style.fontWeight = 'var(--mdHeadingWeightH2_6, 520)';
@@ -1865,6 +2267,95 @@ try{
       for (let i=bgChildren.length-1; i>=want; i--){
         try{ _mdBgInner.removeChild(bgChildren[i]); }catch{}
       }
+
+      // Draw fenced code blocks as single rectangles (black fill) spanning the visible portion.
+      try{
+        _mdEnsureTextLayer();
+        if (_mdCodeBgInner){
+          const rects = Array.from(_mdCodeBgInner.children);
+          let rectN = 0;
+          const extPx = Math.max(0, Math.round((chPxBase||10) * 0.5));
+          let i = 0;
+          while (i < want){
+            if (!rowIsCode[i]){ i++; continue; }
+            const s = i;
+            let e = i;
+            while ((e+1) < want && rowIsCode[(e+1)|0]) e++;
+
+            const y0 = (rowY[s]|0);
+            const y1 = ((rowY[e]|0) + (rowH[e]|0))|0;
+            let top = (y0|0);
+            let height = Math.max(0, (y1 - y0)|0);
+
+            // Visual padding: extend by ~0.5ch on real block edges (clamped to viewport).
+            if (rowCodeFirst[s]){ top = Math.max(0, (top|0) - (extPx|0)); height = (height|0) + (extPx|0); }
+            if (rowCodeLast[e]){ height = (height|0) + (extPx|0); }
+
+            let rEl = rects[rectN];
+            if (!rEl){
+              rEl = document.createElement('div');
+              _mdCodeBgInner.appendChild(rEl);
+            }
+            const isFirst = !!rowCodeFirst[s];
+            const isLast = !!rowCodeLast[e];
+            rEl.className = 'md-codeblock-rect' + (isFirst ? ' md-codeblock-first' : '') + (isLast ? ' md-codeblock-last' : '');
+            try{ rEl.style.top = (top|0) + 'px'; }catch{}
+            try{ rEl.style.height = (height|0) + 'px'; }catch{}
+            try{ rEl.style.left = (_cbRectLeftPx|0) + 'px'; }catch{}
+            try{ rEl.style.right = (_cbRectRightPx|0) + 'px'; }catch{}
+            rectN++;
+            i = (e+1)|0;
+          }
+          for (let k=rects.length-1; k>=rectN; k--){
+            try{ _mdCodeBgInner.removeChild(rects[k]); }catch{}
+          }
+        }
+      }catch{}
+
+      // Active-line overlay inside code blocks: paint above block background (#1793)
+      try{
+        _mdEnsureTextLayer();
+        if (_mdCodeStripeInner){
+          const kids = Array.from(_mdCodeStripeInner.children);
+          let used = 0;
+          const activeIdx = (caretRow|0) - (start|0);
+          if (activeIdx >= 0 && activeIdx < (want|0) && rowIsCode[activeIdx]){
+            let sEl = kids[0];
+            if (!sEl){ sEl = document.createElement('div'); _mdCodeStripeInner.appendChild(sEl); }
+            sEl.className = 'md-codeblock-active';
+            try{ sEl.style.top = (rowY[activeIdx]|0) + 'px'; }catch{}
+            try{ sEl.style.height = (rowH[activeIdx]|0) + 'px'; }catch{}
+            try{ sEl.style.left = (_cbRectLeftPx|0) + 'px'; }catch{}
+            try{ sEl.style.right = (_cbRectRightPx|0) + 'px'; }catch{}
+            try{
+              const hideActiveLine = !!(document && document.body && document.body.classList && document.body.classList.contains('alt-scrolling'));
+              if (!hideActiveLine){
+                if (_mode === 'INSERT') sEl.style.background = 'linear-gradient(to bottom, var(--blockActiveEditLineGradStart, yellow), var(--blockActiveEditLineGradEnd, yellow))';
+                else sEl.style.background = 'linear-gradient(to bottom, var(--blockActiveLineGradStart, yellow), var(--blockActiveLineGradEnd, yellow))';
+              } else {
+                sEl.style.background = '';
+              }
+            }catch{}
+            used = 1;
+          }
+          for (let k=kids.length-1; k>=used; k--){
+            try{ _mdCodeStripeInner.removeChild(kids[k]); }catch{}
+          }
+        }
+      }catch{}
+
+      // Remember last render geometry for hover hit-testing (code tools).
+      try{
+        _mdRenderGeom = {
+          start:(start|0),
+          want:(want|0),
+          rowY:rowY,
+          rowH:rowH,
+          rowIsCode:rowIsCode,
+          cbRectLeftPx:(_cbRectLeftPx|0),
+          cbRectRightPx:(_cbRectRightPx|0),
+        };
+      }catch{ _mdRenderGeom = null; }
     }catch{}
   }
   function _mdApplyVisualState(){
@@ -3854,7 +4345,11 @@ try{
         'caretIMEGradStart','caretIMEGradMid',
         'editCaretGradStart','editCaretGradMid',
         'editCaretIMEGradStart','editCaretIMEGradMid',
-        'editCaretIMEGradStart','editCaretIMEGradMid'
+        'editCaretIMEGradStart','editCaretIMEGradMid',
+        // Fenced code block colors (#1793)
+        'blockFGColor','blockBGColor',
+        'blockActiveLineGradStart','blockActiveLineGradEnd',
+        'blockActiveEditLineGradStart','blockActiveEditLineGradEnd'
       ]);
     }catch{ return new Set(); }
   })();
@@ -7907,6 +8402,7 @@ try{
           const padBottomPx = (info && Number.isFinite(info.blockPadBottomPx)) ? (info.blockPadBottomPx|0) : 0;
           const sc = (info && info.scale) ? (+info.scale || 1) : 1;
           const fs = Math.max(6, Math.round(baseFontPx * sc));
+          const isCodeRow = !!(info && info.isCodeRow);
           const hideSymbols = !!(info && info.hideSymbols);
           let dispText = srcText;
           let prefixLen = 0;
@@ -7923,7 +8419,7 @@ try{
             }
             if (renderHr || renderSetextUnderlineRow){ dispText = ''; prefixLen = 0; }
           }
-          return { dispText, prefixLen, lh, fs, hideSymbols, blockHeightOverridePx:bhOverride, padTopPx:(padTopPx|0), padBottomPx:(padBottomPx|0) };
+          return { dispText, prefixLen, lh, fs, hideSymbols, isCodeRow:!!isCodeRow, blockHeightOverridePx:bhOverride, padTopPx:(padTopPx|0), padBottomPx:(padBottomPx|0) };
         };
 
         for (const seg of _yankFlashSegs){
@@ -7962,6 +8458,39 @@ try{
             yAcc += hPx;
           }
 
+          // Fenced code blocks: account for block margin/padding so flash aligns with rendered code text.
+          // Keep consistent with caret/wrap probes: pad-left via probe indent; shrink probe width by right insets.
+          let ww = (wPx|0);
+          let indentOpts = null;
+          let codePadLeftPx = 0;
+          if (rowInfo && rowInfo.isCodeRow){
+            let chPxBase = 0;
+            try{
+              if (typeof _measureSpan !== 'undefined' && _measureSpan){
+                _measureSpan.textContent = '0';
+                chPxBase = +(_measureSpan.getBoundingClientRect().width||0);
+              }
+            }catch{ chPxBase = 0; }
+            if (!(chPxBase > 0)){
+              try{ chPxBase = Math.max(1, (fs||16) * 0.60); }catch{ chPxBase = 10; }
+            }
+            const cbRectLeftPx = Math.max(0, Math.round((chPxBase||10) * 0.5));
+            let cbRectRightPx = Math.max(0, Math.round((chPxBase||10) * 12));
+            const cbPadPx = Math.max(0, Math.round((chPxBase||10) * 0.5));
+            let edPadRightPx = 0;
+            try{ const csE = getComputedStyle(editor); edPadRightPx = Math.max(0, Math.round(parseFloat(csE.paddingRight||'0')||0)); }catch{ edPadRightPx = 0; }
+            let cbRectRightEffPx = Math.max(0, (cbRectRightPx|0) - (edPadRightPx|0));
+            try{
+              const minW = 4;
+              if (((cbRectLeftPx|0) + (cbRectRightEffPx|0) + minW) > (ww|0)) cbRectRightEffPx = Math.max(0, (ww|0) - (minW|0) - (cbRectLeftPx|0));
+            }catch{}
+            const cbTextPadLeftPx = ((cbRectLeftPx|0) + (cbPadPx|0))|0;
+            const cbTextPadRightPx = ((cbRectRightEffPx|0) + (cbPadPx|0))|0;
+            codePadLeftPx = (cbTextPadLeftPx|0);
+            ww = Math.max(20, (ww|0) - (cbTextPadRightPx|0));
+            indentOpts = { padLeftPx:(cbTextPadLeftPx|0), textIndentPx:0 };
+          }
+
           if (!wrapOn){
             _measureSpan.textContent = dispText.slice(0, c1);
             const x1b = _measureSpan.getBoundingClientRect().width;
@@ -7973,7 +8502,7 @@ try{
             if (!(x2 > x1)) continue;
             const el = document.createElement('div');
             el.className='yank-flash';
-            el.style.left=(x1 - _hs) + 'px';
+            el.style.left=((x1 + (codePadLeftPx|0)) - _hs) + 'px';
             el.style.top= yAcc + 'px';
             el.style.width= Math.max(1, Math.round(x2 - x1)) + 'px';
             el.style.height= Math.max(1, Math.round(lh)) + 'px';
@@ -7981,15 +8510,15 @@ try{
             _yankFlashLayer.appendChild(el);
           } else {
             let intra1 = 0, intra2 = 0;
-            try{ intra1 = _wrapProbeIntraFromColStyled(dispText, c1|0, wPx|0, lh|0, fs|0) | 0; }catch{ intra1 = 0; }
-            try{ intra2 = _wrapProbeIntraFromColStyled(dispText, c2|0, wPx|0, lh|0, fs|0) | 0; }catch{ intra2 = intra1; }
+            try{ intra1 = _wrapProbeIntraFromColStyled(dispText, c1|0, ww|0, lh|0, fs|0, indentOpts) | 0; }catch{ intra1 = 0; }
+            try{ intra2 = _wrapProbeIntraFromColStyled(dispText, c2|0, ww|0, lh|0, fs|0, indentOpts) | 0; }catch{ intra2 = intra1; }
             intra1 = Math.max(0, intra1|0);
             intra2 = Math.max(intra1, intra2|0);
             for (let intra=intra1; intra<=intra2; intra++){
               let x1 = 0;
-              let x2 = wPx;
-              try{ if (intra === intra1){ const xp = _wrapProbeXFromColStyled(dispText, c1|0, wPx|0, fs|0, lh|0); if (Number.isFinite(xp)) x1 = Math.max(0, xp); } }catch{}
-              try{ if (intra === intra2){ const xp = _wrapProbeXFromColStyled(dispText, c2|0, wPx|0, fs|0, lh|0); if (Number.isFinite(xp)) x2 = Math.max(0, xp); } }catch{}
+              let x2 = ww;
+              try{ if (intra === intra1){ const xp = _wrapProbeXFromColStyled(dispText, c1|0, ww|0, fs|0, lh|0, indentOpts); if (Number.isFinite(xp)) x1 = Math.max(0, xp); } }catch{}
+              try{ if (intra === intra2){ const xp = _wrapProbeXFromColStyled(dispText, c2|0, ww|0, fs|0, lh|0, indentOpts); if (Number.isFinite(xp)) x2 = Math.max(0, xp); } }catch{}
               if (!(x2 > x1)) continue;
               const el = document.createElement('div');
               el.className='yank-flash';
@@ -10180,6 +10709,8 @@ try{
       if (!(_mdRichEnabled && _mdRichEnabled())) { _mdWrapCache = null; return null; }
       if (!(_wrapEnabled && _wrapEnabled())) { _mdWrapCache = null; return null; }
       const lines = _splitLines();
+      let fence = null;
+      try{ fence = _mdCodeFenceEnsureCache && _mdCodeFenceEnsureCache(false, lines); }catch{ fence = null; }
       const b = currentBuffer && currentBuffer();
       const tick = (b && Number.isFinite(b._changeTick)) ? (b._changeTick|0) : 0;
       const wPx = _wrapAvailWidthPx();
@@ -10195,16 +10726,50 @@ try{
       let baseFontPx = 16;
       try{ baseFontPx = parseFloat(getComputedStyle(editor).fontSize)||baseFontPx; }catch{}
 
+      // Code block inset/padding in px (match _mdRenderTextLayer)
+      let chPxBase = 0;
+      try{
+        if (typeof _measureSpan !== 'undefined' && _measureSpan){
+          _measureSpan.textContent = '0';
+          chPxBase = +(_measureSpan.getBoundingClientRect().width||0);
+        }
+      }catch{ chPxBase = 0; }
+      if (!(chPxBase > 0)){
+        try{ chPxBase = Math.max(1, (baseFontPx||16) * 0.60); }catch{ chPxBase = 10; }
+      }
+      const cbRectLeftPx = Math.max(0, Math.round((chPxBase||10) * 0.5));
+      let cbRectRightPx = Math.max(0, Math.round((chPxBase||10) * 12));
+      const cbPadPx = Math.max(0, Math.round((chPxBase||10) * 0.5));
+      // Effective right inset inside text layer coordinates (wrap-on reserves textarea padding-right).
+      let edPadRightPx = 0;
+      try{ const csE = getComputedStyle(editor); edPadRightPx = Math.max(0, Math.round(parseFloat(csE.paddingRight||'0')||0)); }catch{ edPadRightPx = 0; }
+      let cbRectRightEffPx = Math.max(0, (cbRectRightPx|0) - (edPadRightPx|0));
+      try{
+        const minW = 4;
+        if (((cbRectLeftPx|0) + (cbRectRightEffPx|0) + minW) > (wPx|0)) cbRectRightEffPx = Math.max(0, (wPx|0) - (minW|0) - (cbRectLeftPx|0));
+      }catch{}
+      const cbTextPadLeftPx = ((cbRectLeftPx|0) + (cbPadPx|0))|0;
+      const cbTextPadRightPx = ((cbRectRightEffPx|0) + (cbPadPx|0))|0;
+      const cbIndentOpts = { padLeftPx:(cbTextPadLeftPx|0), textIndentPx:0 };
+      const cbProbeWidthPx = Math.max(20, (wPx|0) - (cbTextPadRightPx|0));
+
       const counts = new Array(lines.length|0);
       const prefix = new Array((lines.length|0) + 1);
       prefix[0] = 0;
       let totalPx = 0;
       for (let i=0;i<lines.length;i++){
         const src = String(lines[i]||'');
+        const fk = (fence && fence.kind) ? (fence.kind[i]|0) : 0;
+        const isFenceRow = ((fk|0) === 1);
+        const isCodeRow = ((fk|0) === 2);
         // Compute display text for stable wrap measurement.
         let disp = src;
         try{
           if (hideSymbolsDefault){
+            // Clean display: hide fence rows; but keep code content raw.
+            if (isFenceRow){
+              disp = '';
+            } else if (!isCodeRow){
             const isHr = _mdIsHrLineForDisplay(src, lines, i, false);
             const isSetextU = _mdIsSetextUnderlineRowForDisplay(src, lines, i, false);
             if (isHr || isSetextU){
@@ -10215,6 +10780,7 @@ try{
                 const p = _mdHeadingPrefixLen(src)|0;
                 if (p>0) disp = src.slice(p);
               }
+            }
             }
           }
         }catch{ disp = src; }
@@ -10227,7 +10793,7 @@ try{
         // List hanging indent affects wrap count.
         let indentOpts = null;
         try{
-          if (hideSymbolsDefault){
+          if (hideSymbolsDefault && !isCodeRow && !isFenceRow){
             const ul = _mdUListInfo && _mdUListInfo(src, i, lines);
             if (ul) indentOpts = _mdIndentOptsForListLine(src, ul, wPx|0, fs|0, lh|0);
           }
@@ -10235,8 +10801,13 @@ try{
 
         let n = 1;
         if (!heavy){
-          const n0 = _wrapProbeLineCountStyled(disp, wPx|0, lh|0, fs|0, indentOpts);
-          if (Number.isFinite(n0) && (n0|0) > 0) n = (n0|0);
+          if (isCodeRow){
+            const n0 = _wrapProbeLineCountStyled(disp, cbProbeWidthPx|0, lh|0, fs|0, cbIndentOpts);
+            if (Number.isFinite(n0) && (n0|0) > 0) n = (n0|0);
+          } else {
+            const n0 = _wrapProbeLineCountStyled(disp, wPx|0, lh|0, fs|0, indentOpts);
+            if (Number.isFinite(n0) && (n0|0) > 0) n = (n0|0);
+          }
         } else {
           n = 1;
         }
@@ -10282,6 +10853,13 @@ try{
       const r = Math.max(0, Math.min((lines.length-1)|0, row|0));
       const src = String(lines[r]||'');
 
+      // Fenced code blocks: do not apply WYSIWYG heading stripping.
+      let fk = 0;
+      try{
+        const fc = _mdCodeFenceEnsureCache && _mdCodeFenceEnsureCache(false, lines);
+        if (fc && fc.kind && r>=0 && r<(lines.length|0)) fk = (fc.kind[r]|0);
+      }catch{ fk = 0; }
+
       let baseFontPx = 16;
       try{ baseFontPx = parseFloat(getComputedStyle(editor).fontSize)||baseFontPx; }catch{}
       const info = (function(){ try{ return _mdLineLayoutInfoAtRow(lines, r, true); }catch{ return null; } })();
@@ -10290,7 +10868,33 @@ try{
       const fs = Math.max(6, Math.round(baseFontPx * sc));
       const wPx = (c && Number.isFinite(c.wPx)) ? (c.wPx||80) : _wrapAvailWidthPx();
 
-      const adj = _mdWysiwygAdjust(src, col|0);
+      // Code block inset/padding (match _mdRenderTextLayer)
+      let chPxBase = 0;
+      try{
+        if (typeof _measureSpan !== 'undefined' && _measureSpan){
+          _measureSpan.textContent = '0';
+          chPxBase = +(_measureSpan.getBoundingClientRect().width||0);
+        }
+      }catch{ chPxBase = 0; }
+      if (!(chPxBase > 0)){
+        try{ chPxBase = Math.max(1, (baseFontPx||16) * 0.60); }catch{ chPxBase = 10; }
+      }
+      const cbRectLeftPx = Math.max(0, Math.round((chPxBase||10) * 0.5));
+      let cbRectRightPx = Math.max(0, Math.round((chPxBase||10) * 12));
+      const cbPadPx = Math.max(0, Math.round((chPxBase||10) * 0.5));
+      let edPadRightPx = 0;
+      try{ const csE = getComputedStyle(editor); edPadRightPx = Math.max(0, Math.round(parseFloat(csE.paddingRight||'0')||0)); }catch{ edPadRightPx = 0; }
+      let cbRectRightEffPx = Math.max(0, (cbRectRightPx|0) - (edPadRightPx|0));
+      try{
+        const minW = 4;
+        if (((cbRectLeftPx|0) + (cbRectRightEffPx|0) + minW) > (wPx|0)) cbRectRightEffPx = Math.max(0, (wPx|0) - (minW|0) - (cbRectLeftPx|0));
+      }catch{}
+      const cbTextPadLeftPx = ((cbRectLeftPx|0) + (cbPadPx|0))|0;
+      const cbTextPadRightPx = ((cbRectRightEffPx|0) + (cbPadPx|0))|0;
+      const cbIndentOpts = { padLeftPx:(cbTextPadLeftPx|0), textIndentPx:0 };
+      const cbProbeWidthPx = Math.max(20, (wPx|0) - (cbTextPadRightPx|0));
+
+      const adj = ((fk|0) === 2 || (fk|0) === 1) ? { line:src, col:(col|0), prefix:0 } : _mdWysiwygAdjust(src, col|0);
       const dispLine = String(adj.line||'');
       const cc = Math.max(0, Math.min((dispLine.length|0), (adj.col|0)));
 
@@ -10305,7 +10909,13 @@ try{
         }
       }catch{ indentOpts = null; }
       let intra = 0;
-      try{ intra = _wrapProbeIntraFromColStyled(dispLine, cc|0, wPx|0, lh|0, fs|0, indentOpts) | 0; }catch{ intra = 0; }
+      try{
+        if ((fk|0) === 2){
+          intra = _wrapProbeIntraFromColStyled(dispLine, cc|0, cbProbeWidthPx|0, lh|0, fs|0, cbIndentOpts) | 0;
+        } else {
+          intra = _wrapProbeIntraFromColStyled(dispLine, cc|0, wPx|0, lh|0, fs|0, indentOpts) | 0;
+        }
+      }catch{ intra = 0; }
       intra = Math.max(0, Math.min(((c.counts[r]|0)-1)|0, intra|0));
       return ((c.prefix[r]|0) + intra + 1);
     }catch{ return (row|0)+1; }
@@ -10334,8 +10944,9 @@ try{
         if (_intraAt(mid) > tgtIntra) hi = mid; else lo = mid + 1;
       }
       // IMPORTANT: allow end==len so the caret can land at the logical EOL position
-      // (just before '\n').
-      const end = Math.max(start, Math.min(len, lo|0));
+      // (just before '\n'). Also avoid picking the *first* column of the next intra.
+      const endExclusive = Math.max(start, Math.min(len, lo|0));
+      const end = (endExclusive >= len) ? len : Math.max(start, (endExclusive - 1)|0);
       if (!(desired > 0)) return start;
 
       let a = start, b = end;
@@ -10348,6 +10959,16 @@ try{
       const xCand = _xAt(cand);
       const xPrev = _xAt(prev);
       if (Math.abs(xPrev - desired) <= Math.abs(xCand - desired)) cand = prev;
+
+      // Safety: ensure the chosen column stays within the intended intra.
+      // This prevents a rare "can't move up" case when desiredX is huge and the boundary
+      // column maps to the next intra.
+      try{
+        let ic = _intraAt(cand|0);
+        if ((ic|0) > (tgtIntra|0)){
+          while ((cand|0) > (start|0) && ((_intraAt((cand|0))|0) > (tgtIntra|0))) cand = (cand - 1)|0;
+        }
+      }catch{}
       return cand;
     }catch{ return 0; }
   }
@@ -11215,6 +11836,13 @@ try{
   // Active line stripe gradient (top -> bottom)
   setVar('activeLineGradStart', themeGet('activeLineGradientStart', t.activeLineGradientStart));
   setVar('activeLineGradEnd', themeGet('activeLineGradientEnd', t.activeLineGradientEnd));
+  // Fenced code block colors (#1793)
+  setVar('blockFGColor', themeGet('blockFGColor', t.blockFGColor));
+  setVar('blockBGColor', themeGet('blockBGColor', t.blockBGColor));
+  setVar('blockActiveLineGradStart', themeGet('blockActiveLineGradStart', t.blockActiveLineGradStart));
+  setVar('blockActiveLineGradEnd', themeGet('blockActiveLineGradEnd', t.blockActiveLineGradEnd));
+  setVar('blockActiveEditLineGradStart', themeGet('blockActiveEditLineGradStart', t.blockActiveEditLineGradStart));
+  setVar('blockActiveEditLineGradEnd', themeGet('blockActiveEditLineGradEnd', t.blockActiveEditLineGradEnd));
   // Gutter gradients (active row default) and INSERT用ガター
   setVar('activeGutterGradStart', themeGet('activeGutterGradientStart', t.activeGutterGradientStart));
   setVar('activeGutterGradEnd', themeGet('activeGutterGradientEnd', t.activeGutterGradientEnd));
@@ -13347,6 +13975,13 @@ try{
           let disp = srcText;
           // Loose-gap rows are displayed as blank regardless of symbol hiding.
           try{ if (info && info.isLooseGap) disp = ''; }catch{}
+          // Fenced code blocks: keep code content raw; hide fence rows in clean display.
+          try{
+            const fc = _mdCodeFenceEnsureCache && _mdCodeFenceEnsureCache(false, lines);
+            const fk = (fc && fc.kind && r>=0 && r<total) ? (fc.kind[r]|0) : 0;
+            if (hideSymbols && (fk|0) === 1) disp = '';
+            if ((fk|0) === 2) return { disp, info };
+          }catch{}
           if (hideSymbols){
             let renderHr = false;
             let renderSetextUnderlineRow = false;
@@ -13409,7 +14044,13 @@ try{
 
         // intra-row (wrapped) line index for caret
         const srcLine0 = String(lines[targetIdx]||'');
-        const adj0 = _mdWysiwygAdjust(srcLine0, caretCol|0);
+        // Fenced code blocks: don't apply WYSIWYG prefix stripping.
+        let fk = 0;
+        try{
+          const fc = _mdCodeFenceEnsureCache && _mdCodeFenceEnsureCache(false, lines);
+          if (fc && fc.kind && targetIdx>=0 && targetIdx<total) fk = (fc.kind[targetIdx]|0);
+        }catch{ fk = 0; }
+        const adj0 = ((fk|0) === 2 || (fk|0) === 1) ? { line:srcLine0, col:(caretCol|0), prefix:0 } : _mdWysiwygAdjust(srcLine0, caretCol|0);
         const dispLine = String(adj0.line||'');
         let caretColVis0 = (adj0.col|0);
         let intra = 0;
@@ -13418,10 +14059,11 @@ try{
           let indentOpts = null;
           let dispForProbe = dispLine;
           let ccForProbe = (caretColVis0|0);
+          let ww = (wPx|0);
           try{
             const isActiveRow = true;
             const hide = !!(_mdHideSymbolsForRow && _mdHideSymbolsForRow(!!isActiveRow));
-            if (hide){
+            if (hide && (fk|0) !== 2){
               const ul = _mdUListInfo && _mdUListInfo(srcLine0, targetIdx|0, lines);
               let ulForProbe = ul;
               // Hide up to 3 leading spaces before list markers and shift caret col accordingly.
@@ -13446,7 +14088,34 @@ try{
               if (ulForProbe && lt !== 'ol') indentOpts = _mdIndentOptsForListLine(dispForProbe, ulForProbe, wPx|0, _mdCaretFontSizePx|0, _mdCaretLineHeightPx|0);
             }
           }catch{ indentOpts = null; }
-          try{ intra = _wrapProbeIntraFromColStyled(dispForProbe, ccForProbe|0, wPx|0, _mdCaretLineHeightPx|0, _mdCaretFontSizePx|0, indentOpts) | 0; }catch{ intra = 0; }
+          // Code block padding: left 0.5ch + padding 0.5ch, right 12ch + padding 0.5ch.
+          if ((fk|0) === 2){
+            let chPxBase = 0;
+            try{
+              if (typeof _measureSpan !== 'undefined' && _measureSpan){
+                _measureSpan.textContent = '0';
+                chPxBase = +(_measureSpan.getBoundingClientRect().width||0);
+              }
+            }catch{ chPxBase = 0; }
+            if (!(chPxBase > 0)){
+              try{ chPxBase = Math.max(1, (_mdCaretFontSizePx||16) * 0.60); }catch{ chPxBase = 10; }
+            }
+            const cbRectLeftPx = Math.max(0, Math.round((chPxBase||10) * 0.5));
+            let cbRectRightPx = Math.max(0, Math.round((chPxBase||10) * 12));
+            const cbPadPx = Math.max(0, Math.round((chPxBase||10) * 0.5));
+            let edPadRightPx = 0;
+            try{ const csE = getComputedStyle(editor); edPadRightPx = Math.max(0, Math.round(parseFloat(csE.paddingRight||'0')||0)); }catch{ edPadRightPx = 0; }
+            let cbRectRightEffPx = Math.max(0, (cbRectRightPx|0) - (edPadRightPx|0));
+            try{
+              const minW = 4;
+              if (((cbRectLeftPx|0) + (cbRectRightEffPx|0) + minW) > (ww|0)) cbRectRightEffPx = Math.max(0, (ww|0) - (minW|0) - (cbRectLeftPx|0));
+            }catch{}
+            const cbTextPadLeftPx = ((cbRectLeftPx|0) + (cbPadPx|0))|0;
+            const cbTextPadRightPx = ((cbRectRightEffPx|0) + (cbPadPx|0))|0;
+            ww = Math.max(20, (ww|0) - (cbTextPadRightPx|0));
+            indentOpts = { padLeftPx:(cbTextPadLeftPx|0), textIndentPx:0 };
+          }
+          try{ intra = _wrapProbeIntraFromColStyled(dispForProbe, ccForProbe|0, ww|0, _mdCaretLineHeightPx|0, _mdCaretFontSizePx|0, indentOpts) | 0; }catch{ intra = 0; }
           intra = Math.max(0, intra|0);
         }
         topPx = y + (padTopT|0) + intra * (_mdCaretLineHeightPx|0);
@@ -13731,12 +14400,16 @@ try{
       }catch{ return 0; }
     };
     try{ x += _mdOlExtraXpx(caretCol|0); }catch{}
+
+    // Cache wrap-probe params for caret (used by both x and next-char width).
+    let _wrapWpxForCaret = null;
+    let _wrapIndentOptsForCaret = null;
     // Wrap mode: x should be measured from the start of the current visual wrapped line.
     // Use probe-based x to match native textarea wrapping.
     try{
       if (_wrapEnabled()){
         const c = _wrapEnsureCache(false);
-        const wPx = (c && Number.isFinite(c.wPx)) ? (c.wPx||80) : _wrapAvailWidthPx();
+        let wPx = (c && Number.isFinite(c.wPx)) ? (c.wPx||80) : _wrapAvailWidthPx();
         // md-rich list hanging indent (only in clean display)
         let indentOpts = null;
         try{
@@ -13751,6 +14424,36 @@ try{
             }
           }
         }catch{ indentOpts = null; }
+
+        // Code block padding: align caret probe with code line padding.
+        try{
+          if (_mdRichActive && _mdRichActive()){
+            const lines2 = _splitLines();
+            let fk = 0;
+            try{ const fc = _mdCodeFenceEnsureCache && _mdCodeFenceEnsureCache(false, lines2); if (fc && fc.kind && (caretRow|0) >= 0 && (caretRow|0) < (lines2.length|0)) fk = (fc.kind[caretRow|0]|0); }catch{ fk = 0; }
+            if ((fk|0) === 2){
+              let chPxBase = 0;
+              try{ if (typeof _measureSpan !== 'undefined' && _measureSpan){ _measureSpan.textContent = '0'; chPxBase = +(_measureSpan.getBoundingClientRect().width||0); } }catch{ chPxBase = 0; }
+              if (!(chPxBase > 0)){
+                try{ chPxBase = Math.max(1, (_mdCaretFontSizePx||16) * 0.60); }catch{ chPxBase = 10; }
+              }
+              const cbRectLeftPx = Math.max(0, Math.round((chPxBase||10) * 0.5));
+              const cbRectRightPx = Math.max(0, Math.round((chPxBase||10) * 12));
+              const cbPadPx = Math.max(0, Math.round((chPxBase||10) * 0.5));
+              let edPadRightPx = 0;
+              try{ const csE = getComputedStyle(editor); edPadRightPx = Math.max(0, Math.round(parseFloat(csE.paddingRight||'0')||0)); }catch{ edPadRightPx = 0; }
+              let cbRectRightEffPx = Math.max(0, (cbRectRightPx|0) - (edPadRightPx|0));
+              try{ const minW = 4; if (((cbRectLeftPx|0) + (cbRectRightEffPx|0) + minW) > (wPx|0)) cbRectRightEffPx = Math.max(0, (wPx|0) - (minW|0) - (cbRectLeftPx|0)); }catch{}
+              const cbTextPadLeftPx = ((cbRectLeftPx|0) + (cbPadPx|0))|0;
+              const cbTextPadRightPx = ((cbRectRightEffPx|0) + (cbPadPx|0))|0;
+              wPx = Math.max(20, (wPx|0) - (cbTextPadRightPx|0));
+              indentOpts = { padLeftPx:(cbTextPadLeftPx|0), textIndentPx:0 };
+            }
+          }
+        }catch{}
+
+        _wrapWpxForCaret = (wPx|0);
+        _wrapIndentOptsForCaret = indentOpts;
         const xp = _mdRichActive()
           ? _wrapProbeXFromColStyled(line, caretColVis|0, wPx, (_mdCaretFontSizePx||Math.max(6, Math.round(FONT_SIZE)))|0, (_mdCaretLineHeightPx||LINE_HEIGHT)|0, indentOpts)
           : _wrapProbeXFromCol(line, caretColVis|0, wPx);
@@ -13774,9 +14477,10 @@ try{
       try{
         if (_wrapEnabled()){
           const c = _wrapEnsureCache(false);
-          const wPx = (c && Number.isFinite(c.wPx)) ? (c.wPx||80) : _wrapAvailWidthPx();
+          const wPx = (_wrapWpxForCaret != null) ? (_wrapWpxForCaret|0) : ((c && Number.isFinite(c.wPx)) ? (c.wPx||80) : _wrapAvailWidthPx());
+          const indentOpts2 = (_wrapIndentOptsForCaret != null) ? _wrapIndentOptsForCaret : null;
           const xp2 = _mdRichActive()
-            ? _wrapProbeXFromColStyled(line, (caretColVis+1)|0, wPx, (_mdCaretFontSizePx||Math.max(6, Math.round(FONT_SIZE)))|0, (_mdCaretLineHeightPx||LINE_HEIGHT)|0, indentOpts)
+            ? _wrapProbeXFromColStyled(line, (caretColVis+1)|0, wPx, (_mdCaretFontSizePx||Math.max(6, Math.round(FONT_SIZE)))|0, (_mdCaretLineHeightPx||LINE_HEIGHT)|0, indentOpts2)
             : _wrapProbeXFromCol(line, (caretColVis+1)|0, wPx);
           if (Number.isFinite(xp2)) x2 = xp2;
           try{ x2 += _mdOlExtraXpx((caretCol|0) + 1); }catch{}
@@ -16684,18 +17388,45 @@ try{
             const fs0 = Math.max(6, Math.round(baseFontPx * sc0));
             const wPx0 = (c && Number.isFinite(c.wPx)) ? (c.wPx||80) : _wrapAvailWidthPx();
             const src0 = String(lines[caretRow|0]||'');
-            const adj0 = _mdWysiwygAdjust(src0, caretCol|0);
+            // Fenced code blocks: do not apply WYSIWYG heading stripping.
+            let fk0 = 0;
+            try{ const fc0 = _mdCodeFenceEnsureCache && _mdCodeFenceEnsureCache(false, lines); if (fc0 && fc0.kind && (caretRow|0) >= 0 && (caretRow|0) < (lines.length|0)) fk0 = (fc0.kind[caretRow|0]|0); }catch{ fk0 = 0; }
+            const adj0 = ((fk0|0) === 2 || (fk0|0) === 1) ? { line:src0, col:(caretCol|0), prefix:0 } : _mdWysiwygAdjust(src0, caretCol|0);
             const disp0 = String(adj0.line||'');
             const col0 = Math.max(0, Math.min((disp0.length|0), (adj0.col|0)));
             let indent0 = null;
+            let wProbe0 = (wPx0|0);
             try{
               const hide0 = !!(_mdHideSymbolsForRow && _mdHideSymbolsForRow(true));
-              if (hide0){
+              if (hide0 && (fk0|0) !== 2){
                 const ul0 = _mdUListInfo && _mdUListInfo(src0, caretRow|0, lines);
                 if (ul0) indent0 = _mdIndentOptsForListLine(disp0, ul0, wPx0|0, fs0|0, lh0|0);
               }
             }catch{ indent0 = null; }
-            const x0 = _wrapProbeXFromColStyled(disp0, col0|0, wPx0|0, fs0|0, lh0|0, indent0);
+
+            // Code block padding: align desiredX measurement inside fenced code blocks.
+            try{
+              if ((fk0|0) === 2){
+                let chPxBase = 0;
+                try{ if (typeof _measureSpan !== 'undefined' && _measureSpan){ _measureSpan.textContent = '0'; chPxBase = +(_measureSpan.getBoundingClientRect().width||0); } }catch{ chPxBase = 0; }
+                if (!(chPxBase > 0)){
+                  try{ chPxBase = Math.max(1, (fs0||16) * 0.60); }catch{ chPxBase = 10; }
+                }
+                const cbRectLeftPx = Math.max(0, Math.round((chPxBase||10) * 0.5));
+                const cbRectRightPx = Math.max(0, Math.round((chPxBase||10) * 12));
+                const cbPadPx = Math.max(0, Math.round((chPxBase||10) * 0.5));
+                let edPadRightPx = 0;
+                try{ const csE = getComputedStyle(editor); edPadRightPx = Math.max(0, Math.round(parseFloat(csE.paddingRight||'0')||0)); }catch{ edPadRightPx = 0; }
+                let cbRectRightEffPx = Math.max(0, (cbRectRightPx|0) - (edPadRightPx|0));
+                try{ const minW = 4; if (((cbRectLeftPx|0) + (cbRectRightEffPx|0) + minW) > (wProbe0|0)) cbRectRightEffPx = Math.max(0, (wProbe0|0) - (minW|0) - (cbRectLeftPx|0)); }catch{}
+                const cbTextPadLeftPx = ((cbRectLeftPx|0) + (cbPadPx|0))|0;
+                const cbTextPadRightPx = ((cbRectRightEffPx|0) + (cbPadPx|0))|0;
+                wProbe0 = Math.max(20, (wProbe0|0) - (cbTextPadRightPx|0));
+                indent0 = { padLeftPx:(cbTextPadLeftPx|0), textIndentPx:0 };
+              }
+            }catch{}
+
+            const x0 = _wrapProbeXFromColStyled(disp0, col0|0, wProbe0|0, fs0|0, lh0|0, indent0);
             if (Number.isFinite(x0)) _desiredWrapXPx = Math.max(0, Number(x0||0));
           }
         }catch{}
@@ -16710,18 +17441,44 @@ try{
         const fsT = Math.max(6, Math.round(baseFontPx * scT));
         const wPxT = (c && Number.isFinite(c.wPx)) ? (c.wPx||80) : _wrapAvailWidthPx();
         const srcT = String(lines[row|0]||'');
-        const adjT = _mdWysiwygAdjust(srcT, 0);
+        let fkT = 0;
+        try{ const fcT = _mdCodeFenceEnsureCache && _mdCodeFenceEnsureCache(false, lines); if (fcT && fcT.kind && (row|0) >= 0 && (row|0) < (lines.length|0)) fkT = (fcT.kind[row|0]|0); }catch{ fkT = 0; }
+        const adjT = ((fkT|0) === 2 || (fkT|0) === 1) ? { line:srcT, col:0, prefix:0 } : _mdWysiwygAdjust(srcT, 0);
         const dispT = String(adjT.line||'');
         // Hanging indent for list items / continuation lines in clean display.
         let indentOpts = null;
+        let wProbeT = (wPxT|0);
         try{
           const hide = !!(_mdHideSymbolsForRow && _mdHideSymbolsForRow(true));
-          if (hide){
+          if (hide && (fkT|0) !== 2){
             const ul = _mdUListInfo && _mdUListInfo(srcT, row|0, lines);
             if (ul) indentOpts = _mdIndentOptsForListLine(dispT, ul, wPxT|0, fsT|0, lhT|0);
           }
         }catch{ indentOpts = null; }
-        const dispCol = _mdWrapColForIntraXStyled(dispT, intra|0, desiredX, wPxT|0, lhT|0, fsT|0, indentOpts);
+
+        // Code block padding: align desiredX->col mapping inside fenced code blocks.
+        try{
+          if ((fkT|0) === 2){
+            let chPxBase = 0;
+            try{ if (typeof _measureSpan !== 'undefined' && _measureSpan){ _measureSpan.textContent = '0'; chPxBase = +(_measureSpan.getBoundingClientRect().width||0); } }catch{ chPxBase = 0; }
+            if (!(chPxBase > 0)){
+              try{ chPxBase = Math.max(1, (fsT||16) * 0.60); }catch{ chPxBase = 10; }
+            }
+            const cbRectLeftPx = Math.max(0, Math.round((chPxBase||10) * 0.5));
+            const cbRectRightPx = Math.max(0, Math.round((chPxBase||10) * 12));
+            const cbPadPx = Math.max(0, Math.round((chPxBase||10) * 0.5));
+            let edPadRightPx = 0;
+            try{ const csE = getComputedStyle(editor); edPadRightPx = Math.max(0, Math.round(parseFloat(csE.paddingRight||'0')||0)); }catch{ edPadRightPx = 0; }
+            let cbRectRightEffPx = Math.max(0, (cbRectRightPx|0) - (edPadRightPx|0));
+            try{ const minW = 4; if (((cbRectLeftPx|0) + (cbRectRightEffPx|0) + minW) > (wProbeT|0)) cbRectRightEffPx = Math.max(0, (wProbeT|0) - (minW|0) - (cbRectLeftPx|0)); }catch{}
+            const cbTextPadLeftPx = ((cbRectLeftPx|0) + (cbPadPx|0))|0;
+            const cbTextPadRightPx = ((cbRectRightEffPx|0) + (cbPadPx|0))|0;
+            wProbeT = Math.max(20, (wProbeT|0) - (cbTextPadRightPx|0));
+            indentOpts = { padLeftPx:(cbTextPadLeftPx|0), textIndentPx:0 };
+          }
+        }catch{}
+
+        const dispCol = _mdWrapColForIntraXStyled(dispT, intra|0, desiredX, wProbeT|0, lhT|0, fsT|0, indentOpts);
         // Convert display col back to source col (clean display hides heading markers).
         let srcCol = dispCol|0;
         try{ if (_mdWysiwygActive && _mdWysiwygActive()) srcCol = (dispCol|0) + (_mdHeadingPrefixLen(srcT)|0); }catch{}
@@ -16732,18 +17489,41 @@ try{
 
         // Update wrap curswant from current X, but never decrease.
         try{
-          const adjC = _mdWysiwygAdjust(srcT, caretCol|0);
+          const adjC = ((fkT|0) === 2 || (fkT|0) === 1) ? { line:srcT, col:(caretCol|0), prefix:0 } : _mdWysiwygAdjust(srcT, caretCol|0);
           const dispC = String(adjC.line||'');
           const colC = Math.max(0, Math.min((dispC.length|0), (adjC.col|0)));
           let indentC = null;
+          let wProbeC = (wPxT|0);
           try{
             const hideC = !!(_mdHideSymbolsForRow && _mdHideSymbolsForRow(true));
-            if (hideC){
+            if (hideC && (fkT|0) !== 2){
               const ulC = _mdUListInfo && _mdUListInfo(srcT, row|0, lines);
               if (ulC) indentC = _mdIndentOptsForListLine(dispC, ulC, wPxT|0, fsT|0, lhT|0);
             }
           }catch{ indentC = null; }
-          const xC = _wrapProbeXFromColStyled(dispC, colC|0, wPxT|0, fsT|0, lhT|0, indentC);
+
+          try{
+            if ((fkT|0) === 2){
+              let chPxBase = 0;
+              try{ if (typeof _measureSpan !== 'undefined' && _measureSpan){ _measureSpan.textContent = '0'; chPxBase = +(_measureSpan.getBoundingClientRect().width||0); } }catch{ chPxBase = 0; }
+              if (!(chPxBase > 0)){
+                try{ chPxBase = Math.max(1, (fsT||16) * 0.60); }catch{ chPxBase = 10; }
+              }
+              const cbRectLeftPx = Math.max(0, Math.round((chPxBase||10) * 0.5));
+              const cbRectRightPx = Math.max(0, Math.round((chPxBase||10) * 12));
+              const cbPadPx = Math.max(0, Math.round((chPxBase||10) * 0.5));
+              let edPadRightPx = 0;
+              try{ const csE = getComputedStyle(editor); edPadRightPx = Math.max(0, Math.round(parseFloat(csE.paddingRight||'0')||0)); }catch{ edPadRightPx = 0; }
+              let cbRectRightEffPx = Math.max(0, (cbRectRightPx|0) - (edPadRightPx|0));
+              try{ const minW = 4; if (((cbRectLeftPx|0) + (cbRectRightEffPx|0) + minW) > (wProbeC|0)) cbRectRightEffPx = Math.max(0, (wProbeC|0) - (minW|0) - (cbRectLeftPx|0)); }catch{}
+              const cbTextPadLeftPx = ((cbRectLeftPx|0) + (cbPadPx|0))|0;
+              const cbTextPadRightPx = ((cbRectRightEffPx|0) + (cbPadPx|0))|0;
+              wProbeC = Math.max(20, (wProbeC|0) - (cbTextPadRightPx|0));
+              indentC = { padLeftPx:(cbTextPadLeftPx|0), textIndentPx:0 };
+            }
+          }catch{}
+
+          const xC = _wrapProbeXFromColStyled(dispC, colC|0, wProbeC|0, fsT|0, lhT|0, indentC);
           if (Number.isFinite(xC)){
             const prev = (_desiredWrapXPx == null) ? null : Number(_desiredWrapXPx||0);
             const nx = Math.max(0, Number(xC||0));
@@ -21062,6 +21842,20 @@ try{
   try{ editor.addEventListener('mousemove', _updateLinkHoverFromMouse, { passive:true }); }catch{ editor.addEventListener('mousemove', _updateLinkHoverFromMouse); }
   try{ editor.addEventListener('mouseleave', ()=>{ try{ _clearLinkHover(); }catch{} }); }catch{}
   try{ editor.addEventListener('click', _onEditorClickForLink, true); }catch{}
+
+  // Fenced code block hover tools (#1795)
+  try{ editor.addEventListener('mousemove', _mdCodeToolsUpdateFromMouse, { passive:true }); }catch{ try{ editor.addEventListener('mousemove', _mdCodeToolsUpdateFromMouse); }catch{} }
+  // NOTE: moving from textarea to the floating buttons triggers editor mouseleave.
+  // Keep the tools visible when the relatedTarget is inside the tools element.
+  try{
+    editor.addEventListener('mouseleave', (e)=>{
+      try{
+        const rt = e && e.relatedTarget;
+        if (_mdCodeToolsEl && rt && (rt === _mdCodeToolsEl || _mdCodeToolsEl.contains(rt))) return;
+      }catch{}
+      try{ _mdCodeToolsHide(); }catch{}
+    });
+  }catch{}
     // Ctrl + Wheel = editor zoom (only editor/gutter)
     let _lastZoomStepAt = 0;
     const wheelZoom = (e)=>{

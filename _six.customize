@@ -77,6 +77,20 @@ window.THEME = {
   // 行番号(NORMAL/INSERTカーソル行) 文字色
   activeLineNumberColor: "#20a090",
 
+  // コードブロック内 文字色
+  blockFGColor: "#f0f0f0",
+
+  // コードブロック内 背景
+  blockBGColor: "#202020",
+
+  // 行背景(コードブロック内NORMALカーソル行)グラデーション
+  blockActiveLineGradStart: "#203024",
+  blockActiveLineGradEnd: "#102a14",
+
+  // 行背景(コードブロック内INSERTカーソル行)グラデーション
+  blockActiveEditLineGradStart: "#3a2a2a",
+  blockActiveEditLineGradEnd: "#302020",
+
   eofGutterFillColor: "rgb(235,239,235)",
   gutterGradientStart: "rgb(235,239,235)",
   gutterGradientEnd: "rgb(219,227,219)",
@@ -208,6 +222,20 @@ window.EX1_THEME = {
   // INSERTでIME ONのcaretグラデーション
   editCaretIMEGradStart: "rgba(113,247,31, 0.95)",
   editCaretIMEGradMid: "rgba(113,247,31,0.05)",
+
+  // コードブロック内 文字色
+  blockFGColor: "#f0f0f0",
+
+  // コードブロック内 背景
+  blockBGColor: "#202020",
+
+  // 行背景(コードブロック内NORMALカーソル行)グラデーション
+  blockActiveLineGradStart: "#404040",
+  blockActiveLineGradEnd: "#303030",
+
+  // 行背景(コードブロック内INSERTカーソル行)グラデーション
+  blockActiveEditLineGradStart: "#4a3a3a",
+  blockActiveEditLineGradEnd: "#403030",
 };
 
 // かな/カナでの長音として扱う記号 (単語単位の移動に利用)。コードポイント配列。

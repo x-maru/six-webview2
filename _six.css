@@ -460,6 +460,115 @@ body.md-rich #editor::selection {
 	overflow-wrap: anywhere;
 }
 
+/* Markdown-rich fenced code block (``` ... ```). */
+#textLayer .md-line.md-codeblock {
+	color: var(--blockFGColor, var(--mdCleanBgStart, var(--lineGradStart, #bfe3ff)));
+}
+
+/* Code block hover tools (#1795). */
+#mdCodeTools.md-code-tools {
+	display: none;
+	gap: 6px;
+	align-items: center;
+	justify-content: flex-end;
+	padding: 0;
+	border-radius: 0;
+	background: transparent;
+	backdrop-filter: none;
+	-webkit-backdrop-filter: none;
+	border: 0;
+	box-shadow: none;
+	font: 11px/1.1 system-ui, -apple-system, 'Segoe UI', sans-serif;
+	color: rgba(255,255,255,0.92);
+	user-select: none;
+}
+#mdCodeTools .md-code-tool-btn {
+	display: inline-flex;
+	align-items: center;
+	gap: 6px;
+	padding: 3px 6px;
+	border-radius: 6px;
+	border: 1px solid rgba(255,255,255,0.16);
+	background: rgba(0,0,0,0.25);
+	color: inherit;
+	cursor: pointer;
+	user-select: none;
+}
+#mdCodeTools .md-code-tool-btn:hover {
+	background: rgba(255,255,255,0.10);
+}
+#mdCodeTools .md-code-tool-btn:active {
+	transform: translateY(0.5px);
+}
+#mdCodeTools .md-code-tool-ico {
+	position: relative;
+	display: inline-block;
+	width: 1.55em;
+	height: 1.15em;
+	line-height: 1.15em;
+}
+#mdCodeTools .md-code-tool-ico .p {
+	position: absolute;
+	left: 0;
+	top: 0;
+	font-size: 1em;
+	filter: grayscale(15%);
+}
+#mdCodeTools .md-code-tool-ico .p2 {
+	/* overlap on the top-right of the base page */
+	left: 0.62em;
+	top: -0.10em;
+	opacity: 0.92;
+}
+#mdCodeTools .md-code-tool-ico .arr {
+	position: absolute;
+	left: 0.58em;
+	top: 50%;
+	transform: translateY(-60%);
+	font-size: 0.72em;
+	font-weight: 700;
+	color: red;
+	text-shadow: 0 1px 2px rgba(0,0,0,0.55);
+}
+#mdCodeTools .md-code-tool-txt {
+	font-size: 11px;
+	letter-spacing: 0.2px;
+}
+
+/* Code block background: single rectangle spanning fence range (#1790). */
+#textBgLayer .md-codeblock-rect {
+	position: absolute;
+	left: 0;
+	right: 0;
+	box-sizing: border-box;
+	background: var(--blockBGColor, #000);
+}
+
+/* Active line overlay inside fenced code blocks (#1793). */
+#textBgLayer .md-codestripe {
+	position: absolute;
+	left: 0;
+	right: 0;
+	top: 0;
+	bottom: 0;
+	pointer-events: none;
+}
+#textBgLayer .md-codeblock-active {
+	position: absolute;
+	left: 0;
+	right: 0;
+	border-radius: 0.22em;
+	pointer-events: none;
+}
+#textBgLayer .md-codeblock-rect.md-codeblock-first {
+	border-top-left-radius: 0.22em;
+	border-top-right-radius: 0.22em;
+}
+#textBgLayer .md-codeblock-rect.md-codeblock-last {
+	border-bottom-left-radius: 0.22em;
+	border-bottom-right-radius: 0.22em;
+}
+
 /* Markdown-rich unordered list marker (fixed fullwidth box, smaller glyph centered) */
 #textLayer .md-ulbox {
 	display: inline-flex;
