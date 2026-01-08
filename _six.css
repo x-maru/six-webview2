@@ -4,13 +4,14 @@
 	--edScale: 1;
 	--lhBase: 20px;          /* base line-height for editor */
 	--lhExtraBase: 0.4rem;   /* extra leading added on top of base */
+	--lhTune: 1.00;          /* line-height multiplier (fine tune) */
 	--gwBase: 56px;          /* base gutter width */
 	--fontBase: 18px;        /* base font-size for UI (tabbar/cmdbar) */
 	--editorFontBase: 20px;  /* base font-size for editor/gutter at 100% */
 	/* EOF padding (in lines) */
 	--eofPadLines: 6;
 	/* Derived (used by editor only) */
-	--lh: calc(var(--lhBase) * var(--edScale) + var(--lhExtraBase) * var(--edScale));
+	--lh: calc((var(--lhBase) + var(--lhExtraBase)) * var(--edScale) * var(--lhTune, 1));
 	/* Effective line-height after JS rounding; falls back to --lh */
 	--lhEff: var(--lh);
 	/* Align tiled line backgrounds when scrollTop has a fractional remainder */
@@ -129,7 +130,7 @@ body.md-rich #editorViewport {
 	color: var(--gutterNumberColor, #57607a); text-align:right; padding-right: 0; box-sizing:border-box;
 	font-size: calc(var(--editorFontBase, 20px) * var(--edScale));
 	/* Prefer thinner monospace faces; fall back gracefully (default = original order) */
-	font-family: "Cascadia Code", "Cascadia Mono", "JetBrains Mono", "Fira Code", "Consolas", "Yu Gothic", "游ゴシック Light", "Meiryo", monospace !important;
+	font-family: "Sarasa Mono J", "Cascadia Code", "Cascadia Mono", "JetBrains Mono", "Fira Code", "Consolas", "Yu Gothic", "游ゴシック Light", "Meiryo", monospace !important;
 	font-weight: 200 !important;
 }
 
@@ -140,13 +141,23 @@ body.md-rich #gutter {
 #gutter div { line-height: var(--lhEff, var(--lh)); padding-right: calc(6px * var(--edScale)); box-sizing: border-box; width: 100%; /* use line-height centering; avoid flex rounding drift; make row background span full gutter incl. padding */ }
 #editor { flex: 1; background: transparent; color: var(--editorTextColor, #e6e6e6); border:0; outline:0; resize:none; line-height: var(--lhEff, var(--lh)); tab-size: var(--tabstop, 8); -moz-tab-size: var(--tabstop, 8); white-space: pre; padding: 0 2rem calc(var(--eofPadLines, 10) * var(--lhEff, var(--lh))) 0; margin: 0; box-sizing: content-box; position: relative; z-index: 2; font-size: calc(var(--editorFontBase, 20px) * var(--edScale));
 	/* Default = original order (CJK not forced first) */
-	font-family: "Cascadia Code", "Cascadia Mono", "JetBrains Mono", "Fira Code", "Consolas", "Yu Gothic", "游ゴシック Light", "Meiryo", monospace !important;
+	font-family: "Sarasa Mono J", "Cascadia Code", "Cascadia Mono", "JetBrains Mono", "Fira Code", "Consolas", "Yu Gothic", "游ゴシック Light", "Meiryo", monospace !important;
 	font-weight: 220 !important;
 	/* Stabilize glyph metrics for measurement: disable kerning/ligatures (do not force full-width variants) */
 	font-kerning: none; font-variant-ligatures: none;
 	/* Disable proportional kana/alt spacing if the font supports it (best-effort) */
 	font-feature-settings: "palt" 0, "halt" 0, "pkna" 0, "pwid" 0, "fwid" 0, "kern" 0; }
 #editor { caret-color: transparent; }
+
+/* When Sarasa is available, bump weight slightly (avoid XLight/ExtraLight selection). */
+body.font-sarasa #editor,
+body.font-sarasa #textLayer,
+body.font-sarasa #gutter {
+	font-weight: 320 !important;
+}
+
+/* Slightly increase leading when Sarasa is available (visual breathing room). */
+body.font-sarasa { --lhTune: 1.04; }
 
 /* Soft wrap (visual only) */
 body.wrap-on #editor {
@@ -252,9 +263,9 @@ body.ime-reduced-text #editor::-webkit-scrollbar-corner,
 	z-index: 2; /* above backgrounds, below textarea/caret */
 	font-size: calc(var(--editorFontBase, 20px) * var(--edScale));
 	color: var(--editorTextColor, #e6e6e6);
-	font-family: 'SixEditorMix',
+	font-family: "Sarasa Mono J", 'SixEditorMix',
 		"Cascadia Code", "Cascadia Mono", "JetBrains Mono", "Fira Code", "Consolas",
-		"Sarasa Mono J", "Noto Sans Mono", "Noto Sans CJK JP", "Noto Sans JP", "Noto Sans Japanese",
+		"Noto Sans Mono", "Noto Sans CJK JP", "Noto Sans JP", "Noto Sans Japanese",
 		"Yu Gothic", "游ゴシック Light", "Meiryo", "MS Gothic", monospace !important;
 	font-weight: 220 !important;
 	white-space: pre;
@@ -488,7 +499,12 @@ body.md-rich #editor::selection {
 	transform-origin: left center;
 	display:inline-block;
 }
-:root { --controlCharFont: "Cascadia Mono", "JetBrains Mono", monospace; }
+:root { --controlCharFont: "Sarasa Mono J", "Cascadia Mono", "JetBrains Mono", monospace; }
+
+/* Make EOL symbol smaller only when Sarasa is used (keep Noto Sans JP default unchanged). */
+body.font-sarasa .listchar-eol {
+	--controlCharScale: 0.80;
+}
 /* Markdown-rich heading weights (tweakable) */
 :root { --mdHeadingWeightH1: 780; --mdHeadingWeightH2_6: 560; --mdHeadingWeightH2_6_CJK: 640; }
 /* Allow ideographic space to expand more if needed */

@@ -1393,8 +1393,24 @@ try{
         }
       }catch{}
       const wrapOn = (function(){ try{ return _wrapEnabled(); }catch{ return false; } })();
+      const imeComp = (function(){ try{ return !!(window && window._imeComposing===true); }catch{ return false; } })();
       let wPx = 80;
       try{ if (wrapOn) wPx = _wrapAvailWidthPx()|0; }catch{ wPx = 80; }
+
+      // IME composing (md-rich): avoid per-row DOM wrap probes.
+      // Approximate 1ch width once per render; fallback to a safe constant.
+      let imeChPxBase = 0;
+      if (imeComp && wrapOn){
+        try{
+          if (typeof _measureSpan !== 'undefined' && _measureSpan){
+            _measureSpan.textContent = '0';
+            imeChPxBase = +(_measureSpan.getBoundingClientRect().width||0);
+          }
+        }catch{ imeChPxBase = 0; }
+        if (!(imeChPxBase > 0)){
+          try{ imeChPxBase = Math.max(1, (baseFontPx||16) * 0.60); }catch{ imeChPxBase = 10; }
+        }
+      }
 
       // scroll remainder vs fixed grid (for subpixel alignment)
       let rem = 0;
@@ -1755,8 +1771,9 @@ try{
         }
 
         // List hanging indent (md-rich+wrap): keep leading indent; hang only marker-width.
+        // NOTE: During IME composition, skip indent probing (it calls DOM measurement and is expensive).
         let indentOpts = null;
-        if (wrapOn && hideSymbols && listInfoDisp){
+        if (wrapOn && hideSymbols && listInfoDisp && !imeComp){
           // #1752: Ordered-list markers were being shifted/clipped by hanging-indent math under WebView2.
           // Keep hanging-indent for unordered lists only.
           const lt = (listInfoDisp && listInfoDisp.listType) ? String(listInfoDisp.listType||'') : '';
@@ -1808,9 +1825,19 @@ try{
           try{
             // Use the displayed text (after symbol hiding) for wrap measurement.
             const disp = String(text||'');
-            const n0 = _wrapProbeLineCountStyled(disp, wPx|0, lh|0, fs|0, indentOpts);
-            const n = (Number.isFinite(n0) && (n0|0) > 0) ? (n0|0) : 1;
-            hPx = Math.max(1, n|0) * (lh|0);
+            if (imeComp){
+              // Cheap approximation in monospace columns.
+              const visCols = _visualWidthUpToLine(disp, (disp.length|0))|0;
+              const sc = (baseFontPx>0) ? (fs / baseFontPx) : 1;
+              const chPx = Math.max(1, (imeChPxBase||10) * (Number.isFinite(sc) ? sc : 1));
+              const colsPerLine = Math.max(1, Math.floor((wPx|0) / chPx));
+              const n = Math.max(1, Math.ceil((visCols||0) / (colsPerLine||1))|0);
+              hPx = Math.max(1, n|0) * (lh|0);
+            } else {
+              const n0 = _wrapProbeLineCountStyled(disp, wPx|0, lh|0, fs|0, indentOpts);
+              const n = (Number.isFinite(n0) && (n0|0) > 0) ? (n0|0) : 1;
+              hPx = Math.max(1, n|0) * (lh|0);
+            }
           }catch{ hPx = lh; }
         }
 
@@ -2040,6 +2067,8 @@ try{
   // IME composing: schedule a minimal caret sync for markdown-rich so the very first key
   // doesn't render the preedit text shifted relative to the overlay caret.
   let _imeCompCaretSyncPending = false;
+  // Last time we rendered md-rich during IME composition (ms). Used to coalesce redundant paths.
+  let _mdImeLastRenderAt = 0;
   function _scheduleImeCompCaretSync(reason){
     try{
       if (_imeCompCaretSyncPending) return;
@@ -2060,9 +2089,17 @@ try{
           }
         }catch{}
         try{ _mdImeUpdateRange && _mdImeUpdateRange(); }catch{}
-        try{ if (_mdRichActive && _mdRichActive()) _mdRenderTextLayer && _mdRenderTextLayer(); }catch{}
+        try{
+          if (_mdRichActive && _mdRichActive()){
+            const now = Date.now();
+            // Prevent double-render per keystroke (beforeinput + compositionupdate can both schedule renders).
+            if ((now - (_mdImeLastRenderAt|0)) > 16){
+              _mdRenderTextLayer && _mdRenderTextLayer();
+              _mdImeLastRenderAt = now;
+            }
+          }
+        }catch{}
         try{ _repositionCaret && _repositionCaret({ force:true }); }catch{}
-        try{ updateGutter && updateGutter({ force:true }); }catch{}
       };
       if (window && window.requestAnimationFrame){
         requestAnimationFrame(()=>{ try{ run(); }catch{} });
@@ -3655,13 +3692,13 @@ try{
             requestAnimationFrame(()=>{
               _mdImeUpdatePending = false;
               try{ _mdRenderTextLayer(); }catch{}
-              try{ updateGutter({ force:true }); }catch{}
+              try{ _mdImeLastRenderAt = Date.now(); }catch{}
               try{ _repositionCaret({ force:true }); }catch{}
             });
           } else {
             _mdImeUpdatePending = false;
             try{ _mdRenderTextLayer(); }catch{}
-            try{ updateGutter({ force:true }); }catch{}
+            try{ _mdImeLastRenderAt = Date.now(); }catch{}
             try{ _repositionCaret({ force:true }); }catch{}
           }
         }catch{ _mdImeUpdatePending = false; }
@@ -9416,11 +9453,27 @@ try{
         }catch{ return 0; }
       };
       // Read base vars as-is (they may be in px/rem). Fallback to sane defaults.
-      const vBase = (rcs.getPropertyValue('--lhBase')||'20px').trim();
-      const vExtra = (rcs.getPropertyValue('--lhExtraBase')||'0.4rem').trim();
+      const _cv = (name, fallback)=>{
+        try{
+          const a = (cs && cs.getPropertyValue) ? String(cs.getPropertyValue(name)||'').trim() : '';
+          if (a) return a;
+        }catch{}
+        try{
+          const b = (rcs && rcs.getPropertyValue) ? String(rcs.getPropertyValue(name)||'').trim() : '';
+          if (b) return b;
+        }catch{}
+        return String(fallback||'');
+      };
+      const vBase = _cv('--lhBase', '20px');
+      const vExtra = _cv('--lhExtraBase', '0.4rem');
+      const vTuneRaw = _cv('--lhTune', '1');
       const basePx = _measureCssValueToPx(vBase);
       const extraPx = _measureCssValueToPx(vExtra);
-      const raw = (_edScale>0 ? (basePx + extraPx) * _edScale : (parseFloat(cs && cs.lineHeight)||20));
+      const tune = (function(){
+        const n = parseFloat(String(vTuneRaw||'1').replace(/[^0-9.+-]/g,''));
+        return (Number.isFinite(n) && n>0.5 && n<3.0) ? n : 1;
+      })();
+      const raw = (_edScale>0 ? (basePx + extraPx) * _edScale * tune : (parseFloat(cs && cs.lineHeight)||20));
       if (Number.isFinite(raw) && raw>0){
         const snapped = Math.max(1, Math.round(raw));
         try{ root.style.setProperty('--lhEff', snapped + 'px'); }catch{}
@@ -36247,6 +36300,15 @@ try{
     try{
       _readApiFromHash();
       _applyTheme();
+
+      // Detect local fonts (best-effort) and expose via body classes.
+      // This lets CSS adjust weight/overlay sizes only when a specific font family exists.
+      try{
+        const hasFont = (fam)=>{ try{ return !!(document.fonts && document.fonts.check && document.fonts.check('12px "' + String(fam||'').replace(/"/g,'') + '"')); }catch{ return false; } };
+        const hasSarasa = hasFont('Sarasa Mono J') || hasFont('Sarasa Mono J XLight') || hasFont('Sarasa Mono J Light') || hasFont('Sarasa Mono J SemiLight') || hasFont('Sarasa Mono J Regular');
+        try{ document.body && document.body.classList && document.body.classList.toggle('font-sarasa', !!hasSarasa); }catch{}
+      }catch{}
+
       // Try to refresh customize file with cache-buster, then re-apply theme once more
       try{
         _reloadCustomizeFresh()
