@@ -271,6 +271,13 @@ body.ime-reduced-text #editor::-webkit-scrollbar-corner,
 	background: transparent;
 }
 
+/* md-rich: hanging-indent helper (0-width shim at start of line) */
+#textLayer .md-hang0 {
+	display: inline-block;
+	width: 0;
+	pointer-events: none;
+}
+
 /* Markdown-rich: vertically center text within tall heading lines (H1/H2) */
 #textLayer .md-line.md-h1,
 #textLayer .md-line.md-h2 {
@@ -376,12 +383,52 @@ body.md-rich #editor::selection {
 	box-decoration-break: clone;
 }
 
+/* Markdown-rich inline code span (`code`) (#1772/#1773)
+   - Box is filled with current text color (currentColor)
+   - Text is drawn with background gradient start color (inverted look)
+   - When selected (.md-sel), invert using selection fg/bg
+*/
+#textLayer .md-icode {
+	/* IMPORTANT: use inline (not inline-block) so wrapping can occur inside code spans,
+	   matching draft-mode plain text breaking under wrap-on. */
+	display: inline;
+	box-sizing: border-box;
+	border-radius: 0.10em;
+	/* 65% transparent fill (Windows11+WebView2) */
+	background: color-mix(in srgb, currentColor 60%, transparent);
+	/* bevel-like border: top/left lighter, bottom/right stronger */
+	border-style: solid;
+	border-width: 2px;
+	border-color:
+		color-mix(in srgb, currentColor 40%, white)   /* top */
+		color-mix(in srgb, currentColor 70%, gray)    /* right */
+		color-mix(in srgb, currentColor 70%, gray) /* bottom */
+		color-mix(in srgb, currentColor 40%, white);  /* left */
+	/* cancel backticks width:
+	   margin L/R: 0.5ch
+	   padding L/R: 0.5ch + 0.5ch * ([total ticks L+R] - 2)
+	   where total ticks = 2 * ticksPerSide, and --mdIcodePad = ticksPerSide-1
+	*/
+	margin: 0 0.5ch;
+	padding: 0 calc((1 + (var(--mdIcodePad, 0) * 2)) * 0.5ch);
+	vertical-align: baseline;
+	-webkit-box-decoration-break: clone;
+	box-decoration-break: clone;
+}
+#textLayer .md-icode .md-icode-t {
+	color: var(--mdCleanBgStart, var(--lineGradStart, #bfe3ff));
+	/* Allow breaking inside code spans when wrap-on is enabled */
+	white-space: pre-wrap;
+	word-break: break-all;
+	overflow-wrap: anywhere;
+}
+
 /* Markdown-rich unordered list marker (fixed fullwidth box, smaller glyph centered) */
 #textLayer .md-ulbox {
 	display: inline-flex;
 	align-items: center;
 	justify-content: center;
-	width: 2ch; /* occupy fullwidth (2 monospace columns) */
+	width: calc(var(--ulw, 2) * 1ch);
 	vertical-align: middle;
 }
 #textLayer .md-ulbox .md-ulbullet {

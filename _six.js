@@ -103,6 +103,178 @@ try{
     }catch{ return null; }
   }
 
+  // --- Markdown inline code (backticks) (#1772)
+  // CommonMark/GFM-ish:
+  // - Delimiters can be 1+ backticks; the matching closing delimiter must use the same count.
+  // - Content newlines are normalized to spaces.
+  // - If content begins and ends with a space and contains a non-space, strip one space from both ends.
+  function _mdInlineCodeNormalizeContentInfo(s){
+    try{
+      let t = String(s||'');
+      // Normalize line endings to spaces.
+      t = t.replace(/\r\n?/g, '\n').replace(/\n/g, ' ');
+      let trimL = 0;
+      let trimR = 0;
+      // Strip one leading + trailing space if both exist and there's some non-space.
+      // (CommonMark rule to allow `` ` `` patterns.)
+      if (t.length >= 2 && t[0] === ' ' && t[t.length-1] === ' ' && /\S/.test(t)){
+        t = t.slice(1, -1);
+        trimL = 1;
+        trimR = 1;
+      }
+      return { text:t, trimL:(trimL|0), trimR:(trimR|0) };
+    }catch{ return { text:String(s||''), trimL:0, trimR:0 }; }
+  }
+  function _mdInlineCodeParse(s){
+    try{
+      const src = String(s||'');
+      const n = src.length|0;
+      const segs = [];
+      let i = 0;
+      const pushText = (t, a, b)=>{
+        if (!t) return;
+        const last = segs[segs.length-1];
+        if (last && last.t==='text' && Number.isFinite(last.b) && (last.b|0) === (a|0)){
+          last.s += t;
+          last.b = (b|0);
+        } else {
+          segs.push({ t:'text', s:t, a:(a|0), b:(b|0) });
+        }
+      };
+
+      const isEscaped = (idx)=>{
+        try{
+          let k = (idx|0) - 1;
+          let cnt = 0;
+          while (k >= 0 && src[k] === '\\'){ cnt++; k--; }
+          return ((cnt|0) % 2) === 1;
+        }catch{ return false; }
+      };
+
+      while (i < n){
+        const ch = src[i];
+        if (ch !== '`' || isEscaped(i|0)){
+          pushText(ch, i|0, (i+1)|0);
+          i++;
+          continue;
+        }
+
+        // Opening delimiter run
+        let ticks = 1;
+        while ((i + ticks) < n && src[i + ticks] === '`') ticks++;
+        const open = i;
+        const run = ticks|0;
+        let j = (i + run)|0;
+        let found = -1;
+        while (j < n){
+          const k = src.indexOf('`', j);
+          if (k < 0) break;
+          // Count backticks at k
+          let m = 1;
+          while ((k + m) < n && src[k + m] === '`') m++;
+          if ((m|0) === (run|0)){
+            found = k|0;
+            break;
+          }
+          j = (k + m)|0;
+        }
+        if (found < 0){
+          // No closer: treat opening run as literal
+          pushText(src.slice(open, open + run), open|0, (open + run)|0);
+          i = (open + run)|0;
+          continue;
+        }
+
+        const raw = src.slice(open + run, found);
+        const info = _mdInlineCodeNormalizeContentInfo(raw);
+        const code = String((info && info.text) || '');
+        const end = (found + run)|0;
+        segs.push({ t:'code', s: code, ticks: run|0, a:(open|0), b:(end|0), trimL: (info && info.trimL)|0, trimR: (info && info.trimR)|0 });
+        i = (found + run)|0;
+      }
+      return segs;
+    }catch{ return [{ t:'text', s:String(s||'') }]; }
+  }
+  function _mdInlineCodeHtmlWithRange(s, rangeClass, rangeStart, rangeEnd){
+    try{
+      const src = String(s||'');
+      if (!src) return '';
+      const hasRange = !!(rangeClass && Number.isFinite(rangeStart) && Number.isFinite(rangeEnd));
+      const rs = hasRange ? Math.max(0, Math.min(src.length|0, rangeStart|0)) : 0;
+      const re = hasRange ? Math.max(0, Math.min(src.length|0, rangeEnd|0)) : 0;
+      const segs = (src.indexOf('`') >= 0) ? _mdInlineCodeParse(src) : [{ t:'text', s:src, a:0, b:(src.length|0) }];
+
+      const wrap = (cls, inner)=>{ try{ return '<span class="' + cls + '">' + inner + '</span>'; }catch{ return inner; } };
+      const emitPlain = (t, a, b)=>{
+        try{
+          const txt = String(t||'');
+          if (!hasRange || re <= (a|0) || rs >= (b|0)) return _mdEscHtml(txt);
+          // Split within this plain chunk
+          const x0 = Math.max((a|0), (rs|0));
+          const x1 = Math.min((b|0), (re|0));
+          let out = '';
+          if ((x0|0) > (a|0)) out += _mdEscHtml(src.slice(a|0, x0|0));
+          if ((x1|0) > (x0|0)) out += wrap(rangeClass, _mdEscHtml(src.slice(x0|0, x1|0)));
+          if ((b|0) > (x1|0)) out += _mdEscHtml(src.slice(x1|0, b|0));
+          return out;
+        }catch{ return _mdEscHtml(String(t||'')); }
+      };
+
+      let out = '';
+      for (const it of segs){
+        if (!it) continue;
+        if (it.t === 'text'){
+          out += emitPlain(it.s, it.a, it.b);
+          continue;
+        }
+        const a = (it.a|0), b = (it.b|0);
+        const ticks = Math.max(1, (it.ticks|0) || 1);
+        const pad = Math.max(0, (ticks|0) - 1);
+
+        // Partial selection inside code: highlight only the selected substring within the code content.
+        // Map range in the original string onto the code content region (excluding backticks).
+        let inner = '';
+        try{
+          const rawStart = (a + (ticks|0))|0;
+          const rawEnd = (b - (ticks|0))|0;
+          const rawLen = Math.max(0, (rawEnd - rawStart)|0);
+          const trimL = Math.max(0, (it.trimL|0) || 0);
+          const disp = String(it.s||'');
+          const dispLen = (disp.length|0);
+
+          if (!hasRange || re <= rawStart || rs >= rawEnd){
+            inner = _mdEscHtml(disp);
+          } else {
+            // Convert selection offsets (raw) -> displayed offsets (after trim).
+            const selRawS = Math.max(0, Math.min(rawLen|0, (rs - rawStart)|0));
+            const selRawE = Math.max(0, Math.min(rawLen|0, (re - rawStart)|0));
+            let sDisp = Math.max(0, (selRawS - (trimL|0))|0);
+            let eDisp = Math.max(0, (selRawE - (trimL|0))|0);
+            sDisp = Math.max(0, Math.min(dispLen|0, sDisp|0));
+            eDisp = Math.max(0, Math.min(dispLen|0, eDisp|0));
+            const x0 = Math.min(sDisp|0, eDisp|0);
+            const x1 = Math.max(sDisp|0, eDisp|0);
+
+            if ((x1|0) <= (x0|0)){
+              inner = _mdEscHtml(disp);
+            } else {
+              const pre = disp.slice(0, x0|0);
+              const mid = disp.slice(x0|0, x1|0);
+              const post = disp.slice(x1|0);
+              inner = _mdEscHtml(pre) + wrap(rangeClass, _mdEscHtml(mid)) + _mdEscHtml(post);
+            }
+          }
+        }catch{ inner = _mdEscHtml(String(it.s||'')); }
+
+        out += '<span class="md-icode" style="--mdIcodePad:' + (pad|0) + '"><span class="md-icode-t">' + inner + '</span></span>';
+      }
+      return out;
+    }catch{ return _mdEscHtml(String(s||'')); }
+  }
+  function _mdInlineCodeHtml(s){
+    try{ return _mdInlineCodeHtmlWithRange(s, null, 0, 0); }catch{ return _mdEscHtml(String(s||'')); }
+  }
+
   function _mdImeUpdateRange(){
     try{
       if (!editor) return;
@@ -972,19 +1144,70 @@ try{
     try{
       const k = (ul && Number.isFinite(ul.bulletKind)) ? ((ul.bulletKind|0) % 3 + 3) % 3 : 0;
       const cls = (k===1) ? 'md-ulb1' : (k===2 ? 'md-ulb2' : 'md-ulb0');
-      // CSS draws the shape; keep element width stable (2ch) via .md-ulbox.
-      return '<span class="md-ulbox"><span class="md-ulbullet ' + cls + '"></span></span>';
-    }catch{ return '<span class="md-ulbox"><span class="md-ulbullet md-ulb0"></span></span>'; }
+      // CSS draws the shape; width is controlled by --ulw (in ch units).
+      const sp = (ul && Number.isFinite(ul.spaceCount)) ? Math.max(1, Math.min(4, (ul.spaceCount|0))) : 1;
+      const w = 1 + (sp|0); // marker + spaces
+      return '<span class="md-ulbox" style="--ulw:' + (w|0) + '"><span class="md-ulbullet ' + cls + '"></span></span>';
+    }catch{ return '<span class="md-ulbox" style="--ulw:2"><span class="md-ulbullet md-ulb0"></span></span>'; }
   }
   function _mdUListHtmlWithRange(text, ul, rangeClass, rangeStart, rangeEnd){
     try{
       const s = String(text||'');
       const len = (s.length|0);
       if (!ul || !Number.isFinite(ul.markerIdx)) return _mdEscHtml(s);
-      const ms = Math.max(0, Math.min(len, (ul.markerIdx|0)));
+      let ms = Math.max(0, Math.min(len, (ul.markerIdx|0)));
       const ml0 = (ul && Number.isFinite(ul.markerLen)) ? (ul.markerLen|0) : 1;
       const ml = Math.max(1, ml0|0);
-      const me = Math.max(ms, Math.min(len, ms + (ml|0) + 1));
+
+      // Safety: ensure markerIdx points to an actual list marker in this line.
+      // If not, recompute based on leading indent to avoid eating inline code backticks.
+      try{
+        const type0 = (ul && ul.listType) ? String(ul.listType||'') : 'ul';
+        const _isUlMark = (ch)=>{ return ch==='-' || ch==='*' || ch==='+'; };
+        const _looksLikeOlAt = (idx)=>{
+          idx = Math.max(0, Math.min(len, idx|0));
+          let p = idx|0;
+          let any = false;
+          while (p < (len|0) && s[p] >= '0' && s[p] <= '9'){ any = true; p++; }
+          if (!any) return false;
+          const d = (p < (len|0)) ? s[p] : '';
+          if (!(d === '.' || d === ')')) return false;
+          return true;
+        };
+
+        let ok = true;
+        if (type0 === 'ol'){
+          ok = _looksLikeOlAt(ms|0);
+        } else {
+          ok = _isUlMark(s[ms|0]);
+        }
+        if (!ok){
+          // recompute marker index from indentation
+          let idx = 0;
+          while (idx < (len|0)){
+            const ch = s[idx];
+            if (ch === ' ' || ch === '\t'){ idx++; continue; }
+            break;
+          }
+          if (type0 === 'ol'){
+            if (_looksLikeOlAt(idx|0)) ms = idx|0;
+          } else {
+            if (_isUlMark(s[idx|0])) ms = idx|0;
+          }
+        }
+      }catch{}
+
+      const type = (ul && ul.listType) ? String(ul.listType||'') : 'ul';
+      // UL: replace marker + ALL following spaces (1..4) with a stable-width box.
+      // OL: keep previous behavior (marker + first space) for digit alignment logic.
+      let me = 0;
+      let ulSpaceCount = 1;
+      if (type === 'ol'){
+        me = Math.max(ms, Math.min(len, ms + (ml|0) + 1));
+      } else {
+        try{ ulSpaceCount = (ul && Number.isFinite(ul.spaceCount)) ? Math.max(1, Math.min(4, (ul.spaceCount|0))) : 1; }catch{ ulSpaceCount = 1; }
+        me = Math.max(ms, Math.min(len, ms + (ml|0) + (ulSpaceCount|0)));
+      }
       const hasRange = (rangeClass && Number.isFinite(rangeStart) && Number.isFinite(rangeEnd));
       const rs = hasRange ? Math.max(0, Math.min(len, rangeStart|0)) : 0;
       const re = hasRange ? Math.max(0, Math.min(len, rangeEnd|0)) : 0;
@@ -994,17 +1217,14 @@ try{
       const emitText = (a, b)=>{
         a = Math.max(0, Math.min(len, a|0));
         b = Math.max(a, Math.min(len, b|0));
-        if (!hasRange || re <= a || rs >= b) return esc(s.slice(a, b));
-        const x0 = Math.max(a, rs);
-        const x1 = Math.min(b, re);
-        let out = '';
-        if (a < x0) out += esc(s.slice(a, x0));
-        if (x1 > x0) out += wrap(rangeClass, esc(s.slice(x0, x1)));
-        if (x1 < b) out += esc(s.slice(x1, b));
-        return out;
+        // Render inline code spans even when a selection/IME range exists.
+        // Map range coordinates into the substring coordinate space.
+        const sub = s.slice(a, b);
+        const subRs = hasRange ? Math.max(0, Math.min((sub.length|0), (rs - a)|0)) : 0;
+        const subRe = hasRange ? Math.max(0, Math.min((sub.length|0), (re - a)|0)) : 0;
+        try{ return _mdInlineCodeHtmlWithRange(sub, hasRange ? rangeClass : null, subRs|0, subRe|0); }catch{ return esc(sub); }
       };
 
-      const type = (ul && ul.listType) ? String(ul.listType||'') : 'ul';
       if (type === 'ol'){
         // Ordered list marker rendering (#1739/#1741)
         // - Replace (digits + '.' or ')' + first following space) with a fixed-width box.
@@ -1455,7 +1675,7 @@ try{
                 if (listItemDisp){
                   el.innerHTML = _mdUListHtmlWithRange(text, listItemDisp, 'md-sel', c1|0, c2|0);
                 } else {
-                  el.innerHTML = _mdEscHtml(pre) + '<span class="md-sel">' + _mdEscHtml(mid) + '</span>' + _mdEscHtml(post);
+                  el.innerHTML = _mdInlineCodeHtmlWithRange(text, 'md-sel', c1|0, c2|0);
                 }
                 usedHtml = true;
               }
@@ -1502,7 +1722,8 @@ try{
                   // For list lines we don't need headingCjkHtml; keep it simple and stable.
                   el.innerHTML = _mdUListHtmlWithRange(text, listItemDisp, 'md-ime-uline', a|0, b|0);
                 } else {
-                  el.innerHTML = preH + '<span class="md-ime-uline">' + midH + '</span>' + postH;
+                  // Inline code + IME underline (range-aware)
+                  el.innerHTML = _mdInlineCodeHtmlWithRange(text, 'md-ime-uline', a|0, b|0);
                 }
                 usedHtml = true;
               }
@@ -1520,6 +1741,16 @@ try{
           if (listItemDisp){
             try{ el.innerHTML = _mdUListHtmlWithRange(text, listItemDisp, null, 0, 0); usedHtml = true; }catch{ usedHtml = false; }
           }
+          // Inline code spans (`code`) in clean display (#1772)
+          if (!usedHtml && hideSymbols){
+            try{
+              const html = _mdInlineCodeHtml(text);
+              if (html && html !== _mdEscHtml(text)){
+                el.innerHTML = html;
+                usedHtml = true;
+              }
+            }catch{ /* fall through */ }
+          }
           if (!usedHtml) el.textContent = text;
         }
 
@@ -1533,8 +1764,27 @@ try{
             try{ indentOpts = _mdIndentOptsForListLine(text, listInfoDisp, wPx|0, fs|0, lh|0); }catch{ indentOpts = null; }
           }
         }
+        // NOTE: WebView2 can visually clip/overlap the first few characters when using
+        // padding-left + negative text-indent together with inline-flex list markers.
+        // For UL list items (marker is replaced with .md-ulbox), emulate hanging-indent
+        // without text-indent by inserting a 0-width negative-margin span at line start.
+        let ulHangHackPx = 0;
+        try{
+          const lt2 = (listInfoDisp && listInfoDisp.listType) ? String(listInfoDisp.listType||'') : '';
+          if (indentOpts && lt2 === 'ul' && listItemDisp && Number.isFinite(indentOpts.padLeftPx) && (indentOpts.padLeftPx||0) > 0.5){
+            ulHangHackPx = (+indentOpts.padLeftPx||0);
+          }
+        }catch{ ulHangHackPx = 0; }
         try{ el.style.paddingLeft = (indentOpts ? ((indentOpts.padLeftPx||0) + 'px') : ''); }catch{}
-        try{ el.style.textIndent = (indentOpts ? ((indentOpts.textIndentPx||0) + 'px') : ''); }catch{}
+        try{ el.style.textIndent = (indentOpts ? (((ulHangHackPx>0)? 0 : (indentOpts.textIndentPx||0)) + 'px') : ''); }catch{}
+        if ((ulHangHackPx||0) > 0 && usedHtml){
+          try{
+            const prefix = '<span class="md-hang0" style="margin-left:-' + (ulHangHackPx||0) + 'px"></span>';
+            if (typeof el.innerHTML === 'string'){
+              if (!el.innerHTML.startsWith('<span class="md-hang0"')) el.innerHTML = prefix + el.innerHTML;
+            }
+          }catch{}
+        }
 
         // #1736: block padding for loose-gap adjacent rows (tight internal line-height).
         try{ el.style.boxSizing = 'border-box'; }catch{}
@@ -4072,7 +4322,19 @@ try{
       if (!_apiBase) return false;
       const url = _apiBase + 'win/state';
       const body = JSON.stringify(ws);
-      fetch(url, { method:'POST', headers:{ 'Content-Type':'application/json' }, body }).catch(()=>{});
+      // Avoid CORS preflight from file:// origin:
+      // - sendBeacon uses a no-cors-like path (no preflight)
+      // - fetch uses mode:no-cors with a simple Content-Type
+      try{
+        if (typeof navigator !== 'undefined' && navigator && typeof navigator.sendBeacon === 'function'){
+          try{
+            const blob = new Blob([body], { type: 'text/plain' });
+            navigator.sendBeacon(url, blob);
+            return true;
+          }catch{}
+        }
+      }catch{}
+      fetch(url, { method:'POST', mode:'no-cors', keepalive:true, headers:{ 'Content-Type':'text/plain' }, body }).catch(()=>{});
       return true;
     }catch{ return false; }
   }
