@@ -710,9 +710,9 @@ try{
       // Ordered list marker alignment (#1754/#1755/#1765):
       // - Compute max digit width per list block.
       // - Optionally compute display digits with auto-increment (display-only).
-      //   Enabled only when window.SIX_OPTIONS.md_autoIncrement === true.
+      //   Enabled only when md_autoIncrement option is on.
       try{
-        const autoInc = !!(window && window.SIX_OPTIONS && (window.SIX_OPTIONS.md_autoIncrement === true));
+        const autoInc = _getMdAutoIncrement();
         const TAB = 4;
         const _indentBucket = (indentCol)=>{
           const c = Math.max(0, indentCol|0);
@@ -3932,6 +3932,7 @@ try{
         active: Math.max(0, Math.min((buffers.length?buffers.length-1:0), currentIdx|0)),
         buffers: bufs,
         scrolloff: Number.isFinite(scrolloff) ? (scrolloff|0) : 3,
+        md_autoIncrement: _getMdAutoIncrement(),
         windowState: winState,
         searchHistory: searchHist,
         cmdHistory: cmdHist,
@@ -4077,6 +4078,16 @@ try{
         const tn = (j && typeof j.theme === 'string') ? j.theme : null;
         const nn = _normalizeThemeName(tn) || 'basic';
         _setThemeName(nn, { persist:false });
+      }catch{}
+
+      // Restore md_autoIncrement (global, all buffers) (#1768)
+      // If the session does not include it (older sessions), adopt SIX_OPTIONS.md_autoIncrement (or false).
+      try{
+        if (j && typeof j.md_autoIncrement === 'boolean'){
+          _setMdAutoIncrement(!!j.md_autoIncrement, { persist:false, redraw:false });
+        } else {
+          _setMdAutoIncrement(_mdAutoIncrementDefaultFromOptions(), { persist:false, redraw:false });
+        }
       }catch{}
 
       // #1373: Restore search history
@@ -6768,6 +6779,31 @@ try{
   let _optHlsearch = (function(){ try{ const o=(window&&window.SIX_OPTIONS)||{}; return !!o.hlsearch; }catch{} return false; })();          // :set hlsearch / :set nohlsearch
   let _optList = (function(){ try{ const o=(window&&window.SIX_OPTIONS)||{}; return (o.list!==false); }catch{} return true; })(); // :set list (default ON)
   let _hlLayer = null;               // container for match rectangles
+
+  // --- md_autoIncrement (ordered list display auto-increment; global option) ---
+  function _mdAutoIncrementDefaultFromOptions(){
+    try{ return !!(window && window.SIX_OPTIONS && window.SIX_OPTIONS.md_autoIncrement === true); }catch{ return false; }
+  }
+  function _getMdAutoIncrement(){
+    try{ if (window && typeof window.__sixMdAutoIncrement === 'boolean') return !!window.__sixMdAutoIncrement; }catch{}
+    return _mdAutoIncrementDefaultFromOptions();
+  }
+  function _setMdAutoIncrement(v, opts={}){
+    try{
+      const b = !!v;
+      try{ if (window) window.__sixMdAutoIncrement = b; }catch{}
+      if (!opts || opts.persist !== false){
+        try{ _schedulePersist('md_autoIncrement'); }catch{}
+      }
+      if (!opts || opts.redraw !== false){
+        try{ _renderListChars(); }catch{}
+        try{ if (typeof updateGutter === 'function') updateGutter(); }catch{}
+      }
+      return true;
+    }catch{ return false; }
+  }
+  // Initialize once from SIX_OPTIONS unless already set.
+  try{ if (!(window && typeof window.__sixMdAutoIncrement === 'boolean')) window.__sixMdAutoIncrement = _mdAutoIncrementDefaultFromOptions(); }catch{}
   // #624 直前テキスト保持 (INSERT beforeinput/delete 用)
   let _prevTextBeforeInput = '';
   let _prevSelBeforeInputS = 0;
@@ -17835,6 +17871,27 @@ try{
       try{ _renderListChars(); }catch{}
       try{ updateGutter(); }catch{}
       toast('markdown: off', 900); return;
+    }
+
+    // :set md_autoIncrement / :set nomd_autoIncrement / :set md_autoIncrement! / :set md_autoIncrement?
+    if (/^:set\s+md_autoIncrement\s*$/i.test(cmd)){
+      _setMdAutoIncrement(true);
+      toast('md_autoIncrement: on', 900);
+      return;
+    }
+    if (/^:set\s+nomd_autoIncrement\s*$/i.test(cmd)){
+      _setMdAutoIncrement(false);
+      toast('md_autoIncrement: off', 900);
+      return;
+    }
+    if (/^:set\s+md_autoIncrement!\s*$/i.test(cmd)){
+      _setMdAutoIncrement(!_getMdAutoIncrement());
+      toast('md_autoIncrement: ' + (_getMdAutoIncrement() ? 'on' : 'off'), 900);
+      return;
+    }
+    if (/^:set\s+md_autoIncrement\?\s*$/i.test(cmd)){
+      toast('md_autoIncrement: ' + (_getMdAutoIncrement() ? 'on' : 'off'), 1200);
+      return;
     }
     if (/^:set\s+markdown!\s*$/i.test(cmd)){
       const b=currentBuffer(); if (b){ b.markdown=!b.markdown; b._markdownAuto=false; if (b.markdown && typeof b.md_draftedit !== 'boolean') b.md_draftedit = true; _schedulePersist('markdown'); _schedulePersist('md_draftedit'); }
