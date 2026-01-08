@@ -1987,6 +1987,49 @@ try{
   // and mirror it incrementally into the main editor buffer at the caret.
   let imeinput = null;
 
+  function _imeBarHandlePaste(e){
+    try{
+      if (!_imeBarActive) return;
+      if (!editor) return;
+      // Multi-line paste into <input type="text"> drops newlines; mirror into textarea buffer instead.
+      let text = '';
+      try{ text = (e && e.clipboardData && e.clipboardData.getData) ? (e.clipboardData.getData('text/plain') || '') : ''; }catch{ text = ''; }
+      text = String(text||'');
+      if (!text) return;
+      // Normalize CRLF/CR -> LF
+      try{ text = text.replace(/\r\n?/g, '\n'); }catch{}
+      try{ e.preventDefault(); e.stopPropagation(); }catch{}
+
+      // Anchor to current editor selection (replace selection if any)
+      try{
+        let ss = 0, se = 0;
+        try{ ss = (editor.selectionStart|0); se = (editor.selectionEnd|0); }catch{ ss = se = (_offsetFromRC(caretRow|0, caretCol|0)|0); }
+        const a = Math.max(0, Math.min(String(editor.value||'').length, Math.min(ss|0, se|0)));
+        const b = Math.max(0, Math.min(String(editor.value||'').length, Math.max(ss|0, se|0)));
+        _imeBarAnchorOff = a|0;
+        _imeBarPrevText = '';
+        // Keep undo behavior closer to normal paste
+        try{ _pushUndoSnapshot && _pushUndoSnapshot('paste'); }catch{}
+        try{ _imeBarSnapshotTaken = true; }catch{}
+        // If there was a selection, ensure replace logic deletes it
+        try{ editor.selectionStart = a; editor.selectionEnd = b; }catch{}
+      }catch{}
+
+      // Insert pasted text and immediately commit it (do not keep it as "preedit")
+      try{ _imeBarReplaceInsertedText(text, 'paste'); }catch{}
+      try{
+        const newOff = (editor && typeof editor.selectionStart==='number') ? (editor.selectionStart|0) : ((_imeBarAnchorOff|0) + String(text||'').length);
+        _imeBarPrevText = '';
+        _imeBarAnchorOff = newOff|0;
+      }catch{}
+      // Clear IME input so future composition starts fresh
+      try{ const el = (e && e.target) ? e.target : null; if (el && typeof el.value === 'string') el.value = ''; }catch{}
+      try{ _renderListChars && _renderListChars(); }catch{}
+      try{ updateGutter && updateGutter(); }catch{}
+      try{ if (_mdRichActive && _mdRichActive()) _mdRenderTextLayer && _mdRenderTextLayer(); }catch{}
+    }catch{}
+  }
+
   function _ensureImeInputEl(){
     try{
       if (imeinput && imeinput.parentNode) return imeinput;
@@ -2016,13 +2059,40 @@ try{
         }catch{ try{ cf.appendChild(el); }catch{} }
       }
       imeinput = el;
+      // Paste hook: preserve newlines by inserting into textarea buffer (#1770)
+      try{
+        if (!imeinput.__sixPasteHooked){
+          imeinput.__sixPasteHooked = true;
+          imeinput.addEventListener('paste', _imeBarHandlePaste);
+        }
+      }catch{}
       try{ window.imeinput = el; }catch{}
       return el;
     }catch{ return null; }
   }
 
   function _imeBarInputEl(){
-    try{ return _ensureImeInputEl() || ((typeof cmdinput !== 'undefined') ? cmdinput : null); }catch{ try{ return (typeof cmdinput !== 'undefined') ? cmdinput : null; }catch{ return null; } }
+    try{
+      const el = _ensureImeInputEl() || ((typeof cmdinput !== 'undefined') ? cmdinput : null);
+      try{
+        if (el && !el.__sixPasteHooked){
+          el.__sixPasteHooked = true;
+          el.addEventListener('paste', _imeBarHandlePaste);
+        }
+      }catch{}
+      return el;
+    }catch{
+      try{
+        const el = (typeof cmdinput !== 'undefined') ? cmdinput : null;
+        try{
+          if (el && !el.__sixPasteHooked){
+            el.__sixPasteHooked = true;
+            el.addEventListener('paste', _imeBarHandlePaste);
+          }
+        }catch{}
+        return el;
+      }catch{ return null; }
+    }
   }
   let _imeBarActive = false;
   let _imeBarAnchorOff = 0;
@@ -20798,6 +20868,22 @@ try{
             _insertSegDirty = false;
             // selection は編集開始と同時に動くので、直後の select では pending を立てない
             _insertSegIgnoreSelectUntil = Date.now() + 120;
+          }
+        }
+      }catch{}
+
+      // Paste should always be its own undo boundary (not markdown-only) (#1771)
+      // Chromium fires beforeinput with inputType='insertFromPaste' (or 'insertFromDrop') before mutating textarea.
+      // Push a snapshot here so Ctrl+Z undoes *only* the paste.
+      try{
+        if (_mode === 'INSERT'){
+          const itP = String((e && e.inputType) || '');
+          const isPaste = (itP === 'insertFromPaste' || itP === 'insertFromDrop');
+          if (isPaste && !(window && window._imeComposing===true)){
+            // Avoid double boundaries: if a pending segment exists, the paste snapshot supersedes it.
+            try{ _insertSegPending = false; _insertSegDirty = false; }catch{}
+            try{ _pushUndoSnapshot('paste'); }catch{}
+            try{ _insertSegIgnoreSelectUntil = Date.now() + 120; }catch{}
           }
         }
       }catch{}
