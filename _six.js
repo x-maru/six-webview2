@@ -60,7 +60,7 @@ try{
   let _mdBgLayer = null;
   let _mdBgInner = null;
   let _mdVisualSuppressed = false; // reserved: temporarily disable rich visuals if needed
-  let _mdImeRange = null; // { sOff,eOff, sRow,eRow, sCol,eCol }
+  let _mdImeRange = null; // { sOff,eOff }
   let _mdLastHorzDir = 0; // -1:left, +1:right (for md clean caret clamps)
 
   // Japanese/CJK ranges for heading emphasis (#1486)
@@ -283,14 +283,8 @@ try{
       const eOff = (typeof editor.selectionEnd==='number') ? (editor.selectionEnd|0) : sOff;
       const a = Math.min(sOff, eOff);
       const b = Math.max(sOff, eOff);
-      const r1 = _rcFromOffset(a);
-      const r2 = _rcFromOffset(b);
       _mdImeRange = {
         sOff:a, eOff:b,
-        sRow:(r1 && typeof r1.r==='number') ? (r1.r|0) : (caretRow|0),
-        eRow:(r2 && typeof r2.r==='number') ? (r2.r|0) : (caretRow|0),
-        sCol:(r1 && typeof r1.c==='number') ? (r1.c|0) : 0,
-        eCol:(r2 && typeof r2.c==='number') ? (r2.c|0) : 0,
       };
     }catch{ _mdImeRange = null; }
   }
@@ -1343,6 +1337,8 @@ try{
   function _mdRenderTextLayer(){
     try{
       if (!_mdRichActive()) return;
+      // IME fast path: when native textarea is visible, skip rich overlay rendering.
+      try{ if (document && document.body && document.body.classList && document.body.classList.contains('md-ime-native')) return; }catch{}
       _mdEnsureTextLayer();
       if (!_mdTextLayer || !_mdTextInner || !_mdBgLayer || !_mdBgInner) return;
       const lines = _splitLines();
@@ -1716,24 +1712,21 @@ try{
         // This avoids full-viewport double rendering while still giving composition feedback.
         const headingCjkHtml = _mdHeadingCjkHtml(text, lv);
         try{
-          if (!usedHtml && window && window._imeComposing===true && _mdImeRange && row>=0){
-            const sr = _mdImeRange.sRow|0;
-            const er = _mdImeRange.eRow|0;
-            if (row>=sr && row<=er){
-              // IME columns are on the original textarea line; map to display columns when symbols are hidden.
-              const sCol0 = (row===sr) ? (_mdImeRange.sCol|0) : 0;
-              const eCol0 = (row===er) ? (_mdImeRange.eCol|0) : (srcText.length|0);
-              const sCol = Math.max(0, (sCol0|0) - (dispPrefixLen|0));
-              const eCol = Math.max(0, (eCol0|0) - (dispPrefixLen|0));
-              const a = Math.max(0, Math.min(text.length|0, sCol));
-              const b = Math.max(0, Math.min(text.length|0, eCol));
+          if (!usedHtml && window && window._imeComposing===true && _mdImeRange && row>=0 && row<total){
+            const off0 = _offsetFromRC(row|0, 0)|0;
+            const off1 = (off0 + (String(srcText||'').length|0))|0; // exclude newline
+            const segS = Math.max((_mdImeRange.sOff|0), off0|0);
+            const segE = Math.min((_mdImeRange.eOff|0), off1|0);
+            if (segE >= segS && !renderHr && !renderSetextUnderlineRow){
+              // Map underline columns to displayed text (prefix hidden in clean display).
+              let c1 = (segS - off0)|0;
+              let c2 = (segE - off0)|0;
+              if (hideSymbols && (dispPrefixLen|0) > 0){ c1 = Math.max(0, c1 - (dispPrefixLen|0)); c2 = Math.max(0, c2 - (dispPrefixLen|0)); }
+              c1 = Math.max(0, Math.min((text.length|0), c1|0));
+              c2 = Math.max(0, Math.min((text.length|0), c2|0));
+              const a = Math.min(c1|0, c2|0);
+              const b = Math.max(c1|0, c2|0);
               if (b >= a){
-                const pre = text.slice(0, a);
-                const mid = text.slice(a, b);
-                const post = text.slice(b);
-                const preH = headingCjkHtml ? (_mdHeadingCjkHtml(pre, lv) || _mdEscHtml(pre)) : _mdEscHtml(pre);
-                const midH = headingCjkHtml ? (_mdHeadingCjkHtml(mid || ' ', lv) || _mdEscHtml(mid || ' ')) : _mdEscHtml(mid || ' ');
-                const postH = headingCjkHtml ? (_mdHeadingCjkHtml(post, lv) || _mdEscHtml(post)) : _mdEscHtml(post);
                 if (listItemDisp){
                   // For list lines we don't need headingCjkHtml; keep it simple and stable.
                   el.innerHTML = _mdUListHtmlWithRange(text, listItemDisp, 'md-ime-uline', a|0, b|0);
@@ -3610,6 +3603,55 @@ try{
   let _caretGradStartBase = null, _caretGradMidBase = null; // theme baseline to restore
   // IME compositionイベントで状態更新
   let _mdImeUpdatePending = false;
+  let _mdImeLastSelA = 0, _mdImeLastSelB = 0;
+  let _mdImeNativeUntil = 0;
+  let _mdImePostCommitPending = false;
+
+  function _mdImeSetNativeMode(on, why){
+    try{
+      const b = document && document.body;
+      if (!b || !b.classList) return;
+      if (on){
+        b.classList.add('md-ime-native');
+        try{ editor && editor.classList && editor.classList.add('md-ime-native'); }catch{}
+      } else {
+        b.classList.remove('md-ime-native');
+        try{ editor && editor.classList && editor.classList.remove('md-ime-native'); }catch{}
+      }
+    }catch{}
+  }
+  function _mdImeEnterNativeMode(why, ttlMs){
+    try{
+      if (!_mdRichEnabled || !_mdRichEnabled()) return;
+      const now = Date.now();
+      const ttl = Math.max(100, (ttlMs|0) || 2500);
+      _mdImeNativeUntil = Math.max((_mdImeNativeUntil|0), (now + ttl)|0);
+      _mdImeSetNativeMode(true, why);
+    }catch{}
+  }
+  function _mdImeMaybeExitNativeMode(why){
+    try{
+      if (window && window._imeComposing===true) return;
+      const now = Date.now();
+      if (now < (_mdImeNativeUntil|0)) return;
+      _mdImeSetNativeMode(false, why);
+    }catch{}
+  }
+  function _mdImeSchedulePostCommitRender(why){
+    try{
+      if (_mdImePostCommitPending) return;
+      _mdImePostCommitPending = true;
+      const run = ()=>{
+        _mdImePostCommitPending = false;
+        try{ if (_mdRichEnabled && _mdRichEnabled()) _mdApplyVisualState && _mdApplyVisualState(); }catch{}
+        try{ _mdImeMaybeExitNativeMode('postcommit'); }catch{}
+      };
+      if (window && window.requestIdleCallback){
+        try{ window.requestIdleCallback(()=>{ try{ run(); }catch{} }, { timeout: 250 }); return; }catch{}
+      }
+      try{ setTimeout(()=>{ try{ run(); }catch{} }, 0); }catch{}
+    }catch{}
+  }
   try{
     if (editor){
       editor.addEventListener('compositionstart', ()=>{
@@ -3651,11 +3693,12 @@ try{
             _setNativeCaretMode && _setNativeCaretMode(true);
           }
         }catch{}
+        // IME fast path for md-rich: show native textarea during composition.
+        try{ _mdImeEnterNativeMode('compositionstart', 5000); }catch{}
         // タイピング中の重い再描画を少し長めに抑止（IME候補表示中のフレーム落ち対策）
         try{ _typingGuardUntil = Date.now() + 200; }catch{}
         try{ _applyCaretGradient(); }catch{}
-        // markdown-rich: keep rich layer active during composition (#1477)
-        try{ _mdApplyVisualState(); }catch{}
+        // Do not force overlay render here; rebuilt once after commit.
         // #1319: Hide listchars on the active line during IME composition (cheap: avoid full rerender here)
         try{
           if (_optList && _listLayer){
@@ -3685,22 +3728,21 @@ try{
               _setNativeCaretMode && _setNativeCaretMode(true);
             }
           }catch{}
-          try{ _mdImeUpdateRange(); }catch{}
-          if (_mdImeUpdatePending) return;
-          _mdImeUpdatePending = true;
-          if (window.requestAnimationFrame){
-            requestAnimationFrame(()=>{
-              _mdImeUpdatePending = false;
-              try{ _mdRenderTextLayer(); }catch{}
-              try{ _mdImeLastRenderAt = Date.now(); }catch{}
-              try{ _repositionCaret({ force:true }); }catch{}
-            });
-          } else {
-            _mdImeUpdatePending = false;
-            try{ _mdRenderTextLayer(); }catch{}
-            try{ _mdImeLastRenderAt = Date.now(); }catch{}
-            try{ _repositionCaret({ force:true }); }catch{}
-          }
+
+          // IME fast path for md-rich: show native textarea and skip overlay redraw.
+          try{ _mdImeEnterNativeMode('compositionupdate', 5000); }catch{}
+          try{
+            const sOff = (typeof editor.selectionStart==='number') ? (editor.selectionStart|0) : 0;
+            const eOff = (typeof editor.selectionEnd==='number') ? (editor.selectionEnd|0) : sOff;
+            const a = Math.min(sOff, eOff)|0;
+            const b = Math.max(sOff, eOff)|0;
+            if (a !== (_mdImeLastSelA|0) || b !== (_mdImeLastSelB|0)){
+              _mdImeLastSelA = a|0; _mdImeLastSelB = b|0;
+              _mdImeUpdateRange();
+            }
+          }catch{}
+          // NOTE: We intentionally do not update #textLayer during composition.
+          // It can be very expensive with wrap-on / ordered lists on large buffers.
         }catch{ _mdImeUpdatePending = false; }
       });
 
@@ -3712,9 +3754,9 @@ try{
         // markdown-rich: end native-caret forcing immediately (restore overlay caret behavior)
         try{ _nativeCaretForceUntil = 0; _refreshCaretMode && _refreshCaretMode('compositionend-md'); }catch{}
 
-        // Sync overlay caret position once at commit time (skip for huge buffers).
+        // Sync overlay caret position once at commit time (skip for large buffers).
         try{
-          if (_editorTextLen() <= 200000){
+          if (_editorTextLen() <= 50000){
             const off = (editor && typeof editor.selectionStart==='number') ? (editor.selectionStart|0) : 0;
             const rc = _rcFromOffset(off);
             caretRow = rc.r; caretCol = rc.c;
@@ -3737,8 +3779,9 @@ try{
         }catch{}
         // composition終了後の再描画はrAFへ集約
         try{ _requestCaretRender(); }catch{}
-        // markdown-rich: keep rich layer (#1477)
-        try{ _mdApplyVisualState(); }catch{}
+        // markdown-rich: defer expensive overlay rebuild; keep native textarea visible briefly.
+        try{ _mdImeEnterNativeMode('compositionend', 800); }catch{}
+        try{ _mdImeSchedulePostCommitRender('compositionend'); }catch{}
         // #1319: Restore listchars (EOL markers) after commit
         try{ _scheduleListCharsRender && _scheduleListCharsRender('compositionend'); }catch{}
         // IME未確定中に抑止したUI/セッション更新をここで一括反映
@@ -3747,6 +3790,9 @@ try{
         /* keep _imeActive as-is */
         try{ _applyCaretGradient(); }catch{}
         try{ setTimeout(()=>{ try{ _refreshCaretMode(); }catch{} }, 260); }catch{}
+
+        // If nothing else triggers redraw, allow native mode to exit.
+        try{ setTimeout(()=>{ try{ _mdImeMaybeExitNativeMode('compositionend-timeout'); }catch{} }, 900); }catch{}
       });
       // ASCII入力検知（INSERT中）: 最初のASCII文字で IME OFF グラデへ切替 (#1021)
       editor.addEventListener('beforeinput', (e)=>{
@@ -22191,6 +22237,9 @@ try{
     let _imeOrigScrollLeft = 0;
     let _imeReducedStartLine = 0;
     let _imeReducedEndLine = 0;
+    // Reduced-text window in original full text (character offsets)
+    let _imeReducedStartOff = 0;
+    let _imeReducedEndOff = 0;
     editor.addEventListener('compositionstart', (e)=>{
       _imeComposing = true; _lastCompStartTs = Date.now();
       try{ window._imeComposing = true; }catch{}
@@ -22238,106 +22287,99 @@ try{
           try{ _imeVisualLockUntil = 0; }catch{}
           try{ _applyCaretGradient(); }catch{}
           // #1426: Sync caretRow/caretCol from native selection before reduced-text mode.
-          // This prevents IME insertion point drifting away from overlay caret.
+          // IMPORTANT: Avoid _splitLines/_rcFromOffset here (can be O(N) on huge buffers).
           let _imeSelOff0 = 0;
-          let _imeLinesRaw0 = null;
           try{ _imeSelOff0 = (editor && typeof editor.selectionStart==='number') ? (editor.selectionStart|0) : 0; }catch{}
-          try{ _imeLinesRaw0 = _splitLinesRaw && _splitLinesRaw(); }catch{ _imeLinesRaw0 = null; }
-          try{
-            if (_imeLinesRaw0 && Array.isArray(_imeLinesRaw0)){
-              let o = Math.max(0, _imeSelOff0|0);
-              let rr = 0, cc = 0;
-              for (let r=0; r<_imeLinesRaw0.length; r++){
-                const len = String(_imeLinesRaw0[r]||'').length;
-                if (o <= len){ rr = r; cc = o; break; }
-                o -= (len + 1);
-                rr = r+1; cc = 0;
-              }
-              // clamp to EOF
-              if (rr >= _imeLinesRaw0.length){ rr = Math.max(0, _imeLinesRaw0.length-1); cc = String(_imeLinesRaw0[rr]||'').length; }
-              caretRow = rr|0; caretCol = cc|0;
-            } else {
-              const rc = _rcFromOffset(_imeSelOff0|0);
-              caretRow = rc.r|0; caretCol = rc.c|0;
-            }
-          }catch{}
           try{ _repositionCaret && _repositionCaret(); }catch{}
           // #1416: Reduce textarea to surrounding lines to speed up native IME rendering.
           try{
-            const lines = (_imeLinesRaw0 && Array.isArray(_imeLinesRaw0)) ? _imeLinesRaw0 : (_splitLinesRaw && _splitLinesRaw());
-            if (lines && lines.length > 200){ // only for large buffers
-              const r = Math.max(0, Math.min(lines.length-1, caretRow|0));
-              const contextLines = 50;
-              const startLine = Math.max(0, r - contextLines);
-              const endLine = Math.min(lines.length, r + contextLines + 1);
-              _imeOrigFullText = editor.value;
-              _imeOrigOffset = (_imeSelOff0|0);
+            // Only for large buffers (heuristic: many characters).
+            const fullText0 = (function(){
+              try{ const b0 = currentBuffer && currentBuffer(); if (b0 && typeof b0.text==='string') return b0.text; }catch{}
+              try{ return String(editor.value||''); }catch{ return ''; }
+            })();
+            // Make native IME cost bounded: in markdown-rich, always reduce to a small fixed window.
+            // This targets preedit paint lag (partial characters appearing late) that depends on textarea size.
+            const mdRich0 = (function(){ try{ return !!(_mdRichEnabled && _mdRichEnabled()); }catch{ return false; } })();
+            const wrapOn0 = (function(){ try{ return !!(_wrapEnabled && _wrapEnabled()); }catch{ return false; } })();
+            const len0 = (fullText0.length|0);
+            const thresh = mdRich0 ? 0 : (wrapOn0 ? 2000 : 20000);
+            if (len0 > (thresh|0)){
+              const off0 = Math.max(0, Math.min(fullText0.length|0, _imeSelOff0|0));
+              let startOff = off0;
+              let endOff = off0;
+              const MAX_SUBSET_CHARS = mdRich0 ? 2200 : (wrapOn0 ? 4000 : 8000);
+
+              if (mdRich0){
+                // Fixed character window around caret (fast; does not depend on newline count).
+                const half = Math.floor((MAX_SUBSET_CHARS|0) / 2);
+                startOff = Math.max(0, (off0 - half)|0);
+                endOff = Math.min((fullText0.length|0), (off0 + half)|0);
+              } else {
+                // Line-based window (best UX for non-md modes).
+                const contextLines = wrapOn0 ? 8 : 50;
+                try{
+                  while (startOff > 0 && fullText0[startOff-1] !== '\n') startOff--; // to line start
+                  let n = contextLines|0;
+                  while (n > 0 && startOff > 0){
+                    const p = fullText0.lastIndexOf('\n', (startOff-2)|0);
+                    if (p < 0){ startOff = 0; break; }
+                    startOff = (p + 1)|0;
+                    n--;
+                  }
+                }catch{}
+                try{
+                  const nl0 = fullText0.indexOf('\n', off0|0);
+                  endOff = (nl0 < 0) ? (fullText0.length|0) : ((nl0 + 1)|0);
+                  let n = contextLines|0;
+                  while (n > 0 && endOff < (fullText0.length|0)){
+                    const nl = fullText0.indexOf('\n', endOff|0);
+                    endOff = (nl < 0) ? (fullText0.length|0) : ((nl + 1)|0);
+                    n--;
+                  }
+                }catch{}
+                // Cap reduced textarea size.
+                try{
+                  const win = ((endOff|0) - (startOff|0))|0;
+                  if (win > (MAX_SUBSET_CHARS|0)){
+                    const half = Math.floor((MAX_SUBSET_CHARS|0) / 2);
+                    startOff = Math.max(0, (off0 - half)|0);
+                    endOff = Math.min((fullText0.length|0), (off0 + half)|0);
+                  }
+                }catch{}
+              }
+              // Clamp and ensure non-empty window
+              startOff = Math.max(0, Math.min(fullText0.length|0, startOff|0));
+              endOff = Math.max(startOff, Math.min(fullText0.length|0, endOff|0));
+              // Save full state
+              _imeOrigFullText = fullText0;
+              _imeOrigOffset = (off0|0);
               _imeOrigScrollTop = editor.scrollTop|0;
               _imeOrigScrollLeft = editor.scrollLeft|0;
-              // Preserve "bottom slack" (visible EOF padding) to avoid the caret jumping down when blank lines are visible.
-              let _imeOrigBottomSlackPx = 0;
-              try{
-                const max0 = Math.max(0, ((editor.scrollHeight|0) - (editor.clientHeight|0))|0);
-                _imeOrigBottomSlackPx = Math.max(0, (max0 - (_imeOrigScrollTop|0))|0);
-              }catch{}
-              _imeReducedStartLine = startLine;
-              _imeReducedEndLine = endLine;
-              const subset = lines.slice(startLine, endLine);
-              const subsetText = subset.join('\n');
+              _imeReducedStartOff = startOff|0;
+              _imeReducedEndOff = endOff|0;
+              _imeReducedStartLine = 0;
+              _imeReducedEndLine = 0;
+              // Apply reduced text
+              const subsetText = fullText0.slice(startOff|0, endOff|0);
               editor.value = subsetText;
-              // Calculate new caret offset within subset.
-              let newOffset = 0;
-              for (let i = 0; i < r - startLine && i < subset.length; i++) newOffset += subset[i].length + 1;
-              try{
-                const curLine = String(subset[Math.max(0, Math.min(subset.length-1, (r-startLine)|0))] || '');
-                const cc = Math.max(0, Math.min(curLine.length, (caretCol|0)));
-                newOffset += cc;
-              }catch{ newOffset += (caretCol|0); }
+              const newOffset = Math.max(0, Math.min(subsetText.length|0, (off0 - startOff)|0));
               editor.selectionStart = editor.selectionEnd = newOffset;
-              // #1427: Now that textarea is reduced, sync caret to reduced coordinates.
-              // This keeps overlay caret aligned with the IME insertion point, especially near EOF padding.
-              try{
-                const off2 = (editor && typeof editor.selectionStart==='number') ? (editor.selectionStart|0) : (newOffset|0);
-                const rc2 = _rcFromOffset(off2|0);
-                caretRow = rc2.r|0; caretCol = rc2.c|0;
-              }catch{}
-              // Preserve scroll position.
-              // Preserve scroll position.
-              // NOTE: bottomSlackPx>0 is true for most non-bottom positions, so using it unconditionally
-              // causes a drift that grows as you move away from EOF (observed around ~visible-lines threshold).
-              // We only preserve bottom slack when the viewport is actually showing *past EOF* (blank area).
-              // Otherwise preserve caret's relative row position within the viewport.
+              // Keep caret visible in the reduced window (cheap: scan only the reduced subset).
               try{
                 const lh = (typeof LINE_HEIGHT==='number' && LINE_HEIGHT>0) ? LINE_HEIGHT : 20;
-                const newMax = Math.max(0, ((editor.scrollHeight|0) - (editor.clientHeight|0))|0);
-                const origTopLine = Math.floor((_imeOrigScrollTop|0) / lh);
                 const vis = Math.max(1, Math.floor(((editor && editor.clientHeight)||0) / lh));
-                // past-EOF check is based on *full* line count before reduction
-                const pastEofVisible = ((origTopLine + vis) > (lines ? (lines.length|0) : 0));
-                if (pastEofVisible){
-                  // Preserve the same distance from the physical bottom while composing.
-                  // This must also hold when bottomSlack is 0 (thumb pinned at end), otherwise
-                  // the viewport can jump by ~maxMargin lines when IME starts (#1587).
-                  const stNew = Math.max(0, Math.min(newMax, (newMax - (_imeOrigBottomSlackPx|0))|0));
-                  editor.scrollTop = stNew;
-                } else {
-                  const relRow = Math.max(0, (r - origTopLine)|0);
-                  const reducedCaretRow = Math.max(0, (r - startLine)|0);
-                  const maxTop = Math.max(0, subset.length - vis);
-                  let topLineNew = (reducedCaretRow - relRow)|0;
-                  if (topLineNew < 0) topLineNew = 0;
-                  if (topLineNew > maxTop) topLineNew = maxTop;
-                  editor.scrollTop = (topLineNew * lh)|0;
-                }
-              }catch{ /* keep browser default clamp */ }
+                let subRow = 0;
+                for (let i=0, n=Math.min(newOffset|0, subsetText.length|0); i<n; i++) if (subsetText.charCodeAt(i)===10) subRow++;
+                let topLineNew = (subRow - Math.floor(vis/2))|0;
+                if (topLineNew < 0) topLineNew = 0;
+                editor.scrollTop = (topLineNew * lh)|0;
+              }catch{}
               try{ editor.scrollLeft = _imeOrigScrollLeft|0; }catch{}
               _imeReducedText = true;
-              // Expose reduced-text base line for other renderers (e.g. markdown-rich gutter) (#1480)
-              // startLine is 0-based in the full buffer; baseLine1 is 1-based.
-              try{ window._imeReducedText = true; window._imeReducedBaseLine1 = ((startLine|0) + 1)|0; }catch{}
+              try{ window._imeReducedText = true; window._imeReducedBaseLine1 = 1; }catch{}
               try{ document.body.classList.add('ime-reduced-text'); }catch{}
               try{ editor && editor.classList && editor.classList.add('ime-reduced-text'); }catch{}
-              // Ensure overlay caret matches the (preserved) visual position after scrollTop adjustment.
               try{ _repositionCaret && _repositionCaret({ force:true }); }catch{}
             }
           }catch{}
@@ -22356,33 +22398,26 @@ try{
           try{ editor.selectionStart = _preCompSelS; editor.selectionEnd = _preCompSelE; }catch{}
         } else if (_imeReducedText){
           // #1416: Restore full text after IME commit in reduced mode.
+          // IMPORTANT: Avoid split/join of the whole buffer (can be O(N) with high constant factors).
           try{
-            const committedSubset = editor.value;
-            const caretInSubset = editor.selectionStart|0;
-            // Rebuild full text with committed changes.
-            const origLines = _imeOrigFullText.split('\n');
-            const subsetLines = committedSubset.split('\n');
-            const startLine = _imeReducedStartLine|0;
-            const endLine = Math.max(startLine, Math.min(origLines.length, (_imeReducedEndLine|0)));
-            // Replace the subset range with committed subset.
-            origLines.splice(startLine, endLine - startLine, ...subsetLines);
-            const fullText = origLines.join('\n');
+            const committedSubset = String(editor.value||'');
+            const caretInSubset = (editor && typeof editor.selectionStart==='number') ? (editor.selectionStart|0) : 0;
+            const a0 = Math.max(0, Math.min((_imeOrigFullText.length|0), (_imeReducedStartOff|0)));
+            const b0 = Math.max(a0, Math.min((_imeOrigFullText.length|0), (_imeReducedEndOff|0)));
+            const fullText = _imeOrigFullText.slice(0, a0) + committedSubset + _imeOrigFullText.slice(b0);
             editor.value = fullText;
-            // Calculate final caret offset in full text.
-            let finalOffset = 0;
-            for (let i = 0; i < startLine; i++) finalOffset += origLines[i].length + 1;
-            finalOffset += caretInSubset;
+            const finalOffset = Math.max(0, Math.min(fullText.length|0, (a0 + (caretInSubset|0))|0));
             editor.selectionStart = editor.selectionEnd = finalOffset;
             editor.scrollTop = _imeOrigScrollTop|0;
             editor.scrollLeft = _imeOrigScrollLeft|0;
-            // Update buffer text and sync caret.
             const b = currentBuffer();
             if (b) b.text = fullText;
-            const rc = _rcFromOffset(finalOffset);
-            caretRow = rc.r; caretCol = rc.c;
+            // Do not call _rcFromOffset here (it splits lines). Let the normal render path sync later.
           }catch{}
           _imeReducedText = false;
           _imeOrigFullText = '';
+          _imeReducedStartOff = 0;
+          _imeReducedEndOff = 0;
         }
       }catch{}
       _imeComposing = false; _blockedComposition = false; _lastCompEndTs = Date.now();

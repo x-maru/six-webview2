@@ -351,6 +351,32 @@ body.md-rich #editor {
 	scrollbar-gutter: stable;
 }
 
+/* Markdown-rich IME fast path: show native textarea during composition (and shortly after)
+   to avoid heavy overlay re-render work on each IME update.
+   The rich overlay is hidden temporarily and rebuilt once after commit. */
+body.md-rich.md-ime-native #editor {
+	color: var(--editorTextColor, #e6e6e6) !important;
+	caret-color: var(--caretColor, #e6e6e6) !important;
+	text-shadow: none !important;
+}
+
+/* While IME is active, prefer speed: disable native wrapping even if wrap-on.
+   (md-rich overlay handles wrapping normally outside composition.) */
+body.md-rich.wrap-on.md-ime-native #editor {
+	white-space: pre !important;
+	word-break: normal !important;
+	overflow-wrap: normal !important;
+}
+body.md-rich.md-ime-native #editor::selection {
+	background: rgba(0, 255, 255, 0.28) !important;
+	color: inherit !important;
+}
+body.md-rich.md-ime-native #textLayer,
+body.md-rich.md-ime-native #textBgLayer {
+	opacity: 0 !important;
+	pointer-events: none !important;
+}
+
 /* md-rich: keep textarea wrapping enabled too so native scroll metrics match visual wraps.
    This restores EOF reachability for ggG/G without md-only scroll compensation. */
 body.md-rich.wrap-on #editor {
