@@ -87,6 +87,7 @@
   - '/','?'入力バーで半角/全角の空白文字がtrimされてしまう不具合を修正した。
   - wrapモード(折り返し表示)を実装した。行番号は論理行番号に固定。
   - `gj`,`gk`を実装した(折り返し内の見た目caret移動)。markdown onまたはoffでもINSERTモードのときは`j`,`k`を`gj`,`gk`と同じ機能にした。
+  - 制御文字表示ON/OFFをバッファ毎に持つように変更した。
   - markdownの順序付きリスト表示で、番号の自動インクリメント表示(`md_autoIncrement`)を全バッファ共通の設定としてセッション情報に保存/復元するようにした。
     - `:set md_autoIncrement`, `:set nomd_autoIncrement`, `:set md_autoIncrement!`, `:set md_autoIncrement?`
 - 2025.xx.xx v1.0

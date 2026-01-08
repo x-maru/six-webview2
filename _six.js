@@ -3913,6 +3913,7 @@ try{
           savedMode: b.savedMode||'NORMAL',
           savedVisual: (b.savedVisual ? { linewise: !!b.savedVisual.linewise, anchorR: b.savedVisual.anchorR|0, anchorC: b.savedVisual.anchorC|0, caretR: b.savedVisual.caretR|0, caretC: b.savedVisual.caretC|0 } : null),
               shiftwidth: (b.shiftwidth === 'TAB') ? 'TAB' : (Number.isFinite(b.shiftwidth)? (b.shiftwidth|0) : 4),
+        list: (typeof b.list === 'boolean') ? !!b.list : _listDefaultFromOptions(),
         ignorecase: !!b.ignorecase,
         smartcase:  !!b.smartcase,
         markdown: !!b.markdown,
@@ -4173,6 +4174,7 @@ try{
         let shiftwidth = 4;
         if (it && it.shiftwidth === 'TAB') shiftwidth = 'TAB';
         else shiftwidth = Number.isFinite(it && it.shiftwidth) ? Math.max(1, (it.shiftwidth|0)) : 4;
+        const list = (it && typeof it.list === 'boolean') ? !!it.list : _listDefaultFromOptions();
         const ignorecase = !!(it && it.ignorecase);
         const smartcase  = !!(it && it.smartcase);
         const markdown  = !!(it && it.markdown);
@@ -4180,7 +4182,7 @@ try{
         const setext = !!(it && it.setext);
         const wrap = !!(it && it.wrap);
         const edScale = Number.isFinite(it && it.edScale) ? _nearestScale(it.edScale) : 1;
-        _addBuffer({ name, path, text, modified, enc, ff, bom, shiftwidth, ignorecase, smartcase, markdown, md_draftedit, setext, wrap, edScale });
+        _addBuffer({ name, path, text, modified, enc, ff, bom, shiftwidth, list, ignorecase, smartcase, markdown, md_draftedit, setext, wrap, edScale });
         try{
           const b = buffers[buffers.length-1];
           // If savedText is provided, trust it; otherwise, if not modified, set savedText=text
@@ -6792,18 +6794,37 @@ try{
     try{
       const b = !!v;
       try{ if (window) window.__sixMdAutoIncrement = b; }catch{}
+      // md-rich ordered list display uses a cached list analysis; invalidate to reflect instantly (#1769)
+      try{ _mdListInvalidateCache && _mdListInvalidateCache('md_autoIncrement'); }catch{}
       if (!opts || opts.persist !== false){
         try{ _schedulePersist('md_autoIncrement'); }catch{}
       }
       if (!opts || opts.redraw !== false){
+        // md-rich redraw (ordered list marker rendering)
+        try{ _mdRenderTextLayer && _mdRenderTextLayer(); }catch{}
         try{ _renderListChars(); }catch{}
         try{ if (typeof updateGutter === 'function') updateGutter(); }catch{}
+        try{ _updateOverlayMdAutoIncrementVisual && _updateOverlayMdAutoIncrementVisual(); }catch{}
       }
       return true;
     }catch{ return false; }
   }
   // Initialize once from SIX_OPTIONS unless already set.
   try{ if (!(window && typeof window.__sixMdAutoIncrement === 'boolean')) window.__sixMdAutoIncrement = _mdAutoIncrementDefaultFromOptions(); }catch{}
+
+  // --- list (show control chars) per-buffer helpers (#1769) ---
+  function _listDefaultFromOptions(){
+    try{ const o=(window&&window.SIX_OPTIONS)||{}; return (o.list!==false); }catch{ return true; }
+  }
+  function _syncListOptFromBuffer(){
+    try{
+      const b = (typeof currentBuffer==='function') ? currentBuffer() : null;
+      const v = (b && typeof b.list === 'boolean') ? !!b.list : _listDefaultFromOptions();
+      _optList = !!v;
+      try{ if (b && typeof b.list !== 'boolean') b.list = !!v; }catch{}
+      return !!v;
+    }catch{ return !!_optList; }
+  }
   // #624 直前テキスト保持 (INSERT beforeinput/delete 用)
   let _prevTextBeforeInput = '';
   let _prevSelBeforeInputS = 0;
@@ -10998,6 +11019,8 @@ try{
           }catch{}
           return 2;
         })(),
+        // per-buffer 'list' (show control chars) (#1769)
+        list: (typeof b.list === 'boolean') ? !!b.list : _listDefaultFromOptions(),
         // per-buffer case sensitivity options (#696)
         ignorecase: !!b.ignorecase,
         smartcase:  !!b.smartcase,
@@ -11141,8 +11164,13 @@ try{
       currentIdx = i;
       const b = buffers[i];
       const restorePendingAtSwitch = !!(b && b._restoreViewPending);
+      // Apply per-buffer 'list' (control chars) option immediately (#1769)
+      try{ _syncListOptFromBuffer(); }catch{}
+      try{ _updateOverlayListVisual && _updateOverlayListVisual(); }catch{}
       // 3) Load text into editor
       editor.value = String(b.text||'');
+      // Ensure listchars layer matches current list option (clear when off)
+      try{ _scheduleListCharsRender && _scheduleListCharsRender('switch'); }catch{}
       // Apply wrap state early (affects scroll model)
       try{ _wrapApplyVisualState({ skipRender:true }); }catch{}
         // 3.5) Apply this buffer's zoom scale silently (no HUD/LS) and refresh visible-lines cache
@@ -17969,15 +17997,28 @@ try{
 
     // :set list / :set nolist / :set list! / :set list?
     if (/^:set\s+list\s*$/i.test(cmd)){
-      _optList = true; toast('list: on', 900); try{ _renderListChars(); }catch{} updateGutter(); try{ _updateOverlayListVisual(); }catch{} return;
+      const b=currentBuffer(); if (b){ b.list = true; _optList = true; _schedulePersist('list'); }
+      toast('list: on', 900); try{ _renderListChars(); }catch{} updateGutter(); try{ _updateOverlayListVisual(); }catch{} return;
     }
     if (/^:set\s+nolist\s*$/i.test(cmd)){
-      _optList = false; toast('list: off', 900); try{ _renderListChars(); }catch{} updateGutter(); try{ _updateOverlayListVisual(); }catch{} return;
+      const b=currentBuffer(); if (b){ b.list = false; _optList = false; _schedulePersist('list'); }
+      toast('list: off', 900); try{ _renderListChars(); }catch{} updateGutter(); try{ _updateOverlayListVisual(); }catch{} return;
     }
     if (/^:set\s+list!\s*$/i.test(cmd)){
-      _optList = !_optList; toast('list: ' + (_optList?'on':'off'), 900); try{ _renderListChars(); }catch{} updateGutter(); try{ _updateOverlayListVisual(); }catch{} return;
+      const b=currentBuffer();
+      if (b){
+        const cur = (typeof b.list === 'boolean') ? !!b.list : _listDefaultFromOptions();
+        b.list = !cur;
+        _optList = !!b.list;
+        _schedulePersist('list');
+      } else {
+        _optList = !_optList;
+      }
+      toast('list: ' + (_optList?'on':'off'), 900); try{ _renderListChars(); }catch{} updateGutter(); try{ _updateOverlayListVisual(); }catch{} return;
     }
     if (/^:set\s+list\?\s*$/i.test(cmd)){
+      // Ensure mirror is up-to-date
+      try{ _syncListOptFromBuffer(); }catch{}
       toast('list: ' + (_optList?'on':'off'), 1200); return;
     }
     // :set urllink / :set nourllink / :set urllink! / :set urllink?
@@ -31649,7 +31690,8 @@ try{
       const listBtn = document.createElement('button');
       listBtn.type = 'button';
       listBtn.id = 'overlayBtnList';
-      listBtn.style.minWidth = '112px';
+      // Align width with other top-right buttons
+      listBtn.style.minWidth = '100px';
       listBtn.style.border = '1px solid #2a3244';
       listBtn.style.background = '#1a2030';
       listBtn.style.color = '#e6e6e6';
@@ -31681,11 +31723,67 @@ try{
       listWrap.appendChild(listTitle); listWrap.appendChild(listLine); listBtn.appendChild(listWrap);
       listBtn.addEventListener('click', (e)=>{
         try{ e.preventDefault(); e.stopPropagation(); }catch{}
-        try{ _optList = !_optList; }catch{}
+        try{
+          const b = currentBuffer();
+          if (b){
+            const cur = (typeof b.list === 'boolean') ? !!b.list : _listDefaultFromOptions();
+            b.list = !cur;
+            _optList = !!b.list;
+            _schedulePersist('list');
+          } else {
+            _optList = !_optList;
+          }
+        }catch{}
         try{ _renderListChars(); }catch{}
         try{ updateGutter(); }catch{}
         try{ _updateOverlayListVisual(); }catch{}
         try{ toast('list: ' + (_optList?'on':'off'), 900); }catch{}
+        try{ if (lastFocusedEl && typeof lastFocusedEl.focus === 'function'){ lastFocusedEl.focus(); } }catch{}
+      });
+
+      // md_autoIncrement button（右下パレット：グローバル） (#1769)
+      // ラベル: "MD 自動採番" + OFF/ON
+      const mdAutoBtn = document.createElement('button');
+      mdAutoBtn.type = 'button';
+      mdAutoBtn.id = 'overlayBtnMdAutoInc';
+      mdAutoBtn.style.minWidth = '100px';
+      mdAutoBtn.style.border = '1px solid #2a3244';
+      mdAutoBtn.style.background = '#1a2030';
+      mdAutoBtn.style.color = '#e6e6e6';
+      mdAutoBtn.style.borderRadius = '6px';
+      mdAutoBtn.style.padding = '4px 3px';
+      mdAutoBtn.style.cursor = 'pointer';
+      mdAutoBtn.style.font = "12px/1.25 system-ui, -apple-system, 'Segoe UI', sans-serif";
+      mdAutoBtn.style.opacity = '0.92';
+      mdAutoBtn.style.userSelect = 'none';
+      mdAutoBtn.style.outline = 'none';
+      attachHover(mdAutoBtn);
+      mdAutoBtn.addEventListener('contextmenu', (e)=>{ try{ e.preventDefault(); e.stopPropagation(); }catch{} });
+      mdAutoBtn.addEventListener('mousedown', (e)=>{ try{ lastFocusedEl = document.activeElement; e.preventDefault(); }catch{} });
+      const mdAutoWrap = document.createElement('div');
+      mdAutoWrap.style.display = 'flex';
+      mdAutoWrap.style.flexDirection = 'column';
+      mdAutoWrap.style.gap = '2px';
+      const mdAutoTitle = document.createElement('div');
+      mdAutoTitle.textContent = 'MD 自動採番';
+      mdAutoTitle.style.textAlign = 'center';
+      mdAutoTitle.style.fontWeight = '500';
+      const mdAutoLine = document.createElement('div');
+      mdAutoLine.style.display = 'flex';
+      mdAutoLine.style.justifyContent = 'center';
+      mdAutoLine.style.gap = '6px';
+      const mdAutoOff = pillBase('OFF', 'overlayBtnMdAuto_off');
+      const mdAutoOn  = pillBase('ON',  'overlayBtnMdAuto_on');
+      mdAutoLine.appendChild(mdAutoOff);
+      mdAutoLine.appendChild(mdAutoOn);
+      mdAutoWrap.appendChild(mdAutoTitle);
+      mdAutoWrap.appendChild(mdAutoLine);
+      mdAutoBtn.appendChild(mdAutoWrap);
+      mdAutoBtn.addEventListener('click', (e)=>{
+        try{ e.preventDefault(); e.stopPropagation(); }catch{}
+        try{ _setMdAutoIncrement(!_getMdAutoIncrement()); }catch{}
+        try{ _updateOverlayMdAutoIncrementVisual(); }catch{}
+        try{ toast('md_autoIncrement: ' + (_getMdAutoIncrement() ? 'on' : 'off'), 900); }catch{}
         try{ if (lastFocusedEl && typeof lastFocusedEl.focus === 'function'){ lastFocusedEl.focus(); } }catch{}
       });
 
@@ -31788,7 +31886,7 @@ try{
       // Row1: [empty][list][quit]
       const emptyTL = document.createElement('div');
       gridBR.appendChild(emptyTL);   // top-left empty
-      gridBR.appendChild(listBtn);   // top-center
+      gridBR.appendChild(mdAutoBtn); // top-center
       gridBR.appendChild(quitBtn);   // top-right
       // Row2: [empty][hlsearch][help] （shiftwidth は右上へ移動）
       const emptyBL = document.createElement('div');
@@ -32122,12 +32220,15 @@ try{
         try{ const b = currentBuffer(); toast('wrap: ' + (b&&b.wrap?'on':'off'), 900); }catch{}
         try{ if (lastFocusedEl && typeof lastFocusedEl.focus === 'function'){ lastFocusedEl.focus(); } }catch{}
       });
-      // Place as the last item in top-right palette
       palTR.appendChild(wrapBtn);
+
+      // 制御文字表示（list）を右上へ移動（折り返しの下、幅揃え） (#1769)
+      palTR.appendChild(listBtn);
 
   // initialize visual state for hlsearch & list pills
   try{ _updateOverlayHlsearchVisual(); }catch{}
   try{ _updateOverlayListVisual(); }catch{}
+  try{ _updateOverlayMdAutoIncrementVisual && _updateOverlayMdAutoIncrementVisual(); }catch{}
   try{ _updateOverlayThemeVisual(); }catch{}
   try{ _updateOverlayEncodeVisual(); }catch{}
   try{ _updateOverlayShiftwidthVisual(); }catch{}
@@ -32315,6 +32416,7 @@ try{
   // Reflect current list option state to overlay button
   function _updateOverlayListVisual(){
     try{
+      try{ _syncListOptFromBuffer(); }catch{}
       const off = document.getElementById('overlayBtnList_off');
       const on  = document.getElementById('overlayBtnList_on');
       if (!off || !on) return;
@@ -32327,6 +32429,26 @@ try{
       if (_optList){
         on.style.background = green; on.style.color = '#000';
       }else{
+        off.style.background = gray; off.style.color = '#000';
+      }
+    }catch{}
+  }
+
+  // Reflect current md_autoIncrement state to overlay button
+  function _updateOverlayMdAutoIncrementVisual(){
+    try{
+      const off = document.getElementById('overlayBtnMdAuto_off');
+      const on  = document.getElementById('overlayBtnMdAuto_on');
+      if (!off || !on) return;
+      const gray = '#9aa0aa';
+      const green = '#49e26f';
+      off.style.background = 'transparent';
+      on.style.background  = 'transparent';
+      off.style.color = '#e6e6e6';
+      on .style.color = '#e6e6e6';
+      if (_getMdAutoIncrement()){
+        on.style.background = green; on.style.color = '#000';
+      } else {
         off.style.background = gray; off.style.color = '#000';
       }
     }catch{}
