@@ -1,4 +1,4 @@
-const VERSION = '0.9.1.q';
+const VERSION = '0.9.1.s';
 // Build stamp (for verifying which _six.js is actually running)
 // NOTE: Intentionally ASCII-only; fullwidth variants should be treated as invalid.
 try{ window.__sixBuildTs = '2025-12-29T00:00:00Z'; }catch{}
@@ -609,6 +609,13 @@ try{
         // Candidate marker
         const marker = s[idx0];
 
+        // CommonMark/GFM: up to 3 leading *spaces* before a list marker are ignored.
+        // We keep source indices intact but record display-time slack so md-rich can hide it in clean view.
+        let leadSlackCols = 0;
+        try{
+          if ((cols0|0) > 0 && (cols0|0) <= 3 && (idx0|0) === (cols0|0)) leadSlackCols = (cols0|0);
+        }catch{ leadSlackCols = 0; }
+
         // Parse list marker (unordered or ordered). When not a marker, it may be a continuation.
         let listType = '';
         let markerLen = 0;     // marker length excluding following spaces (ul:1, ol:digits+delim)
@@ -695,6 +702,7 @@ try{
           contentStartIdx: (contentStartIdx|0),
           glyph,
           bulletKind,
+          leadSlackCols: (leadSlackCols|0),
         };
         stack.push({ listType, contentIndentCol });
       }
@@ -897,6 +905,52 @@ try{
             const id = (it.listBlockId|0);
             if ((id|0) > 0 && blockLoose[id|0]) it.listLoose = true;
           }
+        }
+      }catch{}
+
+      // #1767: CommonMark/GFM-ish display normalization
+      // - Determine list hierarchy first (using the existing parser)
+      // - Then, at rendering time, subtract the depth-1 leading spaces N (<=3) from ALL levels
+      //   within the same root list block, to preserve relative indentation.
+      // Example (ul): "   - abc\n     - def\n     - ghi" => "- abc\n  - def\n  - ghi".
+      try{
+        const total = (items.length|0);
+        let rootId = 0;
+        let nextRootId = 1;
+        const rootMinSlack = Object.create(null); // rootId -> min slack among depth-1 items
+        const _leadSpaces = (s)=>{
+          try{
+            const t = String(s||'');
+            let n = 0;
+            while (n < (t.length|0) && t[n] === ' ' && n < 4) n++;
+            return n|0;
+          }catch{ return 0; }
+        };
+
+        for (let row=0; row<total; row++){
+          const it = items[row|0];
+          const line = String(lines[row|0]||'');
+          if (it && (it.kind==='item' || it.kind==='cont')){
+            if ((rootId|0) === 0){ rootId = (nextRootId++|0); }
+            try{ it.listRootId = (rootId|0); }catch{}
+            if (it.kind==='item' && ((it.depth|0) === 1)){
+              // N is derived from the minimum depth-1 indent, capped at 3, and only from spaces.
+              const sp = Math.max(0, Math.min(3, _leadSpaces(line)|0));
+              if (rootMinSlack[rootId|0] == null) rootMinSlack[rootId|0] = (sp|0);
+              else rootMinSlack[rootId|0] = Math.min(rootMinSlack[rootId|0]|0, sp|0);
+            }
+            continue;
+          }
+          if (line.trim() === '') continue; // blank keeps the root
+          rootId = 0; // non-list nonblank ends the root
+        }
+
+        for (let row=0; row<total; row++){
+          const it = items[row|0];
+          if (!it || !(it.kind==='item' || it.kind==='cont')) continue;
+          const id = (it.listRootId|0);
+          const n = (id && rootMinSlack[id|0] != null) ? (rootMinSlack[id|0]|0) : 0;
+          try{ it.rootLeadSlackCols = Math.max(0, Math.min(3, n|0))|0; }catch{}
         }
       }catch{}
 
@@ -1317,9 +1371,41 @@ try{
           }catch{ listItem = null; }
         }
 
+        // #1767: In clean display, subtract depth-1 slack (<=3) from the whole root list,
+        // preserving indentation for deeper levels.
+        let dispPrefixLen = (prefixLen|0);
+        let listInfoDisp = listInfo;
+        let listItemDisp = listItem;
+        if (hideSymbols && (dispPrefixLen|0) === 0 && listInfo && (listInfo.kind==='item' || listInfo.kind==='cont')){
+          let baseSlack = 0;
+          try{ baseSlack = Math.max(0, Math.min(3, (listInfo.rootLeadSlackCols|0) || 0)); }catch{ baseSlack = 0; }
+          if ((baseSlack|0) > 0){
+            // Remove only leading spaces (not tabs) and only up to baseSlack.
+            let removed = 0;
+            try{ while ((removed|0) < (baseSlack|0) && srcText && srcText[removed|0] === ' ') removed++; }catch{ removed = 0; }
+            if ((removed|0) > 0){
+              dispPrefixLen = (removed|0);
+              try{ text = String(srcText||'').slice(removed|0); }catch{ text = srcText; }
+              try{
+                const adj = {
+                  indentCol: Math.max(0, (listInfo.indentCol|0) - (removed|0)),
+                  markerIdx: Number.isFinite(listInfo.markerIdx) ? Math.max(0, (listInfo.markerIdx|0) - (removed|0)) : undefined,
+                  contentIndentCol: Number.isFinite(listInfo.contentIndentCol) ? Math.max(0, (listInfo.contentIndentCol|0) - (removed|0)) : undefined,
+                  contentStartIdx: Number.isFinite(listInfo.contentStartIdx) ? Math.max(0, (listInfo.contentStartIdx|0) - (removed|0)) : undefined,
+                };
+                listInfoDisp = Object.assign({}, listInfo, adj);
+                if (listItem) listItemDisp = listInfoDisp;
+              }catch{}
+            }
+          }
+        }
+
         if (renderSetextUnderlineRow){
           text = '';
           prefixLen = 0;
+          dispPrefixLen = 0;
+          listInfoDisp = listInfo;
+          listItemDisp = listItem;
         }
 
         let el = children[i];
@@ -1359,15 +1445,15 @@ try{
               // Map selection columns to displayed text (prefix hidden in clean display).
               let c1 = (segS - off0)|0;
               let c2 = (segE - off0)|0;
-              if (hideSymbols && prefixLen>0){ c1 = Math.max(0, c1 - (prefixLen|0)); c2 = Math.max(0, c2 - (prefixLen|0)); }
+              if (hideSymbols && (dispPrefixLen|0) > 0){ c1 = Math.max(0, c1 - (dispPrefixLen|0)); c2 = Math.max(0, c2 - (dispPrefixLen|0)); }
               c1 = Math.max(0, Math.min((text.length|0), c1|0));
               c2 = Math.max(c1, Math.min((text.length|0), c2|0));
               if (c2 > c1){
                 const pre = text.slice(0, c1);
                 const mid = text.slice(c1, c2);
                 const post = text.slice(c2);
-                if (listItem){
-                  el.innerHTML = _mdUListHtmlWithRange(text, listItem, 'md-sel', c1|0, c2|0);
+                if (listItemDisp){
+                  el.innerHTML = _mdUListHtmlWithRange(text, listItemDisp, 'md-sel', c1|0, c2|0);
                 } else {
                   el.innerHTML = _mdEscHtml(pre) + '<span class="md-sel">' + _mdEscHtml(mid) + '</span>' + _mdEscHtml(post);
                 }
@@ -1401,8 +1487,8 @@ try{
               // IME columns are on the original textarea line; map to display columns when symbols are hidden.
               const sCol0 = (row===sr) ? (_mdImeRange.sCol|0) : 0;
               const eCol0 = (row===er) ? (_mdImeRange.eCol|0) : (srcText.length|0);
-              const sCol = Math.max(0, (sCol0|0) - (prefixLen|0));
-              const eCol = Math.max(0, (eCol0|0) - (prefixLen|0));
+              const sCol = Math.max(0, (sCol0|0) - (dispPrefixLen|0));
+              const eCol = Math.max(0, (eCol0|0) - (dispPrefixLen|0));
               const a = Math.max(0, Math.min(text.length|0, sCol));
               const b = Math.max(0, Math.min(text.length|0, eCol));
               if (b >= a){
@@ -1412,9 +1498,9 @@ try{
                 const preH = headingCjkHtml ? (_mdHeadingCjkHtml(pre, lv) || _mdEscHtml(pre)) : _mdEscHtml(pre);
                 const midH = headingCjkHtml ? (_mdHeadingCjkHtml(mid || ' ', lv) || _mdEscHtml(mid || ' ')) : _mdEscHtml(mid || ' ');
                 const postH = headingCjkHtml ? (_mdHeadingCjkHtml(post, lv) || _mdEscHtml(post)) : _mdEscHtml(post);
-                if (listItem){
+                if (listItemDisp){
                   // For list lines we don't need headingCjkHtml; keep it simple and stable.
-                  el.innerHTML = _mdUListHtmlWithRange(text, listItem, 'md-ime-uline', a|0, b|0);
+                  el.innerHTML = _mdUListHtmlWithRange(text, listItemDisp, 'md-ime-uline', a|0, b|0);
                 } else {
                   el.innerHTML = preH + '<span class="md-ime-uline">' + midH + '</span>' + postH;
                 }
@@ -1431,20 +1517,20 @@ try{
         if (!usedHtml){
           // Ensure we don't keep stale HTML
           if (el.innerHTML !== ''){ try{ el.textContent = ''; }catch{} }
-          if (listItem){
-            try{ el.innerHTML = _mdUListHtmlWithRange(text, listItem, null, 0, 0); usedHtml = true; }catch{ usedHtml = false; }
+          if (listItemDisp){
+            try{ el.innerHTML = _mdUListHtmlWithRange(text, listItemDisp, null, 0, 0); usedHtml = true; }catch{ usedHtml = false; }
           }
           if (!usedHtml) el.textContent = text;
         }
 
         // List hanging indent (md-rich+wrap): keep leading indent; hang only marker-width.
         let indentOpts = null;
-        if (wrapOn && hideSymbols && listInfo){
+        if (wrapOn && hideSymbols && listInfoDisp){
           // #1752: Ordered-list markers were being shifted/clipped by hanging-indent math under WebView2.
           // Keep hanging-indent for unordered lists only.
-          const lt = (listInfo && listInfo.listType) ? String(listInfo.listType||'') : '';
+          const lt = (listInfoDisp && listInfoDisp.listType) ? String(listInfoDisp.listType||'') : '';
           if (lt !== 'ol'){
-            try{ indentOpts = _mdIndentOptsForListLine(srcText, listInfo, wPx|0, fs|0, lh|0); }catch{ indentOpts = null; }
+            try{ indentOpts = _mdIndentOptsForListLine(text, listInfoDisp, wPx|0, fs|0, lh|0); }catch{ indentOpts = null; }
           }
         }
         try{ el.style.paddingLeft = (indentOpts ? ((indentOpts.padLeftPx||0) + 'px') : ''); }catch{}
@@ -2546,7 +2632,26 @@ try{
         caretCol = (line.length|0);
       } else {
         let minCol = 0;
-        try{ if (_mdHideSymbolsForRow && _mdHideSymbolsForRow(true)){ const p = _mdHeadingPrefixLen(line); if ((p|0) > 0) minCol = (p|0); } }catch{}
+        try{
+          if (_mdHideSymbolsForRow && _mdHideSymbolsForRow(true)){
+            const p = _mdHeadingPrefixLen(line);
+            if ((p|0) > 0) minCol = (p|0);
+            else {
+              // CommonMark/GFM: up to 3 leading spaces before list markers are ignored.
+              try{
+                _mdListEnsureCache && _mdListEnsureCache(false);
+                const lines = _splitLines();
+                const ul = _mdUListInfo && _mdUListInfo(line, caretRow|0, lines);
+                if (ul && (ul.kind==='item' || ul.kind==='cont')){
+                  const baseSlack = Math.max(0, Math.min(3, (ul.rootLeadSlackCols|0) || 0));
+                  let removed = 0;
+                  try{ while ((removed|0) < (baseSlack|0) && line[removed|0] === ' ') removed++; }catch{ removed = 0; }
+                  if ((removed|0) > 0) minCol = (removed|0);
+                }
+              }catch{}
+            }
+          }
+        }catch{}
         caretCol = Math.max(0, Math.min(line.length|0, minCol|0));
       }
       try{ _setCaret && _setCaret(caretRow|0, caretCol|0); }catch{}
@@ -5502,6 +5607,25 @@ try{
               dispC1 = Math.max(0, c1 - p);
               dispC2 = Math.max(dispC1, c2 - p);
             }
+
+            // #1767: hide root depth-1 slack (<=3) from all levels in clean display.
+            try{
+              if ((prefixLen|0) === 0){
+                _mdListEnsureCache && _mdListEnsureCache(false);
+                const ul = _mdUListInfo && _mdUListInfo(line, targetIdx|0, lines);
+                if (ul && (ul.kind==='item' || ul.kind==='cont')){
+                  const baseSlack = Math.max(0, Math.min(3, (ul.rootLeadSlackCols|0) || 0));
+                  let removed = 0;
+                  try{ while ((removed|0) < (baseSlack|0) && line[removed|0] === ' ') removed++; }catch{ removed = 0; }
+                  if ((removed|0) > 0){
+                    prefixLen = (removed|0);
+                    dispLine = line.slice(removed|0);
+                    dispC1 = Math.max(0, c1 - (removed|0));
+                    dispC2 = Math.max(dispC1, c2 - (removed|0));
+                  }
+                }
+              }
+            }catch{}
           }
         }
       }catch{ yTop = ((row1 - topLine) * LINE_HEIGHT); rowHeightPx = LINE_HEIGHT; dispLine = line; prefixLen = 0; dispC1 = c1; dispC2 = c2; }
@@ -5666,6 +5790,20 @@ try{
           if (hide){
             const p = _mdHeadingPrefixLen(line)|0;
             if (p>0){ prefixLen = p; dispLine = line.slice(p); }
+
+            // #1767: hide root depth-1 slack (<=3) from all levels in clean display.
+            try{
+              if ((prefixLen|0) === 0){
+                _mdListEnsureCache && _mdListEnsureCache(false);
+                const ul = _mdUListInfo && _mdUListInfo(line, row|0, lines);
+                if (ul && (ul.kind==='item' || ul.kind==='cont')){
+                  const baseSlack = Math.max(0, Math.min(3, (ul.rootLeadSlackCols|0) || 0));
+                  let removed = 0;
+                  try{ while ((removed|0) < (baseSlack|0) && line[removed|0] === ' ') removed++; }catch{ removed = 0; }
+                  if ((removed|0) > 0){ prefixLen = (removed|0); dispLine = line.slice(removed|0); }
+                }
+              }
+            }catch{}
           }
         }
       }catch{ prefixLen = 0; dispLine = line; }
@@ -7632,6 +7770,8 @@ try{
       let dispLine = line;
       let dispPrefix = 0;
       let _mdUlSkipSpaceCol = -1; // skip listchars for the first space after bullet marker
+      let ulSrc = null;
+      let ulDisp = null;
       try{
         if (mdRich){
           const isActiveRow = (row1 === ((caretRow|0) + 1));
@@ -7641,16 +7781,43 @@ try{
             if (p>0){ dispPrefix = p; dispLine = line.slice(p); }
           }
 
-          // #1715: When listchars shows trailing spaces, a list item like "-   " would draw a dot
-          // for the first post-bullet space, which visually sticks to the bullet. Suppress only that 1 space.
+          // #1767: subtract depth-1 slack (<=3) from the root list for display,
+          // preserving indentation for deeper levels.
           try{
             if (hide && (dispPrefix|0) === 0){
               _mdListEnsureCache && _mdListEnsureCache(false);
-              const ul = _mdUListInfo && _mdUListInfo(line, idx|0, lines);
+              ulSrc = _mdUListInfo && _mdUListInfo(line, idx|0, lines);
+              if (ulSrc && (ulSrc.kind==='item' || ulSrc.kind==='cont')){
+                let baseSlack = 0;
+                try{ baseSlack = Math.max(0, Math.min(3, (ulSrc.rootLeadSlackCols|0) || 0)); }catch{ baseSlack = 0; }
+                let removed = 0;
+                try{ while ((removed|0) < (baseSlack|0) && line[removed|0] === ' ') removed++; }catch{ removed = 0; }
+                if ((removed|0) > 0){
+                  dispPrefix = (removed|0);
+                  dispLine = line.slice(removed|0);
+                }
+                try{
+                  ulDisp = Object.assign({}, ulSrc, {
+                    indentCol: Math.max(0, (ulSrc.indentCol|0) - (dispPrefix|0)),
+                    markerIdx: Number.isFinite(ulSrc.markerIdx) ? Math.max(0, (ulSrc.markerIdx|0) - (dispPrefix|0)) : undefined,
+                    contentIndentCol: Number.isFinite(ulSrc.contentIndentCol) ? Math.max(0, (ulSrc.contentIndentCol|0) - (dispPrefix|0)) : undefined,
+                    contentStartIdx: Number.isFinite(ulSrc.contentStartIdx) ? Math.max(0, (ulSrc.contentStartIdx|0) - (dispPrefix|0)) : undefined,
+                  });
+                }catch{ ulDisp = ulSrc; }
+              }
+            }
+          }catch{ ulSrc = null; ulDisp = null; }
+
+          // #1715: When listchars shows trailing spaces, a list item like "-   " would draw a dot
+          // for the first post-bullet space, which visually sticks to the bullet. Suppress only that 1 space.
+          try{
+            if (hide){
+              _mdListEnsureCache && _mdListEnsureCache(false);
+              const ul = ulDisp || ulSrc || (_mdUListInfo && _mdUListInfo(line, idx|0, lines));
               if (ul && Number.isFinite(ul.markerIdx)){
                 const ml0 = (ul && Number.isFinite(ul.markerLen)) ? (ul.markerLen|0) : 1;
                 const ml = Math.max(1, ml0|0);
-                const sc = ((ul.markerIdx|0) - (dispPrefix|0) + (ml|0))|0;
+                const sc = ((ul.markerIdx|0) + (ml|0))|0;
                 if ((sc|0) >= 0) _mdUlSkipSpaceCol = sc|0;
               }
             }
@@ -7674,7 +7841,7 @@ try{
               const isActiveRow = (row1 === ((caretRow|0) + 1));
               const hide = !!(_mdHideSymbolsForRow && _mdHideSymbolsForRow(!!isActiveRow));
               if (hide){
-                const ul = _mdUListInfo && _mdUListInfo(line, idx|0, lines);
+                const ul = ulDisp || ulSrc || (_mdUListInfo && _mdUListInfo(line, idx|0, lines));
                 const lt = (ul && ul.listType) ? String(ul.listType||'') : '';
                 if (ul && lt !== 'ol') indentOpts = _mdIndentOptsForListLine(dispLine, ul, wPx|0, fs|0, rowHeightPx|0);
               }
@@ -7702,14 +7869,15 @@ try{
           const isActiveRow = (row1 === ((caretRow|0) + 1));
           const hide = !!(_mdHideSymbolsForRow && _mdHideSymbolsForRow(!!isActiveRow));
           if (!hide) return 0;
-          const ul = _mdUListInfo && _mdUListInfo(line, idx|0, lines);
+          const ul = ulSrc || (_mdUListInfo && _mdUListInfo(line, idx|0, lines));
           if (!(ul && ul.kind==='item' && String(ul.listType||'')==='ol')) return 0;
           const maxDigits = (ul && Number.isFinite(ul.olMaxDigits)) ? (ul.olMaxDigits|0) : 0;
           if (!(maxDigits > 0)) return 0;
           const srcDigitsLen = Math.max(1, ((ul.markerLen|0) - 1));
           let dispDigitsLen = srcDigitsLen|0;
           try{ if (ul && ul.olDispDigitsText != null) dispDigitsLen = Math.max(1, (String(ul.olDispDigitsText||'').length|0)); }catch{ dispDigitsLen = srcDigitsLen|0; }
-          const slack = ((ul.depth|0) === 1) ? Math.max(0, Math.min(3, (ul.indentCol|0))) : 0;
+          const indentEff = Math.max(0, (ul.indentCol|0) - (dispPrefix|0));
+          const slack = ((ul.depth|0) === 1) ? Math.max(0, Math.min(3, indentEff|0)) : 0;
           const pad = Math.max(0, (maxDigits|0) - (dispDigitsLen|0) - (slack|0));
 
           // Measure 1ch (space) width in px for this row.
@@ -12697,6 +12865,17 @@ try{
                 const p = (_mdHeadingPrefixLen(srcText)|0);
                 if (p>0) disp = srcText.slice(p);
               }
+
+              // CommonMark/GFM: hide up to 3 leading spaces before list markers in clean display.
+              try{
+                const ul = _mdUListInfo && _mdUListInfo(srcText, r|0, lines);
+                if (ul && ul.kind==='item'){
+                  const baseSlack = Math.max(0, Math.min(3, (ul.rootLeadSlackCols|0) || 0));
+                  let removed = 0;
+                  try{ while ((removed|0) < (baseSlack|0) && srcText && srcText[removed|0] === ' ') removed++; }catch{ removed = 0; }
+                  if ((removed|0) > 0) disp = String(srcText||'').slice(removed|0);
+                }
+              }catch{}
             }
           }
           return { disp, info };
@@ -12737,20 +12916,42 @@ try{
         const srcLine0 = String(lines[targetIdx]||'');
         const adj0 = _mdWysiwygAdjust(srcLine0, caretCol|0);
         const dispLine = String(adj0.line||'');
-        const caretColVis0 = (adj0.col|0);
+        let caretColVis0 = (adj0.col|0);
         let intra = 0;
         if (wrapOn){
           // Apply list hanging indent to probe so wrapped intra matches rendered line.
           let indentOpts = null;
+          let dispForProbe = dispLine;
+          let ccForProbe = (caretColVis0|0);
           try{
             const isActiveRow = true;
             const hide = !!(_mdHideSymbolsForRow && _mdHideSymbolsForRow(!!isActiveRow));
             if (hide){
               const ul = _mdUListInfo && _mdUListInfo(srcLine0, targetIdx|0, lines);
-              if (ul) indentOpts = _mdIndentOptsForListLine(dispLine, ul, wPx|0, _mdCaretFontSizePx|0, _mdCaretLineHeightPx|0);
+              let ulForProbe = ul;
+              // Hide up to 3 leading spaces before list markers and shift caret col accordingly.
+              try{
+                if (ul && ul.kind==='item'){
+                  const baseSlack = Math.max(0, Math.min(3, (ul.rootLeadSlackCols|0) || 0));
+                  let removed = 0;
+                  try{ while ((removed|0) < (baseSlack|0) && srcLine0 && srcLine0[removed|0] === ' ') removed++; }catch{ removed = 0; }
+                  if ((removed|0) > 0){
+                    dispForProbe = String(dispLine||'').slice(removed|0);
+                    ccForProbe = Math.max(0, (ccForProbe|0) - (removed|0));
+                    ulForProbe = Object.assign({}, ul, {
+                      indentCol: Math.max(0, (ul.indentCol|0) - (removed|0)),
+                      markerIdx: Number.isFinite(ul.markerIdx) ? Math.max(0, (ul.markerIdx|0) - (removed|0)) : undefined,
+                      contentIndentCol: Number.isFinite(ul.contentIndentCol) ? Math.max(0, (ul.contentIndentCol|0) - (removed|0)) : undefined,
+                      contentStartIdx: Number.isFinite(ul.contentStartIdx) ? Math.max(0, (ul.contentStartIdx|0) - (removed|0)) : undefined,
+                    });
+                  }
+                }
+              }catch{}
+              const lt = (ulForProbe && ulForProbe.listType) ? String(ulForProbe.listType||'') : '';
+              if (ulForProbe && lt !== 'ol') indentOpts = _mdIndentOptsForListLine(dispForProbe, ulForProbe, wPx|0, _mdCaretFontSizePx|0, _mdCaretLineHeightPx|0);
             }
           }catch{ indentOpts = null; }
-          try{ intra = _wrapProbeIntraFromColStyled(dispLine, caretColVis0|0, wPx|0, _mdCaretLineHeightPx|0, _mdCaretFontSizePx|0, indentOpts) | 0; }catch{ intra = 0; }
+          try{ intra = _wrapProbeIntraFromColStyled(dispForProbe, ccForProbe|0, wPx|0, _mdCaretLineHeightPx|0, _mdCaretFontSizePx|0, indentOpts) | 0; }catch{ intra = 0; }
           intra = Math.max(0, intra|0);
         }
         topPx = y + (padTopT|0) + intra * (_mdCaretLineHeightPx|0);
@@ -20860,6 +21061,8 @@ try{
           let prefixLen = 0;
           let renderHr = false;
           let renderSetextUnderlineRow = false;
+          let ulSrc = null;
+          let ulDisp = null;
           try{ if (info && info.isLooseGap){ dispText = ''; prefixLen = 0; renderHr = false; renderSetextUnderlineRow = false; } }catch{}
           if (hideSymbols){
             try{ renderHr = _mdIsHrLineForDisplay(srcText, lines, r0, !!isActiveRow); }catch{ renderHr = false; }
@@ -20875,6 +21078,33 @@ try{
                   if (prefixLen>0) dispText = srcText.slice(prefixLen);
                 }
               }catch{}
+
+              // CommonMark/GFM: up to 3 leading spaces before a list marker are ignored.
+              // In clean display, hide them and keep prefixLen so display<->source mapping stays correct.
+              try{
+                if ((prefixLen|0) === 0){
+                  ulSrc = _mdUListInfo && _mdUListInfo(srcText, r0|0, lines);
+                  if (ulSrc && ulSrc.kind==='item'){
+                    let baseSlack = 0;
+                    try{ baseSlack = Math.max(0, Math.min(3, (ulSrc.rootLeadSlackCols|0) || 0)); }catch{ baseSlack = 0; }
+                    let removed = 0;
+                    try{ while ((removed|0) < (baseSlack|0) && srcText && srcText[removed|0] === ' ') removed++; }catch{ removed = 0; }
+                    if ((removed|0) > 0){
+                      prefixLen = (removed|0);
+                      dispText = String(srcText||'').slice(removed|0);
+                    }
+                    // Build a display-relative ul (indices shifted by prefixLen).
+                    try{
+                      ulDisp = Object.assign({}, ulSrc, {
+                        indentCol: Math.max(0, (ulSrc.indentCol|0) - (prefixLen|0)),
+                        markerIdx: Number.isFinite(ulSrc.markerIdx) ? Math.max(0, (ulSrc.markerIdx|0) - (prefixLen|0)) : undefined,
+                        contentIndentCol: Number.isFinite(ulSrc.contentIndentCol) ? Math.max(0, (ulSrc.contentIndentCol|0) - (prefixLen|0)) : undefined,
+                        contentStartIdx: Number.isFinite(ulSrc.contentStartIdx) ? Math.max(0, (ulSrc.contentStartIdx|0) - (prefixLen|0)) : undefined,
+                      });
+                    }catch{ ulDisp = ulSrc; }
+                  }
+                }
+              }catch{}
             }
           }
 
@@ -20882,8 +21112,9 @@ try{
           let indentOpts = null;
           try{
             if (wrapOn && hideSymbols){
-              const ul = _mdUListInfo && _mdUListInfo(srcText, r0|0, lines);
-              if (ul) indentOpts = _mdIndentOptsForListLine(dispText, ul, wPx|0, fs|0, lh|0);
+              const ul0 = ulDisp || ulSrc || (_mdUListInfo && _mdUListInfo(srcText, r0|0, lines));
+              const lt = (ul0 && ul0.listType) ? String(ul0.listType||'') : '';
+              if (ul0 && lt !== 'ol') indentOpts = _mdIndentOptsForListLine(dispText, ul0, wPx|0, fs|0, lh|0);
             }
           }catch{ indentOpts = null; }
 
@@ -20898,7 +21129,7 @@ try{
             hBlock = (Math.max(1, n|0) * (lh|0))|0;
           }
           try{ hBlock = (hBlock|0) + (padTopPx|0) + (padBottomPx|0); }catch{}
-          return { srcText, dispText, prefixLen:(prefixLen|0), lh:(lh|0), fs:(fs|0), hideSymbols:!!hideSymbols, bhOverride, padTopPx:(padTopPx|0), padBottomPx:(padBottomPx|0), indentOpts, hBlock:(hBlock|0) };
+          return { srcText, dispText, prefixLen:(prefixLen|0), lh:(lh|0), fs:(fs|0), hideSymbols:!!hideSymbols, bhOverride, padTopPx:(padTopPx|0), padBottomPx:(padBottomPx|0), indentOpts, hBlock:(hBlock|0), ulSrc, ulDisp };
         };
 
         // Find row by accumulating per-row block heights from current topLine.
@@ -20942,13 +21173,15 @@ try{
           let forceCol = null;
           try{
             if (infoR && infoR.hideSymbols){
-              const ul = _mdUListInfo && _mdUListInfo(String(infoR.srcText||''), r|0, lines);
+              const ul = (infoR && infoR.ulSrc) ? infoR.ulSrc : (_mdUListInfo && _mdUListInfo(String(infoR.srcText||''), r|0, lines));
               if (ul && ul.kind==='item' && String(ul.listType||'')==='ol' && Number.isFinite(ul.markerIdx) && Number.isFinite(ul.markerLen) && Number.isFinite(ul.olMaxDigits)){
                 const maxDigits = (ul.olMaxDigits|0);
                 const srcDigitsLen = Math.max(1, ((ul.markerLen|0) - 1));
                 let dispDigitsLen = srcDigitsLen|0;
                 try{ if (ul && ul.olDispDigitsText != null) dispDigitsLen = Math.max(1, (String(ul.olDispDigitsText||'').length|0)); }catch{ dispDigitsLen = srcDigitsLen|0; }
-                const slack = ((ul.depth|0) === 1) ? Math.max(0, Math.min(3, (ul.indentCol|0))) : 0;
+                // Use effective indent after hiding up to 3 leading spaces.
+                const indentEff = Math.max(0, (ul.indentCol|0) - (infoR.prefixLen|0));
+                const slack = ((ul.depth|0) === 1) ? Math.max(0, Math.min(3, indentEff|0)) : 0;
                 const pad = Math.max(0, (maxDigits|0) - (dispDigitsLen|0) - (slack|0));
                 // Measure 1ch (space) width at this row style.
                 let spaceW = 0;
