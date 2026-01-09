@@ -1,7 +1,7 @@
 const VERSION = '0.9.1.s';
 // Build stamp (for verifying which _six.js is actually running)
 // NOTE: Intentionally ASCII-only; fullwidth variants should be treated as invalid.
-try{ window.__sixBuildTs = '2025-12-29T00:00:00Z'; }catch{}
+try{ window.__sixBuildTs = '2026-01-09T00:00:00Z'; }catch{}
 const VERSION_STR = 'vi like TextEditor "six" v' + VERSION;
 // Build sentinel (#912) - confirm script actually refreshed & executed
 try{
@@ -21906,6 +21906,19 @@ try{
     let _pendingEofEnterPhysPin = null;
     editor.addEventListener('beforeinput', (e)=>{
       try{ const M = window.SIX_IME_METRICS; if (M && window._imeComposing===true){ M.events.beforeinput++; } }catch{}
+
+      // Guard: if keydown fallback (#1798) already handled Enter, swallow the subsequent beforeinput.
+      try{
+        const itG = String((e && e.inputType) || '');
+        if (_mode === 'INSERT' && (itG==='insertLineBreak' || itG==='insertParagraph')){
+          const until = (window && window.__sixSkipEnterBeforeinputUntil) ? (+window.__sixSkipEnterBeforeinputUntil || 0) : 0;
+          if (until && Date.now() < until){
+            try{ e.preventDefault(); }catch{}
+            return;
+          }
+        }
+      }catch{}
+
       // listchars fast-path: capture the pre-edit position for operations that shift line numbers (Enter)
       try{
         if (_mode === 'INSERT'){
@@ -22072,6 +22085,53 @@ try{
           // (#606) ダミー判定は「現在末尾LFが欠落しているか」のみ
           const dummyActive = !!(b && !v.endsWith('\n'));
           if (atEnd && dummyActive){
+            // #1798: markdown on + INSERT中のリスト項目では、dummyeof変換より兄弟項目生成を優先
+            try{
+              const mdEnabled = (function(){
+                try{ if (typeof _mdRichEnabled === 'function') return !!_mdRichEnabled(); }catch{}
+                try{ const bb = currentBuffer && currentBuffer(); return !!(bb && bb.markdown); }catch{}
+                return false;
+              })();
+              if (mdEnabled && _mode === 'INSERT'){
+                const s0 = (editor.selectionStart|0);
+                const e0 = (editor.selectionEnd|0);
+                if ((s0|0) === (e0|0)){
+                  let rc0 = null;
+                  try{ rc0 = _rcFromOffset(s0|0); }catch{ rc0 = null; }
+                  const r0 = rc0 ? (rc0.r|0) : (caretRow|0);
+                  const lines0 = _splitLines();
+                  const line0 = String((lines0 && r0>=0 && r0<(lines0.length|0)) ? (lines0[r0]||'') : '');
+                  let info0 = null;
+                  try{ info0 = (typeof _mdUListInfo === 'function') ? _mdUListInfo(line0, r0|0, lines0) : null; }catch{ info0 = null; }
+                  if (info0 && info0.kind === 'item' && (info0.listType === 'ul' || info0.listType === 'ol')){
+                    const markerIdx = (info0.markerIdx|0);
+                    const markerLen = (info0.markerLen|0);
+                    if ((markerIdx|0) >= 0 && (markerLen|0) > 0 && (markerIdx|0) <= line0.length){
+                      const indent = line0.slice(0, markerIdx|0);
+                      const marker = line0.slice(markerIdx|0, Math.min(line0.length, (markerIdx|0) + (markerLen|0)));
+                      const sc = Math.max(1, (info0.spaceCount|0));
+                      const prefix = indent + marker + ' '.repeat(sc|0);
+
+                      try{ e.preventDefault(); }catch{}
+                      const newV = v + '\n' + prefix;
+                      editor.value = newV;
+                      const newOff = newV.length|0;
+                      try{ editor.selectionStart = editor.selectionEnd = newOff; }catch{}
+                      try{ caretRow = (r0|0) + 1; caretCol = (prefix.length|0); }catch{}
+                      try{ _touchBufferModified(); }catch{}
+                      try{ _wrapInvalidateCache && _wrapInvalidateCache('md-list-enter-eof'); }catch{}
+                      try{ _insertSegDirty = true; }catch{}
+                      try{ ensureScrolloff && ensureScrolloff(); }catch{}
+                      try{ if (_mdRenderTextLayer) _mdRenderTextLayer(); }catch{}
+                      try{ _repositionCaret && _repositionCaret(); }catch{}
+                      try{ updateGutter && updateGutter(); }catch{}
+                      try{ _scheduleListCharsRender && _scheduleListCharsRender('md-list-enter-eof'); }catch{}
+                      return; // 処理済み
+                    }
+                  }
+                }
+              }
+            }catch{}
             // 既定の改行挿入を抑止し、末尾に'\n'だけ追加。caretは改行直前へ戻すことで末尾空行を表示しない
             try{ e.preventDefault(); }catch{}
             const newV = v + '\n';
@@ -22083,6 +22143,64 @@ try{
             _touchBufferModified(); ensureScrolloff(); _repositionCaret(); updateGutter();
             try{ _scheduleListCharsRender && _scheduleListCharsRender('dummy-eof-enter'); }catch{}
             return; // 処理済み
+          }
+        }
+      }catch{}
+
+      // #1798: markdown on + INSERT中のみの Enter 特殊動作（(un)ordered list item → 兄弟項目を作る）
+      try{
+        const it = String(e.inputType||'');
+        if (it==='insertLineBreak' || it==='insertParagraph'){
+          if (!(window && window._imeComposing===true)){
+            const mdEnabled = (function(){
+              try{ if (typeof _mdRichEnabled === 'function') return !!_mdRichEnabled(); }catch{}
+              try{ const b = currentBuffer && currentBuffer(); return !!(b && b.markdown); }catch{}
+              return false;
+            })();
+            if (mdEnabled && editor && _mode === 'INSERT'){
+              const s0 = (editor.selectionStart|0);
+              const e0 = (editor.selectionEnd|0);
+              if ((s0|0) === (e0|0)){
+                const b = currentBuffer();
+                // Prefer buffer text (avoid expensive textarea.value materialization).
+                const v = (b && typeof b.text === 'string') ? b.text : String(editor.value||'');
+
+                let rc = null;
+                try{ rc = _rcFromOffset(s0|0); }catch{ rc = null; }
+                const lines = _splitLines();
+                const r = rc ? (rc.r|0) : (caretRow|0);
+                const line = String((lines && r>=0 && r<(lines.length|0)) ? (lines[r]||'') : '');
+
+                let info = null;
+                try{ info = (typeof _mdUListInfo === 'function') ? _mdUListInfo(line, r|0, lines) : null; }catch{ info = null; }
+                if (info && info.kind === 'item' && (info.listType === 'ul' || info.listType === 'ol')){
+                  const markerIdx = (info.markerIdx|0);
+                  const markerLen = (info.markerLen|0);
+                  if ((markerIdx|0) >= 0 && (markerLen|0) > 0 && (markerIdx|0) <= line.length){
+                    const indent = line.slice(0, markerIdx|0);
+                    const marker = line.slice(markerIdx|0, Math.min(line.length, (markerIdx|0) + (markerLen|0)));
+                    const sc = Math.max(1, (info.spaceCount|0));
+                    const prefix = indent + marker + ' '.repeat(sc|0);
+
+                    try{ e.preventDefault(); }catch{}
+                    const newV = v.slice(0, s0|0) + '\n' + prefix + v.slice(s0|0);
+                    editor.value = newV;
+                    const newOff = (s0|0) + 1 + (prefix.length|0);
+                    try{ editor.selectionStart = editor.selectionEnd = newOff; }catch{}
+                    try{ caretRow = (r|0) + 1; caretCol = (prefix.length|0); }catch{}
+                    try{ _touchBufferModified(); }catch{}
+                    try{ _wrapInvalidateCache && _wrapInvalidateCache('md-list-enter'); }catch{}
+                    try{ _insertSegDirty = true; }catch{}
+                    try{ ensureScrolloff && ensureScrolloff(); }catch{}
+                    try{ if (_mdRenderTextLayer) _mdRenderTextLayer(); }catch{}
+                    try{ _repositionCaret && _repositionCaret(); }catch{}
+                    try{ updateGutter && updateGutter(); }catch{}
+                    try{ _scheduleListCharsRender && _scheduleListCharsRender('md-list-enter'); }catch{}
+                    return; // 処理済み
+                  }
+                }
+              }
+            }
           }
         }
       }catch{}
@@ -23583,6 +23701,89 @@ try{
         try{
           const printable = (e.key && e.key.length===1 && !e.ctrlKey && !e.altKey && !e.metaKey);
           if (printable && !e.isComposing){ _imeActive=false; _applyCaretGradient(); }
+        }catch{}
+
+        // #1798: markdown on + INSERT中の Enter 特殊動作（ul/ol item 行 → 兄弟項目を作る）
+        // beforeinput が環境差/競合で動かない場合の keydown フォールバック。
+        try{
+          if (e && e.key==='Enter' && !e.ctrlKey && !e.altKey && !e.metaKey){
+            if (!(window && window._imeComposing===true)){
+              const mdEnabled = (function(){
+                try{ if (typeof _mdRichEnabled === 'function') return !!_mdRichEnabled(); }catch{}
+                try{ const b = currentBuffer && currentBuffer(); return !!(b && b.markdown); }catch{}
+                return false;
+              })();
+              if (mdEnabled && editor){
+                const s0 = (editor.selectionStart|0);
+                const e0 = (editor.selectionEnd|0);
+                if ((s0|0) === (e0|0)){
+                  // Keep INSERT undo segmentation behavior roughly consistent with beforeinput.
+                  try{
+                    if (_mode === 'INSERT' && !_insertSegDirty){
+                      const st = _currentStacks && _currentStacks();
+                      const u0 = st && st._undo;
+                      if (u0 && u0.length){
+                        const top = u0[u0.length - 1];
+                        if (top && top.kind === 'insert'){
+                          const off0 = Math.max(0, Math.min(String(editor.value||'').length, (s0|0)));
+                          try{ const rc0 = _rcFromOffset(off0|0); if (rc0){ top.caretRow = rc0.r|0; top.caretCol = rc0.c|0; } }catch{}
+                          try{ top.scrollTop = (editor && typeof editor.scrollTop==='number') ? (editor.scrollTop|0) : (top.scrollTop|0); }catch{}
+                        }
+                      }
+                    }
+                  }catch{}
+                  try{
+                    if (_mode === 'INSERT' && _insertSegPending){
+                      _pushUndoSnapshot && _pushUndoSnapshot('insert-seg');
+                      _insertSegPending = false;
+                      _insertSegDirty = false;
+                      _insertSegIgnoreSelectUntil = Date.now() + 120;
+                    }
+                  }catch{}
+
+                  let rc = null;
+                  try{ rc = _rcFromOffset(s0|0); }catch{ rc = null; }
+                  const r = rc ? (rc.r|0) : (caretRow|0);
+                  const lines = _splitLines();
+                  const line = String((lines && r>=0 && r<(lines.length|0)) ? (lines[r]||'') : '');
+                  let info = null;
+                  try{ info = (typeof _mdUListInfo === 'function') ? _mdUListInfo(line, r|0, lines) : null; }catch{ info = null; }
+                  if (info && info.kind === 'item' && (info.listType === 'ul' || info.listType === 'ol')){
+                    const markerIdx = (info.markerIdx|0);
+                    const markerLen = (info.markerLen|0);
+                    if ((markerIdx|0) >= 0 && (markerLen|0) > 0 && (markerIdx|0) <= line.length){
+                      const indent = line.slice(0, markerIdx|0);
+                      const marker = line.slice(markerIdx|0, Math.min(line.length, (markerIdx|0) + (markerLen|0)));
+                      const sc = Math.max(1, (info.spaceCount|0));
+                      const prefix = indent + marker + ' '.repeat(sc|0);
+
+                      try{ e.preventDefault(); e.stopPropagation(); }catch{}
+                      const v = String(editor.value||'');
+                      const newV = v.slice(0, s0|0) + '\n' + prefix + v.slice(s0|0);
+                      editor.value = newV;
+                      const newOff = (s0|0) + 1 + (prefix.length|0);
+                      try{ editor.selectionStart = editor.selectionEnd = newOff; }catch{}
+                      try{ const rc1 = _rcFromOffset(newOff|0); caretRow = rc1.r|0; caretCol = rc1.c|0; }catch{ caretRow = (r|0) + 1; caretCol = (prefix.length|0); }
+                      try{ _setCaret && _setCaret(caretRow|0, caretCol|0); }catch{}
+                      try{ _touchBufferModified(); }catch{}
+                      try{ _mdListInvalidateCache && _mdListInvalidateCache('md-list-enter-kd'); }catch{}
+                      try{ _mdWrapInvalidateCache && _mdWrapInvalidateCache('md-list-enter-kd'); }catch{}
+                      try{ _wrapInvalidateCache && _wrapInvalidateCache('md-list-enter-kd'); }catch{}
+                      try{ _insertSegDirty = true; }catch{}
+                      try{ _insertSegIgnoreSelectUntil = Date.now() + 80; }catch{}
+                      try{ ensureScrolloff && ensureScrolloff(); }catch{}
+                      try{ if (_mdRenderTextLayer) _mdRenderTextLayer(); }catch{}
+                      try{ _repositionCaret && _repositionCaret(); }catch{}
+                      try{ updateGutter && updateGutter(); }catch{}
+                      try{ _scheduleListCharsRender && _scheduleListCharsRender('md-list-enter-kd'); }catch{}
+                      try{ if (window) window.__sixSkipEnterBeforeinputUntil = Date.now() + 120; }catch{}
+                      return; // handled
+                    }
+                  }
+                }
+              }
+            }
+          }
         }catch{}
 
         // #1575: INSERTのEnter（EOF付近）でEOFパッドが1行欠ける/thumb gapが出る。
@@ -28416,6 +28617,52 @@ try{
                   try{ _imeBarPrevText = ''; _imeBarAnchorOff = (editor && typeof editor.selectionStart==='number') ? (editor.selectionStart|0) : (_imeBarAnchorOff|0); }catch{}
                 } else {
                   // Empty bar + Enter:
+                  // #1798: markdown on + INSERT中のみの Enter 特殊動作（IME bar 経由）
+                  // list item 行では、\n + 同じprefix（インデント+マーカー+空白）を挿入し、キャレットをprefix末尾へ。
+                  let didListEnter = false;
+                  try{
+                    const mdEnabled = (function(){
+                      try{ if (typeof _mdRichEnabled === 'function') return !!_mdRichEnabled(); }catch{}
+                      try{ const bb = currentBuffer && currentBuffer(); return !!(bb && bb.markdown); }catch{}
+                      return false;
+                    })();
+                    if (mdEnabled && _mode === 'INSERT' && editor){
+                      let ss0 = 0, se0 = 0;
+                      try{ ss0 = editor.selectionStart|0; se0 = editor.selectionEnd|0; }catch{}
+                      const offIns0 = Math.max(0, Math.min((String((currentBuffer && currentBuffer() && currentBuffer().text)||editor.value||'').length|0), Math.min(ss0|0, se0|0)));
+                      let rc0 = null;
+                      try{ rc0 = _rcFromOffset(offIns0|0); }catch{ rc0 = null; }
+                      const r0 = rc0 ? (rc0.r|0) : (caretRow|0);
+                      const lines0 = _splitLines();
+                      const line0 = String((lines0 && r0>=0 && r0<(lines0.length|0)) ? (lines0[r0]||'') : '');
+                      let info0 = null;
+                      try{ info0 = (typeof _mdUListInfo === 'function') ? _mdUListInfo(line0, r0|0, lines0) : null; }catch{ info0 = null; }
+                      if (info0 && info0.kind === 'item' && (info0.listType === 'ul' || info0.listType === 'ol')){
+                        const markerIdx = (info0.markerIdx|0);
+                        const markerLen = (info0.markerLen|0);
+                        if ((markerIdx|0) >= 0 && (markerLen|0) > 0 && (markerIdx|0) <= line0.length){
+                          const indent = line0.slice(0, markerIdx|0);
+                          const marker = line0.slice(markerIdx|0, Math.min(line0.length, (markerIdx|0) + (markerLen|0)));
+                          const sc = Math.max(1, (info0.spaceCount|0));
+                          const prefix = indent + marker + ' '.repeat(sc|0);
+
+                          try{ _imeBarAnchorOff = offIns0|0; }catch{}
+                          try{ _imeBarPrevText = ''; }catch{}
+                          try{ _imeBarReplaceInsertedText('\n' + prefix, 'md-list-enter'); }catch{}
+                          try{ _imeBarPrevText = ''; _imeBarAnchorOff = (editor && typeof editor.selectionStart==='number') ? (editor.selectionStart|0) : (_imeBarAnchorOff|0); }catch{}
+                          try{ _mdListInvalidateCache && _mdListInvalidateCache('md-list-enter-ime'); }catch{}
+                          try{ _mdWrapInvalidateCache && _mdWrapInvalidateCache('md-list-enter-ime'); }catch{}
+                          try{ _wrapInvalidateCache && _wrapInvalidateCache('md-list-enter-ime'); }catch{}
+                          didListEnter = true;
+                          try{ if (_optDebugKeys) _debugPush({ t:Date.now(), type:'imebar-enter-list', mode:_mode, inputType:'Enter', data:'', ctrl:!!e.ctrlKey, alt:!!e.altKey, meta:!!e.metaKey, isComp:false }); }catch{}
+                        }
+                      }
+                    }
+                  }catch{}
+                  if (didListEnter){
+                    try{ _positionImeBar && _positionImeBar(); }catch{}
+                    return;
+                  }
                   // Match markdown-off INSERT behavior (#600): if caret is at dummy EOF newline position
                   // (no final LF and caret at EOF), promote dummy -> real '\n' without creating a visible blank line.
                   let didDummy = false;
@@ -28632,6 +28879,51 @@ try{
                 try{ cmdinput.value = ''; }catch{}
                 try{ _imeBarPrevText = ''; _imeBarAnchorOff = (editor && typeof editor.selectionStart==='number') ? (editor.selectionStart|0) : (_imeBarAnchorOff|0); }catch{}
               } else {
+                // #1798: markdown on + INSERT中のみの Enter 特殊動作（IME bar legacy 経由）
+                let didListEnter = false;
+                try{
+                  const mdEnabled = (function(){
+                    try{ if (typeof _mdRichEnabled === 'function') return !!_mdRichEnabled(); }catch{}
+                    try{ const bb = currentBuffer && currentBuffer(); return !!(bb && bb.markdown); }catch{}
+                    return false;
+                  })();
+                  if (mdEnabled && _mode === 'INSERT' && editor){
+                    let ss0 = 0, se0 = 0;
+                    try{ ss0 = editor.selectionStart|0; se0 = editor.selectionEnd|0; }catch{}
+                    const offIns0 = Math.max(0, Math.min((String((currentBuffer && currentBuffer() && currentBuffer().text)||editor.value||'').length|0), Math.min(ss0|0, se0|0)));
+                    let rc0 = null;
+                    try{ rc0 = _rcFromOffset(offIns0|0); }catch{ rc0 = null; }
+                    const r0 = rc0 ? (rc0.r|0) : (caretRow|0);
+                    const lines0 = _splitLines();
+                    const line0 = String((lines0 && r0>=0 && r0<(lines0.length|0)) ? (lines0[r0]||'') : '');
+                    let info0 = null;
+                    try{ info0 = (typeof _mdUListInfo === 'function') ? _mdUListInfo(line0, r0|0, lines0) : null; }catch{ info0 = null; }
+                    if (info0 && info0.kind === 'item' && (info0.listType === 'ul' || info0.listType === 'ol')){
+                      const markerIdx = (info0.markerIdx|0);
+                      const markerLen = (info0.markerLen|0);
+                      if ((markerIdx|0) >= 0 && (markerLen|0) > 0 && (markerIdx|0) <= line0.length){
+                        const indent = line0.slice(0, markerIdx|0);
+                        const marker = line0.slice(markerIdx|0, Math.min(line0.length, (markerIdx|0) + (markerLen|0)));
+                        const sc = Math.max(1, (info0.spaceCount|0));
+                        const prefix = indent + marker + ' '.repeat(sc|0);
+
+                        try{ _imeBarAnchorOff = offIns0|0; }catch{}
+                        try{ _imeBarPrevText = ''; }catch{}
+                        try{ _imeBarReplaceInsertedText('\n' + prefix, 'md-list-enter'); }catch{}
+                        try{ _imeBarPrevText = ''; _imeBarAnchorOff = (editor && typeof editor.selectionStart==='number') ? (editor.selectionStart|0) : (_imeBarAnchorOff|0); }catch{}
+                        try{ _mdListInvalidateCache && _mdListInvalidateCache('md-list-enter-ime-legacy'); }catch{}
+                        try{ _mdWrapInvalidateCache && _mdWrapInvalidateCache('md-list-enter-ime-legacy'); }catch{}
+                        try{ _wrapInvalidateCache && _wrapInvalidateCache('md-list-enter-ime-legacy'); }catch{}
+                        didListEnter = true;
+                        try{ if (_optDebugKeys) _debugPush({ t:Date.now(), type:'imebar-enter-list-legacy', mode:_mode, inputType:'Enter', data:'', ctrl:!!e.ctrlKey, alt:!!e.altKey, meta:!!e.metaKey, isComp:false }); }catch{}
+                      }
+                    }
+                  }
+                }catch{}
+                if (didListEnter){
+                  try{ _positionImeBar && _positionImeBar(); }catch{}
+                  return;
+                }
                 // Empty bar + Enter: match markdown-off INSERT dummy EOF promotion (#600).
                 let didDummy = false;
                 try{
