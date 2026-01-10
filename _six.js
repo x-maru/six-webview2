@@ -1,7 +1,7 @@
-const VERSION = '0.9.1.s';
+const VERSION = '0.9.1.t';
 // Build stamp (for verifying which _six.js is actually running)
 // NOTE: Intentionally ASCII-only; fullwidth variants should be treated as invalid.
-try{ window.__sixBuildTs = '2026-01-09T00:00:00Z'; }catch{}
+try{ window.__sixBuildTs = '2026-01-10T03:10:00Z'; }catch{}
 const VERSION_STR = 'vi like TextEditor "six" v' + VERSION;
 // Build sentinel (#912) - confirm script actually refreshed & executed
 try{
@@ -1796,8 +1796,13 @@ try{
         const isActiveRow = (row === (caretRow|0));
         const tb = (isCodeRow ? null : _mdThematicBreakInfo(srcText));
         const setextOn = (isCodeRow ? false : _mdSetextEnabled());
-
         const draftMode0 = (function(){ try{ return !!(_mdDraftEditEnabled && _mdDraftEditEnabled()); }catch{ return false; } })();
+
+        // Hide markdown symbols for display.
+        // - clean mode: always hide
+        // - draft mode: hide on non-caret lines only (#1489)
+        let hideSymbols = false;
+        try{ hideSymbols = !!(_mdHideSymbolsForRow && _mdHideSymbolsForRow(!!isActiveRow)); }catch{ hideSymbols = false; }
 
         // Loose list blank-line spacer rendering (#1730/#1731)
         // - clean: collapse ALL blank lines in the run (height=0)
@@ -1808,11 +1813,6 @@ try{
           ((caretRow|0) === (looseGap.prevItemRow|0)) ||
           (((caretRow|0) >= (looseGap.start|0)) && ((caretRow|0) <= (looseGap.end|0)))
         ));
-
-        // Hide markdown symbols for display.
-        // - clean mode: always hide
-        // - draft mode: hide on non-caret lines only (#1489)
-        const hideSymbols = !!_mdHideSymbolsForRow(isActiveRow);
 
         // setext heading: apply to this line when the *next* line is a setext underline.
         let setextLv = 0;
@@ -2218,6 +2218,14 @@ try{
             } else {
               let ww = (wPx|0);
               let io = indentOpts;
+              // UL list lines: actual rendering may emulate hanging-indent via a negative-margin shim
+              // (md-hang0) with text-indent forced to 0 to avoid WebView2 clipping. Ensure the wrap
+              // probe uses the same effective style, otherwise it can undercount visual wrap lines.
+              try{
+                if ((ulHangHackPx||0) > 0 && io && typeof io === 'object'){
+                  io = Object.assign({}, io, { textIndentPx: 0 });
+                }
+              }catch{}
               if (isCodeRow){
                 ww = Math.max(20, (ww|0) - (_cbTextPadRightPx|0));
                 io = _cbIndentOpts;
@@ -2436,7 +2444,13 @@ try{
           const until = (window && window.__sixSkipEnsureUntil) ? (window.__sixSkipEnsureUntil|0) : 0;
           let skip = (until && Date.now() < until);
           if (skip){
-            try{ if (typeof _wrapUsesVisualScrollGrid === 'function' && _wrapUsesVisualScrollGrid()) skip = false; }catch{}
+            try{
+              if (typeof _wrapUsesVisualScrollGrid === 'function' && _wrapUsesVisualScrollGrid()){
+                // md-rich: keep skip to avoid vertical jitter/vibration on h/l.
+                const mdRich = !!(function(){ try{ return (_mdRichActive && _mdRichActive()); }catch{ return false; } })();
+                if (!mdRich) skip = false;
+              }
+            }catch{}
           }
           if (!skip) ensureScrolloff();
         }catch{}
@@ -7874,6 +7888,26 @@ try{
         _lastKeydownForAnom.code = e.code;
         _lastKeydownForAnom.t = now;
       }catch{}
+
+      // debugkeys: record capture-stage keydown (so motion keys are always visible)
+      try{
+        if (_optDebugKeys){
+          _debugPush({
+            t: now,
+            type: 'cap-keydown',
+            mode: (typeof _mode!== 'undefined')? _mode : 'NORMAL',
+            key: e.key,
+            code: e.code,
+            repeat: !!e.repeat,
+            trusted: !!e.isTrusted,
+            ctrl: !!e.ctrlKey,
+            alt: !!e.altKey,
+            shift: !!e.shiftKey,
+            meta: !!e.metaKey,
+            isComp: !!(e && e.isComposing)
+          });
+        }
+      }catch{}
       try{ const M = window.SIX_IME_METRICS; if (M && window._imeComposing===true){ M.events.keydown++; } }catch{}
 
       // During IME composition, do not run typing-guard/rAF scheduling here.
@@ -7945,6 +7979,26 @@ try{
       try{
         if (_optRawKeys){
           _rawPush({ t:Date.now(), type:'raw-keyup', key:e.key, code:e.code, repeat:!!e.repeat, trusted:!!e.isTrusted, ctrl:e.ctrlKey, alt:e.altKey, meta:e.metaKey });
+        }
+      }catch{}
+
+      // debugkeys: record capture-stage keyup (useful to see when repeat stops)
+      try{
+        if (_optDebugKeys){
+          _debugPush({
+            t: Date.now(),
+            type: 'cap-keyup',
+            mode: (typeof _mode!== 'undefined')? _mode : 'NORMAL',
+            key: e.key,
+            code: e.code,
+            repeat: !!e.repeat,
+            trusted: !!e.isTrusted,
+            ctrl: !!e.ctrlKey,
+            alt: !!e.altKey,
+            shift: !!e.shiftKey,
+            meta: !!e.metaKey,
+            isComp: !!(e && e.isComposing)
+          });
         }
       }catch{}
     }, true);
@@ -8384,9 +8438,20 @@ try{
       const wrapOn = (function(){ try{ return _wrapEnabled(); }catch{ return false; } })();
 
       if (mdRich){
-        const topLine1 = _topLine()|0;
-        const startIdx = Math.max(0, (topLine1|0) - 1);
-        const endIdx = Math.min((lines.length|0) - 1, startIdx + (vis|0) - 1);
+        // Prefer renderer geometry for Y positioning under variable row heights.
+        // Re-summing per-row wrap probes can drift by +/- lines depending on preceding content.
+        const g = (function(){ try{ return _mdRenderGeom; }catch{ return null; } })();
+        const useGeom = !!(g && Number.isFinite(g.start) && Number.isFinite(g.want) && Array.isArray(g.rowY) && Array.isArray(g.rowH));
+        let startIdx = 0;
+        let endIdx = -1;
+        if (useGeom){
+          startIdx = Math.max(0, (g.start|0));
+          endIdx = Math.min((lines.length|0) - 1, ((g.start|0) + (g.want|0) - 1)|0);
+        } else {
+          const topLine1 = _topLine()|0;
+          startIdx = Math.max(0, (topLine1|0) - 1);
+          endIdx = Math.min((lines.length|0) - 1, startIdx + (vis|0) - 1);
+        }
         let wPx = 80;
         try{ if (wrapOn) wPx = _wrapAvailWidthPx()|0; }catch{ wPx = 80; }
         let baseFontPx = 16;
@@ -8422,6 +8487,61 @@ try{
           return { dispText, prefixLen, lh, fs, hideSymbols, isCodeRow:!!isCodeRow, blockHeightOverridePx:bhOverride, padTopPx:(padTopPx|0), padBottomPx:(padBottomPx|0) };
         };
 
+        const _ulIndentOptsForRow = (srcText, dispText, rowInfo)=>{
+          try{
+            if (!wrapOn) return null;
+            if (!rowInfo || !rowInfo.hideSymbols) return null;
+            if (rowInfo.isCodeRow) return null;
+            const ul = _mdUListInfo && _mdUListInfo(String(srcText||''), rowInfo._row|0, lines);
+            const lt = (ul && ul.listType) ? String(ul.listType||'') : '';
+            if (!ul) return null;
+            // Renderer keeps hanging-indent for unordered lists only.
+            if (lt === 'ol') return null;
+            let indentOpts = null;
+            try{ indentOpts = _mdIndentOptsForListLine(String(dispText||''), ul, wPx|0, (rowInfo.fs|0)||Math.max(6,Math.round(baseFontPx)), (rowInfo.lh|0)||LINE_HEIGHT); }catch{ indentOpts = null; }
+            // Match renderer UL hang-hack: disable negative text-indent.
+            try{
+              if (indentOpts && lt === 'ul' && Number.isFinite(indentOpts.padLeftPx) && (indentOpts.padLeftPx||0) > 0.5){
+                indentOpts = { padLeftPx:(+indentOpts.padLeftPx||0), textIndentPx: 0 };
+              }
+            }catch{}
+            return indentOpts;
+          }catch{ return null; }
+        };
+
+        const _codeWrapParamsFor = (rowInfo)=>{
+          try{
+            if (!wrapOn) return null;
+            if (!rowInfo || !rowInfo.isCodeRow) return null;
+            const fs = (rowInfo.fs|0) || Math.max(6, Math.round(baseFontPx));
+            let chPxBase = 0;
+            try{
+              if (typeof _measureSpan !== 'undefined' && _measureSpan){
+                _measureSpan.textContent = '0';
+                chPxBase = +(_measureSpan.getBoundingClientRect().width||0);
+              }
+            }catch{ chPxBase = 0; }
+            if (!(chPxBase > 0)){
+              try{ chPxBase = Math.max(1, (fs||16) * 0.60); }catch{ chPxBase = 10; }
+            }
+            const cbRectLeftPx = Math.max(0, Math.round((chPxBase||10) * 0.5));
+            let cbRectRightPx = Math.max(0, Math.round((chPxBase||10) * 12));
+            const cbPadPx = Math.max(0, Math.round((chPxBase||10) * 0.5));
+            let edPadRightPx = 0;
+            try{ const csE = getComputedStyle(editor); edPadRightPx = Math.max(0, Math.round(parseFloat(csE.paddingRight||'0')||0)); }catch{ edPadRightPx = 0; }
+            let cbRectRightEffPx = Math.max(0, (cbRectRightPx|0) - (edPadRightPx|0));
+            try{
+              const minW = 4;
+              if (((cbRectLeftPx|0) + (cbRectRightEffPx|0) + minW) > (wPx|0)) cbRectRightEffPx = Math.max(0, (wPx|0) - (minW|0) - (cbRectLeftPx|0));
+            }catch{}
+            const cbTextPadLeftPx = ((cbRectLeftPx|0) + (cbPadPx|0))|0;
+            const cbTextPadRightPx = ((cbRectRightEffPx|0) + (cbPadPx|0))|0;
+            const ww = Math.max(20, (wPx|0) - (cbTextPadRightPx|0));
+            const indentOpts = { padLeftPx:(cbTextPadLeftPx|0), textIndentPx:0 };
+            return { ww:(ww|0), indentOpts };
+          }catch{ return null; }
+        };
+
         for (const seg of _yankFlashSegs){
           const r = (seg.r|0);
           if (r < startIdx || r > endIdx) continue;
@@ -8440,22 +8560,41 @@ try{
           c2 = Math.max(c1, Math.min((dispText.length|0), c2|0));
           if (c2<=c1) continue;
 
-          // y offset by summing heights of rows from startIdx to r
+          // Y offset: use renderer-computed rowY when available.
           let yAcc = 0;
-          for (let rr=startIdx; rr<r; rr++){
-            const inf = _dispForRow(rr, false);
-            const dtext = String(inf.dispText||'');
-            let hPx = (inf.lh|0) || LINE_HEIGHT;
-            if (Number.isFinite(inf.blockHeightOverridePx)){
-              hPx = (inf.blockHeightOverridePx|0);
-            } else if (wrapOn){
-              let n0 = 1;
-              try{ n0 = _wrapProbeLineCountStyled(dtext, wPx|0, (inf.lh|0)||LINE_HEIGHT, (inf.fs|0)||Math.max(6,Math.round(baseFontPx))) | 0; }catch{ n0 = 1; }
-              const n = (n0 && n0>0) ? (n0|0) : 1;
-              hPx = Math.max(1, n) * ((inf.lh|0)||LINE_HEIGHT);
+          if (useGeom){
+            const idx = ((r|0) - (g.start|0))|0;
+            if (idx >= 0 && idx < (g.rowY.length|0)){
+              yAcc = (g.rowY[idx]|0);
+              // If row is fully collapsed (e.g., loose-gap in clean mode), skip.
+              try{ if ((g.rowH[idx]|0) <= 0) continue; }catch{}
             }
-            try{ hPx = (hPx|0) + ((inf.padTopPx|0) + (inf.padBottomPx|0)); }catch{}
-            yAcc += hPx;
+          } else {
+            // Fallback (older behavior): sum heights; may drift under variable row heights.
+            for (let rr=startIdx; rr<r; rr++){
+              const inf0 = _dispForRow(rr, false);
+              const inf = Object.assign({ _row:(rr|0) }, inf0);
+              const dtext = String(inf.dispText||'');
+              let hPx = (inf.lh|0) || LINE_HEIGHT;
+              if (Number.isFinite(inf.blockHeightOverridePx)){
+                hPx = (inf.blockHeightOverridePx|0);
+              } else if (wrapOn){
+                let n0 = 1;
+                try{
+                  const codeP = _codeWrapParamsFor(inf);
+                  const ulIndent = _ulIndentOptsForRow(String(lines[rr]||''), dtext, inf);
+                  if (codeP){
+                    n0 = _wrapProbeLineCountStyled(dtext, codeP.ww|0, (inf.lh|0)||LINE_HEIGHT, (inf.fs|0)||Math.max(6,Math.round(baseFontPx)), codeP.indentOpts) | 0;
+                  } else {
+                    n0 = _wrapProbeLineCountStyled(dtext, wPx|0, (inf.lh|0)||LINE_HEIGHT, (inf.fs|0)||Math.max(6,Math.round(baseFontPx)), ulIndent) | 0;
+                  }
+                }catch{ n0 = 1; }
+                const n = (n0 && n0>0) ? (n0|0) : 1;
+                hPx = Math.max(1, n) * ((inf.lh|0)||LINE_HEIGHT);
+              }
+              try{ hPx = (hPx|0) + ((inf.padTopPx|0) + (inf.padBottomPx|0)); }catch{}
+              yAcc += hPx;
+            }
           }
 
           // Fenced code blocks: account for block margin/padding so flash aligns with rendered code text.
@@ -8503,13 +8642,18 @@ try{
             const el = document.createElement('div');
             el.className='yank-flash';
             el.style.left=((x1 + (codePadLeftPx|0)) - _hs) + 'px';
-            el.style.top= yAcc + 'px';
+            // Align to text area within the row (account for top padding like loose-gap/blocks).
+            el.style.top= (yAcc + (rowInfo.padTopPx|0)) + 'px';
             el.style.width= Math.max(1, Math.round(x2 - x1)) + 'px';
             el.style.height= Math.max(1, Math.round(lh)) + 'px';
             try{ el.style.background = col; el.style.opacity = '0.35'; el.style.outline = '1px solid ' + col; el.style.outlineOffset='-1px'; }catch{}
             _yankFlashLayer.appendChild(el);
           } else {
             let intra1 = 0, intra2 = 0;
+            // Non-code rows may use list hanging indent in clean display.
+            if (!indentOpts && rowInfo && rowInfo.hideSymbols && !rowInfo.isCodeRow){
+              try{ indentOpts = _ulIndentOptsForRow(srcLine, dispText, Object.assign({ _row:(r|0) }, rowInfo)); }catch{}
+            }
             try{ intra1 = _wrapProbeIntraFromColStyled(dispText, c1|0, ww|0, lh|0, fs|0, indentOpts) | 0; }catch{ intra1 = 0; }
             try{ intra2 = _wrapProbeIntraFromColStyled(dispText, c2|0, ww|0, lh|0, fs|0, indentOpts) | 0; }catch{ intra2 = intra1; }
             intra1 = Math.max(0, intra1|0);
@@ -8523,7 +8667,7 @@ try{
               const el = document.createElement('div');
               el.className='yank-flash';
               el.style.left=(x1 - _hs) + 'px';
-              el.style.top= (yAcc + (intra|0) * (lh|0)) + 'px';
+              el.style.top= (yAcc + (rowInfo.padTopPx|0) + (intra|0) * (lh|0)) + 'px';
               el.style.width= Math.max(1, Math.round(x2 - x1)) + 'px';
               el.style.height= Math.max(1, Math.round(lh)) + 'px';
               try{ el.style.background = col; el.style.opacity = '0.35'; el.style.outline = '1px solid ' + col; el.style.outlineOffset='-1px'; }catch{}
@@ -10704,6 +10848,10 @@ try{
 
   // Markdown-rich wrap metrics (styled per line-height/font-size)
   let _mdWrapCache = null;
+  // Markdown-rich wrap metrics for *clean display* (symbol-hiding + hanging-indent), used for
+  // scroll-range compensation. This intentionally does NOT try to follow draft-mode's
+  // "active line is raw" behavior; it models the dominant non-active clean rendering.
+  let _mdWrapCacheClean = null;
   function _mdWrapEnsureCache(force){
     try{
       if (!(_mdRichEnabled && _mdRichEnabled())) { _mdWrapCache = null; return null; }
@@ -10819,8 +10967,142 @@ try{
       return _mdWrapCache;
     }catch{ return _mdWrapCache; }
   }
+  function _mdWrapEnsureCacheClean(force){
+    try{
+      if (!(_mdRichEnabled && _mdRichEnabled())) { _mdWrapCacheClean = null; return null; }
+      if (!(_wrapEnabled && _wrapEnabled())) { _mdWrapCacheClean = null; return null; }
+      const lines = _splitLines();
+      let fence = null;
+      try{ fence = _mdCodeFenceEnsureCache && _mdCodeFenceEnsureCache(false, lines); }catch{ fence = null; }
+      const b = currentBuffer && currentBuffer();
+      const tick = (b && Number.isFinite(b._changeTick)) ? (b._changeTick|0) : 0;
+      const wPx = _wrapAvailWidthPx();
+      const setextOn = !!(_mdSetextEnabled && _mdSetextEnabled());
+      const heavy = (function(){ try{ return _editorTextLen() > 200000; }catch{ return false; } })();
+      // Always assume clean symbol-hiding for scroll/height estimation.
+      const hideSymbolsDefault = true;
+
+      const need = !!(force || !_mdWrapCacheClean || _mdWrapCacheClean.dirty || _mdWrapCacheClean.wPx !== wPx || _mdWrapCacheClean.lineCount !== (lines.length|0) || _mdWrapCacheClean.tick !== tick || _mdWrapCacheClean.hideSymbolsDefault !== hideSymbolsDefault || _mdWrapCacheClean.setextOn !== setextOn);
+      if (!need) return _mdWrapCacheClean;
+
+      let baseFontPx = 16;
+      try{ baseFontPx = parseFloat(getComputedStyle(editor).fontSize)||baseFontPx; }catch{}
+
+      // Code block inset/padding in px (match _mdRenderTextLayer)
+      let chPxBase = 0;
+      try{
+        if (typeof _measureSpan !== 'undefined' && _measureSpan){
+          _measureSpan.textContent = '0';
+          chPxBase = +(_measureSpan.getBoundingClientRect().width||0);
+        }
+      }catch{ chPxBase = 0; }
+      if (!(chPxBase > 0)){
+        try{ chPxBase = Math.max(1, (baseFontPx||16) * 0.60); }catch{ chPxBase = 10; }
+      }
+      const cbRectLeftPx = Math.max(0, Math.round((chPxBase||10) * 0.5));
+      let cbRectRightPx = Math.max(0, Math.round((chPxBase||10) * 12));
+      const cbPadPx = Math.max(0, Math.round((chPxBase||10) * 0.5));
+      // Effective right inset inside text layer coordinates (wrap-on reserves textarea padding-right).
+      let edPadRightPx = 0;
+      try{ const csE = getComputedStyle(editor); edPadRightPx = Math.max(0, Math.round(parseFloat(csE.paddingRight||'0')||0)); }catch{ edPadRightPx = 0; }
+      let cbRectRightEffPx = Math.max(0, (cbRectRightPx|0) - (edPadRightPx|0));
+      try{
+        const minW = 4;
+        if (((cbRectLeftPx|0) + (cbRectRightEffPx|0) + minW) > (wPx|0)) cbRectRightEffPx = Math.max(0, (wPx|0) - (minW|0) - (cbRectLeftPx|0));
+      }catch{}
+      const cbTextPadLeftPx = ((cbRectLeftPx|0) + (cbPadPx|0))|0;
+      const cbTextPadRightPx = ((cbRectRightEffPx|0) + (cbPadPx|0))|0;
+      const cbIndentOpts = { padLeftPx:(cbTextPadLeftPx|0), textIndentPx:0 };
+      const cbProbeWidthPx = Math.max(20, (wPx|0) - (cbTextPadRightPx|0));
+
+      const counts = new Array(lines.length|0);
+      const prefix = new Array((lines.length|0) + 1);
+      prefix[0] = 0;
+      let totalPx = 0;
+      for (let i=0;i<lines.length;i++){
+        const src = String(lines[i]||'');
+        const fk = (fence && fence.kind) ? (fence.kind[i]|0) : 0;
+        const isFenceRow = ((fk|0) === 1);
+        const isCodeRow = ((fk|0) === 2);
+        // Compute display text for stable wrap measurement.
+        let disp = src;
+        try{
+          if (hideSymbolsDefault){
+            // Clean display: hide fence rows; but keep code content raw.
+            if (isFenceRow){
+              disp = '';
+            } else if (!isCodeRow){
+              const isHr = _mdIsHrLineForDisplay(src, lines, i, false);
+              const isSetextU = _mdIsSetextUnderlineRowForDisplay(src, lines, i, false);
+              if (isHr || isSetextU){
+                disp = '';
+              } else {
+                const lv0 = _mdHeadingLevel(src)|0;
+                if (lv0>=1 && lv0<=6){
+                  const p = _mdHeadingPrefixLen(src)|0;
+                  if (p>0) disp = src.slice(p);
+                }
+              }
+            }
+          }
+        }catch{ disp = src; }
+
+        const info = (function(){ try{ return _mdLineLayoutInfoAtRow(lines, i, false); }catch{ return null; } })();
+        const lh = isCodeRow ? (LINE_HEIGHT|0) : ((info && info.lineHeightPx) ? (info.lineHeightPx|0) : (LINE_HEIGHT|0));
+        const bhOverride = (info && Number.isFinite(info.blockHeightOverridePx)) ? (info.blockHeightOverridePx|0) : null;
+        const padTopPx = (info && Number.isFinite(info.blockPadTopPx)) ? (info.blockPadTopPx|0) : 0;
+        const padBottomPx = (info && Number.isFinite(info.blockPadBottomPx)) ? (info.blockPadBottomPx|0) : 0;
+        const sc = isCodeRow ? 1 : ((info && info.scale) ? (+info.scale || 1) : 1);
+        const fs = Math.max(6, Math.round(baseFontPx * (Number.isFinite(sc) ? sc : 1)));
+
+        // List hanging indent affects wrap count.
+        let indentOpts = null;
+        try{
+          if (hideSymbolsDefault && !isCodeRow && !isFenceRow){
+            const ul = _mdUListInfo && _mdUListInfo(src, i, lines);
+            if (ul) indentOpts = _mdIndentOptsForListLine(src, ul, wPx|0, fs|0, lh|0);
+            // Match renderer UL hang-hack: disable negative text-indent for UL list items.
+            try{
+              const lt2 = (ul && ul.listType) ? String(ul.listType||'') : '';
+              if (indentOpts && lt2 === 'ul' && Number.isFinite(indentOpts.padLeftPx) && (indentOpts.padLeftPx||0) > 0.5){
+                indentOpts = { padLeftPx:(+indentOpts.padLeftPx||0), textIndentPx: 0 };
+              }
+            }catch{}
+          }
+        }catch{ indentOpts = null; }
+
+        let n = 1;
+        if (!heavy){
+          if (isCodeRow){
+            const n0 = _wrapProbeLineCountStyled(disp, cbProbeWidthPx|0, lh|0, fs|0, cbIndentOpts);
+            if (Number.isFinite(n0) && (n0|0) > 0) n = (n0|0);
+          } else {
+            const n0 = _wrapProbeLineCountStyled(disp, wPx|0, lh|0, fs|0, indentOpts);
+            if (Number.isFinite(n0) && (n0|0) > 0) n = (n0|0);
+          }
+        } else {
+          n = 1;
+        }
+        counts[i] = n;
+        prefix[i+1] = (prefix[i] + n);
+        try{
+          let hPx = 0;
+          if (Number.isFinite(bhOverride)){
+            hPx = (bhOverride|0);
+          } else {
+            hPx = (Math.max(1, (n|0)) * Math.max(1, (lh|0)))|0;
+          }
+          hPx = (hPx|0) + ((padTopPx|0) + (padBottomPx|0));
+          totalPx += (hPx|0);
+        }catch{}
+      }
+      _mdWrapCacheClean = { wPx, lineCount:(lines.length|0), tick, counts, prefix, totalPx:(totalPx|0), dirty:false, hideSymbolsDefault, setextOn, builtAt: Date.now() };
+      return _mdWrapCacheClean;
+    }catch{ return _mdWrapCacheClean; }
+  }
   function _mdWrapInvalidateCache(_reason){
     try{ if (_mdWrapCache) _mdWrapCache.dirty = true; }catch{}
+    try{ if (_mdWrapCacheClean) _mdWrapCacheClean.dirty = true; }catch{}
   }
   function _mdWrapTotalVisLines(){
     try{
@@ -10841,7 +11123,15 @@ try{
         if ((P[mid+1]|0) >= vv) hi = mid; else lo = mid + 1;
       }
       const row = Math.max(0, Math.min((c.lineCount-1)|0, lo|0));
-      const intra = Math.max(0, (vv - (P[row]|0) - 1));
+      let intra = Math.max(0, (vv - (P[row]|0) - 1));
+      // IMPORTANT: v1 can be in the EOF padding region (vv > total visual lines).
+      // Clamp intra so callers never see an out-of-range intra that can shift highlights/caret.
+      try{
+        if (c.counts && row >= 0 && row < (c.counts.length|0)){
+          const maxIntra = Math.max(0, ((c.counts[row]|0) - 1));
+          if ((intra|0) > (maxIntra|0)) intra = maxIntra|0;
+        }
+      }catch{}
       return { row, intra };
     }catch{ return { row: Math.max(0, (v1|0)-1), intra:0 }; }
   }
@@ -10991,21 +11281,94 @@ try{
   let _mdEofPadExtraLines = 0;
   let _mdEofPadLastPbPx = -1;
   let _mdEofPadLastExtraPx = 0;
+  // md-rich + wrap-on: keep physical maxScrollTop aligned to LINE_HEIGHT.
+  // Add a tiny (0..LINE_HEIGHT-1) px remainder compensation to paddingBottom.
+  // This avoids a visible half-row drift near EOF and prevents losing ~1 pad line.
+  let _mdEofPadGridLastBasePx = -1;
+  let _mdEofPadGridLastLh = -1;
+
+  // md-rich + wrap-on: the textarea (raw markdown) can wrap differently than the overlay (clean display).
+  // To avoid a "dead" scroll range where the thumb moves but the overlay does not, map between:
+  //   - physical scrollTop space (textarea)
+  //   - effective scrollTop space (overlay)
+  // Effective range is derived from the md wrap cache visual-line grid (prefix count) + EOF padding.
+  // (We intentionally do NOT use overlay's variable pixel heights here; the scroll model is line-grid based.)
+  let _mdEofLastTotalPx = 0;     // legacy: last overlay estimated content height (without EOF pad)
+  let _mdEofLastContentPx = 0;   // textarea native content height (without paddings)
+  let _mdEofLastLinesTotal = 0;
+  function _mdRichWrapOn(){
+    try{ return !!((_mdRichActive && _mdRichActive()) && (_wrapEnabled && _wrapEnabled())); }catch{ return false; }
+  }
+  function _mdScrollMapGet(){
+    try{
+      if (!editor) return null;
+      if (!_mdRichWrapOn()) return null;
+      const lh = Math.max(1, (LINE_HEIGHT|0));
+      let ptPx = 0;
+      try{
+        const cs0 = getComputedStyle(editor);
+        ptPx = Math.max(0, Math.round(parseFloat(cs0.paddingTop||'0')||0));
+      }catch{ ptPx = 0; }
+      let clientH = 0;
+      try{
+        if (viewport && (viewport.clientHeight|0) > 0) clientH = (viewport.clientHeight|0);
+        else clientH = (editor.clientHeight||0)|0;
+      }catch{ clientH = (editor.clientHeight||0)|0; }
+      const physMax = Math.max(0, ((editor.scrollHeight||0) - (clientH|0))|0);
+      // Effective (overlay) scroll grid: visual line count (wrap cache prefix) * LINE_HEIGHT.
+      // This keeps caret/scrolloff/clamp stable even when the overlay uses variable padding/line-height.
+      let visLines = 0;
+      try{ if (typeof _mdWrapTotalVisLines === 'function') visLines = (_mdWrapTotalVisLines()|0); }catch{ visLines = 0; }
+      if ((visLines|0) <= 0){
+        let nLines = (_mdEofLastLinesTotal|0);
+        try{ if ((nLines|0) <= 0 && typeof _totalLines === 'function') nLines = (_totalLines()|0); }catch{}
+        visLines = Math.max(0, (nLines|0));
+      }
+      const totalPx = Math.max(0, (visLines|0) * lh);
+      const basePadPx = Math.max(0, (_eofPadLines()|0) * lh);
+      // Include textarea padding-top so effMax aligns with physMax after padding compensation.
+      const effTotal = Math.max(0, (ptPx|0) + (totalPx|0) + (basePadPx|0));
+      const effMax = Math.max(0, (effTotal|0) - (clientH|0));
+      return { lh:(lh|0), clientH:(clientH|0), physMax:(physMax|0), effMax:(effMax|0), ptPx:(ptPx|0) };
+    }catch{ return null; }
+  }
+  function _mdEffFromPhysPx(physPx){
+    try{
+      const m = _mdScrollMapGet();
+      if (!m) return Math.max(0, Math.round(physPx||0));
+      const p = Math.max(0, Math.round(physPx||0));
+      const physMax = (m.physMax|0);
+      const effMax = (m.effMax|0);
+      if (physMax <= 0 || effMax <= 0) return Math.max(0, Math.min(p|0, effMax|0));
+      const eff = Math.round((p * effMax) / physMax);
+      return Math.max(0, Math.min(eff|0, effMax|0));
+    }catch{ return Math.max(0, Math.round(physPx||0)); }
+  }
+  function _mdPhysFromEffPx(effPx){
+    try{
+      const m = _mdScrollMapGet();
+      if (!m) return Math.max(0, Math.round(effPx||0));
+      const e = Math.max(0, Math.round(effPx||0));
+      const physMax = (m.physMax|0);
+      const effMax = (m.effMax|0);
+      if (physMax <= 0 || effMax <= 0) return Math.max(0, Math.min(e|0, physMax|0));
+      const phys = Math.round((e * physMax) / effMax);
+      return Math.max(0, Math.min(phys|0, physMax|0));
+    }catch{ return Math.max(0, Math.round(effPx||0)); }
+  }
+
   function _mdEffectiveScrollTopPx(opts){
     // md-rich + wrap-on: native scrollTop may enter compensation range (for scrollbar thumb).
     // Rendering/mapping must use an effective scrollTop that hides compensation and stays grid-aligned.
     try{
-      let st = (editor && typeof editor.scrollTop === 'number') ? (editor.scrollTop|0) : 0;
-      if (_mdRichActive && _mdRichActive() && _wrapEnabled && _wrapEnabled()){
-        let effMaxLocal = -1;
+      let stPhys = (editor && typeof editor.scrollTop === 'number') ? (editor.scrollTop|0) : 0;
+      let st = stPhys|0;
+      let effMaxLocal = -1;
+      if (_mdRichWrapOn()){
+        st = _mdEffFromPhysPx(stPhys|0)|0;
         try{
-          if (typeof _mdEffectiveMaxScrollPx === 'function'){
-            const eff = (_mdEffectiveMaxScrollPx()|0);
-            if (eff >= 0){
-              effMaxLocal = (eff|0);
-              st = Math.min(st|0, effMaxLocal|0);
-            }
-          }
+          const m = _mdScrollMapGet();
+          if (m) effMaxLocal = (m.effMax|0);
         }catch{}
         const snap = !(opts && opts.snap === false);
         if (snap){
@@ -11014,7 +11377,10 @@ try{
           // If we floor() at EOF, we can hide part of the last pad line and it looks like
           // "5行+半端" when wrap compensation is exactly 1 line.
           const effMax = (effMaxLocal|0);
-          if (effMax >= 0 && ((effMax - (st|0)) <= 1.5)){
+          // NOTE: due to phys<->eff proportional mapping + rounding, we may land slightly below
+          // the true effective bottom. Treat "within ~1 visual line" as EOF and pin to effMax.
+          const nearEofPx = Math.max(2, Math.floor(lh * 0.8));
+          if (effMax >= 0 && ((effMax - (st|0)) <= nearEofPx)){
             st = effMax|0;
           } else {
             st = Math.floor((st|0) / lh) * lh;
@@ -11196,71 +11562,19 @@ try{
     }catch{}
   }
 
-  function _mdPinThumbPhysBottom(reason){
-    // md-rich + wrap-on: keep native scrollbar thumb at true bottom, while
-    // overlay rendering uses the effective scrollTop grid.
-    try{
-      if (!editor) return;
-      if (!(_mdRichActive && _mdRichActive())) return;
-      if (!(_wrapEnabled && _wrapEnabled())) return;
-      if (!(_wrapUsesVisualScrollGrid && !_wrapUsesVisualScrollGrid())) return;
-      try{ if (((caretRow|0) + 1) !== ((_totalLines()|0))) return; }catch{}
-      // Update wrap cache/padding before measuring max scroll.
-      try{ if (typeof _mdWrapEnsureCache === 'function') _mdWrapEnsureCache(true); }catch{}
-      try{ if (typeof _mdSyncEofPadComp === 'function') _mdSyncEofPadComp(); }catch{}
-      const physMax = Math.max(0, ((editor.scrollHeight||0) - (editor.clientHeight||0))|0);
-      const cur = (editor.scrollTop||0);
-      if (Math.abs(cur - physMax) > 0.5) editor.scrollTop = physMax;
-    }catch{}
-  }
-
   function _mdEffectiveMaxScrollPx(){
     try{
       if (!editor) return 0;
-      // In md-rich, the visible viewport height is governed by `#viewport` overlays.
-      // Using `editor.clientHeight` can drift when padding/box-sizing adjustments are applied,
-      // which can make the effective max too small and prevent reaching EOF.
-      let clientH = 0;
+      // md-rich + wrap-on: return effective max scroll in overlay space.
+      // (Physical thumb travel is mapped to this range in _mdEffectiveScrollTopPx.)
       try{
-        if ((_mdRichActive && _mdRichActive()) && viewport && (viewport.clientHeight|0) > 0){
-          clientH = (viewport.clientHeight|0);
-        } else {
-          clientH = (editor.clientHeight||0)|0;
-        }
-      }catch{ clientH = (editor.clientHeight||0)|0; }
-      const maxScroll = Math.max(0, (editor.scrollHeight||0) - (clientH|0));
-      // md-rich + wrap-on: the native scroll range is expanded via paddingBottom
-      // (EOF pad + wrap/height compensation). The scrollbar thumb should be allowed
-      // to reach the true physical bottom, but mapping/rendering must clamp to an
-      // *effective* maximum that hides the compensation range so the user-visible
-      // EOF padding stays at eofPadLines (+ remainder).
-      try{
-        const mdLogicalWrap = !!(
-          (_mdRichActive && _mdRichActive()) &&
-          (_wrapEnabled && _wrapEnabled()) &&
-          (_wrapUsesVisualScrollGrid && !_wrapUsesVisualScrollGrid())
-        );
-        if (mdLogicalWrap){
-          // `extraPx` is the additional pixel range added to paddingBottom so the native thumb
-          // can reach the physical bottom even though the textarea stays unwrapped.
-          // Effective scroll must exclude this region; otherwise EOF shows far more than
-          // eofPadLines, and caret motions (k/j) can desync from the visible viewport.
-          let extraPx = 0;
-          try{ extraPx = Math.max(0, (_mdEofPadLastExtraPx|0)); }catch{ extraPx = 0; }
-          // If extraPx wasn't computed yet but we have the last applied paddingBottom, derive it.
-          try{
-            if ((extraPx|0) <= 0 && (_mdEofPadLastPbPx|0) >= 0){
-              const lh = Math.max(1, (LINE_HEIGHT|0));
-              const basePad = (typeof _eofPadLines === 'function') ? (_eofPadLines()|0) : 0;
-              const basePx = Math.max(0, (basePad|0) * (lh|0));
-              extraPx = Math.max(0, ((_mdEofPadLastPbPx|0) - (basePx|0))|0);
-            }
-          }catch{}
-          const eff = Math.max(0, ((maxScroll|0) - (extraPx|0))|0);
-          return Math.min((maxScroll|0), (eff|0));
-        }
+        const m = _mdScrollMapGet();
+        if (m) return (m.effMax|0);
       }catch{}
-      return maxScroll|0;
+      // Fallback: physical
+      let clientH = 0;
+      try{ clientH = (viewport && (viewport.clientHeight|0) > 0) ? (viewport.clientHeight|0) : ((editor.clientHeight||0)|0); }catch{ clientH = (editor.clientHeight||0)|0; }
+      return Math.max(0, ((editor.scrollHeight||0) - (clientH|0))|0);
     }catch{ return 0; }
   }
 
@@ -11427,14 +11741,57 @@ try{
             d.eofMeta.cond = ((d.eofMeta && d.eofMeta.cond)|0) + 1;
           }
         }catch{}
-        // With md-rich.wrap-on the textarea itself is wrapped (CSS), so native scrollHeight
-        // already reflects visual wraps. Do NOT add md-only scroll-range compensation here.
+        // md-rich + wrap-on:
+        // The overlay rendering can wrap differently than the textarea (e.g., hanging indent
+        // or code block padding reduces available width). When the overlay becomes taller
+        // than the textarea's native wrapped layout, the user cannot visually reach EOF and
+        // y-based overlays (yank flash) drift upward.
+        // Compensate by extending paddingBottom by the difference in total content height.
         const lines = _splitLines();
         linesTotal = (lines.length|0);
-        totalPx = 0;
-        textPx = (linesTotal|0) * (LINE_HEIGHT|0);
-        extraPx = 0;
-        _mdEofPadLastExtraPx = 0;
+        try{ wPx = (typeof _wrapAvailWidthPx === 'function') ? (_wrapAvailWidthPx()|0) : 0; }catch{ wPx = 0; }
+        let c = null;
+        try{ c = (typeof _mdWrapEnsureCacheClean === 'function') ? (_mdWrapEnsureCacheClean(false) || _mdWrapEnsureCacheClean(true)) : null; }catch{ c = null; }
+        try{ cacheTotalPx = (c && Number.isFinite(c.totalPx)) ? (c.totalPx|0) : 0; }catch{ cacheTotalPx = 0; }
+        try{ cacheWpx = (c && Number.isFinite(c.wPx)) ? (c.wPx|0) : 0; }catch{ cacheWpx = 0; }
+
+        // IMPORTANT (md-rich + wrap-on): unify scroll model heights.
+        // Use the md-wrap visual-line grid (counts/prefix) * LINE_HEIGHT as the canonical height.
+        // This keeps:
+        //   - effective scroll space (overlay)
+        //   - physical scroll range (textarea thumb)
+        // aligned, eliminating the EOF thumb gap and EOF blank toggling.
+        let visLines = 0;
+        try{
+          if (c && c.prefix && c.prefix.length) visLines = (c.prefix[c.prefix.length-1]|0);
+          else if (typeof _mdWrapTotalVisLines === 'function') visLines = (_mdWrapTotalVisLines()|0);
+        }catch{ visLines = 0; }
+        if ((visLines|0) <= 0) visLines = Math.max(0, (linesTotal|0));
+        totalPx = Math.max(0, (visLines|0) * Math.max(1, (LINE_HEIGHT|0)));
+        textPx = Math.max(0, (linesTotal|0) * Math.max(1, (LINE_HEIGHT|0)));
+
+        // Measure textarea native content height (wrapped by browser) excluding paddings.
+        // Do not mutate paddingBottom here (avoids feedback loops).
+        let ptPx = 0;
+        let pbPx = 0;
+        try{
+          const cs = getComputedStyle(editor);
+          ptPx = Math.max(0, Math.round(parseFloat(cs.paddingTop||'0')||0));
+          pbPx = Math.max(0, Math.round(parseFloat(cs.paddingBottom||'0')||0));
+        }catch{ ptPx = 0; pbPx = 0; }
+        let contentPx = 0;
+        try{
+          const sh0 = (editor.scrollHeight||0)|0;
+          contentPx = Math.max(0, (sh0|0) - (ptPx|0) - (pbPx|0));
+        }catch{ contentPx = 0; }
+
+        // Extra pixels needed so textarea scroll range can reach overlay EOF.
+        extraPx = Math.max(0, (totalPx|0) - (contentPx|0))|0;
+        _mdEofPadLastExtraPx = extraPx|0;
+        // Record last measured totals for scroll mapping.
+        try{ _mdEofLastTotalPx = (totalPx|0); }catch{}
+        try{ _mdEofLastContentPx = (contentPx|0); }catch{}
+        try{ _mdEofLastLinesTotal = (linesTotal|0); }catch{}
         extra = 0;
       }
       _mdEofPadExtraLines = extra|0;
@@ -11443,11 +11800,44 @@ try{
       // User-visible EOF padding stays at CSS --eofPadLines; extra is consumed as "content height" compensation.
       const basePad = (_eofPadLines()|0);
       if (_mdRichEnabled && _mdRichEnabled() && _wrapEnabled && _wrapEnabled()){
-        // Use pixel-precise padding to reduce clamp/jitter near EOF under variable row heights.
+        // Use pixel-precise padding to reduce clamp/jitter near EOF.
+        // Additionally align the physical maxScrollTop to the LINE_HEIGHT grid.
         const lh = Math.max(1, (LINE_HEIGHT|0));
-        const pb = Math.max(0, ((basePad|0) * lh) + (extraPx|0));
+        const basePb = Math.max(0, ((basePad|0) * lh) + (extraPx|0));
+        let targetPb = (basePb|0);
         try{
-          const pbI = (pb|0);
+          // If baseline changed, reset to it first so remainder math is stable.
+          if ((_mdEofPadGridLastBasePx|0) !== (basePb|0) || (_mdEofPadGridLastLh|0) !== (lh|0)){
+            try{ editor.style.paddingBottom = (basePb|0) + 'px'; }catch{}
+            _mdEofPadGridLastBasePx = (basePb|0);
+            _mdEofPadGridLastLh = (lh|0);
+            _mdEofPadLastPbPx = -1;
+          }
+
+          let clientH = 0;
+          try{
+            if (viewport && (viewport.clientHeight|0) > 0) clientH = (viewport.clientHeight|0);
+            else clientH = (editor.clientHeight||0)|0;
+          }catch{ clientH = (editor.clientHeight||0)|0; }
+          const pm0 = Math.max(0, ((editor.scrollHeight||0) - (clientH|0))|0);
+
+          // Compute remainder against baseline max by subtracting any current extra padding.
+          let curPb = (basePb|0);
+          try{
+            const cs = window.getComputedStyle(editor);
+            const pbCur = parseFloat(String(cs.getPropertyValue('padding-bottom')||'0'));
+            if (Number.isFinite(pbCur)) curPb = Math.max(0, Math.round(pbCur));
+          }catch{ curPb = (basePb|0); }
+          const extraPb = Math.max(0, (curPb|0) - (basePb|0));
+          const pmBase = Math.max(0, (pm0|0) - (extraPb|0));
+          let rem = 0;
+          try{ rem = (pmBase % (lh|0))|0; if (rem < 0) rem = (rem + (lh|0))|0; }catch{ rem = 0; }
+          const comp = (rem === 0) ? 0 : ((lh|0) - rem);
+          targetPb = ((basePb|0) + (comp|0))|0;
+        }catch{ targetPb = (basePb|0); }
+
+        try{
+          const pbI = (targetPb|0);
           if ((_mdEofPadLastPbPx|0) !== (pbI|0)){
             editor.style.paddingBottom = pbI + 'px';
             _mdEofPadLastPbPx = pbI|0;
@@ -11489,9 +11879,10 @@ try{
   }
   function _wrapUsesVisualScrollGrid(){
     try{
-      // Use the visual-line scroll grid whenever wrapping is enabled.
-      // (md-rich also keeps the textarea wrapped so native scroll metrics stay consistent.)
-      return _wrapEnabled();
+      // Wrap-on: use a visual-line scroll grid.
+      // - non-md: native textarea wraps
+      // - md-rich: md wrap cache (overlay-aware) via _wrapRowFromVisualLine1/_wrapVisualLine1ForRowCol
+      return !!(_wrapEnabled && _wrapEnabled());
     }catch{ return false; }
   }
   function _wrapSpaceWidthPx(){
@@ -11506,16 +11897,19 @@ try{
     try{
       if (!editor) return 80;
       // IMPORTANT (md-rich): wrapping is rendered in overlay layers, not the textarea.
-      // If we base width on clientWidth, scrollbar appearance changes cw and can cause a
-      // positive feedback loop: narrower width -> more wraps -> larger extraPx -> larger paddingBottom
-      // -> scrollbar appears -> width narrows further.
-      // To prevent “EOF余白が増殖”, use offsetWidth (includes scrollbar gutter) in md-rich.
+      // In md-rich we want a width basis that matches overlay layout and is stable even when
+      // the textarea's scrollbar appears. Prefer the overlay viewport width if available.
       const cw = (editor.clientWidth||0);
       let basisW = cw;
       try{
         if (_mdRichActive && _mdRichActive() && _wrapEnabled && _wrapEnabled()){
-          const ow = (editor.offsetWidth||0);
-          if (ow > 0) basisW = ow;
+          // Prefer viewport (overlay container). It is typically unaffected by the textarea scrollbar.
+          if (typeof viewport !== 'undefined' && viewport && (viewport.clientWidth|0) > 0){
+            basisW = (viewport.clientWidth|0);
+          } else {
+            // Fallback: use textarea clientWidth (matches native wrapping).
+            basisW = (editor.clientWidth||0);
+          }
         }
       }catch{}
       // Cache paddings to reduce getComputedStyle churn (and avoid forced reflow in debug sessions)
@@ -11589,12 +11983,16 @@ try{
   }
   function _topVisualLine1(){
     try{
-      const st = (editor.scrollTop||0);
+      let st = (editor.scrollTop||0);
+      // md-rich + wrap-on: use effective scrollTop (overlay space).
+      try{ if (typeof _mdRichWrapOn === 'function' && _mdRichWrapOn() && typeof _mdEffectiveScrollTopPx === 'function') st = _mdEffectiveScrollTopPx({ snap:true })|0; }catch{}
       return Math.floor(st / LINE_HEIGHT) + 1;
     }catch{ return 1; }
   }
   function _wrapRowFromVisualLine1(v1){
     try{
+      // md-rich + wrap-on: visual grid comes from md wrap cache (overlay), not textarea native wrap.
+      try{ if (typeof _mdRichWrapOn === 'function' && _mdRichWrapOn() && typeof _mdWrapRowFromVisualLine1 === 'function') return _mdWrapRowFromVisualLine1(v1|0); }catch{}
       const c = _wrapEnsureCache(false);
       if (!c || !c.prefix) return { row: Math.max(0, Math.min((_totalLines()-1)|0, (v1|0)-1)), intra: 0 };
       const vv = Math.max(1, v1|0);
@@ -11606,12 +12004,28 @@ try{
         if ((P[mid+1]|0) >= vv) hi = mid; else lo = mid + 1;
       }
       const row = Math.max(0, Math.min((c.lineCount-1)|0, lo|0));
-      const intra = Math.max(0, (vv - (P[row]|0) - 1));
+      let intra = Math.max(0, (vv - (P[row]|0) - 1));
+      try{
+        if (c.counts && row >= 0 && row < (c.counts.length|0)){
+          const maxIntra = Math.max(0, ((c.counts[row]|0) - 1));
+          if ((intra|0) > (maxIntra|0)) intra = maxIntra|0;
+        }
+      }catch{}
       return { row, intra };
     }catch{ return { row: Math.max(0, (v1|0)-1), intra:0 }; }
   }
   function _wrapVisualStartLine1ForRow(row){
     try{
+      // md-rich + wrap-on: use md wrap cache prefix.
+      try{
+        if (typeof _mdRichWrapOn === 'function' && _mdRichWrapOn()){
+          const c2 = (typeof _mdWrapEnsureCache === 'function') ? (_mdWrapEnsureCache(false) || _mdWrapEnsureCache(true)) : null;
+          if (c2 && c2.prefix){
+            const r2 = Math.max(0, Math.min((c2.lineCount-1)|0, row|0));
+            return ((c2.prefix[r2]|0) + 1);
+          }
+        }
+      }catch{}
       const c = _wrapEnsureCache(false);
       if (!c || !c.prefix) return (row|0)+1;
       const r = Math.max(0, Math.min((c.lineCount-1)|0, row|0));
@@ -11620,6 +12034,8 @@ try{
   }
   function _wrapVisualLine1ForRowCol(row, col){
     try{
+      // md-rich + wrap-on: use md wrap cache (overlay width/indent rules).
+      try{ if (typeof _mdRichWrapOn === 'function' && _mdRichWrapOn() && typeof _mdWrapVisualLine1ForRowCol === 'function') return _mdWrapVisualLine1ForRowCol(row|0, col|0); }catch{}
       const c = _wrapEnsureCache(false);
       if (!c || !c.prefix || !c.counts) return (row|0)+1;
       const lines = _splitLines();
@@ -11646,7 +12062,12 @@ try{
   function _scrollTopForTopLine1(topLine1){
     try{
       if (!_wrapUsesVisualScrollGrid()) return Math.max(0, ((topLine1|0)-1) * LINE_HEIGHT);
-      const c = _wrapEnsureCache(false);
+      // Wrap-on: map logical top line -> visual start line using the appropriate wrap cache.
+      let c = null;
+      try{
+        if (typeof _mdRichWrapOn === 'function' && _mdRichWrapOn()) c = (typeof _mdWrapEnsureCache === 'function') ? (_mdWrapEnsureCache(false) || _mdWrapEnsureCache(true)) : null;
+        else c = _wrapEnsureCache(false);
+      }catch{ c = _wrapEnsureCache(false); }
       if (!c || !c.prefix) return Math.max(0, ((topLine1|0)-1) * LINE_HEIGHT);
       const r = Math.max(0, Math.min((c.lineCount-1)|0, (topLine1|0)-1));
       const v1 = (c.prefix[r]|0) + 1;
@@ -12165,26 +12586,16 @@ try{
           prev.viewRow = caretRow|0;
           prev.viewCol = caretCol|0;
           try{
-            const mdLogicalWrap = !!(
-              (_mdRichActive && _mdRichActive()) &&
-              (_wrapEnabled && _wrapEnabled()) &&
-              (_wrapUsesVisualScrollGrid && !_wrapUsesVisualScrollGrid())
-            );
+            const mdWrap = (typeof _mdRichWrapOn === 'function') ? !!_mdRichWrapOn() : !!((_mdRichActive && _mdRichActive()) && (_wrapEnabled && _wrapEnabled()));
             const st = (editor.scrollTop||0)|0;
-            if (mdLogicalWrap && typeof _mdEffectiveScrollTopPx === 'function'){
+            if (mdWrap && typeof _mdEffectiveScrollTopPx === 'function'){
               // Save effective scrollTop so restoring does not land inside the compensation tail.
               const eff = _mdEffectiveScrollTopPx({ snap:true })|0;
               prev.viewScrollTop = Math.max(0, eff|0);
-              // Also remember whether the native thumb was at the physical bottom.
-              try{
-                const physMax = Math.max(0, ((editor.scrollHeight||0) - (editor.clientHeight||0))|0);
-                prev._mdPhysBottom = ((physMax - (st|0)) <= Math.max(2, (LINE_HEIGHT|0)));
-              }catch{ prev._mdPhysBottom = false; }
             } else {
               prev.viewScrollTop = Math.floor(Math.max(0, st)/LINE_HEIGHT)*LINE_HEIGHT;
-              prev._mdPhysBottom = false;
             }
-          }catch{ prev.viewScrollTop = (editor.scrollTop||0)|0; try{ prev._mdPhysBottom = false; }catch{} }
+          }catch{ prev.viewScrollTop = (editor.scrollTop||0)|0; }
           // Record a line-based anchor as well (robust against LINE_HEIGHT changes across restarts)
           try{
             const lh = Math.max(1, (LINE_HEIGHT|0));
@@ -12276,12 +12687,8 @@ try{
       // md-rich + wrap-on: ensure paddingBottom compensation is synced BEFORE applying scrollTop,
       // otherwise restoring a saved EOF/bottom view can briefly show a huge blank tail.
       try{
-        const mdLogicalWrap = !!(
-          (_mdRichActive && _mdRichActive()) &&
-          (_wrapEnabled && _wrapEnabled()) &&
-          (_wrapUsesVisualScrollGrid && !_wrapUsesVisualScrollGrid())
-        );
-        if (mdLogicalWrap){
+        const mdWrap = (typeof _mdRichWrapOn === 'function') ? !!_mdRichWrapOn() : !!((_mdRichActive && _mdRichActive()) && (_wrapEnabled && _wrapEnabled()));
+        if (mdWrap){
           try{ _mdWrapEnsureCache && _mdWrapEnsureCache(true); }catch{}
           try{ _mdSyncEofPadComp && _mdSyncEofPadComp(); }catch{}
         }
@@ -12427,20 +12834,34 @@ try{
           }catch{}
           try{ _repositionCaret(); updateGutter(); }catch{}
           try{ _dbgRestore('switch:applied', { idx:(i|0), st:(editor&&editor.scrollTop)|0, vr:(caretRow|0), vc:(caretCol|0), vp:_dbgViewportSnapshot() }); }catch{}
-          // If this buffer was previously at physical bottom (thumb pinned), restore that
-          // after compensation has been synced so the thumb stays at the end without exposing the tail.
-          try{
-            const mdLogicalWrap = !!(
-              (_mdRichActive && _mdRichActive()) &&
-              (_wrapEnabled && _wrapEnabled()) &&
-              (_wrapUsesVisualScrollGrid && !_wrapUsesVisualScrollGrid())
-            );
-            if (mdLogicalWrap && b && b._mdPhysBottom){
-              try{ _mdPinThumbPhysBottom && _mdPinThumbPhysBottom('switch:restore'); }catch{}
-            }
-          }catch{}
           // Keep native selection aligned with caret; do not let this change scroll position
           try{ const stKeep = (editor && typeof editor.scrollTop==='number') ? editor.scrollTop : 0; _syncNativeSelectionToCaret(); if (editor) _setEditorScrollTop(stKeep, { immediate:true }); }catch{}
+
+          // Defensive: some browsers can adjust native selection after scroll/layout settles.
+          // If that happens, insertion follows the native selection but overlays/posInfo follow caretRow/Col,
+          // causing a visible 1-line drift until the next explicit sync.
+          try{
+            if (!(window && window._imeComposing===true)){
+              const mdNow2 = (function(){ try{ return _mdRichActive && _mdRichActive(); }catch{ return false; } })();
+              if (!mdNow2 && editor && typeof editor.selectionStart === 'number' && typeof editor.selectionEnd === 'number'){
+                const ss = (editor.selectionStart|0);
+                const se = (editor.selectionEnd|0);
+                if ((ss|0) === (se|0)){
+                  const rc2 = _rcFromOffset(ss|0);
+                  if (rc2 && Number.isFinite(rc2.r) && Number.isFinite(rc2.c)){
+                    const rr = (rc2.r|0), cc = (rc2.c|0);
+                    if ((rr|0) !== (caretRow|0) || (cc|0) !== (caretCol|0)){
+                      caretRow = rr|0; caretCol = cc|0;
+                      try{ _repositionCaret(); }catch{}
+                      try{ updateGutter(); }catch{}
+                      try{ _updatePosInfo && _updatePosInfo(); }catch{}
+                    }
+                  }
+                }
+              }
+            }
+          }catch{}
+
           // Persist the restored viewport to the buffer as the new baseline
           // (but do not overwrite a pending lite-restore target view)
           try{
@@ -12500,12 +12921,8 @@ try{
           const st = (editor.scrollTop||0)|0;
           let stSnap = 0;
           try{
-            const mdLogicalWrap = !!(
-              (_mdRichActive && _mdRichActive()) &&
-              (_wrapEnabled && _wrapEnabled()) &&
-              (_wrapUsesVisualScrollGrid && !_wrapUsesVisualScrollGrid())
-            );
-            if (mdLogicalWrap && typeof _mdEffectiveScrollTopPx === 'function'){
+            const mdWrap = (typeof _mdRichWrapOn === 'function') ? !!_mdRichWrapOn() : !!((_mdRichActive && _mdRichActive()) && (_wrapEnabled && _wrapEnabled()));
+            if (mdWrap && typeof _mdEffectiveScrollTopPx === 'function'){
               stSnap = Math.max(0, (_mdEffectiveScrollTopPx({ snap:true })|0));
             } else {
               if (restorePinnedBottomAtEof){
@@ -13931,12 +14348,11 @@ try{
     // md-rich + wrap-on uses a logical scroll grid; fixed-offset rendering can make the caret
     // appear to "teleport" between scrolloff boundaries. Disable it in that mode.
     try{
-      const mdLogicalWrap = !!(
+      const mdWrap = !!(
         (_mdRichEnabled && _mdRichEnabled()) &&
-        (_wrapEnabled && _wrapEnabled()) &&
-        (_wrapUsesVisualScrollGrid && !_wrapUsesVisualScrollGrid())
+        (_wrapEnabled && _wrapEnabled())
       );
-      if (!mdLogicalWrap){
+      if (!mdWrap){
         if (window && window.__sixScanHoldScrollActive && typeof window.__sixScanHoldOffset === 'number') {
           offsetLines = window.__sixScanHoldOffset + 1;
         }
@@ -14011,28 +14427,44 @@ try{
           return { disp, info };
         };
 
+        // Prefer renderer-computed geometry when available to keep caret aligned with md bg layer.
+        // This avoids drift after variable-height rows (e.g. fenced code blocks, loose-gap, wrap probes).
         let y = 0;
-        for (let r=startIdx; r<targetIdx; r++){
-          const a = _dispTextForRow(r, false);
-          const infoR = a.info;
-          const lh = (infoR && infoR.lineHeightPx) ? (infoR.lineHeightPx|0) : LINE_HEIGHT;
-          const padTopPx = (infoR && Number.isFinite(infoR.blockPadTopPx)) ? (infoR.blockPadTopPx|0) : 0;
-          const padBottomPx = (infoR && Number.isFinite(infoR.blockPadBottomPx)) ? (infoR.blockPadBottomPx|0) : 0;
-          const sc = (infoR && infoR.scale) ? (+infoR.scale || 1) : 1;
-          const fs = Math.max(6, Math.round(baseFontPx * sc));
-          let hPx = lh;
-          // Loose-gap: fixed/zero block-height overrides (collapse/expand behavior).
-          let hasOverride = false;
-          try{ if (infoR && Number.isFinite(infoR.blockHeightOverridePx)){ hPx = (infoR.blockHeightOverridePx|0); hasOverride = true; } }catch{ hasOverride = false; }
-          if (wrapOn && !hasOverride){
-            try{
-              const n0 = _wrapProbeLineCountStyled(String(a.disp||''), wPx|0, lh|0, fs|0);
-              const n = (Number.isFinite(n0) && (n0|0) > 0) ? (n0|0) : 1;
-              hPx = Math.max(1, (n|0)) * (lh|0);
-            }catch{ hPx = lh; }
+        let yFromGeom = false;
+        try{
+          const g = _mdRenderGeom;
+          const idx = ((targetIdx|0) - (startIdx|0))|0;
+          if (g && (g.start|0) === (startIdx|0) && Array.isArray(g.rowY) && idx >= 0 && idx < (g.rowY.length|0)){
+            const yy = g.rowY[idx];
+            if (Number.isFinite(yy)){
+              y = (yy|0);
+              yFromGeom = true;
+            }
           }
-          try{ hPx = (hPx|0) + (padTopPx|0) + (padBottomPx|0); }catch{}
-          y += hPx;
+        }catch{ yFromGeom = false; }
+        if (!yFromGeom){
+          for (let r=startIdx; r<targetIdx; r++){
+            const a = _dispTextForRow(r, false);
+            const infoR = a.info;
+            const lh = (infoR && infoR.lineHeightPx) ? (infoR.lineHeightPx|0) : LINE_HEIGHT;
+            const padTopPx = (infoR && Number.isFinite(infoR.blockPadTopPx)) ? (infoR.blockPadTopPx|0) : 0;
+            const padBottomPx = (infoR && Number.isFinite(infoR.blockPadBottomPx)) ? (infoR.blockPadBottomPx|0) : 0;
+            const sc = (infoR && infoR.scale) ? (+infoR.scale || 1) : 1;
+            const fs = Math.max(6, Math.round(baseFontPx * sc));
+            let hPx = lh;
+            // Loose-gap: fixed/zero block-height overrides (collapse/expand behavior).
+            let hasOverride = false;
+            try{ if (infoR && Number.isFinite(infoR.blockHeightOverridePx)){ hPx = (infoR.blockHeightOverridePx|0); hasOverride = true; } }catch{ hasOverride = false; }
+            if (wrapOn && !hasOverride){
+              try{
+                const n0 = _wrapProbeLineCountStyled(String(a.disp||''), wPx|0, lh|0, fs|0);
+                const n = (Number.isFinite(n0) && (n0|0) > 0) ? (n0|0) : 1;
+                hPx = Math.max(1, (n|0)) * (lh|0);
+              }catch{ hPx = lh; }
+            }
+            try{ hPx = (hPx|0) + (padTopPx|0) + (padBottomPx|0); }catch{}
+            y += hPx;
+          }
         }
 
         const t = _dispTextForRow(targetIdx, true);
@@ -15546,6 +15978,36 @@ try{
   let _lastBufferSwitchAt = 0; // timestamp of last successful buffer switch
   // Prefer not to scroll on the very first motion after a buffer switch when caret is already visible (#415 case1)
   let _preferNoScrollOnceAfterSwitch = false;
+  // Cache last vertical motion direction for a short window so deferred ensureScrolloff()
+  // calls (e.g. RAF via _requestCaretRender) can apply directional scrolloff rules.
+  let _lastEnsureVertDir = 0;
+  let _lastEnsureVertDirUntil = 0;
+  let _lastEnsureCaretLine1 = null;
+  let _lastEnsureCaretLineAt = 0;
+
+  function _inferVertDirFromLastKeydown(){
+    try{
+      // Prefer scan-hold held keys when available (more reliable than last keydown).
+      try{
+        const held = (window && window.__sixScanHoldHeld);
+        if (held && held.size > 0){
+          if (held.has('KeyK') || held.has('ArrowUp')) return -1;
+          if (held.has('KeyJ') || held.has('ArrowDown')) return 1;
+        }
+      }catch{}
+      const lk0 = (typeof _lastKeydownForAnom==='object' && _lastKeydownForAnom && _lastKeydownForAnom.key) ? String(_lastKeydownForAnom.key) : '';
+      const lc0 = (typeof _lastKeydownForAnom==='object' && _lastKeydownForAnom && _lastKeydownForAnom.code) ? String(_lastKeydownForAnom.code) : '';
+      const tt0 = (typeof _lastKeydownForAnom==='object' && _lastKeydownForAnom && Number.isFinite(_lastKeydownForAnom.t)) ? (+_lastKeydownForAnom.t) : 0;
+      // Ignore stale keydown; used only to bridge deferred ensureScrolloff() calls.
+      if (tt0 > 0 && (Date.now() - tt0) > 1500) return 0;
+      const lk = lk0;
+      const lc = lc0;
+      // key may be 'Process' when IME is active; use code in that case.
+      if (lk === 'k' || lk === 'ArrowUp' || (lk === 'Process' && lc === 'KeyK')) return -1;
+      if (lk === 'j' || lk === 'ArrowDown' || (lk === 'Process' && lc === 'KeyJ')) return 1;
+      return 0;
+    }catch{ return 0; }
+  }
 
   function _mdEnsureCaretInViewPx(opts){
     // Markdown-rich uses variable per-line heights; logical-line visibility checks can disagree
@@ -15573,13 +16035,54 @@ try{
         }
       }catch{}
 
+      // Directional enforcement (#1818):
+      // - moving UP (k): only enforce TOP margin
+      // - moving DOWN (j): only enforce BOTTOM margin
+      // This avoids k turning into scrolling near EOF due to bottom-margin enforcement.
+      let vdir = (opts && Number.isFinite(opts.vertDir)) ? (opts.vertDir|0) : 0;
+      // If caller didn't specify direction, prefer current user intent (last keydown / scan-hold).
+      try{
+        if (!Number.isFinite(vdir) || (vdir|0) === 0){
+          const intent = (_inferVertDirFromLastKeydown()|0);
+          if ((intent|0) !== 0) vdir = (intent|0);
+        }
+      }catch{}
+      // Fallback to short-lived cached direction.
+      try{
+        if (!Number.isFinite(vdir) || (vdir|0) === 0){
+          if (Date.now() < (_lastEnsureVertDirUntil|0)) vdir = (_lastEnsureVertDir|0);
+          else vdir = 0;
+        }
+      }catch{ vdir = (vdir|0)||0; }
+      const allowTop = (vdir === 0) ? true : (vdir < 0);
+      const allowBottom = (vdir === 0) ? true : (vdir > 0);
+
       let deltaPx = 0;
-      if (cr.top < (vp.top + marginPx)){
+      if (allowTop && (cr.top < (vp.top + marginPx))){
         deltaPx = cr.top - (vp.top + marginPx);
-      } else if (cr.bottom > (vp.bottom - marginPx)){
+      } else if (allowBottom && (cr.bottom > (vp.bottom - marginPx))){
         deltaPx = cr.bottom - (vp.bottom - marginPx);
       }
       if (Math.abs(deltaPx) < 0.5) return false;
+
+      try{
+        if (_optDebugKeys){
+          _debugPush({
+            t:Date.now(),
+            type:'scrolloff-px',
+            mode:_mode,
+            vertDir:(vdir|0),
+            allowTop:!!allowTop,
+            allowBottom:!!allowBottom,
+            marginPx:(marginPx|0),
+            deltaPx:Math.round(deltaPx||0),
+            crTop:Math.round(cr.top||0),
+            crBot:Math.round(cr.bottom||0),
+            vpTop:Math.round(vp.top||0),
+            vpBot:Math.round(vp.bottom||0)
+          });
+        }
+      }catch{}
 
       let maxScroll = Math.max(0, (editor.scrollHeight||0) - (editor.clientHeight||0));
       try{
@@ -15608,6 +16111,20 @@ try{
         }
       }catch{}
       next = Math.max(0, Math.min(maxScroll, next));
+
+      try{
+        if (_optDebugKeys){
+          _debugPush({
+            t:Date.now(),
+            type:'scrolloff-px-apply',
+            mode:_mode,
+            vertDir:(vdir|0),
+            stEff0:(stEff0|0),
+            next:Math.round(next||0),
+            maxScroll:(maxScroll|0)
+          });
+        }
+      }catch{}
       try{ _setEditorScrollTop(next, Object.assign({ immediate:true }, opts||{})); }catch{ editor.scrollTop = next; }
       return true;
     }catch{ return false; }
@@ -15633,6 +16150,14 @@ try{
     // cause a 1-frame caret/stripe jump (#1514/#1516). Do not allow callers to override this to false.
     const merged = Object.assign({ force:true }, opts||{});
     try{ if (_wrapEnabled && _wrapEnabled()) merged.immediate = true; }catch{}
+    // Remember vertical motion direction for deferred ensureScrolloff() calls.
+    try{
+      const vd = (merged && Number.isFinite(merged.vertDir)) ? (merged.vertDir|0) : 0;
+      if ((vd|0) !== 0){
+        _lastEnsureVertDir = (vd|0);
+        _lastEnsureVertDirUntil = (Date.now() + 1200)|0;
+      }
+    }catch{}
     ensureScrolloff(merged);
 
     // md-rich + wrap-on: caret can move by visual lines within the same logical row.
@@ -15640,12 +16165,8 @@ try{
     // a logical-row boundary is crossed. Use DOM-rect based correction to keep the caret within
     // the scrolloff margin in pixels.
     try{
-      const mdLogicalWrap = !!(
-        (_mdRichActive && _mdRichActive()) &&
-        (_wrapEnabled && _wrapEnabled()) &&
-        (_wrapUsesVisualScrollGrid && !_wrapUsesVisualScrollGrid())
-      );
-      if (mdLogicalWrap && typeof _mdEnsureCaretInViewPx === 'function'){
+      const mdWrap = (typeof _mdRichWrapOn === 'function') ? !!_mdRichWrapOn() : !!((_mdRichActive && _mdRichActive()) && (_wrapEnabled && _wrapEnabled()));
+      if (mdWrap && typeof _mdEnsureCaretInViewPx === 'function'){
         // During scan-hold, rely on line-based ensureScrolloff only.
         // Pixel-based correction can fight with the logical grid and cause boundary "teleport".
         try{
@@ -15674,7 +16195,7 @@ try{
             }
           }catch{}
         }
-        _mdEnsureCaretInViewPx({ marginPx: marginPx|0, keepCaret:true });
+        _mdEnsureCaretInViewPx({ marginPx: marginPx|0, keepCaret:true, vertDir: (merged && Number.isFinite(merged.vertDir)) ? (merged.vertDir|0) : 0 });
       }
     }catch{}
   }
@@ -15708,17 +16229,23 @@ try{
         if (isHoriz && !(opts && opts.forceAnimate)) opts.immediate = true;
       }catch{}
 
-      targetPx = Math.max(0, Math.round(targetPx||0));
-      // md-rich + wrap-on: clamp to effective max so extra compensation px
-      // does not become visible as additional EOF blank lines.
+      // md-rich + wrap-on: callers operate in effective scroll space (overlay).
+      // Convert to physical scrollTop so the native scrollbar thumb scale matches.
+      // opts.physical=true means the caller already passed a physical scrollTop.
+      let targetEffPx = Math.max(0, Math.round(targetPx||0));
+      let targetPhysPx = targetEffPx|0;
       try{
-        if (!(opts && opts.physical)){
-          const effMax = _mdEffectiveMaxScrollPx ? (_mdEffectiveMaxScrollPx()|0) : -1;
-          if (effMax >= 0) targetPx = Math.min(targetPx|0, effMax|0);
+        const mdWrap = (typeof _mdRichWrapOn === 'function') ? !!_mdRichWrapOn() : !!((_mdRichActive && _mdRichActive()) && (_wrapEnabled && _wrapEnabled()));
+        if (mdWrap && !(opts && opts.physical)){
+          const effMax = (typeof _mdEffectiveMaxScrollPx === 'function') ? (_mdEffectiveMaxScrollPx()|0) : -1;
+          if (effMax >= 0) targetEffPx = Math.min(targetEffPx|0, effMax|0);
+          if (typeof _mdPhysFromEffPx === 'function') targetPhysPx = _mdPhysFromEffPx(targetEffPx|0)|0;
+          else targetPhysPx = targetEffPx|0;
         }
       }catch{}
-      if (Math.abs(targetPx - cur) < 0.5){ 
-        editor.scrollTop = targetPx; 
+      targetPhysPx = Math.max(0, Math.round(targetPhysPx||0));
+      if (Math.abs(targetPhysPx - cur) < 0.5){ 
+        editor.scrollTop = targetPhysPx; 
         if (__six_scroll_anim) { cancelAnimationFrame(__six_scroll_anim); __six_scroll_anim = null; }
         __six_scroll_target = null;
         // If we cancelled an animation, ensure the scrolling flag is cleared.
@@ -15732,12 +16259,12 @@ try{
         try{ if (__six_scroll_anim) { cancelAnimationFrame(__six_scroll_anim); __six_scroll_anim = null; } }catch{} 
         __six_scroll_target = null;
         try{ document.body.classList.remove('is-scrolling'); }catch{}
-        editor.scrollTop = targetPx; 
+        editor.scrollTop = targetPhysPx; 
         try{ _repositionCaret(); updateGutter(); }catch{}
         return; 
       }
       // If animation is already running towards the same target, let it continue
-      if (__six_scroll_anim && __six_scroll_target === targetPx) {
+      if (__six_scroll_anim && __six_scroll_target === targetPhysPx) {
         // ターゲットが同じでもキャレット位置が変わっている可能性があるため描画更新 (#1207)
         try{ _repositionCaret(); updateGutter(); }catch{}
         return;
@@ -15748,13 +16275,13 @@ try{
       const lastCode = (typeof _lastKeydownForAnom==='object' && _lastKeydownForAnom && _lastKeydownForAnom.code) ? String(_lastKeydownForAnom.code) : null;
       const isJK = !!(lastKey && (lastKey === 'j' || lastKey === 'k' || lastKey === 'ArrowUp' || lastKey === 'ArrowDown' || (lastKey === 'Process' && (lastCode === 'KeyJ' || lastCode === 'KeyK'))));
       const vis = (typeof _visibleLinesExact === 'function') ? (_visibleLinesExact()||1) : 1;
-      const deltaPx = Math.abs(targetPx - cur);
+      const deltaPx = Math.abs(targetPhysPx - cur);
       const deltaLines = Math.max(0, Math.round(deltaPx / (LINE_HEIGHT||1)));
       // Jump commands that exceed viewport should not animate (except hjkl which always animates)
       if (!isJK && !(opts && opts.forceAnimate) && deltaLines > (vis||1)){
         // Ensure we don't leave the "is-scrolling" flag stuck from a previous animation.
         try{ document.body.classList.remove('is-scrolling'); }catch{}
-        editor.scrollTop = targetPx; return;
+        editor.scrollTop = targetPhysPx; return;
       }
       // Determine duration: proportional but clamped.
       // Fixed 500ms for HJKL was too slow for small steps and caused "stuck" feel on repeat.
@@ -15775,9 +16302,9 @@ try{
         } 
       }catch{}
       
-      __six_scroll_target = targetPx;
+      __six_scroll_target = targetPhysPx;
       const start = (window.performance && performance.now) ? performance.now() : Date.now();
-      const from = cur; const to = targetPx;
+      const from = cur; const to = targetPhysPx;
       
       // Start animation: hide caret/list
       try{ document.body.classList.add('is-scrolling'); }catch{}
@@ -15844,12 +16371,8 @@ try{
         const eofPad = (typeof _eofPadLines === 'function') ? (_eofPadLines()|0) : 0;
         if (wrapNow && (eofPad|0) > 0){
           if (mdNow){
-            // md-rich + wrap-on uses logical grid with extra compensation.
-            try{
-              if (_wrapUsesVisualScrollGrid && !_wrapUsesVisualScrollGrid()){
-                if (typeof _mdSyncEofPadComp === 'function') _mdSyncEofPadComp();
-              }
-            }catch{}
+            // md-rich + wrap-on uses effective↔physical mapping; refresh compensation.
+            try{ if (typeof _mdSyncEofPadComp === 'function') _mdSyncEofPadComp(); }catch{}
           } else {
             // markdown-off: physical grid compensation
             try{ if (typeof _syncEofPadGridComp === 'function') _syncEofPadGridComp(); }catch{}
@@ -15922,6 +16445,9 @@ try{
     try{ if (window && window._imeComposing===true && !(opts && opts.force)){ try{ window.SIX_IME_METRICS && (window.SIX_IME_METRICS.composingCalls.ensure++); }catch{} return; } }catch{}
     // #1189: Skip during scan-hold scroll mode (RAF is controlling scroll)
     try{ const sh = (window && window.__sixScanHoldScrollActive); if (sh && !(opts && opts.force)) return; }catch{}
+    // CMD (command-line) should never auto-scroll the buffer.
+    // This also keeps :dumpkeys from perturbing scroll state while debugging.
+    try{ if (_mode === 'CMD' && !(opts && opts.force)) return; }catch{}
     // If paused (e.g., right after '/word' confirm) or a modal is open and
     // we're suppressing scroll adjustments, skip any automatic re-centering/adjustment.
     // This resumes on next explicit caret move or when suppression is cleared.
@@ -15984,14 +16510,9 @@ try{
       if (
         _mdRichActive && _mdRichActive() &&
         _wrapEnabled && _wrapEnabled() &&
-        _wrapUsesVisualScrollGrid && !_wrapUsesVisualScrollGrid() &&
         _mdSyncEofPadComp
       ){
-        const now = (performance && performance.now) ? performance.now() : Date.now();
-        const last = ensureScrolloff._mdEofSyncAt || 0;
-        // Only when explicitly requested (EOF jump) or when we're close enough to EOF
         // that clamp/maxTop depends on mdCompLines.
-        const caretL1 = (caretRow|0) + 1;
         const nearEOF = caretL1 >= ((linesTotal|0) - Math.max(2, Math.floor((vis|0) / 2)));
         // Avoid treating generic `force` as a reason to recompute (j/k repeats can call ensureScrolloff often).
         // Only recompute on explicit EOF-related requests.
@@ -16013,14 +16534,18 @@ try{
     let topLine = _topLine();
     let caretLine1 = caretRow + 1;
     // Wrap mode: operate in visual line space for scrolling.
-    // NOTE: markdown-rich uses wrap for display but keeps logical-line scroll grid.
+    // md-rich + wrap-on: visual lines are derived from the md wrap cache (overlay), not textarea native wrap.
     let _wrapActive = false;
     let _topV1 = 1;
     let _linesTotalVis = linesTotal;
     try{
       _wrapActive = _wrapUsesVisualScrollGrid();
       if (_wrapActive){
-        const c = _wrapEnsureCache(false);
+        let c = null;
+        try{
+          if (typeof _mdRichWrapOn === 'function' && _mdRichWrapOn()) c = (typeof _mdWrapEnsureCache === 'function') ? (_mdWrapEnsureCache(false) || _mdWrapEnsureCache(true)) : null;
+          else c = _wrapEnsureCache(false);
+        }catch{ c = _wrapEnsureCache(false); }
         _topV1 = _topVisualLine1();
         caretLine1 = _wrapVisualLine1ForRowCol(caretRow|0, caretCol|0);
         if (c && c.prefix && c.prefix.length){
@@ -16030,6 +16555,39 @@ try{
         }
       }
     }catch{ _wrapActive=false; }
+
+    // Direction: used to avoid enforcing the *opposite* scrolloff margin right after a motion.
+    // (Example: after a 'k', do not enforce bottom margin; it makes 'k' feel like scrolling.)
+    let _ensureVdir = (opts && Number.isFinite(opts.vertDir)) ? (opts.vertDir|0) : 0;
+    // If caller didn't specify direction, prioritize current user intent.
+    try{
+      if (!Number.isFinite(_ensureVdir) || (_ensureVdir|0) === 0){
+        const intent = (_inferVertDirFromLastKeydown()|0);
+        if ((intent|0) !== 0) _ensureVdir = (intent|0);
+      }
+    }catch{}
+    // Fallback to cached direction (set on keydown/motion).
+    try{
+      if (!Number.isFinite(_ensureVdir) || (_ensureVdir|0) === 0){
+        if (Date.now() < (_lastEnsureVertDirUntil|0)) _ensureVdir = (_lastEnsureVertDir|0);
+        else _ensureVdir = 0;
+      }
+    }catch{ _ensureVdir = (_ensureVdir|0)||0; }
+    // Last resort: infer from caretLine1 delta (covers async ensureScrolloff without key context).
+    try{
+      if ((_ensureVdir|0) === 0 && _lastEnsureCaretLine1 != null){
+        const dt = Date.now() - (_lastEnsureCaretLineAt|0);
+        if (dt >= 0 && dt < 600){
+          const prev = (_lastEnsureCaretLine1|0);
+          const cur = (caretLine1|0);
+          const d = (cur|0) - (prev|0);
+          if (d < 0) _ensureVdir = -1;
+          else if (d > 0) _ensureVdir = 1;
+        }
+      }
+    }catch{}
+    const _allowTopSO = (_ensureVdir === 0) ? true : (_ensureVdir < 0);
+    const _allowBottomSO = (_ensureVdir === 0) ? true : (_ensureVdir > 0);
     const centerOnce = opts.centerOnce || _centerScrolloffOnce;
     const big = scrolloff >= 99999;
     // Allow extra "virtual" page steps so EOF の下に N 行分の余白が見える。
@@ -16037,32 +16595,7 @@ try{
     // 行数ベースの clamp に補正行を足すと過剰に下へ行ける計算になってブレる。
     const totalForClamp = (_wrapActive ? (_linesTotalVis|0) : (linesTotal|0));
     const baseMaxTop = Math.max(1, (totalForClamp|0) - vis + 1);
-    // EOF pad (line count): md-rich+wrap-on uses a logical-line grid, but the textarea can
-    // still render a final empty row when the buffer ends with '\n'. In NORMAL mode the
-    // model hides that phantom row, so we extend the *clamp* pad by 1 to keep the visible
-    // padding stable.
     let _eofPad = _eofPadLines();
-    try{
-      const mdLogicalWrap = !!(
-        (_mdRichActive && _mdRichActive()) &&
-        (_wrapEnabled && _wrapEnabled()) &&
-        (_wrapUsesVisualScrollGrid && !_wrapUsesVisualScrollGrid())
-      );
-      if (mdLogicalWrap && (_eofPad|0) > 0 && editor){
-        const t = (typeof editor.value === 'string') ? editor.value : '';
-        const len = t ? (t.length|0) : 0;
-        if (len > 0 && t.charCodeAt(len-1) === 10){
-          let keep = false;
-          try{
-            if (_mode === 'INSERT'){
-              const off = (typeof editor.selectionStart === 'number') ? (editor.selectionStart|0) : -1;
-              if (off === (len|0)) keep = true;
-            }
-          }catch{}
-          if (!keep) _eofPad = ((_eofPad|0) + 1)|0;
-        }
-      }
-    }catch{}
     // NOTE: Do NOT cap by total lines; padding creates a virtual scroll range even when file < viewport.
     // In wrap-on + markdown-off, the *physical* scroll range can exceed any line-count-based estimate
     // (native soft wraps, delayed reflow after mutations). If we clamp using a stale estimate, we can
@@ -16079,26 +16612,6 @@ try{
       }
     }catch{}
 
-    // md-rich + wrap-on (logical scroll grid): when physically pinned to the bottom,
-    // editor.scrollTop is in variable-height pixel space, so _topLine() (st/LINE_HEIGHT)
-    // can become much larger than the line-based clamp. That makes ensureScrolloff()
-    // think the caret is off-screen and it auto-scrolls upward (observed as oscillation
-    // after `G` and repeated Home/End). In that pinned-bottom state, treat topLine as the
-    // line-based maximum so we keep the EOF pin stable.
-    try{
-      const mdLogicalWrap = !!(
-        (_mdRichActive && _mdRichActive()) &&
-        (_wrapEnabled && _wrapEnabled()) &&
-        (_wrapUsesVisualScrollGrid && !_wrapUsesVisualScrollGrid())
-      );
-      if (mdLogicalWrap && editor){
-        const stNow = (editor && typeof editor.scrollTop === 'number') ? +editor.scrollTop : 0;
-        const physMax = Math.max(0, ((editor.scrollHeight||0) - (editor.clientHeight||0))|0);
-        if ((physMax - stNow) <= 1.5){
-          topLine = Math.min((topLine|0), (maxTopWithPad|0));
-        }
-      }
-    }catch{}
 
     // EOF bottom lock:
     // When the native scrollbar is already at (or very near) the physical bottom and EOF padding is enabled,
@@ -16129,23 +16642,23 @@ try{
         }catch{ bypassBottomLock = false; }
 
         if (!bypassBottomLock){
-          // md-rich + wrap-on: when caret is at logical EOF, we must allow a final
-          // downward pin to the true physical bottom; otherwise the "near bottom" early
-          // return can freeze us 1-2 lines above and shrink visible EOF padding.
-          let mdLogicalWrapAtEOF = false;
+          const mdWrap = (typeof _mdRichWrapOn === 'function') ? !!_mdRichWrapOn() : !!((_mdRichActive && _mdRichActive()) && (_wrapEnabled && _wrapEnabled()));
+          const lh0 = Math.max(1, (LINE_HEIGHT|0));
+          const nearBottomPx = Math.max(2, (lh0|0) * 2);
+
+          // Decide "near bottom" primarily in PHYSICAL scrollbar space.
+          // Rationale (#1817): when we are already at the physical bottom, enforcing the
+          // *bottom* scrolloff margin can cause `k` to scroll instead of moving the caret
+          // out of the bottom margin. Using physical max avoids sensitivity to effective↔physical
+          // rounding/compensation range.
+          let nearBottom = false;
           try{
-            mdLogicalWrapAtEOF = !!(
-              atLogicalEOF &&
-              (_mdRichActive && _mdRichActive()) &&
-              (_wrapEnabled && _wrapEnabled()) &&
-              (_wrapUsesVisualScrollGrid && !_wrapUsesVisualScrollGrid())
-            );
-          }catch{ mdLogicalWrapAtEOF = false; }
-          const stNow = (editor && typeof editor.scrollTop === 'number') ? +editor.scrollTop : 0;
-          const physMax = Math.max(0, ((editor && editor.scrollHeight) ? (editor.scrollHeight|0) : 0) - ((editor && editor.clientHeight) ? (editor.clientHeight|0) : 0));
-          const nearBottomPx = Math.max(2, ((LINE_HEIGHT|0) * 2));
-          const nearPhysBottom = ((physMax - stNow) <= nearBottomPx);
-          if (nearPhysBottom){
+            const stNow = (editor && typeof editor.scrollTop === 'number') ? +editor.scrollTop : 0;
+            const physMax = Math.max(0, ((editor && editor.scrollHeight) ? (editor.scrollHeight|0) : 0) - ((editor && editor.clientHeight) ? (editor.clientHeight|0) : 0));
+            nearBottom = ((physMax - stNow) <= nearBottomPx);
+          }catch{ nearBottom = false; }
+
+          if (nearBottom){
             const topCmpLock = _wrapActive ? (_topV1|0) : (topLine|0);
             const caretInViewLock = ((caretLine1|0) >= (topCmpLock|0) && (caretLine1|0) <= ((topCmpLock|0) + (vis|0) - 1));
 
@@ -16161,16 +16674,6 @@ try{
             }catch{ violatesTopMargin = false; }
 
             if (caretInViewLock && !violatesTopMargin){
-              // For md-rich+wrap at EOF, only short-circuit if we are truly pinned.
-              // Otherwise allow downstream logic to pin to physMax.
-              if (mdLogicalWrapAtEOF){
-                if (Math.abs((stNow|0) - (physMax|0)) > 0.5){
-                  // fall through
-                } else {
-                  if (force){ try{ _repositionCaret(); }catch{} }
-                  return;
-                }
-              }
               // Keep overlays in sync when callers expect a caret render.
               if (force){ try{ _repositionCaret(); }catch{} }
               return;
@@ -16260,11 +16763,7 @@ try{
       // For 'G': show full EOF padding (eofPad lines) regardless of scrolloff.
       // Use line-based maxTopWithPad so md-rich compensation never becomes visible as extra blanks.
       try{
-        const mdLogicalWrap = !!(
-          (_mdRichActive && _mdRichActive()) &&
-          (_wrapEnabled && _wrapEnabled()) &&
-          (_wrapUsesVisualScrollGrid && !_wrapUsesVisualScrollGrid())
-        );
+        const mdWrap = (typeof _mdRichWrapOn === 'function') ? !!_mdRichWrapOn() : !!((_mdRichActive && _mdRichActive()) && (_wrapEnabled && _wrapEnabled()));
         const mdOff = !(function(){ try{ return _mdRichActive && _mdRichActive(); }catch{ return false; } })();
         const wrapOn = (function(){ try{ return _wrapEnabled && _wrapEnabled(); }catch{ return false; } })();
         // Tokenize scheduled pins so multiple timers don't fight and cause flicker.
@@ -16272,13 +16771,12 @@ try{
           try{ ensureScrolloff._eofPinSeq = ((ensureScrolloff._eofPinSeq|0) + 1)|0; return ensureScrolloff._eofPinSeq|0; }
           catch{ return (Date.now()|0); }
         })();
-        if (mdLogicalWrap){
-          // Refresh compensation and drive to *physical* bottom so thumb reaches the end,
-          // while effective scrollTop hides extraPx and keeps only eofPad visible.
+        if (mdWrap){
+          // md-rich + wrap-on: scroll in effective space to the effective max.
+          // _setEditorScrollTop() will map it to physical scrollTop consistently.
           try{ _mdSyncEofPadComp && _mdSyncEofPadComp(); }catch{}
-          const physMax = Math.max(0, ((editor.scrollHeight||0) - (editor.clientHeight||0))|0);
-          _setEditorScrollTop(physMax, Object.assign({}, opts||{}, { immediate:true, keepCaret:true, physical:true }));
-          try{ _mdPinThumbPhysBottom('ensure:eofToBottom'); }catch{}
+          const effMax = (typeof _mdEffectiveMaxScrollPx === 'function') ? (_mdEffectiveMaxScrollPx()|0) : 0;
+          _setEditorScrollTop(effMax, Object.assign({}, opts||{}, { immediate:true, keepCaret:true }));
         } else if (mdOff && wrapOn && (_eofPad|0) > 0) {
           // #1572: markdown-off + wrap-on: always use physical bottom.
           // Padding baseline is handled by _syncEofPadGridComp() (it applies a 1-line implicit compensation).
@@ -16370,16 +16868,37 @@ try{
       }catch{}
 
       const topCmp2 = _wrapActive ? (_topV1|0) : (topLine|0);
-      if (caretLine1 < topCmp2 + soUp){
+      // Always keep caret on-screen; directional gating only applies to the scrolloff *margin*.
+      const hardTop = (caretLine1 < topCmp2);
+      const hardBottom = (caretLine1 > (topCmp2 + vis - 1));
+      if (hardTop || (_allowTopSO && (caretLine1 < topCmp2 + soUp))){
         const newTop = Math.max(1, caretLine1 - soUp);
         if (newTop !== topCmp2) {
+           try{
+             if (_optDebugKeys){
+               _debugPush({
+                 t:Date.now(),
+                 type:'scrolloff-line',
+                 stage:'top',
+                 mode:_mode,
+                 vertDir:(_ensureVdir|0),
+                 wrap:!!_wrapActive,
+                 caretLine1:(caretLine1|0),
+                 top:(topCmp2|0),
+                 vis:(vis|0),
+                 soUp:(soUp|0),
+                 soDown:(soDown|0),
+                 newTop:(newTop|0)
+               });
+             }
+           }catch{}
            // #1239: If scan-hold is active (caret mode), use smooth scroll instead of jump
            const sh = window._scanHold;
            if (window.__sixScanHoldHeld && window.__sixScanHoldHeld.size > 0 && sh && sh.mode === 'caret' && !sh.stepAnimation) {
                // md-rich + wrap-on (logical scroll grid): do NOT switch to scan-hold scroll mode.
                // Switching modes can pin caretRow and desync posInfo/active-row background.
                try{
-                 if ((_mdRichEnabled && _mdRichEnabled()) && _wrapEnabled && _wrapEnabled() && _wrapUsesVisualScrollGrid && !_wrapUsesVisualScrollGrid()){
+                 if ((_mdRichEnabled && _mdRichEnabled()) && _wrapEnabled && _wrapEnabled()){
                    _setEditorScrollTop((newTop-1)*LINE_HEIGHT, { immediate:true, keepCaret:true });
                    scrolled = true;
                    // Continue normal flow (no scan-hold scroll mode)
@@ -16436,7 +16955,7 @@ try{
                _setEditorScrollTop((newTop-1)*LINE_HEIGHT, (sh && sh.stepAnimation) ? { immediate: true, keepCaret:true } : Object.assign({}, opts||{}, { keepCaret:true })); scrolled = true; 
            }
         }
-      } else if (caretLine1 > topCmp2 + vis - soDown - 1){
+      } else if (hardBottom || (_allowBottomSO && (caretLine1 > topCmp2 + vis - soDown - 1))){
         let newTop = Math.max(1, caretLine1 - (vis - soDown - 1));
         // EOF付近での過剰スクロールを防止 (#1203)
         newTop = Math.min(newTop, maxTopWithPad);
@@ -16444,20 +16963,36 @@ try{
         // we must NOT scroll if we are already at maxTop.
         // But if we are NOT at maxTop, we should scroll as much as possible.
         if (newTop !== topCmp2) {
+           try{
+             if (_optDebugKeys){
+               _debugPush({
+                 t:Date.now(),
+                 type:'scrolloff-line',
+                 stage:'bottom',
+                 mode:_mode,
+                 vertDir:(_ensureVdir|0),
+                 wrap:!!_wrapActive,
+                 caretLine1:(caretLine1|0),
+                 top:(topCmp2|0),
+                 vis:(vis|0),
+                 soUp:(soUp|0),
+                 soDown:(soDown|0),
+                 newTop:(newTop|0),
+                 maxTop:(maxTopWithPad|0)
+               });
+             }
+           }catch{}
            // md-rich + wrap-on: when scrolloff pushes us to the EOF cap (maxTopWithPad),
            // snap to the *effective* max scrollTop (px) so the last EOF pad line + viewport remainder
            // becomes visible without requiring an extra manual scroll step.
            try{
-             const mdLogicalWrap = !!(
-               (_mdRichActive && _mdRichActive()) &&
-               (_wrapEnabled && _wrapEnabled()) &&
-               (_wrapUsesVisualScrollGrid && !_wrapUsesVisualScrollGrid())
-             );
-             if (mdLogicalWrap && ((newTop|0) === (maxTopWithPad|0)) && typeof _mdEffectiveMaxScrollPx === 'function'){
+             const mdWrap = (typeof _mdRichWrapOn === 'function') ? !!_mdRichWrapOn() : !!((_mdRichActive && _mdRichActive()) && (_wrapEnabled && _wrapEnabled()));
+             if (mdWrap && ((newTop|0) === (maxTopWithPad|0)) && typeof _mdEffectiveMaxScrollPx === 'function'){
                const effMax = (_mdEffectiveMaxScrollPx()|0);
                if (effMax >= 0){
-                 const stNow = (editor && typeof editor.scrollTop === 'number') ? (editor.scrollTop||0) : 0;
-                 if (Math.abs((effMax|0) - (stNow|0)) > 0.5){
+                 let stNowEff = (editor && typeof editor.scrollTop === 'number') ? (editor.scrollTop||0) : 0;
+                 try{ if (typeof _mdEffectiveScrollTopPx === 'function') stNowEff = _mdEffectiveScrollTopPx({ snap:false })|0; }catch{}
+                 if (Math.abs((effMax|0) - (stNowEff|0)) > 0.5){
                    _setEditorScrollTop(effMax|0, Object.assign({}, opts||{}, { immediate:true, keepCaret:true }));
                    scrolled = true;
                    return;
@@ -16468,9 +17003,9 @@ try{
            // #1239: Smooth scroll transition for scan-hold
            const sh = window._scanHold;
            if (window.__sixScanHoldHeld && window.__sixScanHoldHeld.size > 0 && sh && sh.mode === 'caret' && !sh.stepAnimation) {
-               // md-rich + wrap-on (logical scroll grid): avoid switching to scan-hold scroll mode.
+               // md-rich + wrap-on: avoid switching to scan-hold scroll mode.
                try{
-                 if ((_mdRichEnabled && _mdRichEnabled()) && _wrapEnabled && _wrapEnabled() && _wrapUsesVisualScrollGrid && !_wrapUsesVisualScrollGrid()){
+                 if ((_mdRichActive && _mdRichActive()) && _wrapEnabled && _wrapEnabled()){
                    _setEditorScrollTop((newTop-1)*LINE_HEIGHT, { immediate:true, keepCaret:true });
                    scrolled = true;
                    return;
@@ -16526,29 +17061,6 @@ try{
       if (topLine > maxTop){ _setEditorScrollTop((maxTop-1)*LINE_HEIGHT, {}); }
     }
 
-    // md-rich + wrap-on: when at logical EOF, ensure the native scrollbar is pinned to
-    // the true physical bottom so effective scrollTop can clamp to the stable max.
-    // This makes EOF padding deterministic regardless of reaching EOF via `j` or `G`.
-    try{
-      const eofPadNow = (typeof _eofPadLines==='function') ? (_eofPadLines()|0) : 0;
-      const mdLogicalWrap = !!(
-        (eofPadNow|0) > 0 &&
-        atLogicalEOF &&
-        (_mdRichActive && _mdRichActive()) &&
-        (_wrapEnabled && _wrapEnabled()) &&
-        (_wrapUsesVisualScrollGrid && !_wrapUsesVisualScrollGrid())
-      );
-      if (mdLogicalWrap && typeof _mdPinThumbPhysBottom === 'function'){
-        const before = (editor && typeof editor.scrollTop === 'number') ? +editor.scrollTop : 0;
-        _mdPinThumbPhysBottom('ensure:atEOF');
-        const after = (editor && typeof editor.scrollTop === 'number') ? +editor.scrollTop : 0;
-        if (Math.abs(after - before) > 0.5){
-          try{ _repositionCaret(); }catch{}
-          try{ updateGutter(); }catch{}
-        }
-      }
-    }catch{}
-
     // md-rich debug: sample ensureScrolloff behavior (aggregated, throttled)
     try{
       if (_mdEofDbgEnabled && _mdEofDbgEnabled() && _mdRichActive && _mdRichActive() && _wrapEnabled && _wrapEnabled()){
@@ -16590,16 +17102,7 @@ try{
       // writing editor.scrollTop would clamp to effective max and cause a sudden viewport jump.
       // Rendering already uses effective scrollTop, so skip physical snapping here.
       try{
-        const mdLogicalWrap = !!(
-          (_mdRichEnabled && _mdRichEnabled()) &&
-          (_wrapEnabled && _wrapEnabled()) &&
-          (_wrapUsesVisualScrollGrid && !_wrapUsesVisualScrollGrid())
-        );
-        if (mdLogicalWrap && typeof _mdEffectiveMaxScrollPx === 'function'){
-          const stP = (editor && typeof editor.scrollTop === 'number') ? +editor.scrollTop : 0;
-          const effMax = +(_mdEffectiveMaxScrollPx()|0);
-          if (stP > (effMax + 0.5)) return;
-        }
+        if (typeof _mdRichWrapOn === 'function' && _mdRichWrapOn()) return;
       }catch{}
 
       // markdown-off + wrap-on: browser clamp at physical EOF may be non-aligned to LINE_HEIGHT.
@@ -16638,16 +17141,7 @@ try{
 
             // Same guard as above (compensation range): don't pull physical scrollTop down.
             try{
-              const mdLogicalWrap2 = !!(
-                (_mdRichEnabled && _mdRichEnabled()) &&
-                (_wrapEnabled && _wrapEnabled()) &&
-                (_wrapUsesVisualScrollGrid && !_wrapUsesVisualScrollGrid())
-              );
-              if (mdLogicalWrap2 && typeof _mdEffectiveMaxScrollPx === 'function'){
-                const stP2 = (editor && typeof editor.scrollTop === 'number') ? +editor.scrollTop : 0;
-                const effMax2 = +(_mdEffectiveMaxScrollPx()|0);
-                if (stP2 > (effMax2 + 0.5)) return;
-              }
+              if (typeof _mdRichWrapOn === 'function' && _mdRichWrapOn()) return;
             }catch{}
             // Same EOF-near clamp guard as above: do not floor-snap at physical EOF
             // for markdown-off + wrap-on.
@@ -16908,6 +17402,40 @@ try{
         let baseFontPx = 16;
         try{ baseFontPx = parseFloat(getComputedStyle(editor).fontSize)||baseFontPx; }catch{}
 
+        // Fenced code blocks: gutter height must match md-rich renderer.
+        // In particular, code content lines (kind=2) use LINE_HEIGHT grid and wrap width excludes code-block right padding.
+        let _fc = null;
+        try{ _fc = _mdCodeFenceEnsureCache && _mdCodeFenceEnsureCache(false, lines); }catch{ _fc = null; }
+        let _cbTextPadLeftPx = 0;
+        let _cbTextPadRightPx = 0;
+        let _cbIndentOpts = null;
+        try{
+          let chPxBase = 0;
+          try{
+            if (typeof _measureSpan !== 'undefined' && _measureSpan){
+              _measureSpan.textContent = '0';
+              chPxBase = +(_measureSpan.getBoundingClientRect().width||0);
+            }
+          }catch{ chPxBase = 0; }
+          if (!(chPxBase > 0)){
+            try{ chPxBase = Math.max(1, (baseFontPx||16) * 0.60); }catch{ chPxBase = 10; }
+          }
+          const cbRectLeftPx = Math.max(0, Math.round((chPxBase||10) * 0.5));
+          let cbRectRightPx = Math.max(0, Math.round((chPxBase||10) * 12));
+          const cbPadPx = Math.max(0, Math.round((chPxBase||10) * 0.5));
+          // md-rich text layer is inset by textarea padding-right; match renderer's effective right inset.
+          let edPadRightPx = 0;
+          try{ const csE = getComputedStyle(editor); edPadRightPx = Math.max(0, Math.round(parseFloat(csE.paddingRight||'0')||0)); }catch{ edPadRightPx = 0; }
+          let cbRectRightEffPx = Math.max(0, (cbRectRightPx|0) - (edPadRightPx|0));
+          try{
+            const minW = 4;
+            if (((cbRectLeftPx|0) + (cbRectRightEffPx|0) + minW) > (wPx|0)) cbRectRightEffPx = Math.max(0, (wPx|0) - (minW|0) - (cbRectLeftPx|0));
+          }catch{}
+          _cbTextPadLeftPx = ((cbRectLeftPx|0) + (cbPadPx|0))|0;
+          _cbTextPadRightPx = ((cbRectRightEffPx|0) + (cbPadPx|0))|0;
+          _cbIndentOpts = { padLeftPx: (_cbTextPadLeftPx|0), textIndentPx: 0 };
+        }catch{ _cbTextPadLeftPx = 0; _cbTextPadRightPx = 0; _cbIndentOpts = null; }
+
         // Ensure unordered-list nesting cache exists (used for bullet rendering width).
         try{ _mdListEnsureCache && _mdListEnsureCache(false); }catch{}
         let wPx = 80;
@@ -16930,17 +17458,26 @@ try{
           } else {
             const isActiveRow = ((idx0|0) === (caretRow|0));
             const info = _mdLineLayoutInfoAtRow(lines, idx0|0, isActiveRow);
-            lh = (info && info.lineHeightPx) ? (info.lineHeightPx|0) : LINE_HEIGHT;
+            // Fence kind: 0=normal, 1=fence, 2=code
+            let fk = 0;
+            try{ if (_fc && _fc.kind && (idx0|0) >= 0 && (idx0|0) < (lines.length|0)) fk = (_fc.kind[idx0|0]|0); }catch{ fk = 0; }
+            const isFenceRow = ((fk|0) === 1);
+            const isCodeRow = ((fk|0) === 2);
+
+            // md renderer: code rows use fixed grid; fence rows can be hidden in clean display.
+            lh = isCodeRow ? (LINE_HEIGHT|0) : ((info && info.lineHeightPx) ? (info.lineHeightPx|0) : (LINE_HEIGHT|0));
             const bhOverride = (info && Number.isFinite(info.blockHeightOverridePx)) ? (info.blockHeightOverridePx|0) : null;
-            const padTopPx = (info && Number.isFinite(info.blockPadTopPx)) ? (info.blockPadTopPx|0) : 0;
-            const padBottomPx = (info && Number.isFinite(info.blockPadBottomPx)) ? (info.blockPadBottomPx|0) : 0;
-            const sc = (info && info.scale) ? (+info.scale || 1) : 1;
+            const padTopPx = isCodeRow ? 0 : ((info && Number.isFinite(info.blockPadTopPx)) ? (info.blockPadTopPx|0) : 0);
+            const padBottomPx = isCodeRow ? 0 : ((info && Number.isFinite(info.blockPadBottomPx)) ? (info.blockPadBottomPx|0) : 0);
+            const sc = isCodeRow ? 1 : ((info && info.scale) ? (+info.scale || 1) : 1);
             const fs = Math.max(6, Math.round(baseFontPx * sc));
             // Use the displayed text (after symbol hiding) for wrap measurement.
             let dispText = text;
             try{
               if (info && info.isLooseGap){ dispText = ''; }
               const hideSymbols = !!(info && info.hideSymbols);
+              // Clean display: fence rows are hidden (match renderer/caret path)
+              if (hideSymbols && isFenceRow) dispText = '';
               if (hideSymbols){
                 let renderHr = false;
                 let renderSetextUnderlineRow = false;
@@ -16962,7 +17499,13 @@ try{
               hPx = (bhOverride|0);
             } else if (wrapOn){
               try{
-                const n0 = _wrapProbeLineCountStyled(String(dispText||''), wPx|0, lh|0, fs|0);
+                let ww = (wPx|0);
+                let io = null;
+                if (isCodeRow){
+                  ww = Math.max(20, (ww|0) - (_cbTextPadRightPx|0));
+                  io = _cbIndentOpts;
+                }
+                const n0 = _wrapProbeLineCountStyled(String(dispText||''), ww|0, lh|0, fs|0, io);
                 const n = (Number.isFinite(n0) && (n0|0) > 0) ? (n0|0) : 1;
                 hPx = Math.max(1, (n|0)) * (lh|0);
               }catch{ hPx = lh; }
@@ -17339,7 +17882,10 @@ try{
       if (_maybeScrollEofPadStep('normal-eof-pad-scroll')) return;
     }
     // 通常処理: Prefer no scroll on first motion after switch if caret is visible; otherwise force ensure
-    if (!(opts && opts.skipEnsure)) _ensureAfterMotion();
+    if (!(opts && opts.skipEnsure)){
+      const dir = ((delta|0) > 0) ? 1 : (((delta|0) < 0) ? -1 : 0);
+      _ensureAfterMotion(Object.assign({}, opts||{}, { vertDir: dir|0 }));
+    }
     // motion log
     try{ _debugPush({ t:Date.now(), type:'motion', mode:_mode, kind:'lines', delta:delta|0, toR:caretRow|0, toC:caretCol|0 }); }catch{}
     try{ _anomalyMaybeEnd('lines-motion'); }catch{}
@@ -17531,7 +18077,10 @@ try{
           }
         }catch{}
 
-            if (!(opts && opts.skipEnsure)) _ensureAfterMotion();
+            if (!(opts && opts.skipEnsure)){
+              const dir = ((d|0) > 0) ? 1 : (((d|0) < 0) ? -1 : 0);
+              _ensureAfterMotion(Object.assign({}, opts||{}, { vertDir: dir|0 }));
+            }
             try{ _debugPush({ t:Date.now(), type:'motion', mode:_mode, kind:'md-vis-lines', delta:d, fromV1:(curV1|0), toV1:(targetV1|0), toR:(caretRow|0), toC:(caretCol|0) }); }catch{}
             return;
           }
@@ -17575,7 +18124,10 @@ try{
         }
       }catch{}
 
-      if (!(opts && opts.skipEnsure)) _ensureAfterMotion();
+      if (!(opts && opts.skipEnsure)){
+        const dir = ((d|0) > 0) ? 1 : (((d|0) < 0) ? -1 : 0);
+        _ensureAfterMotion(Object.assign({}, opts||{}, { vertDir: dir|0 }));
+      }
       try{ _debugPush({ t:Date.now(), type:'motion', mode:_mode, kind:'vis-lines', delta:d, fromV1:(curV1|0), toV1:(targetV1|0), toR:(caretRow|0), toC:(caretCol|0) }); }catch{}
     }catch{ try{ _moveCaretLines(delta, opts); }catch{} }
   }
@@ -17648,6 +18200,9 @@ try{
         try{ _debugPush({ t:Date.now(), type:'bounce-fix', expect:_visLineLastTargetRow, actual:caretRow }); }catch{}
       }
     }catch{}
+
+    // Remember last caret position in ensure space (visual when wrap grid is active).
+    try{ _lastEnsureCaretLine1 = (caretLine1|0); _lastEnsureCaretLineAt = Date.now(); }catch{}
   }
   if (window && window.requestAnimationFrame){
     try{ requestAnimationFrame(()=>{ _visualLinewiseAntiBounce(); }); }catch{}
@@ -19331,6 +19886,8 @@ try{
           return i.toString().padStart(3,'0')+' '+new Date(e.t).toISOString()+` ${e.type}`+
             ` m=${e.mode}`+
             (e.stage?` stage=${e.stage}`:'')+
+            (e.vertDir!=null?` vertDir=${e.vertDir}`:'')+
+            (e.wrap!=null?` wrap=${e.wrap?'1':'0'}`:'')+
             (e.key!==undefined?` key=${JSON.stringify(e.key)}`:'')+
             (e.code?` code=${e.code}`:'')+
             (e.keyCode!=null?` keyCode=${e.keyCode}`:'')+
@@ -19344,8 +19901,25 @@ try{
             (e.toC!=null?` toC=${(e.toC|0)}`:'')+
             (e.fromV1!=null?` fromV1=${e.fromV1}`:'')+
             (e.toV1!=null?` toV1=${e.toV1}`:'')+
+            (e.caretLine1!=null?` caretLine1=${e.caretLine1}`:'')+
             (e.top!=null?` top=${e.top}`:'')+
+            (e.vis!=null?` vis=${e.vis}`:'')+
+            (e.soUp!=null?` soUp=${e.soUp}`:'')+
+            (e.soDown!=null?` soDown=${e.soDown}`:'')+
+            (e.newTop!=null?` newTop=${e.newTop}`:'')+
+            (e.maxTop!=null?` maxTop=${e.maxTop}`:'')+
             (e.maxTopWithPad!=null?` maxTopWithPad=${e.maxTopWithPad}`:'')+
+            (e.allowTop!=null?` allowTop=${e.allowTop?'1':'0'}`:'')+
+            (e.allowBottom!=null?` allowBottom=${e.allowBottom?'1':'0'}`:'')+
+            (e.marginPx!=null?` marginPx=${e.marginPx}`:'')+
+            (e.deltaPx!=null?` deltaPx=${e.deltaPx}`:'')+
+            (e.stEff0!=null?` stEff0=${e.stEff0}`:'')+
+            (e.next!=null?` next=${e.next}`:'')+
+            (e.maxScroll!=null?` maxScroll=${e.maxScroll}`:'')+
+            (e.crTop!=null?` crTop=${e.crTop}`:'')+
+            (e.crBot!=null?` crBot=${e.crBot}`:'')+
+            (e.vpTop!=null?` vpTop=${e.vpTop}`:'')+
+            (e.vpBot!=null?` vpBot=${e.vpBot}`:'')+
             (e.reason?` reason=${e.reason}`:'')+
             (e.note?` note=${e.note}`:'')+
             (e.inputType?` inputType=${e.inputType}`:'')+
@@ -19850,6 +20424,59 @@ try{
       if (/^:\s*build\s*$/i.test(s) || /^:\s*build\?\s*$/i.test(s)){
         try{ console.log('[six][cmd] :build hit', { cmd: s, ts: (window && window.__sixBuildTs) || '?', ver: (typeof VERSION!=='undefined'?VERSION:'?'), boot: (window && window.__sixBootTs) || null }); }catch{}
         try{ toast('build ts=' + String((window && window.__sixBuildTs) || '?') + ' ver=' + String(VERSION||'?')); }catch{}
+        return;
+      }
+    }
+
+    // :mdeof / :mdeof? -> dump md-rich EOF/scroll compensation diagnostics
+    {
+      const s = String(cmd||'');
+      if (/^:\s*mdeof\s*$/i.test(s) || /^:\s*mdeof\?\s*$/i.test(s)){
+        try{
+          const md = !!(_mdRichActive && _mdRichActive());
+          const wrap = !!(_wrapEnabled && _wrapEnabled());
+          const lh = (LINE_HEIGHT|0) || 1;
+          const eofPad = (typeof _eofPadLines==='function') ? (_eofPadLines()|0) : 0;
+          const st = (editor && typeof editor.scrollTop==='number') ? (editor.scrollTop|0) : 0;
+          const sh = (editor && typeof editor.scrollHeight==='number') ? (editor.scrollHeight|0) : 0;
+          const ch = (editor && typeof editor.clientHeight==='number') ? (editor.clientHeight|0) : 0;
+          const physMax = Math.max(0, (sh|0) - (ch|0));
+          let vpH = 0; try{ vpH = (viewport && (viewport.clientHeight|0) > 0) ? (viewport.clientHeight|0) : 0; }catch{ vpH = 0; }
+          let pb = 0, pt = 0;
+          try{ const cs = getComputedStyle(editor); pt = Math.max(0, Math.round(parseFloat(cs.paddingTop||'0')||0)); pb = Math.max(0, Math.round(parseFloat(cs.paddingBottom||'0')||0)); }catch{ pt = 0; pb = 0; }
+          const contentPx = Math.max(0, (sh|0) - (pt|0) - (pb|0));
+          let effMax = -1; try{ effMax = (typeof _mdEffectiveMaxScrollPx==='function') ? (_mdEffectiveMaxScrollPx()|0) : -1; }catch{ effMax = -1; }
+          let stEff = st|0; try{ stEff = (typeof _mdEffectiveScrollTopPx==='function') ? (_mdEffectiveScrollTopPx({ snap:false })|0) : (st|0); }catch{ stEff = st|0; }
+          let extraPx = 0; try{ extraPx = (_mdEofPadLastExtraPx|0); }catch{ extraPx = 0; }
+          let pbLast = -1; try{ pbLast = (_mdEofPadLastPbPx|0); }catch{ pbLast = -1; }
+          let wPx = 0; try{ wPx = (typeof _wrapAvailWidthPx==='function') ? (_wrapAvailWidthPx()|0) : 0; }catch{ wPx = 0; }
+          let mdTotalPx = 0;
+          try{
+            const c = (typeof _mdWrapEnsureCacheClean==='function') ? (_mdWrapEnsureCacheClean(false) || _mdWrapEnsureCacheClean(true)) : null;
+            mdTotalPx = (c && Number.isFinite(c.totalPx)) ? (c.totalPx|0) : 0;
+          }catch{ mdTotalPx = 0; }
+          let linesTotal = 0; try{ linesTotal = (_totalLines()|0); }catch{ linesTotal = 0; }
+          let vis = 0; try{ vis = (_visibleLinesExact()|0); }catch{ vis = 0; }
+
+          const rec = {
+            md, wrap,
+            lh, eofPad,
+            st, stEff,
+            sh, ch, vpH,
+            physMax, effMax,
+            pt, pb, pbLast,
+            extraPx,
+            wPx,
+            contentPx,
+            mdTotalPx,
+            linesTotal, vis,
+          };
+          try{ console.log('[six][cmd] :mdeof', rec); }catch{}
+          try{
+            const msg = 'mdeof st=' + st + ' eff=' + effMax + ' phys=' + physMax + ' pb=' + pb + ' extra=' + extraPx + ' mdTot=' + mdTotalPx + ' content=' + contentPx + ' lh=' + lh;
+            toast(msg, 2400);
+          }catch{ try{ toast('mdeof logged', 1400); }catch{} }
+        }catch{ try{ toast('mdeof failed', 1400); }catch{} }
         return;
       }
     }
@@ -21467,12 +22094,8 @@ try{
       if (!editor) return;
       const eofPadNow = (typeof _eofPadLines==='function') ? (_eofPadLines()|0) : 0;
       if ((eofPadNow|0) <= 0) return;
-      const mdLogicalWrap = !!(
-        (_mdRichActive && _mdRichActive()) &&
-        (_wrapEnabled && _wrapEnabled()) &&
-        (_wrapUsesVisualScrollGrid && !_wrapUsesVisualScrollGrid())
-      );
-      if (!mdLogicalWrap) return;
+      const mdWrap = (typeof _mdRichWrapOn === 'function') ? !!_mdRichWrapOn() : !!((_mdRichActive && _mdRichActive()) && (_wrapEnabled && _wrapEnabled()));
+      if (!mdWrap) return;
       const total = (typeof _totalLines === 'function') ? (_totalLines()|0) : 0;
       const atEOF = (((caretRow|0) + 1) === (total|0));
       if (!atEOF) return;
@@ -21486,7 +22109,6 @@ try{
         try{ if (document && document.hidden) return; }catch{}
         try{ if (typeof _mdWrapEnsureCache === 'function') _mdWrapEnsureCache(true); }catch{}
         try{ if (typeof _mdSyncEofPadComp === 'function') _mdSyncEofPadComp(); }catch{}
-        try{ if (typeof _mdPinThumbPhysBottom === 'function') _mdPinThumbPhysBottom('activate:' + String(reason||'')); }catch{}
         try{ ensureScrolloff({ force:true, preferEOFPad:true, eofToBottom:true, keepCaret:true, immediate:true }); }catch{}
       };
 
@@ -24893,17 +25515,6 @@ try{
           // Avoid _mdEnsureCaretInViewPx here; it operates in effective space and can detach the thumb.
           _updateVisualSelection();
 
-          // md-rich + wrap-on: resync wrap cache/padding and pin the native thumb to the true bottom.
-          try{
-            if (_mdRichActive && _mdRichActive() && _wrapEnabled && _wrapEnabled()){
-              const pin = ()=>{ try{ _mdPinThumbPhysBottom('visual:G'); }catch{} };
-              pin();
-              try{ if (window.requestAnimationFrame) requestAnimationFrame(pin); }catch{}
-              setTimeout(pin, 0);
-              setTimeout(pin, 60);
-            }
-          }catch{}
-
           // Reinforce alignment and snap scrollTop to exact line grid over a few frames
           // to eradicate rare leading blank / half-line drift after large jumps (#423/#424)
           try{
@@ -24912,7 +25523,6 @@ try{
                 // md-rich + wrap-on: do not snap native scrollTop (it would move the scrollbar thumb up).
                 try{ if (_mdRichActive && _mdRichActive() && _wrapEnabled && _wrapEnabled()){
                   _repositionCaret(); updateGutter();
-                  try{ _mdPinThumbPhysBottom('visual:G:reinforce'); }catch{}
                   return;
                 } }catch{}
                 const st0 = (editor.scrollTop||0);
@@ -26443,17 +27053,6 @@ try{
         _repositionCaret(); updateGutter();
         // md-rich + wrap-on: handled by ensureScrolloff(eofToBottom) + physical thumb pin.
 
-        // md-rich + wrap-on: resync wrap cache/padding and pin the native thumb to the true bottom.
-        try{
-          if (_mdRichActive && _mdRichActive() && _wrapEnabled && _wrapEnabled()){
-            const pin = ()=>{ try{ _mdPinThumbPhysBottom('normal:G'); }catch{} };
-            pin();
-            try{ if (window.requestAnimationFrame) requestAnimationFrame(pin); }catch{}
-            setTimeout(pin, 0);
-            setTimeout(pin, 60);
-          }
-        }catch{}
-
         // Reinforce: snap scrollTop to exact line grid over a few frames so
         // leading blank / half-line drift cannot persist after a large jump (#423/#424)
         try{
@@ -26464,7 +27063,6 @@ try{
                 // If IME composition starts right after the jump, do not keep forcing expensive UI resync.
                 if (window && window._imeComposing===true) return;
                 _repositionCaret(); updateGutter();
-                try{ _mdPinThumbPhysBottom('normal:G:reinforce'); }catch{}
                 return;
               } }catch{}
               const st0 = (editor.scrollTop||0);
@@ -26661,16 +27259,6 @@ try{
             if (!_scanHold) return;
             if (_scanHold.mode === 'scroll') return; // already scrolling
 
-            // md-rich + wrap-on (logical scroll grid): never switch to scan-hold scroll mode.
-            try{
-              const mdLogicalWrap = !!(
-                (_mdRichEnabled && _mdRichEnabled()) &&
-                (_wrapEnabled && _wrapEnabled()) &&
-                (_wrapUsesVisualScrollGrid && !_wrapUsesVisualScrollGrid())
-              );
-              if (mdLogicalWrap) return;
-            }catch{}
-
             // Revert caret to safe position (undo the move that caused violation)
             const curTopV1 = Math.round((editor.scrollTop||0)/LINE_HEIGHT) + 1;
             let safeRow = (curTopV1 - 1) + (idealOffset|0);
@@ -26715,19 +27303,6 @@ try{
             const vis = _visibleLinesExact();
             const topLine = _topLine();
             const linesTotal = _totalLines();
-
-            // md-rich + wrap-on usually keeps a logical-line scroll grid (visual wrap is for rendering).
-            // In that mode, scan-hold "scroll" mode (which relies on visual-line ↔ row mapping)
-            // can pin/teleport caretRow and desync posInfo/active-row background.
-            // Always use caret mode; scrolloff enforcement is handled by ensureScrolloff.
-            try{
-              const mdLogicalWrap = !!(
-                (_mdRichEnabled && _mdRichEnabled()) &&
-                (_wrapEnabled && _wrapEnabled()) &&
-                (_wrapUsesVisualScrollGrid && !_wrapUsesVisualScrollGrid())
-              );
-              if (mdLogicalWrap) return 'caret';
-            }catch{}
             
             // #1245: Peek at pending count to predict true destination
             const count = (_countAcc==null?1:_countAcc);
@@ -26888,11 +27463,16 @@ try{
             // When scrolloff >= vis/2, always scroll (center mode)
             // if (scrolloffVal >= Math.floor(vis/2)) return preferScroll();
             // Check if caret would violate scrolloff margin AFTER move: if so, scroll content
-            // #1223: Use rounded top line for boundary check to handle fractional scrollTop
-            // (from smooth scrolling) consistently. Floor can cause off-by-one jitter.
-            // #1247: Use floor to match ensureScrolloff strictly, ensuring we predict scroll mode correctly
-            // for prefix-count moves (e.g. 5j).
-            const topLineRound = Math.floor(curTopPx / LINE_HEIGHT) + 1;
+            // Boundary check MUST be done in the same coordinate space as wouldBeCaretLine1.
+            // In md-rich+wrap (visual-grid), physical scrollTop can diverge from the effective
+            // visual-line grid, which can cause false "need scroll" decisions.
+            let topLineRound = Math.floor(curTopPx / LINE_HEIGHT) + 1;
+            try{
+              if (_scanHoldUsesVisualGrid()){
+                if (typeof _topVisualLine1 === 'function') topLineRound = (_topVisualLine1()|0);
+                else if (typeof _mdEffectiveScrollTopPx === 'function') topLineRound = (Math.floor((_mdEffectiveScrollTopPx({ snap:false })|0) / LINE_HEIGHT) + 1)|0;
+              }
+            }catch{}
             const margin = scrolloffVal;
 
             // #1315: For large scrolloff (centering), we must only scroll if we are actually
@@ -26996,22 +27576,15 @@ try{
             // #1297: For large jumps (count > 30), force immediate scroll to avoid animation/snap errors
             // #1304: Also force immediate scroll during step animation to ensure position is correct for next step
             const forceImmediate = (count > 30) || (_scanHold && _scanHold.stepAnimation) || (opts && opts.immediate);
-            _ensureAfterMotion(forceImmediate ? { immediate: true } : {});
+            _ensureAfterMotion(forceImmediate ? { immediate: true, vertDir: (delta|0) } : { vertDir: (delta|0) });
             const postScrollTop = (editor && editor.scrollTop) || 0;
             
             if (Math.abs(postScrollTop - preScrollTop) > 0.5) {
                 // Scrolling occurred. Enable static overlay mode if not already active.
-                // md-rich+wrap-on (logical scroll grid) is sensitive to fixed-offset rendering; it can
+                // md-rich+wrap-on is sensitive to fixed-offset rendering; it can
                 // make the caret look "pinned" at the scrolloff boundary during k/j hold.
-                let mdLogicalWrap = false;
-                try{
-                  mdLogicalWrap = !!(
-                    (_mdRichEnabled && _mdRichEnabled()) &&
-                    (_wrapEnabled && _wrapEnabled()) &&
-                    (_wrapUsesVisualScrollGrid && !_wrapUsesVisualScrollGrid())
-                  );
-                }catch{ mdLogicalWrap = false; }
-                if (!mdLogicalWrap){
+                const mdWrap = (typeof _mdRichWrapOn === 'function') ? !!_mdRichWrapOn() : !!((_mdRichActive && _mdRichActive()) && (_wrapEnabled && _wrapEnabled()));
+                if (!mdWrap){
                   if (!window.__sixScanHoldScrollActive) {
                       try{ window.__sixScanHoldScrollActive = true; }catch{}
                       try{ document.body.classList.add('is-scrolling'); }catch{}
@@ -27474,7 +28047,7 @@ try{
                   } else {
                     _moveCaretVisualLines(delta, { skipEnsure: true });
                     try{ _flagCaretMotion(); }catch{}
-                    _ensureAfterMotion();
+                    _ensureAfterMotion({ vertDir: dir|0 });
                     _repositionCaret(); updateGutter();
                     if (_mode === 'VISUAL'){ try{ _updateVisualSelection(); }catch{} }
                   }
@@ -27514,6 +28087,25 @@ try{
             _scanHold.mode = mode;
             _scanHold.stopping = false; // #1238: Reset stopping flag on new keydown
             _scanHold.firstKeydownTs = performance.now();
+
+            try{
+              if (_optDebugKeys){
+                _debugPush({
+                  t:Date.now(),
+                  type:'scanhold',
+                  stage:'decide',
+                  mode:_mode,
+                  effCode:_effCode,
+                  dir:(delta|0),
+                  decide:String(mode||''),
+                  scrolloff:(scrolloff|0),
+                  caretRow:(caretRow|0)+1,
+                  topLine:(typeof _topLine==='function') ? (_topLine()|0) : 0,
+                  topV1:(typeof _topVisualLine1==='function') ? (_topVisualLine1()|0) : 0,
+                  st:Math.round((editor && typeof editor.scrollTop==='number') ? (editor.scrollTop||0) : 0)
+                });
+              }
+            }catch{}
 
             // Debug (rawkeys): show handler path + count state
             try{
@@ -27893,9 +28485,7 @@ try{
             // - 終了時に scrolloff/md-rich レイヤ/posInfo を強制再同期してズレの残留を防ぐ
             try{
               if (
-                (_mdRichActive && _mdRichActive()) &&
-                (_wrapEnabled && _wrapEnabled()) &&
-                (_wrapUsesVisualScrollGrid && !_wrapUsesVisualScrollGrid()) &&
+                (typeof _mdRichWrapOn === 'function' ? _mdRichWrapOn() : ((_mdRichActive && _mdRichActive()) && (_wrapEnabled && _wrapEnabled()))) &&
                 (typeof _mdSyncEofPadComp === 'function')
               ){
                 _mdSyncEofPadComp();
@@ -32774,6 +33364,21 @@ try{
       if (!isAutoRun && lastTs!=null && delta < 140){
         try{ console.debug('[parentNav real skip multi-fire]', { delta, lastTs }); }catch{}
         return;
+
+      // Cache vertical intent early so deferred ensureScrolloff() (without opts) stays directional.
+      // This is critical for md-rich+wrap with scrolloff where bottom-margin enforcement must be
+      // suppressed when moving UP (k).
+      try{
+        const kk = String((e && e.key) || '');
+        const cc = String((e && e.code) || '');
+        let dir = 0;
+        if (kk === 'k' || kk === 'ArrowUp' || (kk === 'Process' && cc === 'KeyK')) dir = -1;
+        else if (kk === 'j' || kk === 'ArrowDown' || (kk === 'Process' && cc === 'KeyJ')) dir = 1;
+        if ((dir|0) !== 0){
+          _lastEnsureVertDir = (dir|0);
+          _lastEnsureVertDirUntil = (now + 1200)|0;
+        }
+      }catch{}
       }
       if (!isAutoRun){ window._fileParentNavRealLastTs = nowTs; }
       let haveBase = !!_fileBaseURL;

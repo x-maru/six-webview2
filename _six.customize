@@ -28,7 +28,7 @@ window.SIX_OPTIONS = {
     '.xls','xlsx','xlsm','doc','docx','ppt','pptx', ],
   DEBUG_IME: false,
   DEBUG_SCAN_HOLD: false,
-  DEBUG_MD_EOF: false,
+  DEBUG_MD_EOF: true,
   hlsearch: false, // 検索ハイライト（:set hlsearch / :set nohlsearch / :set hlsearch!）
   urllink: true,
   imeSwitchKey: 'direct',
