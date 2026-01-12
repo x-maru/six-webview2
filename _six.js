@@ -10944,6 +10944,13 @@ try{
           if (hideSymbolsDefault && !isCodeRow && !isFenceRow){
             const ul = _mdUListInfo && _mdUListInfo(src, i, lines);
             if (ul) indentOpts = _mdIndentOptsForListLine(src, ul, wPx|0, fs|0, lh|0);
+            // Match renderer UL hang-hack: disable negative text-indent for UL list items.
+            try{
+              const lt2 = (ul && ul.listType) ? String(ul.listType||'') : '';
+              if (indentOpts && lt2 === 'ul' && Number.isFinite(indentOpts.padLeftPx) && (indentOpts.padLeftPx||0) > 0.5){
+                indentOpts = { padLeftPx:(+indentOpts.padLeftPx||0), textIndentPx: 0 };
+              }
+            }catch{}
           }
         }catch{ indentOpts = null; }
 
@@ -11896,22 +11903,11 @@ try{
   function _wrapAvailWidthPx(){
     try{
       if (!editor) return 80;
-      // IMPORTANT (md-rich): wrapping is rendered in overlay layers, not the textarea.
-      // In md-rich we want a width basis that matches overlay layout and is stable even when
-      // the textarea's scrollbar appears. Prefer the overlay viewport width if available.
+      // Wrapping width must exclude the gutter. The only reliable basis here is the textarea's
+      // own clientWidth (it is flexed next to #gutter). In md-rich, scrollbar-gutter:stable keeps
+      // this width from oscillating when scrollbars appear.
       const cw = (editor.clientWidth||0);
       let basisW = cw;
-      try{
-        if (_mdRichActive && _mdRichActive() && _wrapEnabled && _wrapEnabled()){
-          // Prefer viewport (overlay container). It is typically unaffected by the textarea scrollbar.
-          if (typeof viewport !== 'undefined' && viewport && (viewport.clientWidth|0) > 0){
-            basisW = (viewport.clientWidth|0);
-          } else {
-            // Fallback: use textarea clientWidth (matches native wrapping).
-            basisW = (editor.clientWidth||0);
-          }
-        }
-      }catch{}
       // Cache paddings to reduce getComputedStyle churn (and avoid forced reflow in debug sessions)
       let pl = 0;
       let pr = 0;
