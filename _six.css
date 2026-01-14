@@ -420,6 +420,15 @@ body.md-rich #editor::selection {
 	box-decoration-break: clone;
 }
 
+/* Markdown-rich inline link ([text](url ...)) */
+#textLayer .md-link {
+	color: var(--mdLinkColor, #4ea1ff);
+	text-decoration: underline;
+	text-underline-offset: 2px;
+	text-decoration-thickness: 1px;
+	text-decoration-color: color-mix(in srgb, currentColor 85%, transparent);
+}
+
 /* Markdown-rich inline code span (`code`) (#1772/#1773)
    - Box is filled with current text color (currentColor)
    - Text is drawn with background gradient start color (inverted look)

@@ -209,7 +209,6 @@ try{
       const rs = hasRange ? Math.max(0, Math.min(src.length|0, rangeStart|0)) : 0;
       const re = hasRange ? Math.max(0, Math.min(src.length|0, rangeEnd|0)) : 0;
       const segs = (src.indexOf('`') >= 0) ? _mdInlineCodeParse(src) : [{ t:'text', s:src, a:0, b:(src.length|0) }];
-
       const wrap = (cls, inner)=>{ try{ return '<span class="' + cls + '">' + inner + '</span>'; }catch{ return inner; } };
       const emitPlain = (t, a, b)=>{
         try{
@@ -279,6 +278,432 @@ try{
   }
   function _mdInlineCodeHtml(s){
     try{ return _mdInlineCodeHtmlWithRange(s, null, 0, 0); }catch{ return _mdEscHtml(String(s||'')); }
+  }
+
+  // --- Markdown inline links (GFM-ish): [text](url "title") (#1825/#1826/#1827)
+  function _mdInlineLinkScan(s){
+    // Returns array of { lb, rb, rp, textStart, textEnd, url, tooltip }
+    // Indices are in the given string s.
+    try{
+      const src = String(s||'');
+      const n = src.length|0;
+      const out = [];
+      const isEsc = (idx)=>{
+        try{
+          let k = (idx|0) - 1;
+          let cnt = 0;
+          while (k >= 0 && src[k] === '\\'){ cnt++; k--; }
+          return ((cnt|0) % 2) === 1;
+        }catch{ return false; }
+      };
+      const skipWs = (k)=>{ try{ while (k < (n|0) && (src[k]===' ' || src[k]==='\t')) k++; }catch{} return k|0; };
+      const unesc = (t)=>{
+        try{
+          let r = '';
+          for (let i=0;i<(t.length|0);i++){
+            const ch = t[i];
+            if (ch === '\\' && (i+1) < (t.length|0)) { r += t[i+1]; i++; continue; }
+            r += ch;
+          }
+          return r;
+        }catch{ return String(t||''); }
+      };
+
+      let i = 0;
+      while (i < (n|0)){
+        const lb = src.indexOf('[', i|0);
+        if (lb < 0) break;
+        if (isEsc(lb|0)) { i = (lb+1)|0; continue; }
+        // Find matching ]
+        let rb = -1;
+        for (let k=(lb+1)|0; k < (n|0); k++){
+          if (src[k] === ']' && !isEsc(k|0)) { rb = k|0; break; }
+        }
+        if (rb < 0) break;
+        let p = skipWs((rb+1)|0);
+        if (p >= (n|0) || src[p] !== '(' || isEsc(p|0)) { i = (lb+1)|0; continue; }
+        const lp = p|0;
+        p = skipWs((lp+1)|0);
+
+        // destination
+        let urlRaw = '';
+        if (p < (n|0) && src[p] === '<' && !isEsc(p|0)){
+          p++;
+          while (p < (n|0)){
+            const ch = src[p];
+            if (ch === '>' && !isEsc(p|0)) { p++; break; }
+            if (ch === '\\' && (p+1) < (n|0)) { urlRaw += src[p+1]; p += 2; continue; }
+            urlRaw += ch; p++;
+          }
+        } else {
+          while (p < (n|0)){
+            const ch = src[p];
+            if ((ch === ' ' || ch === '\t' || ch === ')') && !isEsc(p|0)) break;
+            if (ch === '\\' && (p+1) < (n|0)) { urlRaw += src[p+1]; p += 2; continue; }
+            urlRaw += ch; p++;
+          }
+        }
+        urlRaw = String(urlRaw||'').trim();
+        if (!urlRaw){ i = (lb+1)|0; continue; }
+        p = skipWs(p|0);
+
+        // optional title
+        let tooltip = '';
+        if (p < (n|0) && src[p] !== ')'){
+          const q = src[p];
+          if (q === '"' || q === "'"){
+            p++;
+            while (p < (n|0)){
+              const ch = src[p];
+              if (ch === q && !isEsc(p|0)) { p++; break; }
+              if (ch === '\\' && (p+1) < (n|0)) { tooltip += src[p+1]; p += 2; continue; }
+              tooltip += ch; p++;
+            }
+            tooltip = String(tooltip||'');
+            p = skipWs(p|0);
+          } else if (q === '(' && !isEsc(p|0)){
+            // (title)
+            p++;
+            while (p < (n|0)){
+              const ch = src[p];
+              if (ch === ')' && !isEsc(p|0)) { p++; break; }
+              if (ch === '\\' && (p+1) < (n|0)) { tooltip += src[p+1]; p += 2; continue; }
+              tooltip += ch; p++;
+            }
+            tooltip = String(tooltip||'').trim();
+            p = skipWs(p|0);
+          }
+        }
+
+        if (p >= (n|0) || src[p] !== ')' || isEsc(p|0)) { i = (lb+1)|0; continue; }
+        const rp = p|0;
+
+        const textStart = (lb+1)|0;
+        const textEnd = (rb|0);
+        const textLen = Math.max(0, (textEnd - textStart)|0);
+        if ((textLen|0) <= 0){ i = (lb+1)|0; continue; }
+
+        out.push({ lb:(lb|0), rb:(rb|0), lp:(lp|0), rp:(rp|0), textStart, textEnd, url:String(unesc(urlRaw)||''), tooltip:String(tooltip||'') });
+        i = (rp+1)|0;
+      }
+      return out;
+    }catch{ return []; }
+  }
+
+  function _mdInlineLinkCollapseInfo(s){
+    // Collapse [text](...) -> text (drop brackets + destination + optional title)
+    // Returns { dispText, links, srcToDisp(col), dispToSrc(col) }
+    try{
+      const src = String(s||'');
+      const n = src.length|0;
+      const links0 = _mdInlineLinkScan(src);
+      if (!links0 || !links0.length) return { dispText: src, links: [], srcToDisp:(c)=>Math.max(0, Math.min(n|0, c|0)), dispToSrc:(c)=>Math.max(0, Math.min(n|0, c|0)) };
+
+      let removed = 0;
+      const links = [];
+      for (let i=0;i<links0.length;i++){
+        const it = links0[i];
+        if (!it) continue;
+        const spanLen = ((it.rp+1) - (it.lb|0))|0;
+        const textLen = ((it.textEnd|0) - (it.textStart|0))|0;
+        const dispStart = (it.lb|0) - (removed|0);
+        const dispEnd = (dispStart + (textLen|0))|0;
+        const removedLen = Math.max(0, (spanLen|0) - (textLen|0))|0;
+        links.push(Object.assign({ dispStart:(dispStart|0), dispEnd:(dispEnd|0), removedLen:(removedLen|0) }, it));
+        removed = (removed + (removedLen|0))|0;
+      }
+
+      // Build collapsed text
+      let out = '';
+      let pos = 0;
+      for (const it of links){
+        const lb = it.lb|0;
+        const rp1 = (it.rp+1)|0;
+        const ts = it.textStart|0;
+        const te = it.textEnd|0;
+        if ((lb|0) > (pos|0)) out += src.slice(pos|0, lb|0);
+        out += src.slice(ts|0, te|0);
+        pos = rp1|0;
+      }
+      if ((pos|0) < (n|0)) out += src.slice(pos|0);
+
+      const srcToDisp = (col0)=>{
+        try{
+          let col = Math.max(0, Math.min(n|0, col0|0));
+          let rem = 0;
+          for (const it of links){
+            const lb = it.lb|0;
+            const ts = it.textStart|0;
+            const te = it.textEnd|0;
+            const rp1 = (it.rp+1)|0;
+            if ((col|0) <= (lb|0)) break;
+            if ((col|0) < (ts|0)) return (it.dispStart|0);
+            if ((col|0) < (te|0)) return (it.dispStart|0) + ((col|0) - (ts|0));
+            if ((col|0) <= (rp1|0)) return (it.dispEnd|0);
+            rem = (rem + (it.removedLen|0))|0;
+          }
+          return (col - (rem|0))|0;
+        }catch{ return Math.max(0, Math.min(n|0, col0|0)); }
+      };
+      const dispToSrc = (dispCol0)=>{
+        try{
+          const dn = (out.length|0);
+          let dc = Math.max(0, Math.min(dn|0, dispCol0|0));
+          let rem = 0;
+          for (const it of links){
+            const ds = it.dispStart|0;
+            const de = it.dispEnd|0;
+            const ts = it.textStart|0;
+            if ((dc|0) < (ds|0)) break;
+            if ((dc|0) < (de|0)) return (ts|0) + ((dc|0) - (ds|0));
+            rem = (rem + (it.removedLen|0))|0;
+          }
+          return (dc + (rem|0))|0;
+        }catch{ return Math.max(0, dispCol0|0); }
+      };
+
+      return { dispText: String(out||''), links, srcToDisp, dispToSrc };
+    }catch{
+      return {
+        dispText:String(s||''),
+        links:[],
+        srcToDisp:(c)=>c|0,
+        dispToSrc:(c)=>c|0,
+        srcToDispCaret:(c)=>c|0,
+        dispToSrcCaret:(c)=>c|0,
+      };
+    }
+  }
+
+  function _mdInlineCodeCollapseInfo(s){
+    // Collapse inline code spans (remove backtick delimiters and CommonMark trim) for clean-display hit-testing.
+    // Returns { dispText, srcToDisp(col), dispToSrc(col) } where "src" is the given string s.
+    try{
+      const src = String(s||'');
+      const n = src.length|0;
+      if (!src || src.indexOf('`') < 0) return { dispText: src, srcToDisp:(c)=>Math.max(0, Math.min(n|0, c|0)), dispToSrc:(c)=>Math.max(0, Math.min(n|0, c|0)) };
+      const segs = _mdInlineCodeParse(src);
+      if (!segs || !segs.length) return { dispText: src, srcToDisp:(c)=>Math.max(0, Math.min(n|0, c|0)), dispToSrc:(c)=>Math.max(0, Math.min(n|0, c|0)) };
+
+      const spans = []; // only code spans
+      let out = '';
+      for (const it of segs){
+        if (!it) continue;
+        if (it.t === 'code'){
+          const a = (it.a|0), b = (it.b|0);
+          const dispStart = (out.length|0);
+          const disp = String(it.s||'');
+          out += disp;
+          const dispEnd = (out.length|0);
+          const srcLen = Math.max(0, (b - a)|0);
+          const dispLen = Math.max(0, (dispEnd - dispStart)|0);
+          const removedLen = Math.max(0, (srcLen - dispLen)|0);
+          spans.push({
+            srcA:a, srcB:b,
+            dispS:dispStart, dispE:dispEnd,
+            ticks:(it.ticks|0),
+            trimL:(it.trimL|0),
+            trimR:(it.trimR|0),
+            dispLen:(dispLen|0),
+            removedLen:(removedLen|0),
+          });
+        } else {
+          out += String(it.s||'');
+        }
+      }
+      const dn = (out.length|0);
+      if (!spans.length) return { dispText: out, srcToDisp:(c)=>Math.max(0, Math.min(n|0, c|0)), dispToSrc:(c)=>Math.max(0, Math.min(dn|0, c|0)) };
+
+      const srcToDisp = (col0)=>{
+        try{
+          let col = Math.max(0, Math.min(n|0, col0|0));
+          let rem = 0;
+          for (const sp of spans){
+            const a = sp.srcA|0;
+            const b = sp.srcB|0;
+            if ((col|0) <= (a|0)) break;
+            if ((col|0) < (b|0)){
+              const openLen = Math.max(0, sp.ticks|0);
+              const closeLen = Math.max(0, sp.ticks|0);
+              const contentA = (a + openLen)|0;
+              const contentB = (b - closeLen)|0;
+              const trimL = Math.max(0, sp.trimL|0);
+              const trimR = Math.max(0, sp.trimR|0);
+              const coreA = (contentA + trimL)|0;
+              const coreB = (contentB - trimR)|0;
+              const ds = sp.dispS|0;
+              const de = sp.dispE|0;
+              if ((col|0) <= (coreA|0)) return ds|0;
+              if ((col|0) >= (coreB|0)) return de|0;
+              const off = (col - coreA)|0;
+              const mapped = (ds + off)|0;
+              return Math.max(ds|0, Math.min(de|0, mapped|0));
+            }
+            rem = (rem + (sp.removedLen|0))|0;
+          }
+          return (col - (rem|0))|0;
+        }catch{ return Math.max(0, Math.min(n|0, col0|0)); }
+      };
+      const dispToSrc = (dispCol0)=>{
+        try{
+          let dc = Math.max(0, Math.min(dn|0, dispCol0|0));
+          let rem = 0;
+          for (const sp of spans){
+            const ds = sp.dispS|0;
+            const de = sp.dispE|0;
+            if ((dc|0) < (ds|0)) break;
+            if ((dc|0) < (de|0)){
+              const a = sp.srcA|0;
+              const openLen = Math.max(0, sp.ticks|0);
+              const trimL = Math.max(0, sp.trimL|0);
+              const contentA = (a + openLen)|0;
+              const coreA = (contentA + trimL)|0;
+              return (coreA + (dc - ds))|0;
+            }
+            rem = (rem + (sp.removedLen|0))|0;
+          }
+          return (dc + (rem|0))|0;
+        }catch{ return Math.max(0, dispCol0|0); }
+      };
+
+      return { dispText: out, srcToDisp, dispToSrc };
+    }catch{ return { dispText:String(s||''), srcToDisp:(c)=>c|0, dispToSrc:(c)=>c|0 }; }
+  }
+
+  function _mdCleanDisplayCollapseInfo(s){
+    // Match clean-display transformations used by HTML renderer for hit-testing:
+    // 1) collapse inline links [text](...) -> text
+    // NOTE: inline-code rendering uses padding/margins that approximate delimiter width;
+    // for hover hit-testing, collapsing inline code can skew X mapping. Only collapse links here.
+    try{
+      const src = String(s||'');
+      const n = src.length|0;
+      const linkCol = _mdInlineLinkCollapseInfo(src);
+      const disp = String((linkCol && linkCol.dispText) || src);
+      const links1 = (linkCol && linkCol.links) ? (linkCol.links||[]) : [];
+      const links = links1;
+      const srcToDisp = (col0)=>{
+        try{
+          const c = Math.max(0, Math.min(n|0, col0|0));
+          return (linkCol && typeof linkCol.srcToDisp === 'function') ? (linkCol.srcToDisp(c|0)|0) : (c|0);
+        }catch{ return Math.max(0, Math.min(n|0, col0|0)); }
+      };
+      const dispToSrc = (dispCol0)=>{
+        try{
+          const dc0 = Math.max(0, Math.min((disp.length|0), dispCol0|0));
+          return (linkCol && typeof linkCol.dispToSrc === 'function') ? (linkCol.dispToSrc(dc0|0)|0) : (dc0|0);
+        }catch{ return Math.max(0, dispCol0|0); }
+      };
+
+      // Caret-position mapping (between characters) for md clean display.
+      // This is distinct from char-index mapping used by hover hit-testing.
+      const srcToDispCaret = (col0)=>{
+        try{
+          const c = Math.max(0, Math.min(n|0, col0|0));
+          if (!links || !links.length) return c|0;
+          let rem = 0;
+          for (const it of links){
+            if (!it) continue;
+            const lb = it.lb|0;
+            const ts = it.textStart|0;
+            const te = it.textEnd|0;
+            const rp1 = ((it.rp|0) + 1)|0;
+            const ds = it.dispStart|0;
+            const de = it.dispEnd|0;
+            if ((c|0) <= (lb|0)) break;
+            if ((c|0) < (ts|0)) return ds|0;
+            if ((c|0) <= (te|0)) return (ds + (c - ts))|0;
+            if ((c|0) <= (rp1|0)) return de|0;
+            rem = (rem + (it.removedLen|0))|0;
+          }
+          return (c - (rem|0))|0;
+        }catch{ return Math.max(0, Math.min(n|0, col0|0)); }
+      };
+      const dispToSrcCaret = (dispCol0)=>{
+        try{
+          const dn = (disp.length|0);
+          const dc = Math.max(0, Math.min(dn|0, dispCol0|0));
+          if (!links || !links.length) return dc|0;
+          let rem = 0;
+          for (const it of links){
+            if (!it) continue;
+            const ds = it.dispStart|0;
+            const de = it.dispEnd|0;
+            if ((dc|0) < (ds|0)) break;
+            if ((dc|0) <= (de|0)){
+              const lb = it.lb|0;
+              const ts = it.textStart|0;
+              const rp1 = ((it.rp|0) + 1)|0;
+              if ((dc|0) === (ds|0)) return Math.max(0, Math.min(n|0, lb|0));
+              if ((dc|0) === (de|0)) return Math.max(0, Math.min(n|0, rp1|0));
+              return Math.max(0, Math.min(n|0, (ts + (dc - ds))|0));
+            }
+            rem = (rem + (it.removedLen|0))|0;
+          }
+          return Math.max(0, Math.min(n|0, (dc + (rem|0))|0));
+        }catch{ return Math.max(0, dispCol0|0); }
+      };
+
+      return { dispText: disp, links, srcToDisp, dispToSrc, srcToDispCaret, dispToSrcCaret };
+    }catch{ return { dispText:String(s||''), links:[], srcToDisp:(c)=>c|0, dispToSrc:(c)=>c|0 }; }
+  }
+
+  function _mdInlineLinkCleanHtmlWithRange(s, rangeClass, rangeStart, rangeEnd){
+    // Clean display HTML: show only link text; apply rangeClass to visible characters only.
+    try{
+      const src = String(s||'');
+      if (!src) return '';
+      // Fast check
+      if (src.indexOf('](') < 0 || src.indexOf('[') < 0) return null;
+      const links0 = _mdInlineLinkScan(src);
+      if (!links0 || !links0.length) return null;
+
+      const hasRange = !!(rangeClass && Number.isFinite(rangeStart) && Number.isFinite(rangeEnd));
+      const rs = hasRange ? Math.max(0, Math.min(src.length|0, rangeStart|0)) : 0;
+      const re = hasRange ? Math.max(0, Math.min(src.length|0, rangeEnd|0)) : 0;
+      const selS = Math.min(rs|0, re|0);
+      const selE = Math.max(rs|0, re|0);
+
+      const emitSub = (sub, a0, b0, extraWrapCls)=>{
+        try{
+          const a = Math.max(0, Math.min((sub.length|0), a0|0));
+          const b = Math.max(0, Math.min((sub.length|0), b0|0));
+          const x0 = Math.min(a|0, b|0);
+          const x1 = Math.max(a|0, b|0);
+          const inner = _mdInlineCodeHtmlWithRange(sub, hasRange ? rangeClass : null, x0|0, x1|0);
+          if (!extraWrapCls) return inner;
+          return '<span class="' + String(extraWrapCls||'') + '">' + inner + '</span>';
+        }catch{ return _mdEscHtml(String(sub||'')); }
+      };
+
+      let out = '';
+      let pos = 0;
+      for (const it of links0){
+        const lb = it.lb|0;
+        const rp1 = (it.rp+1)|0;
+        const ts = it.textStart|0;
+        const te = it.textEnd|0;
+        if ((lb|0) > (pos|0)){
+          const seg = src.slice(pos|0, lb|0);
+          const subRs = hasRange ? Math.max(0, Math.min((seg.length|0), (selS - (pos|0))|0)) : 0;
+          const subRe = hasRange ? Math.max(0, Math.min((seg.length|0), (selE - (pos|0))|0)) : 0;
+          out += emitSub(seg, subRs|0, subRe|0, null);
+        }
+        // Link text only
+        const linkText = src.slice(ts|0, te|0);
+        const subRs = hasRange ? Math.max(0, Math.min((linkText.length|0), (selS - (ts|0))|0)) : 0;
+        const subRe = hasRange ? Math.max(0, Math.min((linkText.length|0), (selE - (ts|0))|0)) : 0;
+        out += emitSub(linkText, subRs|0, subRe|0, 'md-link');
+        pos = rp1|0;
+      }
+      if ((pos|0) < (src.length|0)){
+        const seg = src.slice(pos|0);
+        const subRs = hasRange ? Math.max(0, Math.min((seg.length|0), (selS - (pos|0))|0)) : 0;
+        const subRe = hasRange ? Math.max(0, Math.min((seg.length|0), (selE - (pos|0))|0)) : 0;
+        out += emitSub(seg, subRs|0, subRe|0, null);
+      }
+      return out;
+    }catch{ return null; }
   }
 
   function _mdPlainHtmlWithRange(s, rangeClass, rs, re){
@@ -840,6 +1265,32 @@ try{
         }
         return true;
       }
+      return false;
+    }catch{ return false; }
+  }
+
+  function _mdClampCaretForCleanInlineLinks(){
+    // In md-rich clean (wysiwyg) display, inline links are visually collapsed: [text](url) -> text.
+    // Ensure the caret never rests in a removed (hidden) span (e.g., brackets/URL/title), by snapping
+    // caretCol to a *visible* source column (inside the link text region).
+    try{
+      if (!_mdWysiwygActive || !_mdWysiwygActive()) return false;
+      if (!(_mdHideSymbolsForRow && _mdHideSymbolsForRow(true))) return false;
+      const lines = _splitLinesRaw();
+      if (!Array.isArray(lines) || lines.length===0) return false;
+      const r = Math.max(0, Math.min((lines.length-1)|0, caretRow|0));
+      const src = String(lines[r]||'');
+      if (!src) return false;
+      // Fast check: avoid overhead for non-link lines.
+      if (src.indexOf('](') < 0 || src.indexOf('[') < 0) return false;
+      const n = (src.length|0);
+      const col0 = Math.max(0, Math.min(n|0, caretCol|0));
+      const col = (_mdCleanDisplayCollapseInfo && typeof _mdCleanDisplayCollapseInfo === 'function') ? _mdCleanDisplayCollapseInfo(src) : null;
+      if (!col || typeof col.srcToDispCaret !== 'function' || typeof col.dispToSrcCaret !== 'function') return false;
+      const dc = (col.srcToDispCaret(col0|0)|0);
+      const sc = (col.dispToSrcCaret(dc|0)|0);
+      const out = Math.max(0, Math.min(n|0, sc|0));
+      if ((out|0) !== (col0|0)) { caretCol = out|0; return true; }
       return false;
     }catch{ return false; }
   }
@@ -1497,6 +1948,10 @@ try{
         const sub = s.slice(a, b);
         const subRs = hasRange ? Math.max(0, Math.min((sub.length|0), (rs - a)|0)) : 0;
         const subRe = hasRange ? Math.max(0, Math.min((sub.length|0), (re - a)|0)) : 0;
+        try{
+          const clean = _mdInlineLinkCleanHtmlWithRange(sub, hasRange ? rangeClass : null, subRs|0, subRe|0);
+          if (clean) return clean;
+        }catch{}
         try{ return _mdInlineCodeHtmlWithRange(sub, hasRange ? rangeClass : null, subRs|0, subRe|0); }catch{ return esc(sub); }
       };
 
@@ -2068,7 +2523,14 @@ try{
                 } else if (listItemDisp){
                   el.innerHTML = _mdUListHtmlWithRange(text, listItemDisp, 'md-sel', c1|0, c2|0);
                 } else {
-                  el.innerHTML = _mdInlineCodeHtmlWithRange(text, 'md-sel', c1|0, c2|0);
+                  // Clean display: collapse [text](url ...) to text only.
+                  if (hideSymbols){
+                    const clean = _mdInlineLinkCleanHtmlWithRange(text, 'md-sel', c1|0, c2|0);
+                    if (clean) el.innerHTML = clean;
+                    else el.innerHTML = _mdInlineCodeHtmlWithRange(text, 'md-sel', c1|0, c2|0);
+                  } else {
+                    el.innerHTML = _mdInlineCodeHtmlWithRange(text, 'md-sel', c1|0, c2|0);
+                  }
                 }
                 usedHtml = true;
               }
@@ -2115,7 +2577,13 @@ try{
                   el.innerHTML = _mdUListHtmlWithRange(text, listItemDisp, 'md-ime-uline', a|0, b|0);
                 } else {
                   // Inline code + IME underline (range-aware)
-                  el.innerHTML = _mdInlineCodeHtmlWithRange(text, 'md-ime-uline', a|0, b|0);
+                  if (hideSymbols){
+                    const clean = _mdInlineLinkCleanHtmlWithRange(text, 'md-ime-uline', a|0, b|0);
+                    if (clean) el.innerHTML = clean;
+                    else el.innerHTML = _mdInlineCodeHtmlWithRange(text, 'md-ime-uline', a|0, b|0);
+                  } else {
+                    el.innerHTML = _mdInlineCodeHtmlWithRange(text, 'md-ime-uline', a|0, b|0);
+                  }
                 }
                 usedHtml = true;
               }
@@ -2125,7 +2593,16 @@ try{
 
         // Heading H2-H6: make Japanese/CJK runs slightly bolder while keeping ASCII weight as-is (#1486)
         if (!usedHtml && !isCodeRow && !isFenceRow && headingCjkHtml){
-          try{ el.innerHTML = headingCjkHtml; usedHtml = true; }catch{ usedHtml = false; }
+          // If clean display needs link collapsing, prefer link-aware renderer over headingCjkHtml.
+          try{
+            if (hideSymbols){
+              const clean0 = _mdInlineLinkCleanHtmlWithRange(text, null, 0, 0);
+              if (clean0){ el.innerHTML = clean0; usedHtml = true; }
+            }
+          }catch{}
+          if (!usedHtml){
+            try{ el.innerHTML = headingCjkHtml; usedHtml = true; }catch{ usedHtml = false; }
+          }
         }
         if (!usedHtml){
           // Ensure we don't keep stale HTML
@@ -2136,10 +2613,16 @@ try{
           // Inline code spans (`code`) in clean display (#1772)
           if (!usedHtml && !isCodeRow && !isFenceRow && hideSymbols){
             try{
-              const html = _mdInlineCodeHtml(text);
-              if (html && html !== _mdEscHtml(text)){
-                el.innerHTML = html;
+              const clean = _mdInlineLinkCleanHtmlWithRange(text, null, 0, 0);
+              if (clean){
+                el.innerHTML = clean;
                 usedHtml = true;
+              } else {
+                const html = _mdInlineCodeHtml(text);
+                if (html && html !== _mdEscHtml(text)){
+                  el.innerHTML = html;
+                  usedHtml = true;
+                }
               }
             }catch{ /* fall through */ }
           }
@@ -2662,9 +3145,29 @@ try{
       try{ if (_mode==='INSERT' && _editorTextLen() > 200000){ return; } }catch{}
       const lines = _splitLines();
       const r = Math.max(0, Math.min(lines.length-1, caretRow|0));
-      const line = lines[r] || '';
+      const line0 = String(lines[r] || '');
+
+      // md-rich clean display: report column in the visible (collapsed) text space.
+      let line = line0;
+      let c = Math.max(0, caretCol|0);
+      try{
+        if (_mdRichActive && _mdRichActive()){
+          const adj0 = _mdWysiwygAdjust ? _mdWysiwygAdjust(line0, c|0) : { line:line0, col:c|0 };
+          line = String(adj0.line||'');
+          c = (adj0.col|0);
+          const hide = !!(_mdHideSymbolsForRow && _mdHideSymbolsForRow(true));
+          if (hide){
+            const col = (_mdCleanDisplayCollapseInfo && typeof _mdCleanDisplayCollapseInfo === 'function') ? _mdCleanDisplayCollapseInfo(line) : null;
+            if (col && typeof col.dispText === 'string' && typeof col.srcToDispCaret === 'function'){
+              c = (col.srcToDispCaret(c|0)|0);
+              line = String(col.dispText||'');
+            }
+          }
+        }
+      }catch{ line = line0; c = Math.max(0, caretCol|0); }
+
       // 可視幅計測は後段の _visualWidthUpToLine を利用
-      const visCol = _visualWidthUpToLine(line, caretCol|0);
+      const visCol = _visualWidthUpToLine(line, c|0);
       const visTotal = _visualWidthUpToLine(line, (line||'').length);
       // 表示形式: 「行Y 列X/W」 (#633/#1470)
       posinfoEl.textContent = '行' + (r+1) + ' ' + '列' + (visCol+1) + '/' + (visTotal+1);
@@ -6499,6 +7002,7 @@ try{
 
   // ---- URL hover detection and highlight ----
   let _linkLayer = null;
+  let _linkTipLayer = null;
   let _hoverLink = null; // { r, c1, c2, url }
   let _lastLinkMoveAt = 0;
   function _linkEnsureLayer(){
@@ -6507,18 +7011,115 @@ try{
       if (_linkLayer.parentNode !== caretLayer){ caretLayer.appendChild(_linkLayer); }
     }catch{}
   }
+  function _linkTipEnsureLayer(){
+    try{
+      if (!_linkTipLayer){
+        _linkTipLayer = document.createElement('div');
+        _linkTipLayer.style.position='absolute';
+        _linkTipLayer.style.left='0';
+        _linkTipLayer.style.top='0';
+        _linkTipLayer.style.right='0';
+        _linkTipLayer.style.bottom='0';
+        _linkTipLayer.style.pointerEvents='none';
+        _linkTipLayer.style.zIndex='2';
+      }
+      if (_linkTipLayer.parentNode !== caretLayer){ caretLayer.appendChild(_linkTipLayer); }
+    }catch{}
+  }
   function _linkClear(){ try{ if(_linkLayer){ while(_linkLayer.firstChild){ _linkLayer.removeChild(_linkLayer.firstChild); } } }catch{} }
-  function _clearLinkHover(){ try{ _hoverLink=null; _linkClear(); if (editor) editor.style.cursor=''; }catch{} }
+  function _linkTipClear(){ try{ if(_linkTipLayer){ while(_linkTipLayer.firstChild){ _linkTipLayer.removeChild(_linkTipLayer.firstChild); } } }catch{} }
+  function _clearLinkHover(){ try{ _hoverLink=null; _linkClear(); _linkTipClear(); if (editor) editor.style.cursor=''; }catch{} }
+
+  function _linkTooltipTheme(){
+    try{
+      // theme=ex1 のときは _themeGet が window.EX1_THEME を優先する
+      const bg = String((typeof _themeGet === 'function') ? _themeGet('lineGradientStart', 'rgba(16,18,24,0.96)') : 'rgba(16,18,24,0.96)');
+      const fg = String((typeof _themeGet === 'function') ? _themeGet('editorTextColor', '#e6e6e6') : '#e6e6e6');
+      return { bg, fg };
+    }catch{ return { bg:'rgba(16,18,24,0.96)', fg:'#e6e6e6' }; }
+  }
+  function _renderLinkTooltip(anchor){
+    try{
+      _linkTipEnsureLayer();
+      _linkTipClear();
+      if (!_optUrlLink || !_hoverLink) return;
+      // markdown off ではツールチップを出さない (#1826)
+      try{ if (!(_mdRichEnabled && _mdRichEnabled())) return; }catch{}
+      const tip = String(_hoverLink.tooltip||'');
+      if (!tip) return;
+
+      const theme = _linkTooltipTheme();
+      const tipEl = document.createElement('div');
+      tipEl.textContent = tip;
+      tipEl.style.position = 'absolute';
+      tipEl.style.maxWidth = '70vw';
+      tipEl.style.whiteSpace = 'pre-wrap';
+      tipEl.style.wordBreak = 'break-word';
+      tipEl.style.padding = '4px 8px';
+      tipEl.style.borderRadius = '6px';
+      tipEl.style.background = theme.bg;
+      tipEl.style.color = theme.fg;
+      tipEl.style.border = '1px solid rgba(0,0,0,0.25)';
+      tipEl.style.boxShadow = '0 10px 24px rgba(0,0,0,0.35)';
+      tipEl.style.fontSize = '12px';
+      tipEl.style.lineHeight = '1.35';
+      tipEl.style.pointerEvents = 'none';
+      _linkTipLayer.appendChild(tipEl);
+
+      const rect = viewport.getBoundingClientRect();
+      const vw = rect.width || (window.innerWidth||0);
+      const vh = rect.height || (window.innerHeight||0);
+
+      let x = NaN, y = NaN;
+      try{
+        // Prefer anchor coords (same space as highlight layer) to avoid drift in md-rich variable line-height.
+        if (anchor && Number.isFinite(anchor.left) && Number.isFinite(anchor.top)){
+          x = (anchor.left|0);
+          y = (anchor.top|0) + ((anchor.height|0) + 2);
+        } else if (Number.isFinite(_hoverLink._mx) && Number.isFinite(_hoverLink._my)){
+          x = (_hoverLink._mx - rect.left) + 10;
+          y = (_hoverLink._my - rect.top) + 16;
+        }
+      }catch{}
+      if (!Number.isFinite(x)) x = 8;
+      if (!Number.isFinite(y)) y = 8;
+
+      tipEl.style.left = Math.round(x) + 'px';
+      tipEl.style.top  = Math.round(y) + 'px';
+
+      requestAnimationFrame(()=>{
+        try{
+          const b = tipEl.getBoundingClientRect();
+          const w = b.width||0, h=b.height||0;
+          let left = Math.round(x);
+          let top  = Math.round(y);
+          left = Math.max(8, Math.min((vw|0) - (w|0) - 8, left));
+          top  = Math.max(8, Math.min((vh|0) - (h|0) - 8, top));
+          // If tooltip would cover anchor, try above.
+          try{
+            if (anchor && Number.isFinite(anchor.top) && (top <= (anchor.top|0) + (anchor.height|0) + 2) && (top + h) >= (anchor.top|0) && left <= (anchor.left|0) + (anchor.width|0) && (left + w) >= (anchor.left|0)){
+              const above = (anchor.top|0) - (h|0) - 6;
+              if (above >= 8) top = above;
+            }
+          }catch{}
+          tipEl.style.left = left + 'px';
+          tipEl.style.top  = top + 'px';
+        }catch{}
+      });
+    }catch{}
+  }
+
   function _renderLinkHover(){
     try{
       // IME未確定中はホバー描画を抑止
-      try{ if (typeof _imeComposing!== 'undefined' && _imeComposing){ return; } }catch{}
+      try{ if (typeof _imeComposing!== 'undefined' && _imeComposing){ _linkClear(); _linkTipClear(); return; } }catch{}
       // スムーズスクロール中はホバー描画を抑止
-      try{ if (window.__sixScanHoldScrollActive || (document.body.classList.contains('is-scrolling'))) return; }catch{}
+      try{ if (window.__sixScanHoldScrollActive || (document.body.classList.contains('is-scrolling'))){ _linkClear(); _linkTipClear(); return; } }catch{}
       // タイピング直後はリンクホバー描画を一時抑止（次フレームへ）
       if (Date.now() < _typingGuardUntil){ return; }
-      if (!_optUrlLink || !_hoverLink){ _linkClear(); if (editor) editor.style.cursor=''; return; }
+      if (!_optUrlLink || !_hoverLink){ _linkClear(); _linkTipClear(); if (editor) editor.style.cursor=''; return; }
       _linkEnsureLayer(); _linkClear();
+      _linkTipEnsureLayer(); _linkTipClear();
       const topLine = _topLine();
       const row1 = (_hoverLink.r|0) + 1;
       const vis = _visibleLinesExact();
@@ -6563,36 +7164,44 @@ try{
           const infoT = _mdLineLayoutInfoAtRow(lines, targetIdx, (targetIdx === (caretRow|0)));
           rowHeightPx = (infoT && infoT.lineHeightPx) ? (infoT.lineHeightPx||LINE_HEIGHT) : LINE_HEIGHT;
 
-          // Horizontal: when markdown symbols are hidden on this row, subtract heading prefix.
-          const isActiveRow = (targetIdx === (caretRow|0));
-          const hide = _mdHideSymbolsForRow(isActiveRow);
-          if (hide){
-            const p = _mdHeadingPrefixLen(line)|0;
-            if (p>0){
-              prefixLen = p;
-              dispLine = line.slice(p);
-              dispC1 = Math.max(0, c1 - p);
-              dispC2 = Math.max(dispC1, c2 - p);
-            }
+          // Horizontal: support display-space highlight for markdown clean rendering (inline link collapse).
+          if (_hoverLink && typeof _hoverLink.dispLine === 'string' && Number.isFinite(_hoverLink.dispC1) && Number.isFinite(_hoverLink.dispC2)){
+            dispLine = String(_hoverLink.dispLine||'');
+            prefixLen = 0;
+            dispC1 = Math.max(0, Math.min((dispLine.length|0), (_hoverLink.dispC1|0)));
+            dispC2 = Math.max(dispC1, Math.min((dispLine.length|0), (_hoverLink.dispC2|0)));
+          } else {
+            // When markdown symbols are hidden on this row, subtract heading prefix.
+            const isActiveRow = (targetIdx === (caretRow|0));
+            const hide = _mdHideSymbolsForRow(isActiveRow);
+            if (hide){
+              const p = _mdHeadingPrefixLen(line)|0;
+              if (p>0){
+                prefixLen = p;
+                dispLine = line.slice(p);
+                dispC1 = Math.max(0, c1 - p);
+                dispC2 = Math.max(dispC1, c2 - p);
+              }
 
-            // #1767: hide root depth-1 slack (<=3) from all levels in clean display.
-            try{
-              if ((prefixLen|0) === 0){
-                _mdListEnsureCache && _mdListEnsureCache(false);
-                const ul = _mdUListInfo && _mdUListInfo(line, targetIdx|0, lines);
-                if (ul && (ul.kind==='item' || ul.kind==='cont')){
-                  const baseSlack = Math.max(0, Math.min(3, (ul.rootLeadSlackCols|0) || 0));
-                  let removed = 0;
-                  try{ while ((removed|0) < (baseSlack|0) && line[removed|0] === ' ') removed++; }catch{ removed = 0; }
-                  if ((removed|0) > 0){
-                    prefixLen = (removed|0);
-                    dispLine = line.slice(removed|0);
-                    dispC1 = Math.max(0, c1 - (removed|0));
-                    dispC2 = Math.max(dispC1, c2 - (removed|0));
+              // #1767: hide root depth-1 slack (<=3) from all levels in clean display.
+              try{
+                if ((prefixLen|0) === 0){
+                  _mdListEnsureCache && _mdListEnsureCache(false);
+                  const ul = _mdUListInfo && _mdUListInfo(line, targetIdx|0, lines);
+                  if (ul && (ul.kind==='item' || ul.kind==='cont')){
+                    const baseSlack = Math.max(0, Math.min(3, (ul.rootLeadSlackCols|0) || 0));
+                    let removed = 0;
+                    try{ while ((removed|0) < (baseSlack|0) && line[removed|0] === ' ') removed++; }catch{ removed = 0; }
+                    if ((removed|0) > 0){
+                      prefixLen = (removed|0);
+                      dispLine = line.slice(removed|0);
+                      dispC1 = Math.max(0, c1 - (removed|0));
+                      dispC2 = Math.max(dispC1, c2 - (removed|0));
+                    }
                   }
                 }
-              }
-            }catch{}
+              }catch{}
+            }
           }
         }
       }catch{ yTop = ((row1 - topLine) * LINE_HEIGHT); rowHeightPx = LINE_HEIGHT; dispLine = line; prefixLen = 0; dispC1 = c1; dispC2 = c2; }
@@ -6630,7 +7239,9 @@ try{
       const x2 = (_measureSpan.getBoundingClientRect().width||0) * mdScaleX;
       if (!(x2>x1)){ _linkClear(); return; }
       const el = document.createElement('div');
+      // md-rich + wrap: overlay text is rendered with hs=0; ignore native scrollLeft to avoid X drift.
       let _hs=0; try{ _hs=(editor.scrollLeft||0); }catch{}
+      try{ if (mdRich && _wrapEnabled && _wrapEnabled()) _hs = 0; }catch{}
       el.style.position='absolute'; el.style.left=(x1-_hs)+'px';
       el.style.top=yTop+'px';
       el.style.width=Math.max(1, Math.round(x2-x1))+'px';
@@ -6645,8 +7256,126 @@ try{
       el.style.background=col; el.style.outline='1px solid '+col; el.style.outlineOffset='-1px';
       _linkLayer.appendChild(el);
       try{ if (editor) editor.style.cursor='pointer'; }catch{}
+
+      const anchor = { left:(x1-_hs), top:yTop, width:Math.max(1, Math.round(x2-x1)), height:Math.max(1, Math.round(mdRich ? rowHeightPx : LINE_HEIGHT)) };
+      try{ if (_hoverLink) _hoverLink._anchor = anchor; }catch{}
+      try{ _renderLinkTooltip(anchor); }catch{}
     }catch{}
   }
+
+  function _detectMdInlineLinkAt(line, col){
+    try{
+      if (!line) return null;
+      let i = Math.max(0, Math.min((line.length|0), (col|0)));
+      const isEsc = (pos)=>{ try{ return pos>0 && line[pos-1]==='\\'; }catch{ return false; } };
+      const findUnescFwd = (ch, start)=>{
+        try{
+          for (let k=(start|0); k<line.length; k++){
+            if (line[k]===ch && !isEsc(k)) return k;
+          }
+        }catch{}
+        return -1;
+      };
+      const findUnescBwd = (ch, start)=>{
+        try{
+          for (let k=(start|0); k>=0; k--){
+            if (line[k]===ch && !isEsc(k)) return k;
+          }
+        }catch{}
+        return -1;
+      };
+      const skipWs = (k)=>{ try{ while (k<line.length && (line[k]===' '||line[k]==='\t')) k++; }catch{} return k; };
+
+      // Search nearest [ ... ]( ... ) that contains col.
+      let lb = findUnescBwd('[', i);
+      while (lb >= 0){
+        const rb = findUnescFwd(']', lb+1);
+        if (rb < 0) break;
+        let p = skipWs(rb+1);
+        if (line[p] !== '('){ lb = findUnescBwd('[', lb-1); continue; }
+        const lp = p;
+        p = skipWs(lp+1);
+
+        // Parse destination
+        let url = '';
+        if (line[p] === '<'){
+          p++;
+          while (p < line.length){
+            const ch = line[p];
+            if (ch === '>' && !isEsc(p)){ p++; break; }
+            if (ch === '\\' && (p+1)<line.length){ url += line[p+1]; p += 2; continue; }
+            url += ch; p++;
+          }
+        } else {
+          while (p < line.length){
+            const ch = line[p];
+            if ((ch === ' ' || ch === '\t' || ch === ')') && !isEsc(p)) break;
+            if (ch === '\\' && (p+1)<line.length){ url += line[p+1]; p += 2; continue; }
+            url += ch; p++;
+          }
+        }
+        url = String(url||'').trim();
+        if (!url){ lb = findUnescBwd('[', lb-1); continue; }
+        p = skipWs(p);
+
+        // Parse optional title/tooltip
+        let tooltip = '';
+        if (line[p] && line[p] !== ')'){
+          const q = line[p];
+          if (q === '"' || q === "'"){
+            p++;
+            while (p < line.length){
+              const ch = line[p];
+              if (ch === q && !isEsc(p)){ p++; break; }
+              if (ch === '\\' && (p+1)<line.length){ tooltip += line[p+1]; p += 2; continue; }
+              tooltip += ch; p++;
+            }
+            p = skipWs(p);
+          } else if (q === '('){
+            // Title in (...) inside link parens: [t](url (tip))
+            p++;
+            while (p < line.length){
+              const ch = line[p];
+              if (ch === ')' && !isEsc(p)){ p++; break; }
+              if (ch === '\\' && (p+1)<line.length){ tooltip += line[p+1]; p += 2; continue; }
+              tooltip += ch; p++;
+            }
+            tooltip = String(tooltip||'').trim();
+            p = skipWs(p);
+          } else {
+            // Unknown title format: ignore.
+          }
+        }
+
+        if (line[p] !== ')'){ lb = findUnescBwd('[', lb-1); continue; }
+        const rp = p;
+
+        // Ensure col is inside the whole construct
+        if ((col|0) >= (lb|0) && (col|0) <= (rp|0)){
+          // Infer kind
+          let kind = 'external';
+          let finalUrl = String(url||'');
+          try{
+            if (/^file:\/\/wsl\$\//.test(finalUrl) || /^file:\/\/wsl\.localhost\//.test(finalUrl)){
+              finalUrl = finalUrl.slice(7);
+              kind = 'six-open';
+            } else if (/^[A-Za-z]:[\\/]/.test(finalUrl)){
+              kind = 'six-open';
+            } else if (/^[a-zA-Z][a-zA-Z0-9+.-]*:/.test(finalUrl) && !/^[A-Za-z]:/.test(finalUrl)){
+              kind = 'external';
+            } else {
+              kind = 'six-open';
+            }
+            try{ if (kind==='six-open') finalUrl = finalUrl.replace(/\\/g,'/'); }catch{}
+          }catch{}
+          return { c1:lb, c2:rb+1, url:finalUrl, kind, tooltip:String(tooltip||'') };
+        }
+        lb = findUnescBwd('[', lb-1);
+      }
+    }catch{}
+    return null;
+  }
+
   function _detectUrlAt(line, col, row){
     try{
       if (!line) return null;
@@ -6720,6 +7449,7 @@ try{
       }
       const now = Date.now(); if (now - _lastLinkMoveAt < 25) return; _lastLinkMoveAt = now;
       const rect = viewport.getBoundingClientRect();
+      const rectEd = (editor && editor.getBoundingClientRect) ? editor.getBoundingClientRect() : rect;
       const yAbs = (e.clientY - rect.top) + (editor.scrollTop||0);
       let row = Math.floor(yAbs / LINE_HEIGHT);
       const lines = _splitLines();
@@ -6728,18 +7458,59 @@ try{
         if (_mdRichActive()){
           const yInView = (e.clientY - rect.top);
           let rem = 0;
-          try{ const st=(editor.scrollTop||0); rem = st - Math.floor(st/LINE_HEIGHT)*LINE_HEIGHT; if (Math.abs(rem) < 0.01) rem = 0; }catch{ rem = 0; }
+          // Use the same remainder basis as md-rich rendering (effective scrollTop) so Y hit-test matches the visible overlay.
+          try{
+            let st = (editor && (editor.scrollTop||0)) ? (editor.scrollTop||0) : 0;
+            try{
+              if (typeof _mdEffectiveScrollTopPx === 'function'){
+                // Match md renderer's snap behavior: while scrolling, keep per-pixel remainder.
+                let snap = true;
+                try{ snap = !(_lastNativeScrollAt && (Date.now() - (_lastNativeScrollAt|0) <= 120)); }catch{}
+                st = _mdEffectiveScrollTopPx({ snap })||0;
+              }
+            }catch{}
+            rem = st - Math.floor(st/LINE_HEIGHT)*LINE_HEIGHT;
+            if (Math.abs(rem) < 0.01) rem = 0;
+          }catch{ rem = 0; }
           const yTarget = (yInView||0) + rem;
-          const topLine = _topLine()|0;
-          let r0 = Math.max(0, (topLine|0) - 1);
-          let accY = 0;
-          row = r0;
-          for (let i=r0; i<lines.length; i++){
-            const info = _mdLineLayoutInfoAtRow(lines, i, false);
-            const h = (info && info.lineHeightPx) ? (info.lineHeightPx||LINE_HEIGHT) : LINE_HEIGHT;
-            if (yTarget < accY + h){ row = i; break; }
-            accY += h;
-            row = i;
+
+          // Prefer last md render geometry: reflects variable heights and collapsed zero-height rows.
+          let usedGeom = false;
+          try{
+            const g = _mdRenderGeom;
+            if (g && Array.isArray(g.rowY) && Array.isArray(g.rowH) && (g.want|0) > 0){
+              const start = (g.start|0);
+              const want = (g.want|0);
+              for (let i=0;i<want;i++){
+                const t = (g.rowY[i]|0);
+                const h = (g.rowH[i]|0);
+                if ((h|0) <= 0) continue;
+                if ((yTarget|0) >= (t|0) && (yTarget|0) < ((t+h)|0)){
+                  row = (start + i)|0;
+                  usedGeom = true;
+                  break;
+                }
+              }
+              if (!usedGeom){
+                if ((yTarget|0) < (g.rowY[0]|0)) row = start|0;
+                else row = (start + want - 1)|0;
+                usedGeom = true;
+              }
+            }
+          }catch{ usedGeom = false; }
+
+          if (!usedGeom){
+            const topLine = _topLine()|0;
+            let r0 = Math.max(0, (topLine|0) - 1);
+            let accY = 0;
+            row = r0;
+            for (let i=r0; i<lines.length; i++){
+              const info = _mdLineLayoutInfoAtRow(lines, i, (i === (caretRow|0)));
+              const h = (info && info.lineHeightPx) ? (info.lineHeightPx||LINE_HEIGHT) : LINE_HEIGHT;
+              if (yTarget < accY + h){ row = i; break; }
+              accY += h;
+              row = i;
+            }
           }
         }
       }catch{}
@@ -6791,21 +7562,215 @@ try{
         }
         return out;
       };
-      const xAbs = (e.clientX - rect.left) + (editor.scrollLeft||0);
+      // Mousemove is bound to textarea; use textarea-local X so gutter width doesn't skew hit-testing.
+      const xInViewEd = (e.clientX - rectEd.left);
+      let xAbs = (xInViewEd||0) + (editor.scrollLeft||0);
+      // Draft caret line should behave like markdown-off: only raw URL part is clickable.
+      let hideSymbols = false;
+      try{
+        if (mdRich){
+          const isActiveRow = (row === (caretRow|0));
+          hideSymbols = !!(_mdHideSymbolsForRow && _mdHideSymbolsForRow(!!isActiveRow));
+        }
+      }catch{ hideSymbols = false; }
+
+      // markdown clean display: match the displayed text (inline link + inline code collapse) for X->col mapping & highlight.
+      let collapse = null;
+      let dispMeasure = dispLine;
+      try{
+        if (mdRich && hideSymbols){
+          collapse = _mdCleanDisplayCollapseInfo(dispLine);
+          if (collapse && typeof collapse.dispText === 'string') dispMeasure = String(collapse.dispText||'');
+        }
+      }catch{ collapse = null; dispMeasure = dispLine; }
+
+      // X -> displayed column mapping.
+      // md-rich + wrap-on requires intra-line wrap awareness; otherwise we mis-map X on wrapped segments
+      // and can incorrectly treat the newline/listchars area as part of the last link.
+      const lenDisp = (dispMeasure.length|0);
+      if (lenDisp <= 0){ if (_hoverLink){ _clearLinkHover(); } return; }
+      const EPS = 0.01;
+
+      const wrapOnNow = (function(){ try{ return !!(_wrapEnabled && _wrapEnabled()); }catch{ return false; } })();
+      // md-rich+wrap renderer keeps horizontal shift (hs) at 0; match it here.
+      try{ if (mdRich && wrapOnNow) xAbs = (xInViewEd||0); }catch{}
+      const wAt = (col)=>{
+        try{
+          const cc = Math.max(0, Math.min(lenDisp|0, col|0));
+          _measureSpan.textContent = _exp(dispMeasure.slice(0, cc|0));
+          return (_measureSpan.getBoundingClientRect().width||0) * mdScaleX;
+        }catch{ return 0; }
+      };
+
       let cDisp = 0;
-      while (cDisp<dispLine.length){
-        _measureSpan.textContent = _exp(dispLine.slice(0, cDisp+1));
-        const w = (_measureSpan.getBoundingClientRect().width||0) * mdScaleX;
-        if (w >= xAbs || cDisp===dispLine.length-1){ break; }
-        cDisp++;
+      if (mdRich && hideSymbols && collapse && wrapOnNow){
+        // Wrap-aware mapping: derive intra from Y within the logical row, then map X within that intra.
+        let wPx = 80;
+        try{ wPx = _wrapAvailWidthPx ? (_wrapAvailWidthPx()|0) : 80; }catch{ wPx = 80; }
+
+        // Use renderer geom for fs/lh/padding when available (visible rows only).
+        let lh0 = (LINE_HEIGHT|0);
+        let fs0 = Math.max(6, Math.round((typeof FONT_SIZE==='number' ? FONT_SIZE : 16)));
+        let padTop0 = 0;
+        let rowTop0 = 0;
+        try{
+          const g = _mdRenderGeom;
+          if (g && (row|0) >= (g.start|0) && (row|0) < ((g.start|0) + (g.want|0))){
+            const idx = (row - (g.start|0))|0;
+            rowTop0 = (g.rowY && Number.isFinite(g.rowY[idx])) ? (g.rowY[idx]|0) : 0;
+            lh0 = (g.rowLh && Number.isFinite(g.rowLh[idx])) ? (g.rowLh[idx]|0) : (LINE_HEIGHT|0);
+            fs0 = (g.rowFs && Number.isFinite(g.rowFs[idx])) ? (g.rowFs[idx]|0) : fs0;
+            padTop0 = (g.rowPadTop && Number.isFinite(g.rowPadTop[idx])) ? (g.rowPadTop[idx]|0) : 0;
+          }
+        }catch{}
+
+        // Recompute yTarget (same compensation as md renderer transform translateY(-rem)).
+        let yTarget = 0;
+        try{
+          const yInView = (e.clientY - rect.top);
+          let rem = 0;
+          try{
+            let st = (editor && (editor.scrollTop||0)) ? (editor.scrollTop||0) : 0;
+            try{
+              if (typeof _mdEffectiveScrollTopPx === 'function'){
+                let snap = true;
+                try{ snap = !(_lastNativeScrollAt && (Date.now() - (_lastNativeScrollAt|0) <= 120)); }catch{}
+                st = _mdEffectiveScrollTopPx({ snap })||0;
+              }
+            }catch{}
+            rem = st - Math.floor(st/LINE_HEIGHT)*LINE_HEIGHT;
+            if (Math.abs(rem) < 0.01) rem = 0;
+          }catch{ rem = 0; }
+          yTarget = (yInView||0) + (rem||0);
+        }catch{ yTarget = 0; }
+
+        let intra = 0;
+        try{
+          const dy = (yTarget|0) - (rowTop0|0) - (padTop0|0);
+          intra = Math.max(0, Math.floor((dy|0) / Math.max(1, (lh0|0))));
+        }catch{ intra = 0; }
+
+        // Hanging indent for list items/continuations in clean display.
+        let indentOpts = null;
+        try{
+          _mdListEnsureCache && _mdListEnsureCache(false);
+          const ul = _mdUListInfo && _mdUListInfo(line, row|0, lines);
+          if (ul) indentOpts = _mdIndentOptsForListLine(dispMeasure, ul, wPx|0, fs0|0, lh0|0);
+        }catch{ indentOpts = null; }
+
+        // EOL blank-area guard on the *last* wrapped segment.
+        try{
+          const intraEol = _wrapProbeIntraFromColStyled(dispMeasure, lenDisp|0, wPx|0, lh0|0, fs0|0, indentOpts) | 0;
+          const xEol = _wrapProbeXFromColStyled(dispMeasure, lenDisp|0, wPx|0, fs0|0, lh0|0, indentOpts);
+          if ((intra|0) === (intraEol|0) && Number.isFinite(xEol) && (xAbs > (xEol + EPS))){
+            if (_hoverLink){ _clearLinkHover(); }
+            return;
+          }
+        }catch{}
+
+        const colIntra = _mdWrapColForIntraXStyled(dispMeasure, intra|0, xAbs, wPx|0, lh0|0, fs0|0, indentOpts) | 0;
+        cDisp = Math.max(0, Math.min((lenDisp-1)|0, colIntra|0));
+      } else {
+        // Wrap-off (or non-clean): floor-style mapping by prefix widths to avoid boundary off-by-one.
+        try{
+          const wTotal = wAt(lenDisp|0);
+          if (Number.isFinite(wTotal) && (xAbs > (wTotal + EPS))){
+            if (_hoverLink){ _clearLinkHover(); }
+            return;
+          }
+        }catch{}
+
+        let colFloor = 0;
+        try{
+          let lo = 0, hi = lenDisp|0;
+          while (lo < hi){
+            const mid = (lo + hi + 1) >> 1;
+            const w = wAt(mid|0);
+            if (w <= (xAbs + EPS)) lo = mid; else hi = mid - 1;
+          }
+          colFloor = lo|0;
+        }catch{ colFloor = 0; }
+        cDisp = Math.max(0, Math.min((lenDisp-1)|0, colFloor|0));
       }
-      const c = Math.max(0, Math.min(line.length, (prefixLen|0) + (cDisp|0)));
-      const hit = _detectUrlAt(line, c, row);
+
+      const inferKind = (u)=>{
+        try{
+          let finalUrl = String(u||'');
+          let kind = 'external';
+          if (/^file:\/\/wsl\$\//.test(finalUrl) || /^file:\/\/wsl\.localhost\//.test(finalUrl)){
+            finalUrl = finalUrl.slice(7);
+            kind = 'six-open';
+          } else if (/^[A-Za-z]:[\\/]/.test(finalUrl)){
+            kind = 'six-open';
+          } else if (/^[a-zA-Z][a-zA-Z0-9+.-]*:/.test(finalUrl) && !/^[A-Za-z]:/.test(finalUrl)){
+            kind = 'external';
+          } else {
+            kind = 'six-open';
+          }
+          try{ if (kind==='six-open') finalUrl = finalUrl.replace(/\\/g,'/'); }catch{}
+          return { kind, url: finalUrl };
+        }catch{ return { kind:'external', url:String(u||'') }; }
+      };
+
+      let hit = null;
+      if (mdRich && hideSymbols && collapse){
+        // 1) Inline markdown link: clickable/highlight on display text only.
+        try{
+          for (const it of (collapse.links||[])){
+            if (!it) continue;
+            if ((cDisp|0) >= (it.dispStart|0) && (cDisp|0) < (it.dispEnd|0)){
+              const inf = inferKind(it.url);
+              hit = {
+                // source-ish range (not used for highlight in mdRich when disp* exists)
+                c1: (prefixLen|0) + (it.textStart|0),
+                c2: (prefixLen|0) + (it.textEnd|0),
+                url: inf.url,
+                kind: inf.kind,
+                tooltip: String(it.tooltip||''),
+                dispLine: String(collapse.dispText||''),
+                dispC1: (it.dispStart|0),
+                dispC2: (it.dispEnd|0),
+              };
+              break;
+            }
+          }
+        }catch{}
+
+        // 2) Fallback: plain URLs/paths on the row (convert src range -> disp range)
+        if (!hit){
+          try{
+            const srcTrimCol = (collapse.dispToSrc ? (collapse.dispToSrc(cDisp|0)|0) : (cDisp|0));
+            const srcCol = Math.max(0, Math.min(line.length|0, (prefixLen|0) + (srcTrimCol|0)));
+            const raw = _detectUrlAt(line, srcCol|0, row|0);
+            if (raw){
+              const tC1 = Math.max(0, (raw.c1|0) - (prefixLen|0));
+              const tC2 = Math.max(tC1, (raw.c2|0) - (prefixLen|0));
+              const dC1 = collapse.srcToDisp ? (collapse.srcToDisp(tC1|0)|0) : (tC1|0);
+              const dC2 = collapse.srcToDisp ? (collapse.srcToDisp(tC2|0)|0) : (tC2|0);
+              hit = Object.assign({}, raw, {
+                tooltip: '',
+                dispLine: String(collapse.dispText||''),
+                dispC1: (dC1|0),
+                dispC2: (dC2|0),
+              });
+            }
+          }catch{}
+        }
+      } else {
+        // markdown off or draft caret line: legacy behavior (URL part only)
+        const c = Math.max(0, Math.min(line.length, (prefixLen|0) + (cDisp|0)));
+        hit = _detectUrlAt(line, c, row);
+      }
       if (hit){
-        const same = _hoverLink && _hoverLink.r===row && _hoverLink.c1===hit.c1 && _hoverLink.c2===hit.c2 && _hoverLink.url===hit.url && _hoverLink.kind===hit.kind;
+        const same = _hoverLink && _hoverLink.r===row && _hoverLink.c1===hit.c1 && _hoverLink.c2===hit.c2 && _hoverLink.url===hit.url && _hoverLink.kind===hit.kind && String(_hoverLink.tooltip||'')===String(hit.tooltip||'');
         // Copy all properties from hit to support extra fields like bName/line/col
         _hoverLink = Object.assign({ r:row }, hit);
+        try{ if (e){ _hoverLink._mx = (e.clientX||0); _hoverLink._my = (e.clientY||0); } }catch{}
         if (!same) _renderLinkHover();
+        else {
+          // Keep tooltip aligned with the highlight anchor even when the span is unchanged.
+          try{ if (_hoverLink && _hoverLink.tooltip){ _renderLinkTooltip(_hoverLink._anchor || null); } }catch{}
+        }
       } else {
         if (_hoverLink){ _clearLinkHover(); }
       }
@@ -8947,10 +9912,11 @@ try{
       let _mdUlSkipSpaceCol = -1; // skip listchars for the first space after bullet marker
       let ulSrc = null;
       let ulDisp = null;
+      let hide = false;
       try{
         if (mdRich){
           const isActiveRow = (row1 === ((caretRow|0) + 1));
-          const hide = _mdHideSymbolsForRow(isActiveRow);
+          hide = !!(_mdHideSymbolsForRow && _mdHideSymbolsForRow(!!isActiveRow));
           if (hide){
             const p = _mdHeadingPrefixLen(line)|0;
             if (p>0){ dispPrefix = p; dispLine = line.slice(p); }
@@ -8998,7 +9964,15 @@ try{
             }
           }catch{ _mdUlSkipSpaceCol = -1; }
         }
-      }catch{ dispLine = line; dispPrefix = 0; }
+      }catch{ dispLine = line; dispPrefix = 0; _mdUlSkipSpaceCol = -1; ulSrc = null; ulDisp = null; hide = false; }
+
+      // md-rich clean display: collapse inline links so EOL/listchars align with visible text.
+      try{
+        if (mdRich && hide){
+          const col = _mdCleanDisplayCollapseInfo ? _mdCleanDisplayCollapseInfo(dispLine) : null;
+          if (col && typeof col.dispText === 'string') dispLine = String(col.dispText||'');
+        }
+      }catch{}
 
       const wrapOn = (function(){ try{ return !!(_wrapEnabled && _wrapEnabled()); }catch{ return false; } })();
       let wPx = 0;
@@ -10188,6 +11162,15 @@ try{
   function _syncEditorMetrics(){
     try{
       const cs = window.getComputedStyle(editor);
+      // In markdown-rich, the visible glyphs are drawn in #textLayer (not textarea).
+      // Use its computed font metrics for measurement to avoid cumulative X drift.
+      let csMeasure = cs;
+      try{
+        if (typeof _mdRichActive === 'function' && _mdRichActive()){
+          const tl = document.getElementById('textLayer');
+          if (tl) csMeasure = window.getComputedStyle(tl);
+        }
+      }catch{ csMeasure = cs; }
       const root = document.documentElement;
       // Compute raw line-height from CSS variables rather than current computed line-height,
       // because the editor's line-height uses --lhEff which we are about to override.
@@ -10247,14 +11230,17 @@ try{
       }catch{}
       // Sync measurement span font to editor
       try{
-        if (cs && cs.fontFamily) _measureSpan.style.fontFamily = cs.fontFamily;
-        if (cs && cs.fontWeight) _measureSpan.style.fontWeight = cs.fontWeight;
+        if (csMeasure && csMeasure.fontFamily) _measureSpan.style.fontFamily = csMeasure.fontFamily;
+        if (csMeasure && csMeasure.fontWeight) _measureSpan.style.fontWeight = csMeasure.fontWeight;
+        // Keep letter spacing consistent (some fonts/themes use subtle spacing adjustments)
+        try{ if (csMeasure && ('letterSpacing' in csMeasure)) _measureSpan.style.letterSpacing = csMeasure.letterSpacing; }catch{}
         if (Number.isFinite(FONT_SIZE)) _measureSpan.style.fontSize = FONT_SIZE + 'px';
         if (Number.isFinite(LINE_HEIGHT)) _measureSpan.style.lineHeight = LINE_HEIGHT + 'px';
         // Keep measurement behavior consistent with editor rendering
         _measureSpan.style.fontKerning = 'none';
         _measureSpan.style.fontVariantLigatures = 'none';
         _measureSpan.style.fontVariantEastAsian = 'normal';
+        try{ if (csMeasure && csMeasure.fontFeatureSettings) _measureSpan.style.fontFeatureSettings = csMeasure.fontFeatureSettings; }catch{}
       }catch{}
       // Compute caret vertical offset: center font box within line box
       const off = (LINE_HEIGHT - FONT_SIZE) / 2;
@@ -14556,8 +15542,19 @@ try{
           if (fc && fc.kind && targetIdx>=0 && targetIdx<total) fk = (fc.kind[targetIdx]|0);
         }catch{ fk = 0; }
         const adj0 = ((fk|0) === 2 || (fk|0) === 1) ? { line:srcLine0, col:(caretCol|0), prefix:0 } : _mdWysiwygAdjust(srcLine0, caretCol|0);
-        const dispLine = String(adj0.line||'');
+        let dispLine = String(adj0.line||'');
         let caretColVis0 = (adj0.col|0);
+        // md-rich clean display: collapse inline links for wrap intra calculation.
+        try{
+          const hide = !!(_mdHideSymbolsForRow && _mdHideSymbolsForRow(true));
+          if (hide && (fk|0) !== 2){
+            const col = (_mdCleanDisplayCollapseInfo && typeof _mdCleanDisplayCollapseInfo === 'function') ? _mdCleanDisplayCollapseInfo(dispLine) : null;
+            if (col && typeof col.dispText === 'string' && typeof col.srcToDispCaret === 'function'){
+              caretColVis0 = (col.srcToDispCaret(caretColVis0|0)|0);
+              dispLine = String(col.dispText||'');
+            }
+          }
+        }catch{}
         let intra = 0;
         if (wrapOn){
           // Apply list hanging indent to probe so wrapped intra matches rendered line.
@@ -14779,8 +15776,22 @@ try{
     const lines = _splitLines();
     const line0 = lines[caretRow] || '';
     const adj0 = _mdWysiwygAdjust(line0, caretCol|0);
-    const line = adj0.line;
-    const caretColVis = adj0.col|0;
+    const lineRawForCaret = String(adj0.line||'');
+    const caretColRawForCaret = (adj0.col|0);
+    let line = lineRawForCaret;
+    let caretColVis = caretColRawForCaret;
+    // md-rich clean display: collapse inline links so caret X matches visible text.
+    try{
+      const mdRich = !!(_mdRichActive && _mdRichActive());
+      const hide = mdRich ? !!(_mdHideSymbolsForRow && _mdHideSymbolsForRow(true)) : false;
+      if (mdRich && hide){
+        const col = (_mdCleanDisplayCollapseInfo && typeof _mdCleanDisplayCollapseInfo === 'function') ? _mdCleanDisplayCollapseInfo(line) : null;
+        if (col && typeof col.dispText === 'string' && typeof col.srcToDispCaret === 'function'){
+          caretColVis = (col.srcToDispCaret(caretColVis|0)|0);
+          line = String(col.dispText||'');
+        }
+      }
+    }catch{}
 
     // markdown-rich: caret X/width should follow per-line font scale
     // (approximate by scaling base measurements; textarea itself cannot vary per-line font size).
@@ -15438,6 +16449,9 @@ try{
 
       // #1494: markdown clean display - HR/setext underline lines clamp to column 0.
       try{ _mdClampCaretForSpecialCleanLines(); }catch{}
+
+      // #1835: markdown clean display - inline link collapse makes URL/title spans non-navigable.
+      try{ _mdClampCaretForCleanInlineLinks && _mdClampCaretForCleanInlineLinks(); }catch{}
     }catch{}
   }
   function _afterTextMutation(){
@@ -18393,11 +19407,38 @@ try{
       nc = minCol;
     }
 
-    if (delta > 0) {
-      for (let i=0; i<delta; i++) nc = _nextIndex(line, nc);
-    } else if (delta < 0) {
-      const count = -delta;
-      for (let i=0; i<count; i++) nc = _prevIndex(line, nc);
+    // md-rich clean (wysiwyg): move in collapsed display caret-space for inline links ([text](url) -> text).
+    // Use caret-position mapping to avoid unreachable columns or hidden "phantom" ranges (#1836/#1837).
+    let movedInDisp = false;
+    try{
+      if (delta && (_mdWysiwygActive && _mdWysiwygActive()) && (_mdHideSymbolsForRow && _mdHideSymbolsForRow(true))){
+        const linesRaw = _splitLinesRaw();
+        const src = String((linesRaw && linesRaw.length) ? (linesRaw[caretRow]||'') : line);
+        if (src && src.indexOf('](') >= 0 && src.indexOf('[') >= 0){
+          const col = (_mdCleanDisplayCollapseInfo && typeof _mdCleanDisplayCollapseInfo === 'function') ? _mdCleanDisplayCollapseInfo(src) : null;
+          if (col && typeof col.srcToDispCaret === 'function' && typeof col.dispToSrcCaret === 'function' && typeof col.dispText === 'string'){
+            const disp = String(col.dispText||'');
+            let dc = (col.srcToDispCaret(Math.max(0, Math.min((src.length|0), nc|0)) )|0);
+            if (delta > 0){
+              for (let i=0; i<(delta|0); i++) dc = _nextIndex(disp, dc);
+            } else if (delta < 0){
+              const count = (-delta)|0;
+              for (let i=0; i<count; i++) dc = _prevIndex(disp, dc);
+            }
+            nc = (col.dispToSrcCaret(dc|0)|0);
+            movedInDisp = true;
+          }
+        }
+      }
+    }catch{ movedInDisp = false; }
+
+    if (!movedInDisp){
+      if (delta > 0) {
+        for (let i=0; i<delta; i++) nc = _nextIndex(line, nc);
+      } else if (delta < 0) {
+        const count = -delta;
+        for (let i=0; i<count; i++) nc = _prevIndex(line, nc);
+      }
     }
 
     // #1757: In markdown clean mode, the first post-marker space of ordered lists is visual-only.
@@ -18480,6 +19521,9 @@ try{
       r = _mdClampRowOutOfCollapsed(lines, r|0, opt2);
     }catch{}
     const len=(lines[r]||'').length; caretRow=r; caretCol=Math.max(0, Math.min(len, c|0));
+
+    // #1835: md-rich clean display collapses inline links; prevent landing inside hidden URL/title spans.
+    try{ _mdClampCaretForCleanInlineLinks && _mdClampCaretForCleanInlineLinks(); }catch{}
     // Keep per-buffer view state fresh even when we don't switch tabs or scroll.
     // This improves session restore reliability for caret position.
     try{
@@ -19829,8 +20873,10 @@ try{
       try{ _updateOverlayMarkdownVisual(); }catch{}
       try{ _mdApplyVisualState && _mdApplyVisualState(); }catch{}
       try{ _repositionCaret(); }catch{}
-      try{ _renderListChars(); }catch{}
-      try{ updateGutter(); }catch{}
+      // md_draftedit toggles change clean/draft visibility; refresh md-rich layout first, then listchars.
+      try{ _mdDraftLastActiveRow1ForList = null; }catch{}
+      try{ updateGutter && updateGutter({ force:true }); }catch{ try{ updateGutter && updateGutter(); }catch{} }
+      try{ _scheduleListCharsRender && _scheduleListCharsRender('md_draftedit:set'); }catch{ try{ _renderListChars(); }catch{} }
       toast('md_draftedit: draft', 900); return;
     }
     if (/^:set\s+nomd_draftedit\s*$/i.test(cmd)){
@@ -19838,8 +20884,9 @@ try{
       try{ _updateOverlayMarkdownVisual(); }catch{}
       try{ _mdApplyVisualState && _mdApplyVisualState(); }catch{}
       try{ _repositionCaret(); }catch{}
-      try{ _renderListChars(); }catch{}
-      try{ updateGutter(); }catch{}
+      try{ _mdDraftLastActiveRow1ForList = null; }catch{}
+      try{ updateGutter && updateGutter({ force:true }); }catch{ try{ updateGutter && updateGutter(); }catch{} }
+      try{ _scheduleListCharsRender && _scheduleListCharsRender('md_draftedit:clear'); }catch{ try{ _renderListChars(); }catch{} }
       toast('md_draftedit: 清書', 900); return;
     }
     if (/^:set\s+md_draftedit!\s*$/i.test(cmd)){
@@ -19847,8 +20894,9 @@ try{
       try{ _updateOverlayMarkdownVisual(); }catch{}
       try{ _mdApplyVisualState && _mdApplyVisualState(); }catch{}
       try{ _repositionCaret(); }catch{}
-      try{ _renderListChars(); }catch{}
-      try{ updateGutter(); }catch{}
+      try{ _mdDraftLastActiveRow1ForList = null; }catch{}
+      try{ updateGutter && updateGutter({ force:true }); }catch{ try{ updateGutter && updateGutter(); }catch{} }
+      try{ _scheduleListCharsRender && _scheduleListCharsRender('md_draftedit:toggle'); }catch{ try{ _renderListChars(); }catch{} }
       toast('md_draftedit: ' + (b && b.md_draftedit ? 'draft' : '清書'), 900); return;
     }
     if (/^:set\s+md_draftedit\?\s*$/i.test(cmd)){
