@@ -2127,7 +2127,7 @@ try{
       const wrapOn = (function(){ try{ return _wrapEnabled(); }catch{ return false; } })();
       const imeComp = (function(){ try{ return !!(window && window._imeComposing===true); }catch{ return false; } })();
       let wPx = 80;
-      try{ if (wrapOn) wPx = _wrapAvailWidthPx()|0; }catch{ wPx = 80; }
+      try{ if (wrapOn) wPx = +(_wrapAvailWidthPx()||80); }catch{ wPx = 80; }
 
       // IME composing (md-rich): avoid per-row DOM wrap probes.
       // Approximate 1ch width once per render; fallback to a safe constant.
@@ -2637,7 +2637,7 @@ try{
           // Keep hanging-indent for unordered lists only.
           const lt = (listInfoDisp && listInfoDisp.listType) ? String(listInfoDisp.listType||'') : '';
           if (lt !== 'ol'){
-            try{ indentOpts = _mdIndentOptsForListLine(text, listInfoDisp, wPx|0, fs|0, lh|0); }catch{ indentOpts = null; }
+            try{ indentOpts = _mdIndentOptsForListLine(text, listInfoDisp, (+wPx||0), fs|0, lh|0); }catch{ indentOpts = null; }
           }
         }
         // NOTE: WebView2 can visually clip/overlap the first few characters when using
@@ -2697,13 +2697,13 @@ try{
               const visCols = _visualWidthUpToLine(disp, (disp.length|0))|0;
               const sc = (baseFontPx>0) ? (fs / baseFontPx) : 1;
               const chPx = Math.max(1, (imeChPxBase||10) * (Number.isFinite(sc) ? sc : 1));
-              let wEffPx = (wPx|0);
+              let wEffPx = (+wPx||0);
               if (isCodeRow) wEffPx = Math.max(20, (wEffPx|0) - (_cbTextPadLeftPx|0) - (_cbTextPadRightPx|0));
               const colsPerLine = Math.max(1, Math.floor((wEffPx|0) / chPx));
               const n = Math.max(1, Math.ceil((visCols||0) / (colsPerLine||1))|0);
               hPx = Math.max(1, n|0) * (lh|0);
             } else {
-              let ww = (wPx|0);
+              let ww = (+wPx||0);
               let io = indentOpts;
               // UL list lines: actual rendering may emulate hanging-indent via a negative-margin shim
               // (md-hang0) with text-indent forced to 0 to avoid WebView2 clipping. Ensure the wrap
@@ -2714,10 +2714,10 @@ try{
                 }
               }catch{}
               if (isCodeRow){
-                ww = Math.max(20, (ww|0) - (_cbTextPadRightPx|0));
+                ww = Math.max(20, (+ww||0) - (_cbTextPadRightPx|0));
                 io = _cbIndentOpts;
               }
-              const n0 = _wrapProbeLineCountStyled(disp, ww|0, lh|0, fs|0, io);
+              const n0 = _wrapProbeLineCountStyled(disp, ww, lh|0, fs|0, io);
               const n = (Number.isFinite(n0) && (n0|0) > 0) ? (n0|0) : 1;
               hPx = Math.max(1, n|0) * (lh|0);
             }
@@ -9976,7 +9976,9 @@ try{
 
       const wrapOn = (function(){ try{ return !!(_wrapEnabled && _wrapEnabled()); }catch{ return false; } })();
       let wPx = 0;
-      try{ if (wrapOn) wPx = _wrapAvailWidthPx()|0; }catch{ wPx = 0; }
+      // IMPORTANT: keep fractional CSS px. Truncating to int can create boundary drift where
+      // glyphs still fit but probe-based positions (esp. EOL) wrap to the next line.
+      try{ if (wrapOn) wPx = (+_wrapAvailWidthPx()||0); }catch{ wPx = 0; }
 
       const _wrapPosForCol = (cc)=>{
         try{
@@ -9997,14 +9999,14 @@ try{
             }catch{ indentOpts = null; }
             let intra = 0;
             let x = null;
-            try{ intra = _wrapProbeIntraFromColStyled(dispLine, col, wPx|0, rowHeightPx|0, fs|0, indentOpts) | 0; }catch{ intra = 0; }
-            try{ x = _wrapProbeXFromColStyled(dispLine, col, wPx|0, fs|0, rowHeightPx|0, indentOpts); }catch{ x = null; }
+            try{ intra = _wrapProbeIntraFromColStyled(dispLine, col, wPx||0, rowHeightPx|0, fs|0, indentOpts) | 0; }catch{ intra = 0; }
+            try{ x = _wrapProbeXFromColStyled(dispLine, col, wPx||0, fs|0, rowHeightPx|0, indentOpts); }catch{ x = null; }
             return { intra: Math.max(0, intra|0), x };
           }
           let intra = 0;
           let x = null;
-          try{ intra = _wrapProbeIntraFromCol(dispLine, col, wPx|0) | 0; }catch{ intra = 0; }
-          try{ x = _wrapProbeXFromCol(dispLine, col, wPx|0); }catch{ x = null; }
+          try{ intra = _wrapProbeIntraFromCol(dispLine, col, wPx||0) | 0; }catch{ intra = 0; }
+          try{ x = _wrapProbeXFromCol(dispLine, col, wPx||0); }catch{ x = null; }
           return { intra: Math.max(0, intra|0), x };
         }catch{ return { intra:0, x:null }; }
       };
@@ -10160,11 +10162,49 @@ try{
           xEnd = (_hs + vx);
         } else {
           if (wrapOn){
-            const pEnd = _wrapPosForCol(dispLine.length|0);
+            const len0 = (dispLine.length|0);
+            const pEnd = _wrapPosForCol(len0|0);
             const lh = mdRich ? (rowHeightPx|0) : (LINE_HEIGHT|0);
-            yEnd = (yTop|0) + (Math.max(0, (pEnd.intra|0)) * Math.max(1, lh|0));
-            xEnd = Number.isFinite(pEnd.x) ? Math.max(0, (+pEnd.x||0)) : 0;
-            try{ xEnd += _mdOlExtraXpxList(dispLine.length|0); }catch{}
+            let intraE = Math.max(0, (pEnd.intra|0));
+            let xE = Number.isFinite(pEnd.x) ? Math.max(0, (+pEnd.x||0)) : 0;
+            // If the end column lands at the start of the next wrapped segment due to engine caret drift
+            // (creating an EOL-only line), clamp to the last character's intra so the EOL marker hangs on
+            // the previous visual line.
+            // IMPORTANT: Do NOT clamp when the last glyph itself legitimately wrapped to the next line.
+            try{
+              if ((len0|0) > 0){
+                const pLast = _wrapPosForCol(((len0|0) - 1)|0);
+                const intraLast = Math.max(0, (pLast.intra|0));
+                if ((intraE|0) > (intraLast|0)){
+                  // Distinguish:
+                  // - caret drift: end-col is reported on the *next* segment but X is at segment start/end
+                  // - legit wrap: last glyph moved to next segment, so end-col X is after that glyph (not start)
+                  const ww = Math.max(20, (+wPx||0));
+                  const eps = (function(){
+                    try{
+                      const fs = mdRich ? (Math.max(6, Math.round(baseFontPx * (scale||1)))||16) : (parseFloat(getComputedStyle(editor).fontSize||'16')||16);
+                      return Math.max(1.5, Math.min(4, fs * 0.15));
+                    }catch{ return 2; }
+                  })();
+                  let xStart = 0;
+                  try{
+                    if (mdRich){
+                      const p0 = _wrapPosForCol(0);
+                      if (p0 && Number.isFinite(p0.x)) xStart = Math.max(0, (+p0.x||0));
+                    }
+                  }catch{ xStart = 0; }
+                  const atLineStart = Number.isFinite(xE) && (+xE <= (xStart + eps));
+                  const atLineEnd = Number.isFinite(xE) && (+xE >= (ww - eps));
+                  if (atLineStart || atLineEnd){
+                    intraE = intraLast|0;
+                    xE = ww;
+                  }
+                }
+              }
+            }catch{}
+            yEnd = (yTop|0) + (intraE|0) * Math.max(1, lh|0);
+            xEnd = xE;
+            try{ xEnd += _mdOlExtraXpxList(len0|0); }catch{}
           } else {
             _measureSpan.textContent = _exp(dispLine);
             const xEndb = _measureSpan.getBoundingClientRect().width;
@@ -11664,7 +11704,44 @@ try{
       const h = p.getBoundingClientRect().height;
       const lh = (Number.isFinite(lineHeightPx) && (lineHeightPx||0) > 0) ? (lineHeightPx||LINE_HEIGHT||1) : (LINE_HEIGHT||1);
       if (!Number.isFinite(h) || h <= 0) return 1;
-      return Math.max(1, Math.round(h / lh));
+      let n = Math.max(1, Math.round(h / lh));
+
+      // md-rich wrap boundary guard:
+      // Some engines place the *caret position* (col=len) on the next wrapped line even when
+      // the last glyph (col=len-1) is still on the previous line. That yields an "empty" final
+      // visual line (only EOL/listchars), which we intentionally avoid in clean wrap semantics.
+      // If we detect this, reduce the counted line count by 1.
+      try{
+        const len = (s.length|0);
+        if ((n|0) >= 2 && (len|0) > 0){
+          const intraE = _wrapProbeIntraFromColStyled(s, len|0, (widthPx||80), lh|0, (fontSizePx||0), opts) | 0;
+          const intraLast = _wrapProbeIntraFromColStyled(s, (len-1)|0, (widthPx||80), lh|0, (fontSizePx||0), opts) | 0;
+          if ((intraE|0) > (intraLast|0)){
+            const xE = _wrapProbeXFromColStyled(s, len|0, (widthPx||80), (fontSizePx||0), lh|0, opts);
+            // Start-of-line X is paddingLeft for non-first lines (textIndent doesn't apply there).
+            const xStart = (padLeft > 0 ? padLeft : 0);
+            // NOTE: Use a slightly larger epsilon than sub-pixel noise.
+            // Some engines/zoom ratios report the marker's x a bit > xStart even when it is effectively
+            // at the start of the next visual line, which would otherwise miss this guard.
+            const eps = (function(){
+              try{
+                const fs = (Number.isFinite(fontSizePx) && (fontSizePx||0) > 0) ? (+fontSizePx||16) : 16;
+                return Math.max(1.5, Math.min(4, fs * 0.15));
+              }catch{ return 2; }
+            })();
+            // Some engines put the logical caret on the *next* wrapped line but keep X at the
+            // previous line's end (near the wrap width). Treat both as an empty wrapped line.
+            const ww = Math.max(20, (+widthPx||80));
+            const atLineStart = Number.isFinite(xE) && (+xE <= (xStart + eps));
+            const atLineEnd = Number.isFinite(xE) && (+xE >= (ww - eps));
+            if (atLineStart || atLineEnd){
+              n = Math.max(1, (n|0) - 1);
+            }
+          }
+        }
+      }catch{}
+
+      return n;
     }catch{ return null; }
   }
   function _wrapProbeIntraFromColStyled(text, col, widthPx, lineHeightPx, fontSizePx, opts){
@@ -11915,7 +11992,7 @@ try{
       const cbTextPadLeftPx = ((cbRectLeftPx|0) + (cbPadPx|0))|0;
       const cbTextPadRightPx = ((cbRectRightEffPx|0) + (cbPadPx|0))|0;
       const cbIndentOpts = { padLeftPx:(cbTextPadLeftPx|0), textIndentPx:0 };
-      const cbProbeWidthPx = Math.max(20, (wPx|0) - (cbTextPadRightPx|0));
+      const cbProbeWidthPx = Math.max(20, (+wPx||0) - (cbTextPadRightPx|0));
 
       const counts = new Array(lines.length|0);
       const prefix = new Array((lines.length|0) + 1);
@@ -11959,7 +12036,7 @@ try{
         try{
           if (hideSymbolsDefault && !isCodeRow && !isFenceRow){
             const ul = _mdUListInfo && _mdUListInfo(src, i, lines);
-            if (ul) indentOpts = _mdIndentOptsForListLine(src, ul, wPx|0, fs|0, lh|0);
+            if (ul) indentOpts = _mdIndentOptsForListLine(src, ul, (+wPx||0), fs|0, lh|0);
             // Match renderer UL hang-hack: disable negative text-indent for UL list items.
             try{
               const lt2 = (ul && ul.listType) ? String(ul.listType||'') : '';
@@ -11973,10 +12050,10 @@ try{
         let n = 1;
         if (!heavy){
           if (isCodeRow){
-            const n0 = _wrapProbeLineCountStyled(disp, cbProbeWidthPx|0, lh|0, fs|0, cbIndentOpts);
+            const n0 = _wrapProbeLineCountStyled(disp, cbProbeWidthPx, lh|0, fs|0, cbIndentOpts);
             if (Number.isFinite(n0) && (n0|0) > 0) n = (n0|0);
           } else {
-            const n0 = _wrapProbeLineCountStyled(disp, wPx|0, lh|0, fs|0, indentOpts);
+            const n0 = _wrapProbeLineCountStyled(disp, wPx, lh|0, fs|0, indentOpts);
             if (Number.isFinite(n0) && (n0|0) > 0) n = (n0|0);
           }
         } else {
@@ -12036,7 +12113,7 @@ try{
       const cbTextPadLeftPx = ((cbRectLeftPx|0) + (cbPadPx|0))|0;
       const cbTextPadRightPx = ((cbRectRightEffPx|0) + (cbPadPx|0))|0;
       const cbIndentOpts = { padLeftPx:(cbTextPadLeftPx|0), textIndentPx:0 };
-      const cbProbeWidthPx = Math.max(20, (wPx|0) - (cbTextPadRightPx|0));
+      const cbProbeWidthPx = Math.max(20, (+wPx||0) - (cbTextPadRightPx|0));
 
       const counts = new Array(lines.length|0);
       const prefix = new Array((lines.length|0) + 1);
@@ -12083,7 +12160,7 @@ try{
         try{
           if (hideSymbolsDefault && !isCodeRow && !isFenceRow){
             const ul = _mdUListInfo && _mdUListInfo(src, i, lines);
-            if (ul) indentOpts = _mdIndentOptsForListLine(src, ul, wPx|0, fs|0, lh|0);
+            if (ul) indentOpts = _mdIndentOptsForListLine(src, ul, (+wPx||0), fs|0, lh|0);
             // Match renderer UL hang-hack: disable negative text-indent for UL list items.
             try{
               const lt2 = (ul && ul.listType) ? String(ul.listType||'') : '';
@@ -12097,10 +12174,10 @@ try{
         let n = 1;
         if (!heavy){
           if (isCodeRow){
-            const n0 = _wrapProbeLineCountStyled(disp, cbProbeWidthPx|0, lh|0, fs|0, cbIndentOpts);
+            const n0 = _wrapProbeLineCountStyled(disp, cbProbeWidthPx, lh|0, fs|0, cbIndentOpts);
             if (Number.isFinite(n0) && (n0|0) > 0) n = (n0|0);
           } else {
-            const n0 = _wrapProbeLineCountStyled(disp, wPx|0, lh|0, fs|0, indentOpts);
+            const n0 = _wrapProbeLineCountStyled(disp, wPx, lh|0, fs|0, indentOpts);
             if (Number.isFinite(n0) && (n0|0) > 0) n = (n0|0);
           }
         } else {
@@ -12205,7 +12282,7 @@ try{
       const cbTextPadLeftPx = ((cbRectLeftPx|0) + (cbPadPx|0))|0;
       const cbTextPadRightPx = ((cbRectRightEffPx|0) + (cbPadPx|0))|0;
       const cbIndentOpts = { padLeftPx:(cbTextPadLeftPx|0), textIndentPx:0 };
-      const cbProbeWidthPx = Math.max(20, (wPx|0) - (cbTextPadRightPx|0));
+      const cbProbeWidthPx = Math.max(20, (+wPx||0) - (cbTextPadRightPx|0));
 
       const adj = ((fk|0) === 2 || (fk|0) === 1) ? { line:src, col:(col|0), prefix:0 } : _mdWysiwygAdjust(src, col|0);
       const dispLine = String(adj.line||'');
@@ -12218,15 +12295,15 @@ try{
         const hide = !!(_mdHideSymbolsForRow && _mdHideSymbolsForRow(!!isActiveRow));
         if (hide){
           const ul = _mdUListInfo && _mdUListInfo(src, r, lines);
-          if (ul) indentOpts = _mdIndentOptsForListLine(dispLine, ul, wPx|0, fs|0, lh|0);
+          if (ul) indentOpts = _mdIndentOptsForListLine(dispLine, ul, (+wPx||0), fs|0, lh|0);
         }
       }catch{ indentOpts = null; }
       let intra = 0;
       try{
         if ((fk|0) === 2){
-          intra = _wrapProbeIntraFromColStyled(dispLine, cc|0, cbProbeWidthPx|0, lh|0, fs|0, cbIndentOpts) | 0;
+          intra = _wrapProbeIntraFromColStyled(dispLine, cc|0, cbProbeWidthPx, lh|0, fs|0, cbIndentOpts) | 0;
         } else {
-          intra = _wrapProbeIntraFromColStyled(dispLine, cc|0, wPx|0, lh|0, fs|0, indentOpts) | 0;
+          intra = _wrapProbeIntraFromColStyled(dispLine, cc|0, wPx, lh|0, fs|0, indentOpts) | 0;
         }
       }catch{ intra = 0; }
       intra = Math.max(0, Math.min(((c.counts[r]|0)-1)|0, intra|0));
@@ -12919,11 +12996,51 @@ try{
   function _wrapAvailWidthPx(){
     try{
       if (!editor) return 80;
+      // md-rich+wrap: wrapping is rendered in #textLayer (no native scrollbar). Using textarea
+      // clientWidth can undercount due to scrollbar-space subtraction, creating phantom wrapped
+      // lines (EOL-only/empty wrapped line) near boundary widths.
+      try{
+        if (_mdRichActive && _mdRichActive() && _wrapEnabled && _wrapEnabled()){
+          try{ _mdEnsureTextLayer && _mdEnsureTextLayer(); }catch{}
+          const tl = (typeof _mdTextLayer !== 'undefined') ? _mdTextLayer : null;
+          if (tl){
+            // Prefer integer-stable clientWidth for wrap decisions. Some engines effectively
+            // quantize textarea line breaking to integer px; using fractional rect.width can
+            // overestimate and make EOL/listchars think the last glyph still fits on the previous
+            // segment (EOL appears at the wrap boundary).
+            try{ const cwT = (tl.clientWidth||0); if (cwT > 0) return Math.max(20, (+cwT||0)); }catch{}
+            try{
+              const rw = (tl.getBoundingClientRect && tl.getBoundingClientRect()) ? (tl.getBoundingClientRect().width||0) : 0;
+              if (Number.isFinite(rw) && rw > 0) return Math.max(20, (+rw||0));
+            }catch{}
+          }
+        }
+      }catch{}
       // Wrapping width must exclude the gutter. The only reliable basis here is the textarea's
       // own clientWidth (it is flexed next to #gutter). In md-rich, scrollbar-gutter:stable keeps
       // this width from oscillating when scrollbars appear.
       const cw = (editor.clientWidth||0);
       let basisW = cw;
+
+      // Subpixel guard: clientWidth is integer-rounded, but wrapping decisions happen in
+      // fractional CSS px. Near boundary widths this can make the probe think a line wraps
+      // while the visible layer does not ("empty wrapped line" / EOL-only wrap).
+      // Approximate a float clientWidth via rect.width - (offsetWidth - clientWidth).
+      try{
+        const ow = (editor.offsetWidth||0);
+        const sb = Math.max(0, (ow - cw));
+        const rw = (editor.getBoundingClientRect && editor.getBoundingClientRect()) ? (editor.getBoundingClientRect().width||0) : 0;
+        if (Number.isFinite(rw) && rw > 0){
+          const cwFloat = Math.max(0, (+rw||0) - (sb||0));
+          // Prefer the float width only when it looks sane.
+          if (cwFloat > 0) basisW = cwFloat;
+        }
+      }catch{}
+
+      // IMPORTANT: Do not overestimate beyond integer clientWidth.
+      // If basisW becomes slightly larger due to fractional rect.width rounding,
+      // wrap probes can under-wrap and place EOL markers before the true logical EOL.
+      try{ basisW = Math.min((basisW||0), (cw||0)); }catch{}
       // Cache paddings to reduce getComputedStyle churn (and avoid forced reflow in debug sessions)
       let pl = 0;
       let pr = 0;
@@ -16538,6 +16655,17 @@ try{
     // restore change tick from snapshot and recompute modified
     try{ const b=currentBuffer(); if (b){ b._changeTick = (s.changeTick|0); } }catch{}
     _syncModifiedFromTick();
+
+    // Undo/redo changes text without going through the normal input path.
+    // In md-rich + wrap-on, visual scroll grid mapping depends on md wrap cache.
+    // If we don't rebuild it here, _topLine/_repositionCaret/listchars can be computed
+    // against stale wrap metrics and all EOL markers appear shifted until a full rerender.
+    try{ _wrapInvalidateCache && _wrapInvalidateCache('undo-redo'); }catch{}
+    try{ _mdWrapInvalidateCache && _mdWrapInvalidateCache('undo-redo'); }catch{}
+    try{ _mdListInvalidateCache && _mdListInvalidateCache('undo-redo'); }catch{}
+    try{ if (_wrapEnabled && _wrapEnabled() && _wrapEnsureCache) _wrapEnsureCache(true); }catch{}
+    try{ if (_mdRichActive && _mdRichActive() && _wrapEnabled && _wrapEnabled() && _mdWrapEnsureCache) _mdWrapEnsureCache(true); }catch{}
+
     ensureScrolloff(); try{ if (window && window._imeComposing===true) return; }catch{} _repositionCaret(); updateGutter();
     // Undo/redo 後に listchars の再描画を明示的に行い、EOF付近の可視状態を即時反映 (CaseB)
     try{ _renderListChars(); }catch{}
@@ -24322,6 +24450,26 @@ try{
         // centralize modified tracking (bump change tick on each input)
         _touchBufferModified();
         try{ _wrapInvalidateCache('input'); }catch{}
+
+        // Native textarea undo/redo (Ctrl+Z / Ctrl+Y or Ctrl+Shift+Z) arrives as inputType=historyUndo/historyRedo.
+        // In md-rich + wrap, vertical layout and effective scroll mapping depend on md-wrap caches.
+        // Without refreshing them here, listchars/EOL markers can drift until a full buffer redraw.
+        try{
+          const itH = String((e && e.inputType) || '');
+          const isHist = (itH === 'historyUndo' || itH === 'historyRedo');
+          if (isHist){
+            const mdNow = (function(){ try{ return _mdRichActive && _mdRichActive(); }catch{ return false; } })();
+            const wrapNow = (function(){ try{ return _wrapEnabled && _wrapEnabled(); }catch{ return false; } })();
+            if (mdNow){
+              try{ _mdListInvalidateCache && _mdListInvalidateCache('input:' + itH); }catch{}
+              try{ _mdWrapInvalidateCache && _mdWrapInvalidateCache('input:' + itH); }catch{}
+              // Force rebuild now so any immediate caret/listchars work uses the updated layout.
+              try{ if (wrapNow && _mdWrapEnsureCache) _mdWrapEnsureCache(true); }catch{}
+              try{ _mdSyncEofPadComp && _mdSyncEofPadComp(); }catch{}
+              try{ _mdRenderTextLayer && _mdRenderTextLayer(); }catch{}
+            }
+          }
+        }catch{}
         // INSERT内での入力（insert/delete/改行など）発生を記録 → 次のキャレットのみ移動で一度だけUndo区切りを積む
         try{ _insertSegDirty = true; }catch{}
 
@@ -24376,6 +24524,67 @@ try{
                   try{ if (_optDebugKeys) _debugPush({ t:Date.now(), type:'bs-eol-fix', mode:_mode, inputType:(e&&e.inputType)||'', data:(e&&e.data), src:(snap.src||'snap'), ctrl:false, alt:false, meta:false, isComp:false }); }catch{}
                 }
               }
+            }
+          }
+        }catch{}
+
+        // Wrap boundary + EOF phantom line guard (#1842):
+        // When the file ends with '\n', the caret can visually appear at the end of the wrapped
+        // line but the native textarea places it *after* the final newline (EOF phantom line).
+        // Then typing a character inserts it after '\n', making it look like the character moved
+        // to the next logical line (EOL marker comes before it). If the previous logical line ends
+        // exactly at a wrap boundary, treat this as an engine caret drift and move the character
+        // back before the final '\n'.
+        try{
+          if (!(window && window._imeComposing===true)){
+            const itFix = String((e && e.inputType) || '');
+            const chFix = (e && typeof e.data === 'string') ? String(e.data||'') : '';
+            if (_mode === 'INSERT' && itFix === 'insertText' && chFix && (chFix.length|0) === 1 && chFix !== '\n' && chFix !== '\r'){
+              try{
+                if (_wrapEnabled && _wrapEnabled() && editor && typeof editor.selectionStart === 'number' && typeof editor.selectionEnd === 'number'){
+                  const s1 = (editor.selectionStart|0);
+                  const e1 = (editor.selectionEnd|0);
+                  const v1 = String(editor.value||'');
+                  // Only handle the strict EOF-phantom pattern: ... "<prev>\n<ch>" and caret at EOF.
+                  if ((s1|0) === (e1|0) && (s1|0) === (v1.length|0) && (s1|0) >= 2){
+                    const iCh = (s1|0) - 1;
+                    const iLf = (s1|0) - 2;
+                    if (v1[iLf] === '\n' && v1[iCh] === chFix){
+                      // Extract previous line (the one ending at iLf).
+                      const prevStart = v1.lastIndexOf('\n', (iLf|0) - 1);
+                      const ps = (prevStart >= 0) ? ((prevStart|0) + 1) : 0;
+                      const prevLine = v1.slice(ps|0, iLf|0);
+                      if ((prevLine.length|0) > 0){
+                        const wPx = (typeof _wrapAvailWidthPx === 'function') ? (+_wrapAvailWidthPx()||80) : 80;
+                        const ww = Math.max(20, (+wPx||80));
+                        const len = (prevLine.length|0);
+                        const intraE = _wrapProbeIntraFromCol(prevLine, len|0, ww)|0;
+                        const intraLast = _wrapProbeIntraFromCol(prevLine, Math.max(0, (len-1)|0), ww)|0;
+                        if ((intraE|0) > (intraLast|0)){
+                          const xE = _wrapProbeXFromCol(prevLine, len|0, ww);
+                          const eps = (function(){
+                            try{
+                              const fs = parseFloat(getComputedStyle(editor).fontSize||'16')||16;
+                              return Math.max(1.5, Math.min(4, fs * 0.15));
+                            }catch{ return 2; }
+                          })();
+                          const atLineStart = Number.isFinite(xE) && (+xE <= eps);
+                          const atLineEnd = Number.isFinite(xE) && (+xE >= (ww - eps));
+                          if (atLineStart || atLineEnd){
+                            // Swap: "...\n<ch>" -> "...<ch>\n" and place caret before the final LF.
+                            const newV = v1.slice(0, iLf|0) + chFix + '\n';
+                            editor.value = newV;
+                            const newOff = Math.max(0, (s1|0) - 1);
+                            try{ editor.selectionStart = editor.selectionEnd = newOff; }catch{}
+                            try{ const rc = _rcFromOffset(newOff|0); caretRow = rc.r; caretCol = rc.c; }catch{}
+                            try{ _wrapInvalidateCache && _wrapInvalidateCache('eof-phantom-insert-snap'); }catch{}
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }catch{}
             }
           }
         }catch{}
