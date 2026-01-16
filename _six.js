@@ -1281,6 +1281,15 @@ try{
       const r = Math.max(0, Math.min((lines.length-1)|0, caretRow|0));
       const src = String(lines[r]||'');
       if (!src) return false;
+
+      // Fenced code blocks are displayed as raw text even in clean mode; never clamp caret using
+      // inline-link collapsing on those rows.
+      try{
+        const fc = _mdCodeFenceEnsureCache && _mdCodeFenceEnsureCache(false, lines);
+        const fk = (fc && fc.kind && (r|0) >= 0 && (r|0) < (lines.length|0)) ? (fc.kind[r|0]|0) : 0;
+        if ((fk|0) === 2) return false;
+      }catch{}
+
       // Fast check: avoid overhead for non-link lines.
       if (src.indexOf('](') < 0 || src.indexOf('[') < 0) return false;
       const n = (src.length|0);
@@ -3152,11 +3161,17 @@ try{
       let c = Math.max(0, caretCol|0);
       try{
         if (_mdRichActive && _mdRichActive()){
+          let _mdIsCodeRow = false;
+          try{
+            const fc = _mdCodeFenceEnsureCache && _mdCodeFenceEnsureCache(false, lines);
+            const fk = (fc && fc.kind && (r|0) >= 0 && (r|0) < (lines.length|0)) ? (fc.kind[r|0]|0) : 0;
+            _mdIsCodeRow = ((fk|0) === 2);
+          }catch{ _mdIsCodeRow = false; }
           const adj0 = _mdWysiwygAdjust ? _mdWysiwygAdjust(line0, c|0) : { line:line0, col:c|0 };
           line = String(adj0.line||'');
           c = (adj0.col|0);
-          const hide = !!(_mdHideSymbolsForRow && _mdHideSymbolsForRow(true));
-          if (hide){
+          const hide = (!_mdIsCodeRow) && !!(_mdHideSymbolsForRow && _mdHideSymbolsForRow(true));
+          if (hide && !_mdIsCodeRow){
             const col = (_mdCleanDisplayCollapseInfo && typeof _mdCleanDisplayCollapseInfo === 'function') ? _mdCleanDisplayCollapseInfo(line) : null;
             if (col && typeof col.dispText === 'string' && typeof col.srcToDispCaret === 'function'){
               c = (col.srcToDispCaret(c|0)|0);
@@ -7824,7 +7839,26 @@ try{
       } else {
         // markdown off or draft caret line: legacy behavior (URL part only)
         const c = Math.max(0, Math.min(line.length, (prefixLen|0) + (cDisp|0)));
-        hit = _detectUrlAt(line, c, row);
+        let suppressRaw = false;
+        try{
+          if (mdRich){
+            // Fenced code blocks: treat as draft/raw and never auto-link raw URLs.
+            if (_mdIsCodeRow) suppressRaw = true;
+            else {
+              // Draft caret line: if we are inside a markdown inline link construct, suppress
+              // the raw URL detector so it doesn't activate on the destination text while editing.
+              const draftMode = !!(_mdDraftEditEnabled && _mdDraftEditEnabled());
+              const isActiveRow = (row === (caretRow|0));
+              if (draftMode && isActiveRow){
+                const mdInline = _detectMdInlineLinkAt && _detectMdInlineLinkAt(line, c|0);
+                if (mdInline) suppressRaw = true;
+              }
+            }
+          }
+        }catch{ suppressRaw = false; }
+        if (!suppressRaw){
+          hit = _detectUrlAt(line, c, row);
+        }
       }
       if (hit){
         // md-rich fenced code blocks: never react to markdown inline link syntax ([text](url)).
@@ -15988,11 +16022,23 @@ try{
     const caretColRawForCaret = (adj0.col|0);
     let line = lineRawForCaret;
     let caretColVis = caretColRawForCaret;
+
+    // md-rich fenced code blocks are displayed as raw text even in clean mode.
+    // For those rows, do NOT apply clean-display collapsing (it would shorten the measured line
+    // and clamp caret movement to the collapsed length).
+    let _mdIsCodeRow = false;
+    try{
+      if (_mdRichActive && _mdRichActive()){
+        const fc = _mdCodeFenceEnsureCache && _mdCodeFenceEnsureCache(false, lines);
+        const fk = (fc && fc.kind && (caretRow|0) >= 0 && (caretRow|0) < (lines.length|0)) ? (fc.kind[caretRow|0]|0) : 0;
+        _mdIsCodeRow = ((fk|0) === 2);
+      }
+    }catch{ _mdIsCodeRow = false; }
     // md-rich clean display: collapse inline links so caret X matches visible text.
     try{
       const mdRich = !!(_mdRichActive && _mdRichActive());
-      const hide = mdRich ? !!(_mdHideSymbolsForRow && _mdHideSymbolsForRow(true)) : false;
-      if (mdRich && hide){
+      const hide = (mdRich && !_mdIsCodeRow) ? !!(_mdHideSymbolsForRow && _mdHideSymbolsForRow(true)) : false;
+      if (mdRich && hide && !_mdIsCodeRow){
         const col = (_mdCleanDisplayCollapseInfo && typeof _mdCleanDisplayCollapseInfo === 'function') ? _mdCleanDisplayCollapseInfo(line) : null;
         if (col && typeof col.dispText === 'string' && typeof col.srcToDispCaret === 'function'){
           caretColVis = (col.srcToDispCaret(caretColVis|0)|0);
@@ -16005,7 +16051,7 @@ try{
     // (approximate by scaling base measurements; textarea itself cannot vary per-line font size).
     let _mdScaleX = 1;
     // NOTE: scale is based on the original line (heading level markers still define scale).
-    try{ if (_mdRichActive()) _mdScaleX = _mdLineScale(line0) || 1; }catch{ _mdScaleX = 1; }
+    try{ if (_mdRichActive()) _mdScaleX = _mdIsCodeRow ? 1 : (_mdLineScale(line0) || 1); }catch{ _mdScaleX = 1; }
     // Expand tabs using pixel-based tab stops (columns measured in space-width units) (#507)
     // This keeps overlay caret aligned with the textarea's native rendering even after full-width chars.
     const _expandTabs = (s)=>{
@@ -16421,7 +16467,27 @@ try{
     try{
       if (_mode === 'NORMAL' && !isViewScroll){
         const line = (_splitLines()[caretRow] || '');
-        const link = _detectUrlAt(line, caretCol);
+        let link = null;
+        try{
+          let suppressRaw = false;
+          const mdRich = (function(){ try{ return _mdRichActive(); }catch{ return false; } })();
+          if (mdRich){
+            const lines = _splitLines();
+            const fc = _mdCodeFenceEnsureCache && _mdCodeFenceEnsureCache(false, lines);
+            const fk = (fc && fc.kind && (caretRow|0) >= 0 && (caretRow|0) < (lines.length|0)) ? (fc.kind[caretRow|0]|0) : 0;
+            if ((fk|0) === 2){
+              suppressRaw = true;
+            } else {
+              const draftMode = !!(_mdDraftEditEnabled && _mdDraftEditEnabled());
+              if (draftMode){
+                const mdInline = _detectMdInlineLinkAt && _detectMdInlineLinkAt(String(line||''), caretCol|0);
+                if (mdInline) suppressRaw = true;
+              }
+            }
+          }
+          if (!suppressRaw) link = _detectUrlAt(line, caretCol, caretRow);
+        }catch{ link = _detectUrlAt(line, caretCol, caretRow); }
+
         if (link){
           _hoverLink = { ...link, r: caretRow };
           _renderLinkHover();
@@ -28200,7 +28266,25 @@ try{
     try{
       const lines = _splitLines();
       const line = lines[caretRow] || '';
-      const hit = _detectUrlAt(line, caretCol, caretRow);
+      let hit = null;
+      try{
+        let suppressRaw = false;
+        const mdRich = (function(){ try{ return _mdRichActive(); }catch{ return false; } })();
+        if (mdRich){
+          const fc = _mdCodeFenceEnsureCache && _mdCodeFenceEnsureCache(false, lines);
+          const fk = (fc && fc.kind && (caretRow|0) >= 0 && (caretRow|0) < (lines.length|0)) ? (fc.kind[caretRow|0]|0) : 0;
+          if ((fk|0) === 2){
+            suppressRaw = true;
+          } else {
+            const draftMode = !!(_mdDraftEditEnabled && _mdDraftEditEnabled());
+            if (draftMode){
+              const mdInline = _detectMdInlineLinkAt && _detectMdInlineLinkAt(String(line||''), caretCol|0);
+              if (mdInline) suppressRaw = true;
+            }
+          }
+        }
+        if (!suppressRaw) hit = _detectUrlAt(line, caretCol, caretRow);
+      }catch{ hit = _detectUrlAt(line, caretCol, caretRow); }
       if (hit){
         e.preventDefault(); e.stopPropagation();
         if (hit.kind === 'grep-jump-static'){
