@@ -7152,17 +7152,59 @@ try{
       let dispC1 = c1, dispC2 = c2;
       try{
         if (mdRich){
-          // Vertical: accumulate per-line heights from current topLine.
+          // Vertical: prefer renderer geometry so hover highlight stays aligned under variable row heights
+          // (headings, code blocks, loose gaps/padding). Align to the *text box* (rowY + padTop) and use rowLh.
           const startIdx = Math.max(0, (topLine|0) - 1);
           const targetIdx = Math.max(0, Math.min(lines.length-1, _hoverLink.r|0));
-          let y = 0;
-          for (let r=startIdx; r<targetIdx; r++){
-            const infoR = _mdLineLayoutInfoAtRow(lines, r, (r === (caretRow|0)));
-            y += (infoR && infoR.lineHeightPx) ? (infoR.lineHeightPx||LINE_HEIGHT) : LINE_HEIGHT;
+          let usedGeom = false;
+          try{
+            const g = _mdRenderGeom;
+            const idx = ((targetIdx|0) - (startIdx|0))|0;
+            if (g && (g.start|0) === (startIdx|0) && Array.isArray(g.rowY) && Array.isArray(g.rowLh) && idx >= 0 && idx < (g.rowY.length|0)){
+              const yy = g.rowY[idx];
+              const lh = g.rowLh[idx];
+              if (Number.isFinite(yy) && Number.isFinite(lh)){
+                let padTop = 0;
+                try{ if (Array.isArray(g.rowPadTop) && Number.isFinite(g.rowPadTop[idx])) padTop = (g.rowPadTop[idx]|0); }catch{ padTop = 0; }
+                yTop = (yy|0) + (padTop|0);
+                rowHeightPx = (lh|0);
+                usedGeom = true;
+              }
+            }
+          }catch{ usedGeom = false; }
+          if (!usedGeom){
+            // Fallback: emulate renderer height accumulation (wrap count + padding + overrides).
+            let y = 0;
+            for (let r=startIdx; r<targetIdx; r++){
+              const a = _mdLineLayoutInfoAtRow(lines, r, (r === (caretRow|0)));
+              const lh = (a && a.lineHeightPx) ? (a.lineHeightPx|0) : (LINE_HEIGHT|0);
+              const padTopPx = (a && Number.isFinite(a.blockPadTopPx)) ? (a.blockPadTopPx|0) : 0;
+              const padBottomPx = (a && Number.isFinite(a.blockPadBottomPx)) ? (a.blockPadBottomPx|0) : 0;
+              let hPx = (lh|0);
+              let hasOverride = false;
+              try{ if (a && Number.isFinite(a.blockHeightOverridePx)){ hPx = (a.blockHeightOverridePx|0); hasOverride = true; } }catch{ hasOverride = false; }
+              if (_wrapEnabled && _wrapEnabled() && !hasOverride){
+                try{
+                  let baseFontPx = 16;
+                  try{ baseFontPx = parseFloat(getComputedStyle(editor).fontSize)||baseFontPx; }catch{}
+                  const sc = (a && a.scale) ? (+a.scale || 1) : 1;
+                  const fs = Math.max(6, Math.round(baseFontPx * sc));
+                  let wPx = 80;
+                  try{ wPx = +(_wrapAvailWidthPx()||80); }catch{ wPx = 80; }
+                  const n0 = _wrapProbeLineCountStyled(String(lines[r]||''), wPx|0, lh|0, fs|0);
+                  const n = (Number.isFinite(n0) && (n0|0) > 0) ? (n0|0) : 1;
+                  hPx = Math.max(1, (n|0)) * (lh|0);
+                }catch{ hPx = (lh|0); }
+              }
+              y += (hPx|0) + (padTopPx|0) + (padBottomPx|0);
+            }
+            yTop = (y|0);
+            const infoT = _mdLineLayoutInfoAtRow(lines, targetIdx, (targetIdx === (caretRow|0)));
+            const lhT = (infoT && infoT.lineHeightPx) ? (infoT.lineHeightPx|0) : (LINE_HEIGHT|0);
+            const padTopT = (infoT && Number.isFinite(infoT.blockPadTopPx)) ? (infoT.blockPadTopPx|0) : 0;
+            yTop = (yTop|0) + (padTopT|0);
+            rowHeightPx = (lhT|0);
           }
-          yTop = y;
-          const infoT = _mdLineLayoutInfoAtRow(lines, targetIdx, (targetIdx === (caretRow|0)));
-          rowHeightPx = (infoT && infoT.lineHeightPx) ? (infoT.lineHeightPx||LINE_HEIGHT) : LINE_HEIGHT;
 
           // Horizontal: support display-space highlight for markdown clean rendering (inline link collapse).
           if (_hoverLink && typeof _hoverLink.dispLine === 'string' && Number.isFinite(_hoverLink.dispC1) && Number.isFinite(_hoverLink.dispC2)){
@@ -7208,7 +7250,8 @@ try{
 
       // Wrap mode: map logical rows to visual Y.
       try{
-        if (_wrapEnabled()){
+        // md-rich uses variable per-row heights; do NOT remap to fixed visual grid here.
+        if (!mdRich && _wrapEnabled()){
           const topV1 = _topVisualLine1();
           const v1 = _wrapVisualStartLine1ForRow(_hoverLink.r|0);
           yTop = (v1 - topV1) * LINE_HEIGHT;
