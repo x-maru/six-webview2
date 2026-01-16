@@ -16039,7 +16039,85 @@ try{
         return shiftAfter;
       }catch{ return 0; }
     };
+
+    // #1847: md-rich inline-code (`code`) uses a bordered inline box (.md-icode).
+    // The box border adds extra width that is not represented in the plain-text width measurement,
+    // causing the overlay caret to drift left by a small amount per inline-code span.
+    // Compensate by adding the total border width for each *completed* inline-code span before the caret.
+    const _mdIcodeExtraXpx = (colN)=>{
+      try{
+        if (!(_mdRichActive && _mdRichActive())) return 0;
+        if (!(_mdHideSymbolsForRow && _mdHideSymbolsForRow(true))) return 0;
+        const s = String(line||'');
+        if (!s || s.indexOf('`') === -1) return 0;
+        const col = Math.max(0, Math.min((s.length|0), (colN|0)));
+
+        // Cache border extra width (L+R) in CSS px. Must be measured under #textLayer.
+        let borderPx = 0;
+        try{
+          const key = '__sixMdIcodeBorderExtraPx';
+          const cached = (window && Number.isFinite(window[key])) ? (+window[key]||0) : null;
+          if (cached != null){
+            borderPx = Math.max(0, +cached||0);
+          } else {
+            const host = (typeof _mdTextLayer !== 'undefined' && _mdTextLayer) ? _mdTextLayer : null;
+            if (!host) return 0;
+            const el = document.createElement('span');
+            el.className = 'md-icode';
+            el.textContent = 'x';
+            el.style.position = 'absolute';
+            el.style.left = '0';
+            el.style.top = '0';
+            el.style.visibility = 'hidden';
+            host.appendChild(el);
+            try{
+              const cs = getComputedStyle(el);
+              const bl = parseFloat(cs.borderLeftWidth||'0')||0;
+              const br = parseFloat(cs.borderRightWidth||'0')||0;
+              borderPx = Math.max(0, (bl + br));
+              try{ if (window) window[key] = borderPx; }catch{}
+            }finally{
+              try{ host.removeChild(el); }catch{}
+            }
+          }
+        }catch{ borderPx = 0; }
+        if (!(borderPx > 0)) return 0;
+
+        // Count completed inline-code spans before col (CommonMark-ish backtick runs).
+        let count = 0;
+        let i = 0;
+        while ((i|0) < (col|0)){
+          if (s[i] !== '`'){ i++; continue; }
+          let n = 1;
+          while ((i+n) < (s.length|0) && s[i+n] === '`') n++;
+          const delim = n|0;
+          let j = (i + delim)|0;
+          let matched = false;
+          while (j < (s.length|0)){
+            const k = s.indexOf('`', j|0);
+            if (k < 0) break;
+            let m = 1;
+            while ((k+m) < (s.length|0) && s[k+m] === '`') m++;
+            if ((m|0) === (delim|0)){
+              const end = (k + m)|0;
+              if ((end|0) <= (col|0)) count++;
+              i = end|0;
+              matched = true;
+              break;
+            }
+            j = (k + m)|0;
+          }
+          if (!matched){
+            // Unmatched opener; advance past it.
+            i = (i + delim)|0;
+          }
+        }
+        if (!(count > 0)) return 0;
+        return (count|0) * borderPx;
+      }catch{ return 0; }
+    };
     try{ x += _mdOlExtraXpx(caretCol|0); }catch{}
+    try{ x += _mdIcodeExtraXpx(caretColVis|0); }catch{}
 
     // Cache wrap-probe params for caret (used by both x and next-char width).
     let _wrapWpxForCaret = null;
@@ -16099,6 +16177,7 @@ try{
           : _wrapProbeXFromCol(line, caretColVis|0, wPx);
         if (Number.isFinite(xp)) x = xp;
         try{ x += _mdOlExtraXpx(caretCol|0); }catch{}
+        try{ x += _mdIcodeExtraXpx(caretColVis|0); }catch{}
       }
     }catch{}
   // Make caret height match the full line box
@@ -16114,6 +16193,7 @@ try{
       // width of the next character box
       let x2 = _measureXAbsToCol((caretColVis+1)|0);
       try{ x2 += _mdOlExtraXpx((caretCol|0) + 1); }catch{}
+      try{ x2 += _mdIcodeExtraXpx((caretColVis+1)|0); }catch{}
       try{
         if (_wrapEnabled()){
           const c = _wrapEnsureCache(false);
@@ -16124,6 +16204,7 @@ try{
             : _wrapProbeXFromCol(line, (caretColVis+1)|0, wPx);
           if (Number.isFinite(xp2)) x2 = xp2;
           try{ x2 += _mdOlExtraXpx((caretCol|0) + 1); }catch{}
+          try{ x2 += _mdIcodeExtraXpx((caretColVis+1)|0); }catch{}
         }
       }catch{}
       chW = Math.max(0, x2 - x);
