@@ -7144,7 +7144,15 @@ try{
       const c2 = Math.max(c1, Math.min(line.length, _hoverLink.c2|0));
 
       const mdRich = (function(){ try{ return _mdRichActive(); }catch{ return false; } })();
-      const mdScaleX = (function(){ try{ return mdRich ? (_mdLineScale(line)||1) : 1; }catch{ return 1; } })();
+      let _mdIsCodeRow = false;
+      try{
+        if (mdRich){
+          const fc = _mdCodeFenceEnsureCache && _mdCodeFenceEnsureCache(false, lines);
+          const fk = (fc && fc.kind && (_hoverLink.r|0) >= 0 && (_hoverLink.r|0) < (lines.length|0)) ? (fc.kind[_hoverLink.r|0]|0) : 0;
+          _mdIsCodeRow = ((fk|0) === 2);
+        }
+      }catch{ _mdIsCodeRow = false; }
+      const mdScaleX = (function(){ try{ return mdRich ? ((_mdIsCodeRow ? 1 : (_mdLineScale(line)||1))||1) : 1; }catch{ return 1; } })();
       let yTop = ((row1 - topLine) * LINE_HEIGHT);
       let rowHeightPx = LINE_HEIGHT;
       let dispLine = line;
@@ -7561,11 +7569,23 @@ try{
       const line = String(lines[row]||'');
       // md-rich: per-line scale + optional hidden heading prefix affects X->col mapping.
       const mdRich = (function(){ try{ return _mdRichActive(); }catch{ return false; } })();
-      const mdScaleX = (function(){ try{ return mdRich ? (_mdLineScale(line)||1) : 1; }catch{ return 1; } })();
+      let _mdIsCodeRow = false;
+      try{
+        if (mdRich){
+          const fc = _mdCodeFenceEnsureCache && _mdCodeFenceEnsureCache(false, lines);
+          const fk = (fc && fc.kind && (row|0) >= 0 && (row|0) < (lines.length|0)) ? (fc.kind[row|0]|0) : 0;
+          _mdIsCodeRow = ((fk|0) === 2);
+        }
+      }catch{ _mdIsCodeRow = false; }
+      const mdScaleX = (function(){ try{ return mdRich ? ((_mdIsCodeRow ? 1 : (_mdLineScale(line)||1))||1) : 1; }catch{ return 1; } })();
       let prefixLen = 0;
       let dispLine = line;
       try{
         if (mdRich){
+          // Fenced code block content rows are displayed as raw text even in clean mode;
+          // do not apply clean-display symbol hiding/collapse or markdown link hit-testing.
+          if (_mdIsCodeRow){ prefixLen = 0; dispLine = line; }
+          else {
           const isActiveRow = (row === (caretRow|0));
           const hide = _mdHideSymbolsForRow(isActiveRow);
           if (hide){
@@ -7573,6 +7593,7 @@ try{
             if (p>0){ prefixLen = p; dispLine = line.slice(p); }
 
             // #1767: hide root depth-1 slack (<=3) from all levels in clean display.
+          }
             try{
               if ((prefixLen|0) === 0){
                 _mdListEnsureCache && _mdListEnsureCache(false);
@@ -7614,6 +7635,7 @@ try{
         if (mdRich){
           const isActiveRow = (row === (caretRow|0));
           hideSymbols = !!(_mdHideSymbolsForRow && _mdHideSymbolsForRow(!!isActiveRow));
+          if (_mdIsCodeRow) hideSymbols = false;
         }
       }catch{ hideSymbols = false; }
 
@@ -7621,7 +7643,7 @@ try{
       let collapse = null;
       let dispMeasure = dispLine;
       try{
-        if (mdRich && hideSymbols){
+        if (mdRich && hideSymbols && !_mdIsCodeRow){
           collapse = _mdCleanDisplayCollapseInfo(dispLine);
           if (collapse && typeof collapse.dispText === 'string') dispMeasure = String(collapse.dispText||'');
         }
@@ -7804,6 +7826,20 @@ try{
         const c = Math.max(0, Math.min(line.length, (prefixLen|0) + (cDisp|0)));
         hit = _detectUrlAt(line, c, row);
       }
+      if (hit){
+        // md-rich fenced code blocks: never react to markdown inline link syntax ([text](url)).
+        // Even though URLs may be present as raw text, treat the whole construct as inert.
+        try{
+          if (mdRich && _mdIsCodeRow){
+            const cRaw = Math.max(0, Math.min(line.length|0, (prefixLen|0) + (cDisp|0)));
+            const mdInline = _detectMdInlineLinkAt && _detectMdInlineLinkAt(line, cRaw|0);
+            if (mdInline){
+              hit = null;
+            }
+          }
+        }catch{}
+      }
+
       if (hit){
         const same = _hoverLink && _hoverLink.r===row && _hoverLink.c1===hit.c1 && _hoverLink.c2===hit.c2 && _hoverLink.url===hit.url && _hoverLink.kind===hit.kind && String(_hoverLink.tooltip||'')===String(hit.tooltip||'');
         // Copy all properties from hit to support extra fields like bName/line/col
@@ -9897,6 +9933,7 @@ try{
       const line = String(lines[idx]||'');
 
       const mdRich = !!(function(){ try{ return _mdRichActive(); }catch{ return false; } })();
+      let _mdIsCodeRow = false;
       let rowHeightPx = LINE_HEIGHT;
       let yTop = (row1 - topLine) * LINE_HEIGHT;
       let scale = 1;
@@ -9906,6 +9943,7 @@ try{
         try{
           const isActiveRow = (row1 === ((caretRow|0) + 1));
           const info = _mdLineLayoutInfoAtRow(lines, idx, isActiveRow);
+          try{ _mdIsCodeRow = !!(info && info.isCodeRow); }catch{ _mdIsCodeRow = false; }
           scale = info.scale || 1;
           rowHeightPx = info.lineHeightPx || LINE_HEIGHT;
           // #1730: Clean-mode loose-gap blank rows are fully collapsed (height=0). Do not render listchars for them.
@@ -9959,11 +9997,20 @@ try{
       try{
         if (mdRich){
           const isActiveRow = (row1 === ((caretRow|0) + 1));
-          hide = !!(_mdHideSymbolsForRow && _mdHideSymbolsForRow(!!isActiveRow));
-          if (hide){
-            const p = _mdHeadingPrefixLen(line)|0;
-            if (p>0){ dispPrefix = p; dispLine = line.slice(p); }
-          }
+          // Fenced code block content: always show raw text; do not apply clean-display hiding/collapse.
+          if (_mdIsCodeRow){
+            hide = false;
+            dispLine = line;
+            dispPrefix = 0;
+            _mdUlSkipSpaceCol = -1;
+            ulSrc = null;
+            ulDisp = null;
+          } else {
+            hide = !!(_mdHideSymbolsForRow && _mdHideSymbolsForRow(!!isActiveRow));
+            if (hide){
+              const p = _mdHeadingPrefixLen(line)|0;
+              if (p>0){ dispPrefix = p; dispLine = line.slice(p); }
+            }
 
           // #1767: subtract depth-1 slack (<=3) from the root list for display,
           // preserving indentation for deeper levels.
@@ -10006,12 +10053,13 @@ try{
               }
             }
           }catch{ _mdUlSkipSpaceCol = -1; }
+          }
         }
-      }catch{ dispLine = line; dispPrefix = 0; _mdUlSkipSpaceCol = -1; ulSrc = null; ulDisp = null; hide = false; }
+      }catch{ dispLine = line; dispPrefix = 0; _mdUlSkipSpaceCol = -1; ulSrc = null; ulDisp = null; hide = false; _mdIsCodeRow = false; }
 
       // md-rich clean display: collapse inline links so EOL/listchars align with visible text.
       try{
-        if (mdRich && hide){
+        if (mdRich && hide && !_mdIsCodeRow){
           const col = _mdCleanDisplayCollapseInfo ? _mdCleanDisplayCollapseInfo(dispLine) : null;
           if (col && typeof col.dispText === 'string') dispLine = String(col.dispText||'');
         }
