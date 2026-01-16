@@ -763,7 +763,11 @@ try{
       if (!_mdRichActive()) return false;
       const draft = _mdDraftEditEnabled();
       if (!draft) return true; // clean
-      return !isActiveRow;
+      // Draft mode policy: keep the caret row raw even in NORMAL.
+      // (Regression noted around 5b63fae; 6862e1d behavior.)
+      const m = String(_mode||'');
+      if (m === 'INSERT' || m === 'NORMAL' || m === 'VISUAL') return !isActiveRow;
+      return true;
     }catch{ return false; }
   }
 
@@ -2876,17 +2880,65 @@ try{
       try{ document.body.classList.toggle('md-rich', on); }catch{}
       // markdown mode forces wrap-on behavior; keep wrap visual state synced.
       try{ _wrapApplyVisualState && _wrapApplyVisualState({ skipRender:true }); }catch{}
+      // Switching md-rich changes which layer's computed font metrics we should measure against.
+      // Resync immediately to avoid 1-2ch caret/EOL drift after toggles.
+      try{ _syncEditorMetrics && _syncEditorMetrics(); }catch{}
       try{ _mdWrapInvalidateCache('md-apply'); _mdWrapEnsureCache(true); }catch{}
       try{ _mdSyncEofPadComp(); }catch{}
       _mdEnsureTextLayer();
       if (_mdTextLayer){ _mdTextLayer.style.display = on ? '' : 'none'; }
       if (_mdBgLayer){ _mdBgLayer.style.display = on ? '' : 'none'; }
+      if (!on){
+        // Leaving markdown-rich: clear stale geometry/tools so non-md layout can't accidentally
+        // depend on the last md render.
+        try{ _mdRenderGeom = null; }catch{}
+        try{ _mdCodeToolsHide && _mdCodeToolsHide(); }catch{}
+        try{ _mdDraftLastActiveRow1ForList = null; }catch{}
+
+        // markdown-off + wrap-on: ensure the non-md wrap cache is rebuilt and listchars refreshes
+        // immediately (skipRender path would otherwise wait for the post-layout pass).
+        try{
+          if (_wrapEnabled && _wrapEnabled()){
+            // Markdown toggles can change paddings used by wrap probes; clear cached snapshot.
+            try{ if (_wrapAvailWidthPx && _wrapAvailWidthPx._pad) _wrapAvailWidthPx._pad = null; }catch{}
+            try{ _wrapInvalidateCache && _wrapInvalidateCache('md-off'); }catch{}
+            try{ _wrapEnsureCache && _wrapEnsureCache(true); }catch{}
+            try{ clampViewportExactLines && clampViewportExactLines(); }catch{}
+            try{ if (typeof _scheduleListCharsRender === 'function') _scheduleListCharsRender('md-off'); }catch{ try{ _renderListChars && _renderListChars(); }catch{} }
+          }
+        }catch{}
+      }
       if (on){
         try{ _mdRenderTextLayer(); }catch{}
         try{ updateGutter({ force:true }); }catch{}
         try{ _repositionCaret({ force:true }); }catch{}
         try{ _renderVisSelOverlay && _renderVisSelOverlay(); }catch{}
       }
+
+      // Post-layout refresh: switching md on/off changes CSS classes, wrap forcing, and layer display.
+      // Some engines apply these metrics asynchronously; ensure wrap/listchars/caret are recalculated
+      // on the next frames so EOL markers and caret ranges don't get stuck until restart.
+      try{
+        if (window && window.requestAnimationFrame){
+          const token = Date.now();
+          _mdApplyVisualState._postToken = token;
+          requestAnimationFrame(()=>{
+            requestAnimationFrame(()=>{
+              try{ if (_mdApplyVisualState._postToken !== token) return; }catch{}
+              try{ if (window && window._imeComposing===true) return; }catch{}
+              try{ if (_wrapAvailWidthPx && _wrapAvailWidthPx._pad) _wrapAvailWidthPx._pad = null; }catch{}
+              try{ _syncEditorMetrics && _syncEditorMetrics(); }catch{}
+              try{ _wrapInvalidateCache('md-post'); _wrapEnsureCache(true); }catch{}
+              try{ _mdWrapInvalidateCache('md-post'); _mdWrapEnsureCache(true); }catch{}
+              try{ _mdListInvalidateCache && _mdListInvalidateCache('md-post'); }catch{}
+              try{ _mdDraftLastActiveRow1ForList = null; }catch{}
+              try{ _repositionCaret({ force:true }); }catch{}
+              try{ updateGutter({ force:true }); }catch{}
+              try{ if (typeof _scheduleListCharsRender === 'function') _scheduleListCharsRender('md-post'); else _renderListChars && _renderListChars(); }catch{ try{ _renderListChars && _renderListChars(); }catch{} }
+            });
+          });
+        }
+      }catch{}
     }catch{}
   }
   const tabbarEl   = document.getElementById('tabbar');
@@ -2897,6 +2949,9 @@ try{
   const posinfoEl = document.getElementById('posinfo');
   // ユーザー水平ホイール直後の自動水平再センタリング抑止ガード (#868)
   let _userHScrollGuardUntil = 0;
+  // Keyboard navigation can produce discrete scroll events (ensureScrolloff).
+  // Use this hint to debounce scroll-settle listchars rerenders for j/k/ArrowUp/Down taps.
+  let _kbdNavScrollUntil = 0;
   // NORMAL/VISUAL モードで ctrl なしの横方向 wheel (チルト) により明示的に scrollLeft を加算しガードセット
   try{
     viewport && viewport.addEventListener('wheel', (e)=>{
@@ -9920,6 +9975,10 @@ try{
   // Track the scrollLeft at which listchars were last fully rendered.
   // Used to cheaply follow horizontal scrolling without full re-render.
   let _listRenderedScrollLeft = 0;
+  // Track the viewport-top anchor used for the last full listchars render.
+  // Used to skip redundant full rerenders on scroll-settle when only sub-line
+  // remainder compensation changed (common in md-rich+wrap mapping).
+  let _listRenderedTopKey = '';
   // In markdown draft mode, only the active (caret) row shows raw symbols.
   // Track active row to refresh listchars/EOL when the caret row changes.
   let _mdDraftLastActiveRow1ForList = null;
@@ -10498,6 +10557,14 @@ try{
       const vis = _visibleLinesExact();
       const topLine = _topLine();
 
+      const _listTopKeyNow = ()=>{
+        try{
+          if (_mdRichActive && _mdRichActive()) return 'md:' + String((_topLine()|0));
+          if (_wrapEnabled && _wrapEnabled()) return 'w:' + String((_topVisualLine1()|0));
+          return 'n:' + String((_topLine()|0));
+        }catch{ return ''; }
+      };
+
       // markdown-rich: follow _mdRenderTextLayer (logical rows; wrap is handled by md layer)
       try{
         if (_mdRichActive && _mdRichActive()){
@@ -10507,6 +10574,7 @@ try{
           for (let row = (topLine|0); row <= (endLine|0); row++){
             _renderListCharsRow(row, lines, topLine, realTotal);
           }
+          try{ _listRenderedTopKey = _listTopKeyNow(); }catch{}
           return;
         }
       }catch{}
@@ -10515,6 +10583,9 @@ try{
       // For wrap mode, iterate logical rows that intersect the current visual viewport.
       try{
         if (_wrapEnabled()){
+          // Ensure wrap cache exists before mapping visual lines -> logical rows.
+          // Without this, listchars can lag behind immediately after toggles.
+          try{ _wrapEnsureCache && _wrapEnsureCache(false); }catch{}
           const topV1 = _topVisualLine1();
           const endV1 = (topV1|0) + (vis|0) - 1;
           const sInfo = _wrapRowFromVisualLine1(topV1|0);
@@ -10527,6 +10598,7 @@ try{
           for (let row = startRow1; row <= endRow1; row++){
             _renderListCharsRow(row, lines, topLine, realTotal);
           }
+          try{ _listRenderedTopKey = _listTopKeyNow(); }catch{}
           return;
         }
       }catch{}
@@ -10535,6 +10607,7 @@ try{
       for (let row = topLine; row <= endLine; row++){
         _renderListCharsRow(row, lines, topLine, realTotal);
       }
+      try{ _listRenderedTopKey = _listTopKeyNow(); }catch{}
     }catch{}
   }
 
@@ -16434,7 +16507,7 @@ try{
     try{
       const mdRich = _mdRichActive();
       const draft = _mdDraftEditEnabled();
-      if (_optList && mdRich && draft && !(window && window._imeComposing===true)){
+      if (_optList && mdRich && draft && (_mode === 'INSERT' || _mode === 'NORMAL') && !(window && window._imeComposing===true)){
         const curRow1 = (caretRow|0) + 1;
         if (_mdDraftLastActiveRow1ForList == null) _mdDraftLastActiveRow1ForList = curRow1;
         if (_mdDraftLastActiveRow1ForList !== curRow1){
@@ -17833,12 +17906,19 @@ try{
           if (mdNow){
             // md-rich + wrap-on uses effective↔physical mapping; refresh compensation.
             try{ if (typeof _mdSyncEofPadComp === 'function') _mdSyncEofPadComp(); }catch{}
+                // If we were animating or settling scroll earlier, we might have left is-scrolling
+                // stuck which prevents listchars from rendering at all.
+                try{ if (document && document.body && document.body.classList) document.body.classList.remove('is-scrolling'); }catch{}
+                try{ if (_listScrollRetryTimer){ clearTimeout(_listScrollRetryTimer); _listScrollRetryTimer = 0; } }catch{}
+                try{ if (_listRenderRaf){ cancelAnimationFrame(_listRenderRaf); _listRenderRaf = 0; } }catch{}
+                try{ if (_listLayer) _listLayer.style.visibility = ''; }catch{}
           } else {
             // markdown-off: physical grid compensation
             try{ if (typeof _syncEofPadGridComp === 'function') _syncEofPadGridComp(); }catch{}
           }
           // Force layout read so scrollHeight/clientHeight reflect updated padding.
-          try{ void (editor && editor.scrollHeight); }catch{}
+                // Force an immediate render so listchars does not lag until the next user action.
+                try{ _renderListChars && _renderListChars(); }catch{}
         }
       }catch{}
 
@@ -23831,6 +23911,24 @@ try{
       try{ _incPrevRefresh(); }catch{}
       try{ _updatePosInfo(); }catch{}
     }catch{}
+    try{
+      if (_optList){
+        const keyNow = (function(){
+          try{
+            if (_mdRichActive && _mdRichActive()) return 'md:' + String((_topLine()|0));
+            if (_wrapEnabled && _wrapEnabled()) return 'w:' + String((_topVisualLine1()|0));
+            return 'n:' + String((_topLine()|0));
+          }catch{ return ''; }
+        })();
+        if (keyNow && _listRenderedTopKey && keyNow === _listRenderedTopKey){
+          // Only sub-line remainder / compensated mapping changed; keep DOM and just show it.
+          try{ _listEnsureLayer && _listEnsureLayer(); }catch{}
+          try{ if (_listLayer) _listLayer.style.visibility = ''; }catch{}
+          try{ _listSyncHorizontalScroll && _listSyncHorizontalScroll(); }catch{}
+          return;
+        }
+      }
+    }catch{}
     try{ if (typeof _scheduleListCharsRender === 'function') _scheduleListCharsRender('scrollend'); }catch{}
   }
   const scheduleScrollRender = ()=>{
@@ -23860,6 +23958,7 @@ try{
     // Detect horizontal-only scroll at the event level.
     // (This is what happens when h/l causes the textarea to auto scrollLeft.)
     let _evtMostlyHorizontal = false;
+    let _evtNoop = false;
     try{
       const stNow = (editor && typeof editor.scrollTop === 'number') ? +editor.scrollTop : 0;
       const slNow = (editor && typeof editor.scrollLeft === 'number') ? +editor.scrollLeft : 0;
@@ -23867,12 +23966,18 @@ try{
         const dst = Math.abs(stNow - (+_evtLastST||0));
         const dsl = Math.abs(slNow - (+_evtLastSL||0));
         _evtMostlyHorizontal = (dst <= 0.5 && dsl > 0.5);
+        // Some engines fire scroll events even when scrollTop/Left does not actually change.
+        // Treat those as no-op to avoid triggering scroll-settle rerenders (notably on md-rich NORMAL j/k).
+        _evtNoop = (dst <= 0.5 && dsl <= 0.5);
       } else {
         _evtLastInited = true;
       }
       _evtLastST = stNow;
       _evtLastSL = slNow;
     }catch{}
+
+    // No-op scroll: ignore completely.
+    if (_evtNoop) return;
 
     // Horizontal-only scroll: keep listchars by shifting the layer instead of clearing+full rerender.
     if (_evtMostlyHorizontal){
@@ -23891,7 +23996,8 @@ try{
         // re-render once when scrolling settles.
         try{ if (_optList){ _listEnsureLayer && _listEnsureLayer(); if (_listLayer) _listLayer.style.visibility = 'hidden'; } }catch{}
         try{ if (_scrollSettleTimer) clearTimeout(_scrollSettleTimer); }catch{}
-        _scrollSettleTimer = setTimeout(_scrollSettleCheck, 70);
+        const settleDelay = (Date.now() < (_kbdNavScrollUntil|0)) ? 160 : 70;
+        _scrollSettleTimer = setTimeout(_scrollSettleCheck, settleDelay|0);
       }catch{}
     }
 
@@ -25567,6 +25673,17 @@ try{
   editor.addEventListener('keyup', (e)=>{
     const isComp = !!(window && window._imeComposing===true);
     try{ if (_optDebugKeys) _debugPush({ t:Date.now(), type:'keyup', mode:_mode, key:e.key, code:e.code, keyCode:e.keyCode, which:e.which, ctrl:e.ctrlKey, alt:e.altKey, shift:e.shiftKey, meta:e.metaKey, isComp }); }catch{}
+
+    // md-rich NORMAL: rapid j/k/ArrowUp/ArrowDown taps often cause discrete scroll events.
+    // Hint the scroll scheduler to debounce expensive scroll-settle listchars rerenders.
+    try{
+      const mdNow = !!(function(){ try{ return _mdRichActive && _mdRichActive(); }catch{ return false; } })();
+      if (mdNow && _mode === 'NORMAL'){
+        const k0 = String((e && e.key) || '');
+        const isNav = (k0 === 'j' || k0 === 'k' || k0 === 'ArrowUp' || k0 === 'ArrowDown' || k0 === 'Up' || k0 === 'Down' || k0 === 'PageUp' || k0 === 'PageDown');
+        if (isNav) _kbdNavScrollUntil = Date.now() + 240;
+      }
+    }catch{}
     try{ if (e && e.shiftKey) _shiftHeld = true; }catch{}
     try{ if (e && e.key==='Shift') _shiftHeld = false; }catch{}
 
@@ -26062,6 +26179,16 @@ try{
     // Globally consume Ctrl+U to avoid Edge opening view-source window (#447)
     if (e && e.ctrlKey && !e.altKey && !e.metaKey && (e.key==='u' || e.key==='U')){ try{ e.preventDefault(); e.stopPropagation(); }catch{} return; }
     try{ if (_optDebugKeys) _debugPush({ t:Date.now(), type:'keydown', mode:_mode, key:e.key, code:e.code, keyCode:e.keyCode, which:e.which, ctrl:e.ctrlKey, alt:e.altKey, shift:e.shiftKey, meta:e.metaKey, isComp:_imeComposing }); }catch{}
+
+    // Same debounce hint on keydown.
+    try{
+      const mdNow = !!(function(){ try{ return _mdRichActive && _mdRichActive(); }catch{ return false; } })();
+      if (mdNow && _mode === 'NORMAL'){
+        const k0 = String((e && e.key) || '');
+        const isNav = (k0 === 'j' || k0 === 'k' || k0 === 'ArrowUp' || k0 === 'ArrowDown' || k0 === 'Up' || k0 === 'Down' || k0 === 'PageUp' || k0 === 'PageDown');
+        if (isNav) _kbdNavScrollUntil = Date.now() + 240;
+      }
+    }catch{}
     // When debugkeys is enabled, also snapshot native selection vs overlay caret for key steps.
     try{
       if (_optDebugKeys && _mode === 'INSERT'){
