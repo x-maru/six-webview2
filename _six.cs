@@ -29,6 +29,341 @@ public class __CLASSNAME__ {
   [DllImport("imm32.dll")] private static extern IntPtr ImmGetDefaultIMEWnd(IntPtr hWnd);
   [DllImport("kernel32.dll")] private static extern uint GetCurrentThreadId();
   private const uint WM_IME_CONTROL = 0x0283; private const int IMC_SETOPENSTATUS = 0x0006;
+
+  // --- Color picker helpers (global click -> screen pixel -> clipboard) ---
+  private const int VK_LBUTTON = 0x01;
+  private const uint CF_UNICODETEXT = 13;
+  private const uint GMEM_MOVEABLE = 0x0002;
+  [StructLayout(LayoutKind.Sequential)] private struct POINT { public int X; public int Y; }
+  [DllImport("user32.dll")] private static extern short GetAsyncKeyState(int vKey);
+  [DllImport("user32.dll")] private static extern bool GetCursorPos(out POINT lpPoint);
+  [DllImport("user32.dll")] private static extern IntPtr GetDC(IntPtr hWnd);
+  [DllImport("user32.dll")] private static extern int ReleaseDC(IntPtr hWnd, IntPtr hDC);
+  [DllImport("gdi32.dll")] private static extern uint GetPixel(IntPtr hdc, int nXPos, int nYPos);
+  [DllImport("user32.dll")] private static extern bool OpenClipboard(IntPtr hWndNewOwner);
+  [DllImport("user32.dll")] private static extern bool CloseClipboard();
+  [DllImport("user32.dll")] private static extern bool EmptyClipboard();
+  [DllImport("user32.dll")] private static extern IntPtr SetClipboardData(uint uFormat, IntPtr hMem);
+  [DllImport("kernel32.dll")] private static extern IntPtr GlobalAlloc(uint uFlags, UIntPtr dwBytes);
+  [DllImport("kernel32.dll")] private static extern IntPtr GlobalLock(IntPtr hMem);
+  [DllImport("kernel32.dll")] private static extern bool GlobalUnlock(IntPtr hMem);
+
+  private static readonly object _colorPickLock = new object();
+  private static volatile bool _colorPickPending = false;
+  private static volatile bool _colorPickCancel = false;
+  private static volatile string _colorPickText = null;
+  private static volatile bool _colorPickClipboardOk = false;
+  private static long _colorPickDoneAt = 0;
+
+  private static bool TrySetClipboardTextNative(string text){
+    try{
+      var s = text ?? "";
+      // UTF-16LE with terminating NUL
+      byte[] bytes;
+      try{ bytes = Encoding.Unicode.GetBytes(s + "\0"); }catch{ bytes = new byte[]{0,0}; }
+      // Some apps hold clipboard briefly; retry a little.
+      for(int i=0;i<8;i++){
+        bool opened = false;
+        try{
+          opened = OpenClipboard(IntPtr.Zero);
+          if (!opened){ try{ Thread.Sleep(10); }catch{} continue; }
+          try{ EmptyClipboard(); }catch{}
+          IntPtr hMem = GlobalAlloc(GMEM_MOVEABLE, (UIntPtr)bytes.Length);
+          if (hMem == IntPtr.Zero){ try{ CloseClipboard(); }catch{} return false; }
+          IntPtr pMem = GlobalLock(hMem);
+          if (pMem == IntPtr.Zero){ try{ CloseClipboard(); }catch{} return false; }
+          try{
+            Marshal.Copy(bytes, 0, pMem, bytes.Length);
+          } finally {
+            try{ GlobalUnlock(hMem); }catch{}
+          }
+          IntPtr res = SetClipboardData(CF_UNICODETEXT, hMem);
+          // On success, system owns hMem.
+          try{ CloseClipboard(); }catch{}
+          return (res != IntPtr.Zero);
+        } catch {
+          try{ if (opened) CloseClipboard(); }catch{}
+          try{ Thread.Sleep(10); }catch{}
+        }
+      }
+      return false;
+    }catch{ return false; }
+  }
+  private static bool TrySetClipboardText(string text){
+    try{
+      // Prefer native path (no STA dependency).
+      if (TrySetClipboardTextNative(text)) return true;
+    }catch{}
+    // Fallback: System.Windows.Forms (may require STA; keep best-effort).
+    try{
+      var t = Type.GetType("System.Windows.Forms.Clipboard, System.Windows.Forms", throwOnError:false);
+      if (t == null) return false;
+      var m = t.GetMethod("SetText", new[]{ typeof(string) });
+      if (m == null) return false;
+      m.Invoke(null, new object[]{ text ?? "" });
+      return true;
+    }catch{ return false; }
+  }
+  private static string CssColorNameByHex6(string hex6Lower){
+    try{
+      var h = (hex6Lower ?? "").Trim().ToLowerInvariant();
+      if (h.Length != 6) return null;
+      int r=0,g=0,b=0;
+      try{
+        r = int.Parse(h.Substring(0,2), System.Globalization.NumberStyles.HexNumber);
+        g = int.Parse(h.Substring(2,2), System.Globalization.NumberStyles.HexNumber);
+        b = int.Parse(h.Substring(4,2), System.Globalization.NumberStyles.HexNumber);
+      }catch{ return null; }
+      int key = ((r&255)<<16) | ((g&255)<<8) | (b&255);
+      // Lazy init using System.Drawing.KnownColor (no embedded table).
+      if (_cssNameByRgb == null || _cssNameByRgb.Count == 0){
+        try{ _cssNameByRgb = BuildCssNameMap(); }
+        catch{ _cssNameByRgb = new System.Collections.Generic.Dictionary<int,string>(); }
+      }
+      string name;
+      if (_cssNameByRgb != null && _cssNameByRgb.TryGetValue(key, out name)) return name;
+      return null;
+    }catch{ return null; }
+  }
+
+  private static System.Collections.Generic.Dictionary<int,string> _cssNameByRgb = null;
+  private static string _cssNameBuildDiag = null;
+
+  private static System.Collections.Generic.Dictionary<int,string> BuildCssNameMap(){
+    try{
+      var a = BuildCssNameMapFromKnownColors();
+      if (a != null && a.Count > 0) return a;
+    }catch{}
+    try{
+      var b = BuildCssNameMapFromWpfColors();
+      if (b != null && b.Count > 0) return b;
+    }catch{}
+    return new System.Collections.Generic.Dictionary<int,string>();
+  }
+
+  private static Type FindTypeByLoadedAssemblies(string fullName){
+    try{
+      if (string.IsNullOrEmpty(fullName)) return null;
+      try{
+        var asms = AppDomain.CurrentDomain.GetAssemblies();
+        if (asms != null){
+          foreach(var a in asms){
+            if (a == null) continue;
+            try{ var t = a.GetType(fullName, throwOnError:false, ignoreCase:false); if (t != null) return t; }catch{}
+          }
+        }
+      }catch{}
+    }catch{}
+    return null;
+  }
+  private static Type FindDrawingType(string fullName){
+    try{
+      var t0 = FindTypeByLoadedAssemblies(fullName);
+      if (t0 != null) return t0;
+      // Try load typical assemblies.
+      try{ System.Reflection.Assembly.Load("System.Drawing"); }catch{}
+      try{ System.Reflection.Assembly.Load("System.Drawing.Primitives"); }catch{}
+      try{ System.Reflection.Assembly.Load("System.Drawing.Common"); }catch{}
+      return FindTypeByLoadedAssemblies(fullName);
+    }catch{ return null; }
+  }
+
+  private static Type FindWpfType(string fullName){
+    try{
+      var t0 = FindTypeByLoadedAssemblies(fullName);
+      if (t0 != null) return t0;
+      try{ System.Reflection.Assembly.Load("PresentationCore"); }catch{}
+      try{ System.Reflection.Assembly.Load("WindowsBase"); }catch{}
+      return FindTypeByLoadedAssemblies(fullName);
+    }catch{ return null; }
+  }
+  private static System.Collections.Generic.Dictionary<int,string> BuildCssNameMapFromKnownColors(){
+    var map = new System.Collections.Generic.Dictionary<int,string>();
+    try{
+      try{ _cssNameBuildDiag = "known:init"; }catch{}
+      var colorType = FindDrawingType("System.Drawing.Color");
+      var knownEnum = FindDrawingType("System.Drawing.KnownColor");
+      if (colorType == null || knownEnum == null){
+        try{ _cssNameBuildDiag = "known:types-missing"; }catch{}
+        return map;
+      }
+      var fromKnown = colorType.GetMethod("FromKnownColor", new[]{ knownEnum });
+      if (fromKnown == null){
+        try{ _cssNameBuildDiag = "known:FromKnownColor-missing"; }catch{}
+        return map;
+      }
+      var propR = colorType.GetProperty("R");
+      var propG = colorType.GetProperty("G");
+      var propB = colorType.GetProperty("B");
+      var propA = colorType.GetProperty("A");
+      var propName = colorType.GetProperty("Name");
+      var propIsSystem = colorType.GetProperty("IsSystemColor");
+      if (propR==null||propG==null||propB==null||propA==null||propName==null) return map;
+
+      // Prefer common CSS synonyms when multiple names map to same RGB.
+      Func<string,int> priority = (nm)=>{
+        try{
+          var n = (nm??"").ToLowerInvariant();
+          // User preference: cyan/magenta over aqua/fuchsia.
+          if (n=="cyan") return 3;
+          if (n=="magenta") return 3;
+          if (n=="aqua") return 2;
+          if (n=="fuchsia") return 2;
+          if (n=="gray" || n=="darkgray" || n=="lightgray" || n=="dimgray" || n=="slategray" || n=="lightslategray") return 2;
+          return 1;
+        }catch{ return 1; }
+      };
+
+      var vals = Enum.GetValues(knownEnum);
+      foreach(var v in vals){
+        object colObj = null;
+        try{ colObj = fromKnown.Invoke(null, new object[]{ v }); }catch{ colObj = null; }
+        if (colObj == null) continue;
+        bool isSystem = false;
+        try{ if (propIsSystem != null) isSystem = (bool)propIsSystem.GetValue(colObj, null); }catch{ isSystem = false; }
+        if (isSystem) continue;
+        int a=255; int r=0; int g=0; int b=0;
+        try{ a = Convert.ToInt32(propA.GetValue(colObj, null), System.Globalization.CultureInfo.InvariantCulture); }catch{ a = 255; }
+        if (a != 255) continue; // ignore transparent
+        try{
+          r = Convert.ToInt32(propR.GetValue(colObj, null), System.Globalization.CultureInfo.InvariantCulture);
+          g = Convert.ToInt32(propG.GetValue(colObj, null), System.Globalization.CultureInfo.InvariantCulture);
+          b = Convert.ToInt32(propB.GetValue(colObj, null), System.Globalization.CultureInfo.InvariantCulture);
+        }catch{ continue; }
+        string name = null;
+        try{ name = Convert.ToString(propName.GetValue(colObj, null), System.Globalization.CultureInfo.InvariantCulture); }catch{ name = null; }
+        if (string.IsNullOrEmpty(name)) continue;
+        var css = name.ToLowerInvariant();
+        // Skip any remaining non-keyword-ish names.
+        if (css.Length==0) continue;
+        int key = ((r&255)<<16) | ((g&255)<<8) | (b&255);
+        if (!map.ContainsKey(key)) map[key] = css;
+        else {
+          try{ if (priority(css) > priority(map[key])) map[key] = css; }catch{}
+        }
+      }
+      try{ _cssNameBuildDiag = "known:ok count=" + map.Count; }catch{}
+    }catch{}
+    return map;
+  }
+
+  private static System.Collections.Generic.Dictionary<int,string> BuildCssNameMapFromWpfColors(){
+    var map = new System.Collections.Generic.Dictionary<int,string>();
+    try{
+      try{ _cssNameBuildDiag = "wpf:init"; }catch{}
+      // WPF: System.Windows.Media.Colors has static properties like AliceBlue, Black, etc.
+      var colorsType = FindWpfType("System.Windows.Media.Colors");
+      if (colorsType == null){
+        try{ _cssNameBuildDiag = "wpf:types-missing"; }catch{}
+        return map;
+      }
+      var props = colorsType.GetProperties(System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static);
+      if (props == null || props.Length == 0) return map;
+
+      // System.Windows.Media.Color struct has A/R/G/B byte properties.
+      Type wpfColorType = null;
+      try{ wpfColorType = FindWpfType("System.Windows.Media.Color"); }catch{}
+
+      Func<string,int> priority = (nm)=>{
+        try{
+          var n = (nm??"").ToLowerInvariant();
+          if (n=="cyan") return 3;
+          if (n=="magenta") return 3;
+          if (n=="aqua") return 2;
+          if (n=="fuchsia") return 2;
+          return 1;
+        }catch{ return 1; }
+      };
+
+      foreach(var p in props){
+        if (p == null) continue;
+        string name = null;
+        try{ name = Convert.ToString(p.Name, System.Globalization.CultureInfo.InvariantCulture); }catch{ name = null; }
+        if (string.IsNullOrEmpty(name)) continue;
+        object colObj = null;
+        try{ colObj = p.GetValue(null, null); }catch{ colObj = null; }
+        if (colObj == null) continue;
+        int a=255,r=0,g=0,b=0;
+        try{
+          // Access via reflection on the boxed struct instance.
+          var t = wpfColorType ?? colObj.GetType();
+          var propA = t.GetProperty("A");
+          var propR = t.GetProperty("R");
+          var propG = t.GetProperty("G");
+          var propB = t.GetProperty("B");
+          if (propA==null||propR==null||propG==null||propB==null) continue;
+          a = Convert.ToInt32(propA.GetValue(colObj, null), System.Globalization.CultureInfo.InvariantCulture);
+          r = Convert.ToInt32(propR.GetValue(colObj, null), System.Globalization.CultureInfo.InvariantCulture);
+          g = Convert.ToInt32(propG.GetValue(colObj, null), System.Globalization.CultureInfo.InvariantCulture);
+          b = Convert.ToInt32(propB.GetValue(colObj, null), System.Globalization.CultureInfo.InvariantCulture);
+        }catch{ continue; }
+        if (a != 255) continue;
+        var css = name.ToLowerInvariant();
+        int key = ((r&255)<<16) | ((g&255)<<8) | (b&255);
+        if (!map.ContainsKey(key)) map[key] = css;
+        else { try{ if (priority(css) > priority(map[key])) map[key] = css; }catch{} }
+      }
+      try{ _cssNameBuildDiag = "wpf:ok count=" + map.Count; }catch{}
+    }catch{}
+    return map;
+  }
+  private static string BuildColorPickerText(int r, int g, int b){
+    try{
+      if (r < 0) r = 0; if (r > 255) r = 255;
+      if (g < 0) g = 0; if (g > 255) g = 255;
+      if (b < 0) b = 0; if (b > 255) b = 255;
+      var hex3 = (r.ToString("X2") + g.ToString("X2") + b.ToString("X2")).ToLowerInvariant();
+      var hex4 = hex3 + "ff";
+      var rgba = "rgba(" + r + "," + g + "," + b + ",1.0)";
+      var name = CssColorNameByHex6(hex3);
+      if (!string.IsNullOrEmpty(name)) return hex3 + "\n" + hex4 + "\n" + rgba + "\n" + name;
+      return hex3 + "\n" + hex4 + "\n" + rgba;
+    }catch{ return ""; }
+  }
+  private static void StartColorPickerWorker(){
+    try{
+      bool lastDown = false;
+      try{ lastDown = ((GetAsyncKeyState(VK_LBUTTON) & 0x8000) != 0); }catch{}
+      while(true){
+        if (_colorPickCancel){
+          lock(_colorPickLock){ _colorPickPending = false; _colorPickCancel = false; _colorPickText = null; _colorPickDoneAt = 0; }
+          return;
+        }
+        bool down = false;
+        try{ down = ((GetAsyncKeyState(VK_LBUTTON) & 0x8000) != 0); }catch{}
+        if (down && !lastDown){
+          POINT pt; pt.X = 0; pt.Y = 0;
+          try{ GetCursorPos(out pt); }catch{}
+          int r = 0, g = 0, b = 0;
+          try{
+            var hdc = GetDC(IntPtr.Zero);
+            if (hdc != IntPtr.Zero){
+              uint c = GetPixel(hdc, pt.X, pt.Y);
+              try{ ReleaseDC(IntPtr.Zero, hdc); }catch{}
+              r = (int)(c & 0x000000FF);
+              g = (int)((c & 0x0000FF00) >> 8);
+              b = (int)((c & 0x00FF0000) >> 16);
+            }
+          }catch{}
+          var text = BuildColorPickerText(r, g, b);
+          bool okClip = false;
+          try{ okClip = TrySetClipboardText(text); }catch{ okClip = false; }
+          lock(_colorPickLock){
+            _colorPickText = text;
+            _colorPickClipboardOk = okClip;
+            _colorPickPending = false;
+            _colorPickCancel = false;
+            try{ _colorPickDoneAt = (long)(DateTime.UtcNow - new DateTime(1970,1,1,0,0,0,DateTimeKind.Utc)).TotalMilliseconds; }catch{ _colorPickDoneAt = 0; }
+          }
+          return;
+        }
+        lastDown = down;
+        try{ Thread.Sleep(12); }catch{}
+      }
+    }catch{
+      lock(_colorPickLock){ _colorPickPending = false; _colorPickCancel = false; }
+    }
+  }
   [StructLayout(LayoutKind.Sequential)] private struct RECT { public int left; public int top; public int right; public int bottom; }
   [StructLayout(LayoutKind.Sequential)] private struct GUITHREADINFO { public uint cbSize; public uint flags; public IntPtr hwndActive; public IntPtr hwndFocus; public IntPtr hwndCapture; public IntPtr hwndMenuOwner; public IntPtr hwndMoveSize; public IntPtr hwndCaret; public RECT rcCaret; }
   public delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
@@ -474,6 +809,49 @@ public class __CLASSNAME__ {
               }
               shares.Append("]}"); body = shares.ToString();
             } catch { status = "400 Bad Request"; body = "{\"shares\":[]}"; }
+          } else if (path.StartsWith("/win/colorpicker")){
+            // GET /win/colorpicker/start  -> arm click-wait worker (global LButton edge)
+            // GET /win/colorpicker/poll   -> { pending, done, text, doneAt }
+            // GET /win/colorpicker/cancel -> cancel pending pick
+            try{
+              if (path.StartsWith("/win/colorpicker/start")){
+                bool already = false;
+                lock(_colorPickLock){
+                  already = _colorPickPending;
+                  _colorPickCancel = false;
+                  _colorPickText = null;
+                  _colorPickClipboardOk = false;
+                  _colorPickDoneAt = 0;
+                  _colorPickPending = true;
+                }
+                if (!already){
+                  try{ var th = new Thread(StartColorPickerWorker); th.IsBackground = true; th.Start(); }catch{}
+                }
+                contentType = "application/json; charset=utf-8"; status = "200 OK";
+                body = "{\"ok\":true,\"pending\":true}";
+              }
+              else if (path.StartsWith("/win/colorpicker/cancel")){
+                lock(_colorPickLock){
+                  if (_colorPickPending){ _colorPickCancel = true; }
+                }
+                contentType = "application/json; charset=utf-8"; status = "200 OK";
+                body = "{\"ok\":true}";
+              }
+              else if (path.StartsWith("/win/colorpicker/poll")){
+                bool pending = false; string text = null; long doneAt = 0; bool clipOk = false;
+                lock(_colorPickLock){ pending = _colorPickPending; text = _colorPickText; doneAt = _colorPickDoneAt; clipOk = _colorPickClipboardOk; }
+                bool done = (!pending) && (!string.IsNullOrEmpty(text));
+                contentType = "application/json; charset=utf-8"; status = "200 OK";
+                body = "{\"pending\":" + (pending?"true":"false") + ",\"done\":" + (done?"true":"false") + ",\"clipboardOk\":" + (clipOk?"true":"false") + ",\"doneAt\":" + doneAt + ",\"text\":\"" + JsonEscape(text ?? "") + "\"}";
+              }
+              else {
+                contentType = "application/json; charset=utf-8"; status = "404 Not Found";
+                body = "{\"ok\":false}";
+              }
+            } catch (Exception ex) {
+              status = "500 Internal Server Error"; contentType = "application/json; charset=utf-8";
+              body = "{\"ok\":false,\"error\":\""+JsonEscape(ex.Message)+"\"}";
+            }
           } else if (path.StartsWith("/win/state")){
             // GET  /win/state  -> returns saved JSON state (or {})
             // POST /win/state  -> saves request body as JSON text to .six-winstate.json in current directory

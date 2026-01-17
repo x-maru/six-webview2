@@ -10795,6 +10795,7 @@ try{
       if (/^:\s*api\?\s*$/i.test(v)) return true;
       if (/^:\s*echo\s+api\s*$/i.test(v)) return true;
       if (/^:\s*build\??\s*$/i.test(v)) return true;
+      if (/^:\s*colorpicker\s*$/i.test(v)) return true;
       if (/^:\s*(?:lastsynctime|statmeta!?|parentnav|dumpkeys|dumprawkeys|clearkeys|clearrawkeys)\b/i.test(v)) return true;
 
       return false;
@@ -13621,19 +13622,30 @@ try{
   // Help/Grep dialog theming (#1863)
   // - Help: window.HELP_THEME -> window.MODAL_THEME -> yellow
   // - Grep: window.MODAL_THEME only -> yellow
+  const _themeGetRawWithLegacy = (obj, key)=>{
+    try{
+      let v = _themeGetRawFrom(obj, key);
+      if (v === undefined){
+        // Legacy alias: btnFg/btnBg -> simpleBtnFg/simpleBtnBg
+        if (key === 'simpleBtnBg') v = _themeGetRawFrom(obj, 'btnBg');
+        else if (key === 'simpleBtnFg') v = _themeGetRawFrom(obj, 'btnFg');
+      }
+      return v;
+    }catch{ return undefined; }
+  };
   const _helpGet = (key)=>{
     try{
       const h = (window && window.HELP_THEME) ? window.HELP_THEME : {};
       const m = (window && window.MODAL_THEME) ? window.MODAL_THEME : {};
-      let v = _themeGetRawFrom(h, key);
-      if (v === undefined) v = _themeGetRawFrom(m, key);
+      let v = _themeGetRawWithLegacy(h, key);
+      if (v === undefined) v = _themeGetRawWithLegacy(m, key);
       return (v !== undefined) ? v : 'yellow';
     }catch{ return 'yellow'; }
   };
   const _modalGet = (key)=>{
     try{
       const m = (window && window.MODAL_THEME) ? window.MODAL_THEME : {};
-      const v = _themeGetRawFrom(m, key);
+      const v = _themeGetRawWithLegacy(m, key);
       return (v !== undefined) ? v : 'yellow';
     }catch{ return 'yellow'; }
   };
@@ -13647,8 +13659,8 @@ try{
   setVar('six-help-tab-bg', _helpGet('tabBg'));
   setVar('six-help-tab-fg', _helpGet('tabFg'));
   // Help button (close)
-  setVar('six-help-close-bg', _helpGet('btnBg'));
-  setVar('six-help-close-fg', _helpGet('btnFg'));
+  setVar('six-help-close-bg', _helpGet('simpleBtnBg'));
+  setVar('six-help-close-fg', _helpGet('simpleBtnFg'));
   setVar('six-help-close-border', _helpGet('btnBorder'));
   // Help markdown inline-code/kbd styling
   setVar('six-help-kbd-bg', _helpGet('inlineCodeBg'));
@@ -13659,8 +13671,8 @@ try{
   // Grep (generic modal) base fg/bg + buttons
   setVar('six-modal-bg', _modalGet('bgColor'));
   setVar('six-modal-fg', _modalGet('fgColor'));
-  setVar('six-modal-btn-bg', _modalGet('btnBg'));
-  setVar('six-modal-btn-fg', _modalGet('btnFg'));
+  setVar('six-modal-btn-bg', _modalGet('simpleBtnBg'));
+  setVar('six-modal-btn-fg', _modalGet('simpleBtnFg'));
   setVar('six-modal-btn-border', _modalGet('btnBorder'));
   // Grep inputs (bevel: top/left and bottom/right)
   setVar('six-modal-input-bg', _modalGet('inputBoxBg'));
@@ -20493,6 +20505,135 @@ try{
               fileGlob: args.fileGlob
           });
           return;
+      }
+    }catch{}
+
+    // :colorpicker — pick pixel color at next global click and copy to Windows clipboard.
+    // - Uses NanoApi (/win/colorpicker/*). In WebView-only environments, this is unavailable.
+    // - Cancel: press Esc while waiting.
+    try{
+      const mc = cmd && String(cmd).match(/^:?\s*colorpicker\s*$/i);
+      if (mc){
+        const setCrosshair = (on)=>{
+          try{
+            const b = document && document.body;
+            if (!b || !b.classList) return;
+            if (on) b.classList.add('six-colorpicker-wait');
+            else b.classList.remove('six-colorpicker-wait');
+            // Inject CSS once.
+            if (on && !document.getElementById('six-colorpicker-css')){
+              const st = document.createElement('style');
+              st.id = 'six-colorpicker-css';
+              st.textContent = [
+                'body.six-colorpicker-wait, body.six-colorpicker-wait * { cursor: crosshair !important; }'
+              ].join('\n');
+              (document.head || document.documentElement || document.body).appendChild(st);
+            }
+          }catch{}
+        };
+        const ensureBanner = (()=>{
+          try{
+            let el = document.getElementById('six-colorpicker-banner');
+            if (el) return el;
+            el = document.createElement('div');
+            el.id = 'six-colorpicker-banner';
+            el.textContent = 'colorpicker: クリックした点の色をコピーします…';
+            el.style.position = 'fixed';
+            el.style.left = '10px';
+            el.style.bottom = '10px';
+            el.style.padding = '8px 10px';
+            el.style.font = '13px monospace';
+            el.style.background = 'rgba(0,0,0,0.72)';
+            el.style.color = '#e8e8e8';
+            el.style.border = '1px solid rgba(255,255,255,0.25)';
+            el.style.zIndex = '999999';
+            el.style.pointerEvents = 'none';
+            (document.body || document.documentElement).appendChild(el);
+            return el;
+          }catch{ return null; }
+        });
+        const hideBanner = (()=>{ try{ const el=document.getElementById('six-colorpicker-banner'); if (el && el.parentNode) el.parentNode.removeChild(el); }catch{} });
+
+        if (!_apiIsEnabled()){
+          toast('colorpicker: ローカルAPIがありません');
+          try{ _triggerVisualBell(); }catch{}
+          return;
+        }
+
+        const cancel = (reason)=>{
+          try{ if (window) window._sixColorPickerWaiting = false; }catch{}
+          try{ hideBanner(); }catch{}
+          try{ setCrosshair(false); }catch{}
+          try{
+            _fetchJSONWithTimeout(_apiBase + 'win/colorpicker/cancel', 900)
+              .then(()=>{ try{ _apiNoteSuccess(); }catch{}; if (reason==='timeout') toast('colorpicker: timeout'); else toast('colorpicker: cancelled'); })
+              .catch((e)=>{ try{ _apiNoteFailure(e); }catch{}; toast('colorpicker: cancel failed'); });
+          }catch{}
+        };
+        try{ window.__sixColorPickerCancel = cancel; }catch{}
+
+        // Avoid stacking multiple concurrent waits.
+        if (window && window._sixColorPickerWaiting === true){
+          toast('colorpicker: waiting…');
+          return;
+        }
+        window._sixColorPickerWaiting = true;
+        ensureBanner();
+        setCrosshair(true);
+
+        const poll = async ()=>{
+          try{
+            // arm
+            try{
+              await _fetchJSONWithTimeout(_apiBase + 'win/colorpicker/start', 1200);
+              try{ _apiNoteSuccess(); }catch{}
+            }catch(e){
+              try{ _apiNoteFailure(e); }catch{}
+              toast('colorpicker: start failed');
+              try{ _triggerVisualBell(); }catch{}
+              return;
+            }
+
+            const t0 = Date.now();
+            while(true){
+              try{ if (!(window && window._sixColorPickerWaiting === true)) break; }catch{}
+              // Hard timeout (2 minutes)
+              if ((Date.now() - t0) > 120000){
+                try{ cancel('timeout'); }catch{}
+                try{ _triggerVisualBell(); }catch{}
+                return;
+              }
+              // Poll
+              let js = null;
+              try{
+                js = await _fetchJSONWithTimeout(_apiBase + 'win/colorpicker/poll', 1200);
+                try{ _apiNoteSuccess(); }catch{}
+              }catch(e){
+                try{ _apiNoteFailure(e); }catch{}
+                // If API is temporarily unavailable, break to avoid busy looping.
+                toast('colorpicker: API error');
+                try{ _triggerVisualBell(); }catch{}
+                try{ cancel('api'); }catch{}
+                break;
+              }
+              if (js && js.done && typeof js.text === 'string' && js.text.length > 0){
+                const first = (function(){ try{ return String(js.text).split(/\r?\n/)[0] || ''; }catch{ return ''; } })();
+                const ok = (js && (js.clipboardOk === true));
+                if (ok) toast(first ? ('copied: ' + first) : 'copied');
+                else toast(first ? ('picked: ' + first + ' (clipboard failed)') : 'clipboard failed');
+                break;
+              }
+              await new Promise(r=>setTimeout(r, 80));
+            }
+          } finally {
+            try{ hideBanner(); }catch{}
+            try{ setCrosshair(false); }catch{}
+            try{ window._sixColorPickerWaiting = false; }catch{}
+            try{ if (window && window.__sixColorPickerCancel) window.__sixColorPickerCancel = null; }catch{}
+          }
+        };
+        poll();
+        return;
       }
     }catch{}
 
@@ -29209,12 +29350,14 @@ try{
       }
   if (e.key==='i'){ e.preventDefault(); _setMode('INSERT'); return; }
   if (e.key==='v' && !e.ctrlKey && !e.metaKey && !e.altKey){ e.preventDefault(); _enterVisual(false); return; }
-  if (e.key==='V' && !e.ctrlKey && !e.metaKey && !e.altKey){
+    if (e.key==='V' && !e.ctrlKey && !e.metaKey && !e.altKey){
         e.preventDefault();
         // Preserve caret column when entering VISUAL linewise (#447)
         const colHold = caretCol|0;
         _enterVisual(true);
         try{ _setCaret(caretRow, Math.max(0, Math.min(_lineLen(caretRow), colHold))); }catch{}
+      // markdown-rich: entering VISUAL linewise can leave the caret offscreen; enforce scrolloff once.
+      try{ if (_mdRichActive && _mdRichActive()) _ensureAfterMotion({ vertDir: 0 }); }catch{}
         _repositionCaret(); updateGutter();
         return;
       }
@@ -31571,6 +31714,15 @@ try{
 
               const esc = (typeof _isEsc === 'function') ? _isEsc(e) : (e && e.key === 'Escape');
               if (!esc) return;
+
+              // If colorpicker is waiting, Esc cancels it first.
+              try{
+                if (window && window._sixColorPickerWaiting === true && typeof window.__sixColorPickerCancel === 'function'){
+                  try{ e.preventDefault(); e.stopImmediatePropagation(); e.stopPropagation(); }catch{}
+                  try{ window.__sixColorPickerCancel('esc'); }catch{}
+                  return;
+                }
+              }catch{}
 
               // While IME composition/candidate is active, Esc should be handled by IME.
               // But if composition is stale (rapid Kana/Eisu toggle glitches), allow Esc to recover.

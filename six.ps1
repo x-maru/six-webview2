@@ -107,6 +107,12 @@ function Start-NanoApi([int]$Port){
   $code = Get-Content -LiteralPath $csPath -Raw -Encoding UTF8
   $code = $code.Replace('__CLASSNAME__', $className)
   if (-not ($className -as [type])) {
+    # Preload assemblies used by optional features (e.g., color name lookup).
+    # Keep best-effort and non-fatal.
+    try { Add-Type -AssemblyName System.Drawing -ErrorAction SilentlyContinue | Out-Null } catch {}
+    try { Add-Type -AssemblyName PresentationCore -ErrorAction SilentlyContinue | Out-Null } catch {}
+    try { Add-Type -AssemblyName WindowsBase -ErrorAction SilentlyContinue | Out-Null } catch {}
+    try { Add-Type -AssemblyName System.Windows.Forms -ErrorAction SilentlyContinue | Out-Null } catch {}
     Add-Type -TypeDefinition $code -Language CSharp -IgnoreWarnings -ErrorAction Stop
   }
   $global:_nano = New-Object $className $Port

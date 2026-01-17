@@ -163,7 +163,9 @@ window.THEME = {
   popupHeaderBg: "#000030",
 
   // オーバーレイパレット内のボタン
-  overlayBtnFg: "white",
+  btnFg: "#c9cacd",	// 文字色
+  overlayBtnBg: "#2b313f",	// BG
+  
 
   // Markdownインラインコード
   inlineCodeBG: "#004a0a",
@@ -238,12 +240,15 @@ window.EX1_THEME = {
   inlineCodeBorderBR: "#505050"
 };
 
+window.BTN_THEME = {
+};
+
 // MODALダイアログ用色指定(フォールバックなし)
 window.MODAL_THEME = {
   fgColor: "white",  // 文字色
   bgColor: "#041a10",  // 背景色
-  btnFg: "#e6e6e6",
-  btnBg: "#3a3a56",
+  simpleBtnFg: "#e6e6e6",
+  simpleBtnBg: "#3a3a56",
 //  btnBorder: "#3f5074",
   btnBorder: "cyan",
   inputBoxBg: "#405040",    // 入力欄
