@@ -162,6 +162,9 @@ window.THEME = {
   popupActiveLine: "#00a090", // active line highlight
   popupHeaderBg: "#000030",
 
+  // オーバーレイパレット内のボタン
+  overlayBtnFg: "white",
+
   // Markdownインラインコード
   inlineCodeBG: "#004a0a",
   inlineCodeBorderUL: "#eaf0ea",
@@ -237,12 +240,24 @@ window.EX1_THEME = {
 
 // MODALダイアログ用色指定(フォールバックなし)
 window.MODAL_THEME = {
-  fgColor: "black",  // 文字色
+  fgColor: "white",  // 文字色
   bgColor: "#041a10",  // 背景色
   btnFg: "#e6e6e6",
   btnBg: "#3a3a56",
 //  btnBorder: "#3f5074",
   btnBorder: "cyan",
+  inputBoxBg: "#405040",    // 入力欄
+  inputBoxTL: "white",
+  inputBoxBR: "#203020",
+//  groupBorder: "#d0d0d0",    // 選択肢のボタン群を囲う線
+  groupBorder: "orange",    // 選択肢のボタン群を囲う線
+
+  // 「履歴 F4」「F1/F2/F3」などに適用するインラインコード風スタイル
+//  inlineCodeFg: "#aabada",
+  inlineCodeFg: "red",
+  inlineCodeBg: "#222a2c",
+  inlineCodeTL: "#424a4c",
+  inlineCodeBR: "#020a0c",
 };
 
 // ヘルプダイアログ用色指定(HELP_THEME→MODAL_THEME)
@@ -251,10 +266,10 @@ window.HELP_THEME = {
   tabBg: "#1e241a",
   activeTabFg: "#e0efe6",
   activeTabBg: "#2b7050",
-  inlineCodeFg: "#aabada",
+  inlineCodeFg: "#aacaea",
   inlineCodeBg: "#222a2c",
-  inlineCodeTL: "green",
-  inlineCodeBR: "red",
+  inlineCodeTL: "#424a4c",
+  inlineCodeBR: "#020a0c",
 
 };
 

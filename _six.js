@@ -13618,22 +13618,65 @@ try{
   // VISUAL after ':' selection overlay
   setVar('visCmdSelBg', themeGet('visCmdSelBg', t.visCmdSelBg));
   setVar('visCmdSelOutline', themeGet('visCmdSelOutline', t.visCmdSelOutline));
-  // Help modal (tabs/colors)
-  setVar('six-help-tab-active-bg', themeGet('helpTabActiveBg', t.helpTabActiveBg));
-  setVar('six-help-tab-active-fg', themeGet('helpTabActiveFg', t.helpTabActiveFg));
-  setVar('six-help-tab-bg', themeGet('helpTabBg', t.helpTabBg));
-  setVar('six-help-tab-fg', themeGet('helpTabFg', t.helpTabFg));
-  setVar('six-modal-bg', themeGet('helpModalBg', t.helpModalBg));
-  setVar('six-help-kbd-bg', themeGet('helpKbdBg', t.helpKbdBg));
-  setVar('six-help-kbd-fg', themeGet('helpKbdFg', t.helpKbdFg));
+  // Help/Grep dialog theming (#1863)
+  // - Help: window.HELP_THEME -> window.MODAL_THEME -> yellow
+  // - Grep: window.MODAL_THEME only -> yellow
+  const _helpGet = (key)=>{
+    try{
+      const h = (window && window.HELP_THEME) ? window.HELP_THEME : {};
+      const m = (window && window.MODAL_THEME) ? window.MODAL_THEME : {};
+      let v = _themeGetRawFrom(h, key);
+      if (v === undefined) v = _themeGetRawFrom(m, key);
+      return (v !== undefined) ? v : 'yellow';
+    }catch{ return 'yellow'; }
+  };
+  const _modalGet = (key)=>{
+    try{
+      const m = (window && window.MODAL_THEME) ? window.MODAL_THEME : {};
+      const v = _themeGetRawFrom(m, key);
+      return (v !== undefined) ? v : 'yellow';
+    }catch{ return 'yellow'; }
+  };
+
+  // Help modal base fg/bg
+  setVar('six-help-fg', _helpGet('fgColor'));
+  setVar('six-help-bg', _helpGet('bgColor'));
+  // Help tabs
+  setVar('six-help-tab-active-bg', _helpGet('activeTabBg'));
+  setVar('six-help-tab-active-fg', _helpGet('activeTabFg'));
+  setVar('six-help-tab-bg', _helpGet('tabBg'));
+  setVar('six-help-tab-fg', _helpGet('tabFg'));
+  // Help button (close)
+  setVar('six-help-close-bg', _helpGet('btnBg'));
+  setVar('six-help-close-fg', _helpGet('btnFg'));
+  setVar('six-help-close-border', _helpGet('btnBorder'));
+  // Help markdown inline-code/kbd styling
+  setVar('six-help-kbd-bg', _helpGet('inlineCodeBg'));
+  setVar('six-help-kbd-fg', _helpGet('inlineCodeFg'));
+  setVar('six-help-icode-tl', _helpGet('inlineCodeTL'));
+  setVar('six-help-icode-br', _helpGet('inlineCodeBR'));
+
+  // Grep (generic modal) base fg/bg + buttons
+  setVar('six-modal-bg', _modalGet('bgColor'));
+  setVar('six-modal-fg', _modalGet('fgColor'));
+  setVar('six-modal-btn-bg', _modalGet('btnBg'));
+  setVar('six-modal-btn-fg', _modalGet('btnFg'));
+  setVar('six-modal-btn-border', _modalGet('btnBorder'));
+  // Grep inputs (bevel: top/left and bottom/right)
+  setVar('six-modal-input-bg', _modalGet('inputBoxBg'));
+  setVar('six-modal-input-tl', _modalGet('inputBoxTL'));
+  setVar('six-modal-input-br', _modalGet('inputBoxBR'));
+  // Grep inline-code look (history button / F-key tags)
+  setVar('six-modal-icode-fg', _modalGet('inlineCodeFg'));
+  setVar('six-modal-icode-bg', _modalGet('inlineCodeBg'));
+  setVar('six-modal-icode-tl', _modalGet('inlineCodeTL'));
+  setVar('six-modal-icode-br', _modalGet('inlineCodeBR'));
+  // Grep group border (regex/literal group)
+  setVar('six-modal-group-border', _modalGet('groupBorder'));
   // Global kbd colors for tabs and popups
   // No cross-key fallback: if missing, turn yellow to reveal omission (#438)
   setVar('six-kbd-bg', themeGet('KbdBgColor', t.KbdBgColor));
   setVar('six-kbd-fg', themeGet('KbdFgColor', t.KbdFgColor));
-  // Help close button colors
-  setVar('six-help-close-bg', themeGet('helpCloseBg', t.helpCloseBg));
-  setVar('six-help-close-fg', themeGet('helpCloseFg', t.helpCloseFg));
-  setVar('six-help-close-border', themeGet('helpCloseBorder', t.helpCloseBorder));
   // Popup active line color (encodeSet popup etc.)
   setVar('popupActiveLine', themeGet('popupActiveLine', t.popupActiveLine));
   // EOF fill colors (editor area and gutter)
@@ -22984,7 +23027,9 @@ try{
   const prevBtnsDisp = _modalButtons && _modalButtons.style ? _modalButtons.style.display : '';
   try{ if (_modalButtons) _modalButtons.style.display = 'none'; }catch{}
   const prevBoxBg = _modalBox && _modalBox.style ? _modalBox.style.background : '';
-  try{ if (_modalBox) _modalBox.style.background = 'var(--six-modal-bg, #1e1e1e)'; }catch{}
+  const prevBoxColor = _modalBox && _modalBox.style ? _modalBox.style.color : '';
+  try{ if (_modalBox) _modalBox.style.background = 'var(--six-help-bg, yellow)'; }catch{}
+  try{ if (_modalBox) _modalBox.style.color = 'var(--six-help-fg, yellow)'; }catch{}
   const prevDetailPad = _modalDetail && _modalDetail.style ? _modalDetail.style.padding : '';
   try{ if (_modalDetail) _modalDetail.style.padding = '0'; }catch{}
   _modalButtons.innerHTML = '';
@@ -37613,13 +37658,13 @@ try{
       const box = document.createElement('div');
       // Match Help modal style (opaque background, border)
       // Use var(--font-size) for text size to match body
-      box.style.cssText = 'background:var(--six-modal-bg, #1e1e1e); border:1px solid var(--six-border, #444); color:var(--text-color); padding:16px; width:780px; max-width:96%; box-shadow:0 4px 12px rgba(0,0,0,0.5); display:flex; flex-direction:column; gap:12px; border-radius:4px; font-size:var(--font-size, 16px);';
+      box.style.cssText = 'background:var(--six-modal-bg, #1e1e1e); border:1px solid var(--six-border, #444); color:var(--six-modal-fg, #e6e6e6); padding:16px; width:780px; max-width:96%; box-shadow:0 4px 12px rgba(0,0,0,0.5); display:flex; flex-direction:column; gap:12px; border-radius:4px; font-size:var(--font-size, 16px);';
       modal.appendChild(box);
 
       // Title
       const title = document.createElement('div');
       title.textContent = 'grep(検索)';
-      title.style.cssText = 'font-weight:bold; font-size:inherit; color:var(--text-color); margin-bottom:4px; text-align:center; cursor:move; user-select:none;';
+      title.style.cssText = 'font-weight:bold; font-size:inherit; color:var(--six-modal-fg, #e6e6e6); margin-bottom:4px; text-align:center; cursor:move; user-select:none;';
       box.appendChild(title);
 
       // Drag logic
@@ -37671,7 +37716,7 @@ try{
       // Label on the left (requested)
       const inputLabel = document.createElement('div');
       inputLabel.textContent = '検索語';
-      inputLabel.style.cssText = 'flex:0 0 auto; font-size:0.85em; color:var(--text-dim); white-space:nowrap; user-select:none;';
+      inputLabel.style.cssText = 'flex:0 0 auto; font-size:0.85em; color:var(--six-modal-fg, #e6e6e6); opacity:0.78; white-space:nowrap; user-select:none;';
       inputRow.appendChild(inputLabel);
       
       // Search term input with an inline [履歴] button
@@ -37682,14 +37727,14 @@ try{
       input.type = 'text';
       input.placeholder = '';
       // Leave space for [履歴] on the right inside the input
-      input.style.cssText = 'width:100%; background:var(--bg-color); color:var(--text-color); border:1px solid #ffffff; padding:4px 56px 4px 8px; font-family:var(--font-mono); outline:none; font-size:inherit; box-sizing:border-box;';
+      input.style.cssText = 'width:100%; background:var(--six-modal-input-bg, var(--six-modal-bg, #1e1e1e)); color:var(--six-modal-fg, #e6e6e6); border:0; box-shadow:inset 1px 1px 0 var(--six-modal-input-tl, #c0c0c0), inset -1px -1px 0 var(--six-modal-input-br, #505050); padding:4px 56px 4px 8px; font-family:var(--font-mono); outline:none; font-size:inherit; box-sizing:border-box;';
       inputWrap.appendChild(input);
 
       const termHistBtn = document.createElement('button');
       termHistBtn.type = 'button';
       termHistBtn.tabIndex = -1;
       termHistBtn.textContent = '履歴 F4';
-      termHistBtn.style.cssText = 'position:absolute; right:4px; top:50%; transform:translateY(-50%); border:1px solid #2a3244; background:#1a2030; color:#e6e6e6; border-radius:6px; padding:3px 8px; cursor:pointer; font-size:11px; line-height:1.2; user-select:none; outline:none;';
+      termHistBtn.style.cssText = 'position:absolute; right:4px; top:50%; transform:translateY(-50%); border:0; box-shadow:inset 1px 1px 0 var(--six-modal-icode-tl, #2a3244), inset -1px -1px 0 var(--six-modal-icode-br, #1e2534); background:var(--six-modal-icode-bg, #121826); color:var(--six-modal-icode-fg, #e9ecff); border-radius:6px; padding:3px 8px; cursor:pointer; font-size:11px; line-height:1.2; user-select:none; outline:none;';
       termHistBtn.addEventListener('mousedown', (e)=>{ try{ e.preventDefault(); e.stopPropagation(); }catch{} });
       inputWrap.appendChild(termHistBtn);
 
@@ -37710,13 +37755,13 @@ try{
       patBtnWrap.tabIndex = 0;
       patBtnWrap.setAttribute('role','group');
       patBtnWrap.setAttribute('aria-label','検索語モード (正規表現/リテラル)');
-      patBtnWrap.style.cssText = 'display:flex; gap:6px; align-items:center; flex:0 0 auto; padding:4px; border:1px solid #2f3644; border-radius:8px; box-sizing:border-box;';
+      patBtnWrap.style.cssText = 'display:flex; gap:6px; align-items:center; flex:0 0 auto; padding:4px; border:1px solid var(--six-modal-group-border, #2f3644); border-radius:8px; box-sizing:border-box;';
       const _mkPatBtn = (label)=>{
         const b = document.createElement('button');
         b.type = 'button';
         b.tabIndex = -1;
         b.textContent = label;
-        b.style.cssText = 'border:1px solid #2a3244; background:transparent; color:#e6e6e6; border-radius:6px; padding:6px 10px; cursor:pointer; font-size:11px; line-height:1.2; user-select:none; outline:none; white-space:nowrap;';
+        b.style.cssText = 'border:1px solid var(--six-modal-btn-border, #2a3244); background:transparent; color:var(--six-modal-fg, #e6e6e6); border-radius:6px; padding:6px 10px; cursor:pointer; font-size:11px; line-height:1.2; user-select:none; outline:none; white-space:nowrap;';
         b.addEventListener('mousedown', (e)=>{ try{ e.preventDefault(); e.stopPropagation(); }catch{} });
         return b;
       };
@@ -37730,7 +37775,7 @@ try{
       // Target Label
       const targetLabel = document.createElement('div');
       targetLabel.textContent = '検索対象';
-      targetLabel.style.cssText = 'font-size:0.85em; color:var(--text-dim); margin-top:0.5rem; margin-bottom:-6px;';
+      targetLabel.style.cssText = 'font-size:0.85em; color:var(--six-modal-fg, #e6e6e6); opacity:0.78; margin-top:0.5rem; margin-bottom:-6px;';
       box.appendChild(targetLabel);
 
       // Target mode buttons + path inputs
@@ -37811,7 +37856,7 @@ try{
           tag.className = 'fkey-tag';
           tag.textContent = fKey;
           tag.title = titleText || fKey;
-          tag.style.cssText = 'position:absolute; left:0.8rem; top:-10px; display:inline-flex; align-items:center; justify-content:center; padding:2px 6px; font:11px/1.15 system-ui, -apple-system,\'Segoe UI\',sans-serif; background:#1a2030; color:#e6e6e6; border:1px solid #2a3244; border-radius:6px; line-height:1.1; pointer-events:auto; cursor:pointer; user-select:none; box-shadow:0 4px 10px rgba(0,0,0,0.4); opacity:0.95;';
+          tag.style.cssText = 'position:absolute; left:0.8rem; top:-10px; display:inline-flex; align-items:center; justify-content:center; padding:2px 6px; font:11px/1.15 system-ui, -apple-system,\'Segoe UI\',sans-serif; background:var(--six-modal-icode-bg, #121826); color:var(--six-modal-icode-fg, #e9ecff); border:0; border-radius:6px; line-height:1.1; pointer-events:auto; cursor:pointer; user-select:none; box-shadow:0 4px 10px rgba(0,0,0,0.4), inset 1px 1px 0 var(--six-modal-icode-tl, #2a3244), inset -1px -1px 0 var(--six-modal-icode-br, #1e2534); opacity:0.95;';
           tag.addEventListener('mousedown', (ev)=>{ try{ ev.preventDefault(); ev.stopPropagation(); }catch{} });
           tag.addEventListener('click', (ev)=>{ try{ ev.preventDefault(); ev.stopPropagation(); }catch{}; try{ onClick && onClick(); }catch{} });
           wrap.appendChild(tag);
@@ -37848,7 +37893,7 @@ try{
       recurLeft.tabIndex = 0;
       recurLeft.setAttribute('role','button');
       recurLeft.setAttribute('aria-label','サブディレクトリまで検索 (する/しない)');
-      recurLeft.style.cssText = 'display:flex; align-items:center; gap:8px; user-select:none; color:var(--text-color); padding:4px 6px; border:1px solid #2f3644; border-radius:8px; box-sizing:border-box; outline:none;';
+      recurLeft.style.cssText = 'display:flex; align-items:center; gap:8px; user-select:none; color:var(--six-modal-fg, #e6e6e6); padding:4px 6px; border:1px solid var(--six-modal-btn-border, #2f3644); border-radius:8px; box-sizing:border-box; outline:none;';
 
       const recurText = document.createElement('span');
       recurText.textContent = 'サブディレクトリまで検索';
@@ -37862,7 +37907,7 @@ try{
         b.type = 'button';
         b.tabIndex = -1; // not focusable via Tab
         b.textContent = label;
-        b.style.cssText = 'border:1px solid #2a3244; background:transparent; color:#e6e6e6; border-radius:6px; padding:2px 10px; cursor:pointer; font-size:11px; line-height:1.5; user-select:none; outline:none;';
+        b.style.cssText = 'border:1px solid var(--six-modal-btn-border, #2a3244); background:transparent; color:var(--six-modal-fg, #e6e6e6); border-radius:6px; padding:2px 10px; cursor:pointer; font-size:11px; line-height:1.5; user-select:none; outline:none;';
         b.addEventListener('mousedown', (e)=>{ try{ e.preventDefault(); e.stopPropagation(); }catch{} });
         return b;
       };
@@ -37882,14 +37927,14 @@ try{
 
       const depthLabel = document.createElement('span');
       depthLabel.textContent = 'maxdepth';
-      depthLabel.style.cssText = 'font-size:0.85em; color:var(--text-dim);';
+      depthLabel.style.cssText = 'font-size:0.85em; color:var(--six-modal-fg, #e6e6e6); opacity:0.78;';
 
       const _mkDepthInput = ()=>{
         const el = document.createElement('input');
         el.type = 'text';
         el.inputMode = 'numeric';
         el.tabIndex = 0;
-        el.style.cssText = 'width:3.2em; text-align:center; background:var(--bg-color); color:var(--text-color); border:1px solid #ffffff; padding:4px 6px; font-family:var(--font-mono); outline:none; font-size:inherit;';
+        el.style.cssText = 'width:3.2em; text-align:center; background:var(--six-modal-input-bg, var(--six-modal-bg, #1e1e1e)); color:var(--six-modal-fg, #e6e6e6); border:0; box-shadow:inset 1px 1px 0 var(--six-modal-input-tl, #c0c0c0), inset -1px -1px 0 var(--six-modal-input-br, #505050); padding:4px 6px; font-family:var(--font-mono); outline:none; font-size:inherit;';
         return el;
       };
       const depthInput = _mkDepthInput();
@@ -37904,7 +37949,7 @@ try{
       const _mkPathInput = ()=>{
         const el = document.createElement('input');
         el.type = 'text';
-        el.style.cssText = 'width:100%; min-width:0; box-sizing:border-box; background:var(--bg-color); color:var(--text-color); border:1px solid #ffffff; padding:4px 8px; font-family:var(--font-mono); outline:none; font-size:inherit;';
+        el.style.cssText = 'width:100%; min-width:0; box-sizing:border-box; background:var(--six-modal-input-bg, var(--six-modal-bg, #1e1e1e)); color:var(--six-modal-fg, #e6e6e6); border:0; box-shadow:inset 1px 1px 0 var(--six-modal-input-tl, #c0c0c0), inset -1px -1px 0 var(--six-modal-input-br, #505050); padding:4px 8px; font-family:var(--font-mono); outline:none; font-size:inherit;';
         return el;
       };
 
@@ -37915,9 +37960,9 @@ try{
         b.textContent = '履歴 F4';
         const inline = !(opts && opts.inline === false);
         if (inline){
-          b.style.cssText = 'position:absolute; right:4px; top:50%; transform:translateY(-50%); border:1px solid #2a3244; background:#1a2030; color:#e6e6e6; border-radius:6px; padding:3px 8px; cursor:pointer; font-size:11px; line-height:1.2; user-select:none; outline:none;';
+          b.style.cssText = 'position:absolute; right:4px; top:50%; transform:translateY(-50%); border:0; box-shadow:inset 1px 1px 0 var(--six-modal-icode-tl, #2a3244), inset -1px -1px 0 var(--six-modal-icode-br, #1e2534); background:var(--six-modal-icode-bg, #121826); color:var(--six-modal-icode-fg, #e9ecff); border-radius:6px; padding:3px 8px; cursor:pointer; font-size:11px; line-height:1.2; user-select:none; outline:none;';
         } else {
-          b.style.cssText = 'border:1px solid #2a3244; background:#1a2030; color:#e6e6e6; border-radius:6px; padding:3px 8px; cursor:pointer; font-size:11px; line-height:1.2; user-select:none; outline:none;';
+          b.style.cssText = 'border:0; box-shadow:inset 1px 1px 0 var(--six-modal-icode-tl, #2a3244), inset -1px -1px 0 var(--six-modal-icode-br, #1e2534); background:var(--six-modal-icode-bg, #121826); color:var(--six-modal-icode-fg, #e9ecff); border-radius:6px; padding:3px 8px; cursor:pointer; font-size:11px; line-height:1.2; user-select:none; outline:none;';
         }
         // Do not steal focus from the input (clicking the history button should keep focus on the input).
         b.addEventListener('mousedown', (e)=>{ try{ e.preventDefault(); e.stopPropagation(); }catch{} });
@@ -37940,7 +37985,7 @@ try{
 
       const basedirLabel = document.createElement('span');
       basedirLabel.textContent = '-basedir';
-      basedirLabel.style.cssText = 'font-size:0.85em; color:var(--text-dim); white-space:nowrap; user-select:none;';
+      basedirLabel.style.cssText = 'font-size:0.85em; color:var(--six-modal-fg, #e6e6e6); opacity:0.78; white-space:nowrap; user-select:none;';
 
       const basedirInputWrap = document.createElement('div');
       basedirInputWrap.style.cssText = 'position:relative; flex:1 1 auto; min-width:0;';
@@ -37975,15 +38020,17 @@ try{
         try{
           if (!el || !el.style) return;
           if (disabled){
-            el.style.opacity = '0.95';
-            el.style.background = '#07080c';
-            el.style.borderColor = '#0f1320';
-            el.style.color = '#2f3644';
+            el.style.opacity = '0.45';
+            el.style.background = 'var(--six-modal-input-bg, var(--six-modal-bg, #1e1e1e))';
+            el.style.color = 'var(--six-modal-fg, #e6e6e6)';
+            el.style.border = '0';
+            el.style.boxShadow = 'inset 1px 1px 0 var(--six-modal-input-tl, #0f1320), inset -1px -1px 0 var(--six-modal-input-br, #0f1320)';
           } else {
             el.style.opacity = '1.0';
-            el.style.background = 'var(--bg-color)';
-            el.style.borderColor = '#ffffff';
-            el.style.color = 'var(--text-color)';
+            el.style.background = 'var(--six-modal-input-bg, var(--six-modal-bg, #1e1e1e))';
+            el.style.color = 'var(--six-modal-fg, #e6e6e6)';
+            el.style.border = '0';
+            el.style.boxShadow = 'inset 1px 1px 0 var(--six-modal-input-tl, #c0c0c0), inset -1px -1px 0 var(--six-modal-input-br, #505050)';
           }
         }catch{}
       }
@@ -38047,7 +38094,7 @@ try{
         try{
           // Use palette ON/OFF colors
           btn.style.background = active ? _palGreen : _palGray;
-          btn.style.borderColor = '#2a3244';
+          btn.style.borderColor = 'var(--six-modal-btn-border, #2a3244)';
           btn.style.color = '#000';
           btn.style.opacity = active ? '1.0' : '0.9';
         }catch{}
@@ -38074,8 +38121,8 @@ try{
       function _syncRecurPillsVisual(){
         try{
           // reset
-          recurBtnOn.style.background = 'transparent'; recurBtnOn.style.color = '#e6e6e6';
-          recurBtnOff.style.background = 'transparent'; recurBtnOff.style.color = '#e6e6e6';
+          recurBtnOn.style.background = 'transparent'; recurBtnOn.style.color = 'var(--six-modal-fg, #e6e6e6)';
+          recurBtnOff.style.background = 'transparent'; recurBtnOff.style.color = 'var(--six-modal-fg, #e6e6e6)';
           if (_grepRecursive){
             recurBtnOn.style.background = _palGreen; recurBtnOn.style.color = '#000';
           } else {
@@ -38114,9 +38161,10 @@ try{
             try{ _applyDisabledStyle(depthInput, !!depthInput.disabled); }catch{}
             try{
               const dimCol = '#2f3644';
-              const onCol = 'var(--text-color)';
+              const onCol = 'var(--six-modal-fg, #e6e6e6)';
               recurText.style.color = enableRecur ? onCol : dimCol;
-              depthLabel.style.color = (enableRecur && _grepRecursive) ? 'var(--text-dim)' : dimCol;
+              depthLabel.style.color = (enableRecur && _grepRecursive) ? 'var(--six-modal-fg, #e6e6e6)' : dimCol;
+              depthLabel.style.opacity = (enableRecur && _grepRecursive) ? '0.78' : '1.0';
             }catch{}
             _syncRecurPillsVisual();
           }catch{}
@@ -38129,7 +38177,7 @@ try{
             fileglobInput.disabled = pathDisabled || (_grepTargetMode !== 'dirfiles');
           }catch{}
           // Also dim the '-basedir' label when buffer mode is selected.
-          try{ basedirLabel.style.color = pathDisabled ? '#2f3644' : 'var(--text-dim)'; }catch{}
+          try{ basedirLabel.style.color = pathDisabled ? '#2f3644' : 'var(--six-modal-fg, #e6e6e6)'; basedirLabel.style.opacity = pathDisabled ? '1.0' : '0.78'; }catch{}
           _applyDisabledStyle(pathSingle, !!pathSingle.disabled);
           _applyDisabledStyle(basedirInput, !!basedirInput.disabled);
           _applyDisabledStyle(fileglobInput, !!fileglobInput.disabled);
@@ -38140,7 +38188,7 @@ try{
               _applyBtnDisabledStyle(pathHistBtn, true);
             } else {
               // Restore normal colors (applyBtnDisabledStyle does not restore background/border/color).
-              try{ pathHistBtn.style.background = '#1a2030'; pathHistBtn.style.borderColor = '#2a3244'; pathHistBtn.style.color = '#e6e6e6'; }catch{}
+              try{ pathHistBtn.style.background = 'var(--six-modal-btn-bg, #1a2030)'; pathHistBtn.style.borderColor = 'var(--six-modal-btn-border, #2a3244)'; pathHistBtn.style.color = 'var(--six-modal-btn-fg, #e6e6e6)'; }catch{}
               try{ pathHistBtn.style.cursor = 'pointer'; pathHistBtn.style.opacity='1.0'; }catch{}
             }
           }catch{}
@@ -38149,7 +38197,7 @@ try{
             if (basedirHistBtn.disabled){
               _applyBtnDisabledStyle(basedirHistBtn, true);
             } else {
-              try{ basedirHistBtn.style.background = '#1a2030'; basedirHistBtn.style.borderColor = '#2a3244'; basedirHistBtn.style.color = '#e6e6e6'; }catch{}
+              try{ basedirHistBtn.style.background = 'var(--six-modal-btn-bg, #1a2030)'; basedirHistBtn.style.borderColor = 'var(--six-modal-btn-border, #2a3244)'; basedirHistBtn.style.color = 'var(--six-modal-btn-fg, #e6e6e6)'; }catch{}
               try{ basedirHistBtn.style.cursor = 'pointer'; basedirHistBtn.style.opacity='1.0'; }catch{}
             }
           }catch{}
@@ -38159,7 +38207,7 @@ try{
             if (fileglobHistBtn.disabled){
               _applyBtnDisabledStyle(fileglobHistBtn, true);
             } else {
-              try{ fileglobHistBtn.style.background = '#1a2030'; fileglobHistBtn.style.borderColor = '#2a3244'; fileglobHistBtn.style.color = '#e6e6e6'; }catch{}
+              try{ fileglobHistBtn.style.background = 'var(--six-modal-btn-bg, #1a2030)'; fileglobHistBtn.style.borderColor = 'var(--six-modal-btn-border, #2a3244)'; fileglobHistBtn.style.color = 'var(--six-modal-btn-fg, #e6e6e6)'; }catch{}
               try{ fileglobHistBtn.style.cursor = 'pointer'; fileglobHistBtn.style.opacity='1.0'; }catch{}
             }
           }catch{}
@@ -38246,9 +38294,9 @@ try{
       // Match Cancel button style
       execBtn.style.cssText = `
           min-width: 80px;
-          border: 1px solid var(--six-help-close-border, #2f4064);
-          background: var(--six-help-close-bg, #2a3756);
-          color: var(--six-help-close-fg, #e6e6e6);
+          border: 1px solid var(--six-modal-btn-border, #2f4064);
+          background: var(--six-modal-btn-bg, #2a3756);
+          color: var(--six-modal-btn-fg, #e6e6e6);
           padding: 6px 10px;
           border-radius: 6px;
           cursor: pointer;
@@ -38260,9 +38308,9 @@ try{
       cancelBtn.textContent = 'キャンセル';
       cancelBtn.style.cssText = `
           min-width: 80px;
-          border: 1px solid var(--six-help-close-border, #2f4064);
-          background: var(--six-help-close-bg, #2a3756);
-          color: var(--six-help-close-fg, #e6e6e6);
+          border: 1px solid var(--six-modal-btn-border, #2f4064);
+          background: var(--six-modal-btn-bg, #2a3756);
+          color: var(--six-modal-btn-fg, #e6e6e6);
           padding: 6px 10px;
           border-radius: 6px;
           cursor: pointer;
@@ -38910,14 +38958,16 @@ try{
           const ok = _canExecuteNow();
           execBtn.disabled = !ok;
           if (execBtn.disabled){
-            execBtn.style.background = '#07080c';
-            execBtn.style.borderColor = '#0f1320';
-            execBtn.style.color = '#2f3644';
+            execBtn.style.background = 'var(--six-modal-bg, #07080c)';
+            execBtn.style.borderColor = 'var(--six-modal-btn-border, #0f1320)';
+            execBtn.style.color = 'var(--six-modal-fg, #2f3644)';
+            execBtn.style.opacity = '0.55';
             execBtn.style.cursor = 'default';
           } else {
-            execBtn.style.background = 'var(--six-help-close-bg, #2a3756)';
-            execBtn.style.borderColor = 'var(--six-help-close-border, #2f4064)';
-            execBtn.style.color = 'var(--six-help-close-fg, #e6e6e6)';
+            execBtn.style.background = 'var(--six-modal-btn-bg, #2a3756)';
+            execBtn.style.borderColor = 'var(--six-modal-btn-border, #2f4064)';
+            execBtn.style.color = 'var(--six-modal-btn-fg, #e6e6e6)';
+            execBtn.style.opacity = '1.0';
             execBtn.style.cursor = 'pointer';
           }
         }catch{}
@@ -38942,10 +38992,10 @@ try{
       // Focus visuals for the region
       try{
         patBtnWrap.addEventListener('focus', ()=>{
-          try{ patBtnWrap.style.borderColor = '#e6e6e6'; patBtnWrap.style.boxShadow = '0 0 0 2px rgba(230,230,230,0.25)'; }catch{}
+          try{ patBtnWrap.style.borderColor = 'var(--six-modal-btn-fg, #e6e6e6)'; patBtnWrap.style.boxShadow = '0 0 0 2px rgba(230,230,230,0.25)'; }catch{}
         });
         patBtnWrap.addEventListener('blur', ()=>{
-          try{ patBtnWrap.style.borderColor = '#2f3644'; patBtnWrap.style.boxShadow = 'none'; }catch{}
+          try{ patBtnWrap.style.borderColor = 'var(--six-modal-group-border, #2f3644)'; patBtnWrap.style.boxShadow = 'none'; }catch{}
         });
       }catch{}
 
@@ -39967,8 +40017,8 @@ try{
       };
 
       try {
-        if (progress) progress.dirCount = (progress.dirCount|0) + 1;
-        await _maybeYield();
+        recurLeft.addEventListener('focus', ()=>{ try{ recurLeft.style.borderColor = 'var(--six-modal-btn-fg, #e6e6e6)'; recurLeft.style.boxShadow = '0 0 0 2px rgba(230,230,230,0.22)'; }catch{} });
+        recurLeft.addEventListener('blur',  ()=>{ try{ recurLeft.style.borderColor = 'var(--six-modal-btn-border, #2f3644)'; recurLeft.style.boxShadow = 'none'; }catch{} });
 
         const entries = await _listDirEntries(dirUrl, listOptions);
         for (const e of entries) {
