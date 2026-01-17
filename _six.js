@@ -19114,8 +19114,21 @@ try{
           try{
             el.style.display = 'block';
             el.style.height = hPx + 'px';
-            // Keep the number aligned within the first visual line of the block.
-            el.style.lineHeight = (r.eof ? (LINE_HEIGHT+'px') : (lh + 'px'));
+            // Keep the number aligned within the first visual line of the block by default.
+            // In markdown-rich, center the number for *wrapped* rows only.
+            let _lhNum = (r.eof ? (LINE_HEIGHT|0) : (lh|0));
+            try{
+              if (!r.eof && wrapOn){
+                const contentH = Math.max(0, (hPx|0) - (padTopPx|0) - (padBottomPx|0));
+                const baseLh = Math.max(1, (lh|0));
+                // Infer wrap count from height/line-height; allow small rounding noise.
+                const n = Math.max(1, Math.round((contentH + (baseLh*0.15)) / baseLh));
+                if ((n|0) > 1){
+                  _lhNum = Math.max(1, contentH|0);
+                }
+              }
+            }catch{}
+            el.style.lineHeight = _lhNum + 'px';
             el.style.position = 'relative';
             el.style.zIndex = '1';
           }catch{}
