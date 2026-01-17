@@ -173,10 +173,13 @@ window.THEME = {
 
   // Popup (:e popup, :b popup, encodeSet popupなど)
   popupActiveLine: "#00a090", // active line highlight
-  popupHeaderBg: "#000030"
+  popupHeaderBg: "#000030",
+
+  inlineCodeBorderUL: "white",
+  inlineCodeBorderBR: "black"
 };
 
-// markdown清書モードの色指定
+// markdown清書モードを意識した第2の色指定
 window.EX1_THEME = {
   // 本文文字色
   editorTextColor: "black",
@@ -236,6 +239,9 @@ window.EX1_THEME = {
   // 行背景(コードブロック内INSERTカーソル行)グラデーション
   blockActiveEditLineGradStart: "#4a3a3a",
   blockActiveEditLineGradEnd: "#403030",
+
+  inlineCodeBorderUL: "white",
+  inlineCodeBorderBR: "black"
 };
 
 // かな/カナでの長音として扱う記号 (単語単位の移動に利用)。コードポイント配列。

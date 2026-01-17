@@ -442,14 +442,15 @@ body.md-rich #editor::selection {
 	border-radius: 0.10em;
 	/* 65% transparent fill (Windows11+WebView2) */
 	background: color-mix(in srgb, currentColor 60%, transparent);
-	/* bevel-like border: top/left lighter, bottom/right stronger */
-	border-style: solid;
-	border-width: 2px;
-	border-color:
-		color-mix(in srgb, currentColor 40%, white)   /* top */
-		color-mix(in srgb, currentColor 70%, gray)    /* right */
-		color-mix(in srgb, currentColor 70%, gray) /* bottom */
-		color-mix(in srgb, currentColor 40%, white);  /* left */
+	/* IMPORTANT (#1860): do NOT use border here.
+	   Borders add pixels to layout width, which makes clean-mode inline code wider than
+	   draft-mode raw text and can shift wrap boundaries. Use box-shadow instead (no layout). */
+	border: 0;
+	/* bevel-like stroke (no layout impact) */
+	box-shadow:
+		inset 1px 1px 0 color-mix(in srgb, currentColor 40%, white),
+		inset -1px -1px 0 color-mix(in srgb, currentColor 70%, gray),
+		inset 0 0 0 2px color-mix(in srgb, currentColor 55%, transparent);
 	/* cancel backticks width:
 	   margin L/R: 0.5ch
 	   padding L/R: 0.5ch + 0.5ch * ([total ticks L+R] - 2)
