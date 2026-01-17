@@ -158,25 +158,14 @@ window.THEME = {
   dummyLFColor: "orange",
   dummyCRLFColor: "#d0a0f0",
 
-  // Help modal theming
-  helpTabActiveBg: "#2b7050",
-  helpTabActiveFg: "#e0efe6",
-  helpTabBg: "#1e241a",
-  helpTabFg: "#a0aaa0",
-  helpModalBg: "#041a10",
-  helpKbdBg: "#222a2c",
-  helpKbdFg: "#aabada",
-  // Help close button (themeable)
-  helpCloseBg: "#3a3a56",
-  helpCloseFg: "#e6e6e6",
-  helpCloseBorder: "#3f5074",
-
   // Popup (:e popup, :b popup, encodeSet popupなど)
   popupActiveLine: "#00a090", // active line highlight
   popupHeaderBg: "#000030",
 
-  inlineCodeBorderUL: "white",
-  inlineCodeBorderBR: "black"
+  // Markdownインラインコード
+  inlineCodeBG: "#004a0a",
+  inlineCodeBorderUL: "#eaf0ea",
+  inlineCodeBorderBR: "#607060"
 };
 
 // markdown清書モードを意識した第2の色指定
@@ -240,8 +229,33 @@ window.EX1_THEME = {
   blockActiveEditLineGradStart: "#4a3a3a",
   blockActiveEditLineGradEnd: "#403030",
 
-  inlineCodeBorderUL: "white",
-  inlineCodeBorderBR: "black"
+  // Markdownインラインコード
+  inlineCodeBG: "#606060",
+  inlineCodeBorderUL: "#c0c0c0",
+  inlineCodeBorderBR: "#505050"
+};
+
+// MODALダイアログ用色指定(フォールバックなし)
+window.MODAL_THEME = {
+  fgColor: "black",  // 文字色
+  bgColor: "#041a10",  // 背景色
+  btnFg: "#e6e6e6",
+  btnBg: "#3a3a56",
+//  btnBorder: "#3f5074",
+  btnBorder: "cyan",
+};
+
+// ヘルプダイアログ用色指定(HELP_THEME→MODAL_THEME)
+window.HELP_THEME = {
+  tabFg: "#a0aaa0",
+  tabBg: "#1e241a",
+  activeTabFg: "#e0efe6",
+  activeTabBg: "#2b7050",
+  inlineCodeFg: "#aabada",
+  inlineCodeBg: "#222a2c",
+  inlineCodeTL: "green",
+  inlineCodeBR: "red",
+
 };
 
 // かな/カナでの長音として扱う記号 (単語単位の移動に利用)。コードポイント配列。

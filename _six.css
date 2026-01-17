@@ -440,17 +440,21 @@ body.md-rich #editor::selection {
 	display: inline;
 	box-sizing: border-box;
 	border-radius: 0.10em;
-	/* 65% transparent fill (Windows11+WebView2) */
-	background: color-mix(in srgb, currentColor 60%, transparent);
+	/* Fill color (#1862): theme-provided; fallback keeps prior look */
+	background: var(--mdInlineCodeBG, color-mix(in srgb, currentColor 60%, transparent));
 	/* IMPORTANT (#1860): do NOT use border here.
 	   Borders add pixels to layout width, which makes clean-mode inline code wider than
 	   draft-mode raw text and can shift wrap boundaries. Use box-shadow instead (no layout). */
 	border: 0;
-	/* bevel-like stroke (no layout impact) */
+	/* bevel-like stroke (no layout impact): 1px border equivalent with per-side theme colors (#1861/#1862)
+	   - up/left  : --mdInlineCodeBorderUL
+	   - bottom/right: --mdInlineCodeBorderBR
+	*/
 	box-shadow:
-		inset 1px 1px 0 color-mix(in srgb, currentColor 40%, white),
-		inset -1px -1px 0 color-mix(in srgb, currentColor 70%, gray),
-		inset 0 0 0 2px color-mix(in srgb, currentColor 55%, transparent);
+		inset 0 1px 0 var(--mdInlineCodeBorderUL, color-mix(in srgb, currentColor 40%, white)),
+		inset 1px 0 0 var(--mdInlineCodeBorderUL, color-mix(in srgb, currentColor 40%, white)),
+		inset 0 -1px 0 var(--mdInlineCodeBorderBR, color-mix(in srgb, currentColor 70%, gray)),
+		inset -1px 0 0 var(--mdInlineCodeBorderBR, color-mix(in srgb, currentColor 70%, gray));
 	/* cancel backticks width:
 	   margin L/R: 0.5ch
 	   padding L/R: 0.5ch + 0.5ch * ([total ticks L+R] - 2)

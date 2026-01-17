@@ -4926,7 +4926,7 @@ try{
 
   // Global theme profile (shared by all buffers)
   // - 'basic': read from window.THEME only (missing => yellow)
-  // - 'ex1'  : for selected keys, read from window.EX1_THEME then fall back to window.THEME
+  // - 'ex1'  : for ALL theme keys, read from window.EX1_THEME then fall back to window.THEME (missing => yellow)
   let _themeName = 'basic';
 
   function _normalizeThemeName(v){
@@ -4936,32 +4936,6 @@ try{
       return null;
     }catch{ return null; }
   }
-
-  const _EX1_THEME_KEYS = (function(){
-    try{
-      return new Set([
-        'editorTextColor',
-        'lineGradientStart','lineGradientEnd',
-        'inactiveGutterGradientStart','inactiveGutterGradientEnd',
-        'gutterNumberColor',
-        'activeLineGradientStart','activeLineGradientEnd',
-        'activeGutterGradientStart','activeGutterGradientEnd',
-        'activeEditLineGradStart','activeEditLineGradEnd',
-        'activeEditGutterGradStart','activeEditGutterGradEnd',
-        'activeLineNumberColor',
-        'caretGradStart','caretGradMid',
-        'caretIMEGradStart','caretIMEGradMid',
-        'caretIMEGradStart','caretIMEGradMid',
-        'editCaretGradStart','editCaretGradMid',
-        'editCaretIMEGradStart','editCaretIMEGradMid',
-        'editCaretIMEGradStart','editCaretIMEGradMid',
-        // Fenced code block colors (#1793)
-        'blockFGColor','blockBGColor',
-        'blockActiveLineGradStart','blockActiveLineGradEnd',
-        'blockActiveEditLineGradStart','blockActiveEditLineGradEnd'
-      ]);
-    }catch{ return new Set(); }
-  })();
 
   function _themeGetRawFrom(obj, key){
     try{
@@ -4978,16 +4952,23 @@ try{
     try{
       const base = (window && window.THEME) ? window.THEME : {};
       const mode = (_themeName === 'ex1') ? 'ex1' : 'basic';
-      if (mode === 'ex1' && _EX1_THEME_KEYS && _EX1_THEME_KEYS.has(String(key))){
+      if (mode === 'ex1'){
         const ex1 = (window && window.EX1_THEME) ? window.EX1_THEME : {};
         let v = _themeGetRawFrom(ex1, key);
         if (v === undefined) v = _themeGetRawFrom(base, key);
+        // Special fallback for inactive gutter colors
         if (v === undefined){
-          if (key === 'inactiveGutterGradientStart') v = _themeGetRawFrom(base, 'gutterGradientStart');
-          else if (key === 'inactiveGutterGradientEnd') v = _themeGetRawFrom(base, 'gutterGradientEnd');
+          if (key === 'inactiveGutterGradientStart'){
+            v = _themeGetRawFrom(ex1, 'gutterGradientStart');
+            if (v === undefined) v = _themeGetRawFrom(base, 'gutterGradientStart');
+          } else if (key === 'inactiveGutterGradientEnd'){
+            v = _themeGetRawFrom(ex1, 'gutterGradientEnd');
+            if (v === undefined) v = _themeGetRawFrom(base, 'gutterGradientEnd');
+          }
         }
         return v;
       }
+      // basic
       return _themeGetRawFrom(base, key);
     }catch{}
     return undefined;
@@ -13556,6 +13537,11 @@ try{
         setVar('mdCleanFg', themeGet('editorTextColor', t.editorTextColor));
         setVar('mdCleanBgStart', themeGet('lineGradientStart', t.lineGradientStart));
         setVar('mdCleanBgEnd', themeGet('lineGradientEnd', t.lineGradientEnd));
+        // Markdown-rich inline code border bevel colors (#1861)
+        setVar('mdInlineCodeBorderUL', themeGet('inlineCodeBorderUL', t.inlineCodeBorderUL));
+        setVar('mdInlineCodeBorderBR', themeGet('inlineCodeBorderBR', t.inlineCodeBorderBR));
+        // Markdown-rich inline code fill color (#1862)
+        setVar('mdInlineCodeBG', themeGet('inlineCodeBG', t.inlineCodeBG));
         // Keep legacy mdHrColor in sync (used by CSS)
         setVar('mdHrColor', themeGet('editorTextColor', t.editorTextColor));
   // Editor text color
