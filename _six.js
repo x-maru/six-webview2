@@ -22716,6 +22716,297 @@ try{
     });
   }
 
+  // ---- Help docs from external Markdown files ----
+  // Files are loaded from the same directory as _six.js/_six.html.
+  // Naming: ANYNAME.NN.md (NN: 01..99). Tabs are sorted by NN.
+  let _helpMdTabs = null; // Array<{ id,label,nn,name,url,md,html }>
+  let _helpMdLoadPromise = null;
+  function _helpMdTitleFromFirstLine(mdText, fallback){
+    try{
+      const s = String(mdText||'').replace(/\r\n?/g,'\n');
+      const first = (s.split('\n')[0] || '').trim();
+      if (!first) return String(fallback||'Help');
+      const m = first.match(/^#{1,6}\s+(.*)$/);
+      const t = (m && m[1]) ? String(m[1]||'').trim() : first;
+      return t || String(fallback||'Help');
+    }catch{ return String(fallback||'Help'); }
+  }
+  function _helpMdEscHtml(s){
+    try{
+      return String(s||'')
+        .replace(/&/g,'&amp;')
+        .replace(/</g,'&lt;')
+        .replace(/>/g,'&gt;')
+        .replace(/"/g,'&quot;')
+        .replace(/'/g,'&#39;');
+    }catch{ return ''; }
+  }
+  function _helpMdInlineToHtml(s){
+    try{
+      const src = String(s||'');
+      let out = '';
+      let i = 0;
+      while (i < src.length){
+        const ch = src[i];
+        // inline code -> kbd
+        if (ch === '`'){
+          const j = src.indexOf('`', i+1);
+          if (j >= 0){
+            const code = src.slice(i+1, j);
+            out += '<kbd class="six-help-kbd">' + _helpMdEscHtml(code || ' ') + '</kbd>';
+            i = j + 1;
+            continue;
+          }
+        }
+        // link: [text](url)
+        if (ch === '['){
+          const j = src.indexOf(']', i+1);
+          const k = (j >= 0) ? src.indexOf('(', j+1) : -1;
+          const l = (k >= 0) ? src.indexOf(')', k+1) : -1;
+          if (j >= 0 && k === (j+1) && l >= 0){
+            const text = src.slice(i+1, j);
+            const url0 = src.slice(k+1, l).trim();
+            const safeText = _helpMdEscHtml(text || url0);
+            const safeUrl = _helpMdEscHtml(url0);
+            out += '<a class="six-help-link" href="' + safeUrl + '" target="_blank" rel="noopener noreferrer">' + safeText + '</a>';
+            i = l + 1;
+            continue;
+          }
+        }
+        out += _helpMdEscHtml(ch);
+        i++;
+      }
+      return out;
+    }catch{ return _helpMdEscHtml(String(s||'')); }
+  }
+  function _helpMdToHtml(mdText){
+    try{
+      const s = String(mdText||'').replace(/\r\n?/g,'\n');
+      const lines = s.split('\n');
+      let i = 0;
+      let html = '';
+      let inCode = false;
+      let codeBuf = [];
+      let paraBuf = [];
+      let listMode = null; // 'ul' | 'ol'
+      let listItems = [];
+
+      const flushPara = ()=>{
+        if (!paraBuf.length) return;
+        const body = paraBuf.map(x=>_helpMdInlineToHtml(x)).join('<br>');
+        html += '<p class="six-help-p">' + body + '</p>';
+        paraBuf = [];
+      };
+      const flushList = ()=>{
+        if (!listMode || !listItems.length) { listMode = null; listItems = []; return; }
+        html += (listMode==='ol') ? '<ol class="six-help-ol">' : '<ul class="six-help-ul">';
+        for (const it of listItems){
+          html += '<li>' + _helpMdInlineToHtml(it) + '</li>';
+        }
+        html += (listMode==='ol') ? '</ol>' : '</ul>';
+        listMode = null; listItems = [];
+      };
+
+      while (i < lines.length){
+        const raw = lines[i];
+        const line = String(raw||'');
+        // fenced code
+        if (/^```/.test(line)){
+          if (!inCode){
+            flushPara(); flushList();
+            inCode = true; codeBuf = [];
+          } else {
+            const code = codeBuf.join('\n');
+            html += '<pre class="six-help-pre"><code>' + _helpMdEscHtml(code) + '</code></pre>';
+            inCode = false; codeBuf = [];
+          }
+          i++; continue;
+        }
+        if (inCode){ codeBuf.push(line); i++; continue; }
+
+        // blank line
+        if (line.trim()===''){ flushPara(); flushList(); i++; continue; }
+
+        // heading
+        const mh = line.match(/^(#{1,6})\s+(.*)$/);
+        if (mh){
+          flushPara(); flushList();
+          const lvl = Math.max(1, Math.min(6, (mh[1]||'').length|0));
+          html += '<h' + lvl + ' class="six-help-h">' + _helpMdInlineToHtml(mh[2]||'') + '</h' + lvl + '>';
+          i++; continue;
+        }
+
+        // list item
+        const mul = line.match(/^\s*[-*+]\s+(.*)$/);
+        const mol = line.match(/^\s*(\d+)\.\s+(.*)$/);
+        if (mul || mol){
+          flushPara();
+          const want = mol ? 'ol' : 'ul';
+          if (listMode && listMode !== want){ flushList(); }
+          listMode = want;
+          listItems.push(String(mol ? (mol[2]||'') : (mul[1]||'')));
+          i++; continue;
+        }
+
+        // paragraph (accumulate)
+        flushList();
+        paraBuf.push(line);
+        i++;
+      }
+      flushPara(); flushList();
+      if (inCode){
+        const code = codeBuf.join('\n');
+        html += '<pre class="six-help-pre"><code>' + _helpMdEscHtml(code) + '</code></pre>';
+      }
+      return html;
+    }catch{ return '<pre class="six-help-pre"><code>' + _helpMdEscHtml(String(mdText||'')) + '</code></pre>'; }
+  }
+
+  async function _helpMdLoadIndexFiles(dirUrl){
+    try{
+      const tryNames = [
+        'help.index.json',
+        'help.index.txt',
+      ];
+      for (const name of tryNames){
+        const url = new URL(name, dirUrl).toString();
+        let text = '';
+        try{ text = await _fetchTextSmart(url); }catch{
+          try{
+            const r = await fetch(url, { cache:'no-store' });
+            if (r && r.ok) text = await r.text();
+          }catch{}
+        }
+        text = String(text||'').trim();
+        if (!text) continue;
+
+        // JSON: ["x.01.md", ...] or { files:[...]}.
+        if (/\.json$/i.test(name)){
+          try{
+            const data = JSON.parse(text);
+            if (Array.isArray(data)){
+              return data.map(x=>String(x||'')).filter(Boolean);
+            }
+            if (data && Array.isArray(data.files)){
+              return data.files.map(x=>String(x||'')).filter(Boolean);
+            }
+          }catch{}
+          continue;
+        }
+
+        // TXT: one filename per line. Ignore empty and comment lines (# or //).
+        try{
+          const lines = text.split(/\r?\n/);
+          const files = [];
+          for (let line of lines){
+            line = String(line||'').trim();
+            if (!line) continue;
+            if (line.startsWith('#')) continue;
+            if (line.startsWith('//')) continue;
+            files.push(line);
+          }
+          if (files.length) return files;
+        }catch{}
+      }
+      return [];
+    }catch{ return []; }
+  }
+
+  async function _helpMdLoadAtStartup(){
+    try{
+      if (_helpMdLoadPromise) return _helpMdLoadPromise;
+      _helpMdLoadPromise = (async()=>{
+        const dirUrl = _htmlBaseURL();
+        const dir = (dirUrl && dirUrl.toString) ? dirUrl.toString() : String(dirUrl||'');
+        let entries = [];
+        try{
+          if (typeof _listDirEntriesWithQuickRetry === 'function') entries = await _listDirEntriesWithQuickRetry(dir);
+          else if (typeof _listDirEntries === 'function') entries = await _listDirEntries(dir);
+        }catch{ entries = []; }
+
+        let candidates = [];
+        try{
+          if (Array.isArray(entries) && entries.length){
+            for (const e of entries){
+              const name = (e && e.name) ? String(e.name||'') : '';
+              const m = name.match(/^(.+)\.(\d{2})\.md$/i);
+              if (!m) continue;
+              const nn = parseInt(m[2], 10);
+              if (!(nn>=1 && nn<=99)) continue;
+              candidates.push({ nn, name, url: (e && e.url) ? String(e.url) : new URL(name, dirUrl).toString() });
+            }
+          }
+        }catch{}
+
+        // Fallback(1): help.index.(txt|json) manifest for arbitrary names when listing is unavailable.
+        if (!candidates.length){
+          try{
+            const files = await _helpMdLoadIndexFiles(dirUrl);
+            for (const f0 of (Array.isArray(files) ? files : [])){
+              const f = String(f0||'').trim();
+              if (!f) continue;
+              const base = f.split(/[\\/]/).pop();
+              const m = String(base||'').match(/^(.+)\.(\d{2})\.md$/i);
+              if (!m) continue;
+              const nn = parseInt(m[2], 10);
+              if (!(nn>=1 && nn<=99)) continue;
+              const url = (/^[a-z]+:/i.test(f) ? f : new URL(f, dirUrl).toString());
+              candidates.push({ nn, name: String(base||f), url });
+            }
+          }catch{}
+        }
+
+        // Fallback: probe help.NN.md (01..99) when directory listing is unavailable.
+        if (!candidates.length){
+          let foundAny = false;
+          let missRun = 0;
+          for (let nn=1; nn<=99; nn++){
+            const name = 'help.' + String(nn).padStart(2,'0') + '.md';
+            const url = new URL(name, dirUrl).toString();
+            try{
+              const res = await fetch(url, { cache:'no-store' });
+              if (res && res.ok){
+                candidates.push({ nn, name, url });
+                foundAny = true;
+                missRun = 0;
+              } else {
+                if (foundAny){
+                  missRun++;
+                  if (missRun >= 10) break;
+                }
+              }
+            }catch{}
+          }
+        }
+
+        candidates.sort((a,b)=> (a.nn-b.nn) || String(a.name||'').localeCompare(String(b.name||'')));
+        // NN duplicates: first wins.
+        const used = new Set();
+        const tabs = [];
+        for (const c of candidates){
+          if (used.has(c.nn)) continue;
+          used.add(c.nn);
+          let md = '';
+          try{ md = await _fetchTextSmart(String(c.url||'')); }catch{ try{ const r = await fetch(String(c.url||''), { cache:'no-store' }); if (r && r.ok) md = await r.text(); }catch{} }
+          md = String(md||'');
+          const label = _helpMdTitleFromFirstLine(md, c.name);
+          tabs.push({
+            id: 'md' + String(c.nn).padStart(2,'0'),
+            label,
+            nn: (c.nn|0),
+            name: String(c.name||''),
+            url: String(c.url||''),
+            md,
+            html: _helpMdToHtml(md)
+          });
+        }
+        if (tabs.length){ _helpMdTabs = tabs; }
+        return _helpMdTabs;
+      })();
+      return _helpMdLoadPromise;
+    }catch{ return Promise.resolve(_helpMdTabs); }
+  }
+
   // Help modal (:help)
   function helpModal(opts){
     // opts: { defaultTab: 'all'|'cmd'|'normal'|'insert'|'visual' }
@@ -22823,8 +23114,8 @@ try{
         root.appendChild(ops);
         _modalDetail.appendChild(root);
 
-        // Tabs
-        const TABS = [
+        // Tabs (default: built-in). If external Markdown tabs are loaded, they take precedence.
+        const DEFAULT_TABS = [
           { id:'all', label:'全体' },
           { id:'cmd', label:'コマンド' },
           { id:'normal', label:'NORMAL' },
@@ -22832,8 +23123,35 @@ try{
           { id:'visual', label:'VISUAL' },
           { id:'regex', label:'正規表現' }
         ];
-        let curTab = (opts && opts.defaultTab) || 'cmd';
-        if (!TABS.some(t=>t.id===curTab)) curTab = 'cmd';
+        let TABS = DEFAULT_TABS;
+        const _mdTabById = new Map();
+        try{
+          if (Array.isArray(_helpMdTabs) && _helpMdTabs.length){
+            TABS = _helpMdTabs.map(t=>({ id:t.id, label:t.label }));
+            for (const t of _helpMdTabs){ _mdTabById.set(t.id, t); }
+          }
+        }catch{}
+        const wantTab = (opts && opts.defaultTab) || '';
+        let curTab = wantTab || (TABS[0] && TABS[0].id) || 'cmd';
+        if (!TABS.some(t=>t.id===curTab)){
+          // Legacy id -> label mapping (so callers can still pass {defaultTab:'cmd'} etc).
+          const wantLabel = (function(x){
+            switch(String(x||'')){
+              case 'all': return '全体';
+              case 'cmd': return 'コマンド';
+              case 'normal': return 'NORMAL';
+              case 'insert': return 'INSERT';
+              case 'visual': return 'VISUAL';
+              case 'regex': return '正規表現';
+              default: return '';
+            }
+          })(wantTab);
+          if (wantLabel){
+            const hit = TABS.find(t=>String(t && t.label||'') === wantLabel);
+            if (hit) curTab = hit.id;
+          }
+        }
+        if (!TABS.some(t=>t.id===curTab)) curTab = (TABS[0] && TABS[0].id) || 'cmd';
 
         const tabButtons = new Map();
         function applyTabStyles(){
@@ -22877,6 +23195,18 @@ try{
           };
           const K = (txt)=>{ const k=document.createElement('kbd'); k.textContent=txt; styleKbd(k); return k; };
           const sep = (s)=> document.createTextNode(s);
+
+          // External Markdown tab
+          try{
+            if (_mdTabById && _mdTabById.has(curTab)){
+              const t = _mdTabById.get(curTab);
+              wrap.className = 'six-help-md';
+              try{ wrap.innerHTML = String(t && t.html || ''); }catch{ wrap.textContent = String(t && t.md || ''); }
+              sc.appendChild(wrap);
+              try{ sc.scrollTop = 0; }catch{}
+              return;
+            }
+          }catch{}
 
           if (curTab==='all'){
             // 起動後に変更可能なパラメータの初期値
@@ -23328,22 +23658,73 @@ try{
           try{ sc.scrollTop = 0; }catch{}
         }
 
-        tabsBar.innerHTML = '';
-        for (const t of TABS){
-          const b = document.createElement('button');
-          b.textContent = t.label;
-          b.setAttribute('role','tab');
-          b.style.background = 'transparent';
-          b.style.border = 'none';
-          b.style.padding = '6px 8px';
-          b.style.cursor = 'pointer';
-          b.style.outline = 'none'; b.style.boxShadow = 'none';
-          b.setAttribute('tabindex','-1');
-          b.addEventListener('click', (ev)=>{ ev.preventDefault(); curTab = t.id; applyTabStyles(); renderContent(); try{ b.blur(); }catch{} });
-          tabsBar.appendChild(b);
-          tabButtons.set(t.id, b);
+        function rebuildTabs(){
+          tabsBar.innerHTML = '';
+          tabButtons.clear();
+          for (const t of TABS){
+            const b = document.createElement('button');
+            b.textContent = t.label;
+            b.setAttribute('role','tab');
+            b.style.background = 'transparent';
+            b.style.border = 'none';
+            b.style.padding = '6px 8px';
+            b.style.cursor = 'pointer';
+            b.style.outline = 'none'; b.style.boxShadow = 'none';
+            b.setAttribute('tabindex','-1');
+            b.addEventListener('click', (ev)=>{ ev.preventDefault(); curTab = t.id; applyTabStyles(); renderContent(); try{ b.blur(); }catch{} });
+            tabsBar.appendChild(b);
+            tabButtons.set(t.id, b);
+          }
+          applyTabStyles();
+          renderContent();
         }
-  applyTabStyles(); renderContent();
+
+        rebuildTabs();
+
+        // If external help markdown finishes loading after opening Help, hot-swap tabs.
+        try{
+          Promise.resolve(_helpMdLoadAtStartup()).then(()=>{
+            try{
+              if (!(_modalOverlay && _modalOverlay.style && _modalOverlay.style.display !== 'none')) return;
+              if (!(Array.isArray(_helpMdTabs) && _helpMdTabs.length)) return;
+              // Switch to external tabs only once.
+              if (TABS !== DEFAULT_TABS) return;
+              TABS = _helpMdTabs.map(t=>({ id:t.id, label:t.label }));
+              _mdTabById.clear();
+              for (const t of _helpMdTabs){ _mdTabById.set(t.id, t); }
+              try{
+                const prevLabel = (DEFAULT_TABS.find(t=>t.id===curTab) || {}).label;
+                if (prevLabel){
+                  const hit = TABS.find(t=>String(t && t.label||'') === String(prevLabel||''));
+                  if (hit) curTab = hit.id;
+                }
+              }catch{}
+              if (!TABS.some(t=>t.id===curTab)) curTab = (TABS[0] && TABS[0].id) || curTab;
+              rebuildTabs();
+            }catch{}
+          });
+        }catch{}
+
+        // Open links externally (do not navigate the app)
+        try{
+          sc.addEventListener('click', (e)=>{
+            try{
+              const a = e && e.target ? (e.target.closest ? e.target.closest('a') : null) : null;
+              if (!a) return;
+              const href = a.getAttribute('href') || '';
+              if (!href) return;
+              e.preventDefault(); e.stopPropagation();
+              let opened = false;
+              try{
+                if (window && window.chrome && window.chrome.webview && window.chrome.webview.postMessage){
+                  window.chrome.webview.postMessage({ type:'open-url', url: String(href) });
+                  opened = true;
+                }
+              }catch{}
+              if (!opened){ try{ window.open(String(href), '_blank'); opened = true; }catch{} }
+            }catch{}
+          }, true);
+        }catch{}
   // Prevent focusing tabs/content area by mouse (avoid focus ring after click)
   try{ tabsBar.addEventListener('mousedown', (e)=>{ e.preventDefault(); }, true); }catch{}
   try{ sc.addEventListener('mousedown', (e)=>{ e.preventDefault(); }, true); }catch{}
@@ -40438,6 +40819,8 @@ try{
       // Sync metrics (line-height, font-size, measurement span)
       _syncEditorMetrics();
       _wireZoomHUD();
+        // Preload external Help markdown tabs (best-effort)
+        try{ _helpMdLoadAtStartup(); }catch{}
       // Save session opportunistically on unload (no prompt)
   try{ window.addEventListener('beforeunload', ()=>{ try{ if (!_skipPersistOnUnloadOnce) _persistSessionNow(); }catch{} }, { capture:true }); }catch{}
       // Also persist on pagehide/visibilitychange(hidden) to improve reliability for immediate exits
