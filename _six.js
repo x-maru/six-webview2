@@ -2718,14 +2718,6 @@ try{
             } else {
               let ww = (+wPx||0);
               let io = indentOpts;
-              // UL list lines: actual rendering may emulate hanging-indent via a negative-margin shim
-              // (md-hang0) with text-indent forced to 0 to avoid WebView2 clipping. Ensure the wrap
-              // probe uses the same effective style, otherwise it can undercount visual wrap lines.
-              try{
-                if ((ulHangHackPx||0) > 0 && io && typeof io === 'object'){
-                  io = Object.assign({}, io, { textIndentPx: 0 });
-                }
-              }catch{}
               if (isCodeRow){
                 ww = Math.max(20, (+ww||0) - (_cbTextPadRightPx|0));
                 io = _cbIndentOpts;
@@ -9662,12 +9654,6 @@ try{
             if (lt === 'ol') return null;
             let indentOpts = null;
             try{ indentOpts = _mdIndentOptsForListLine(String(dispText||''), ul, wPx|0, (rowInfo.fs|0)||Math.max(6,Math.round(baseFontPx)), (rowInfo.lh|0)||LINE_HEIGHT); }catch{ indentOpts = null; }
-            // Match renderer UL hang-hack: disable negative text-indent.
-            try{
-              if (indentOpts && lt === 'ul' && Number.isFinite(indentOpts.padLeftPx) && (indentOpts.padLeftPx||0) > 0.5){
-                indentOpts = { padLeftPx:(+indentOpts.padLeftPx||0), textIndentPx: 0 };
-              }
-            }catch{}
             return indentOpts;
           }catch{ return null; }
         };
@@ -12235,13 +12221,6 @@ try{
           if (hideSymbolsDefault && !isCodeRow && !isFenceRow){
             const ul = _mdUListInfo && _mdUListInfo(src, i, lines);
             if (ul) indentOpts = _mdIndentOptsForListLine(src, ul, (+wPx||0), fs|0, lh|0);
-            // Match renderer UL hang-hack: disable negative text-indent for UL list items.
-            try{
-              const lt2 = (ul && ul.listType) ? String(ul.listType||'') : '';
-              if (indentOpts && lt2 === 'ul' && Number.isFinite(indentOpts.padLeftPx) && (indentOpts.padLeftPx||0) > 0.5){
-                indentOpts = { padLeftPx:(+indentOpts.padLeftPx||0), textIndentPx: 0 };
-              }
-            }catch{}
           }
         }catch{ indentOpts = null; }
 
@@ -12359,13 +12338,6 @@ try{
           if (hideSymbolsDefault && !isCodeRow && !isFenceRow){
             const ul = _mdUListInfo && _mdUListInfo(src, i, lines);
             if (ul) indentOpts = _mdIndentOptsForListLine(src, ul, (+wPx||0), fs|0, lh|0);
-            // Match renderer UL hang-hack: disable negative text-indent for UL list items.
-            try{
-              const lt2 = (ul && ul.listType) ? String(ul.listType||'') : '';
-              if (indentOpts && lt2 === 'ul' && Number.isFinite(indentOpts.padLeftPx) && (indentOpts.padLeftPx||0) > 0.5){
-                indentOpts = { padLeftPx:(+indentOpts.padLeftPx||0), textIndentPx: 0 };
-              }
-            }catch{}
           }
         }catch{ indentOpts = null; }
 
