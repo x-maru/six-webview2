@@ -168,7 +168,7 @@ window.THEME = {
   
 
   // Markdownインラインコード
-  inlineCodeBG: "#004a0a",
+  inlineCodeBG: "#607a70",
   inlineCodeBorderUL: "#eaf0ea",
   inlineCodeBorderBR: "#607060"
 };

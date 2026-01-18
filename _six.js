@@ -12548,10 +12548,14 @@ try{
   let _mdEofLastTotalPx = 0;     // legacy: last overlay estimated content height (without EOF pad)
   let _mdEofLastContentPx = 0;   // textarea native content height (without paddings)
   let _mdEofLastLinesTotal = 0;
+  // md-rich + wrap-on: freeze the phys<->eff scroll mapping during VISUAL.
+  // Rationale: entering/exiting VISUAL can trigger transient scrollHeight/padding changes,
+  // which changes physMax and makes proportional mapping shift, causing apparent jumps.
+  let _mdScrollMapFrozen = null;
   function _mdRichWrapOn(){
     try{ return !!((_mdRichActive && _mdRichActive()) && (_wrapEnabled && _wrapEnabled())); }catch{ return false; }
   }
-  function _mdScrollMapGet(){
+  function _mdScrollMapGetRaw(){
     try{
       if (!editor) return null;
       if (!_mdRichWrapOn()) return null;
@@ -12583,6 +12587,13 @@ try{
       const effMax = Math.max(0, (effTotal|0) - (clientH|0));
       return { lh:(lh|0), clientH:(clientH|0), physMax:(physMax|0), effMax:(effMax|0), ptPx:(ptPx|0) };
     }catch{ return null; }
+  }
+  function _mdScrollMapGet(){
+    try{
+      // Freeze mapping during VISUAL so proportional conversion stays stable.
+      if (_mdScrollMapFrozen && _visualActive && _mode === 'VISUAL') return _mdScrollMapFrozen;
+    }catch{}
+    return _mdScrollMapGetRaw();
   }
   function _mdEffFromPhysPx(physPx){
     try{
@@ -13622,30 +13633,19 @@ try{
   // Help/Grep dialog theming (#1863)
   // - Help: window.HELP_THEME -> window.MODAL_THEME -> yellow
   // - Grep: window.MODAL_THEME only -> yellow
-  const _themeGetRawWithLegacy = (obj, key)=>{
-    try{
-      let v = _themeGetRawFrom(obj, key);
-      if (v === undefined){
-        // Legacy alias: btnFg/btnBg -> simpleBtnFg/simpleBtnBg
-        if (key === 'simpleBtnBg') v = _themeGetRawFrom(obj, 'btnBg');
-        else if (key === 'simpleBtnFg') v = _themeGetRawFrom(obj, 'btnFg');
-      }
-      return v;
-    }catch{ return undefined; }
-  };
   const _helpGet = (key)=>{
     try{
       const h = (window && window.HELP_THEME) ? window.HELP_THEME : {};
       const m = (window && window.MODAL_THEME) ? window.MODAL_THEME : {};
-      let v = _themeGetRawWithLegacy(h, key);
-      if (v === undefined) v = _themeGetRawWithLegacy(m, key);
+      let v = _themeGetRawFrom(h, key);
+      if (v === undefined) v = _themeGetRawFrom(m, key);
       return (v !== undefined) ? v : 'yellow';
     }catch{ return 'yellow'; }
   };
   const _modalGet = (key)=>{
     try{
       const m = (window && window.MODAL_THEME) ? window.MODAL_THEME : {};
-      const v = _themeGetRawWithLegacy(m, key);
+      const v = _themeGetRawFrom(m, key);
       return (v !== undefined) ? v : 'yellow';
     }catch{ return 'yellow'; }
   };
@@ -16861,11 +16861,15 @@ try{
   function _enterVisual(linewise){
     _visualActive = true; _visualLinewise = !!linewise;
     _visualAnchorR = caretRow; _visualAnchorC = caretCol;
+    // md-rich + wrap-on: freeze phys<->eff mapping during VISUAL to avoid jumps.
+    try{ _mdScrollMapFrozen = null; }catch{}
+    try{ if (_mdRichWrapOn && _mdRichWrapOn() && typeof _mdScrollMapGetRaw === 'function') _mdScrollMapFrozen = _mdScrollMapGetRaw(); }catch{}
     _setMode('VISUAL');
     _updateVisualSelection();
   }
   function _exitVisual(){
     _visualActive = false; _visualLinewise = false;
+    try{ _mdScrollMapFrozen = null; }catch{}
     _setMode('NORMAL');
     _syncNativeSelectionToCaret();
     // Ensure any CMD-time visual overlay is cleared when leaving VISUAL
@@ -18241,22 +18245,39 @@ try{
     if (_visualActive && _visualLinewise && !centerOnce){
       // IME composition: keep-in-view is skipped to avoid reflows; rely on post-composition correction
       try{ if (window && window._imeComposing===true) return; }catch{}
+      // md-rich + wrap-on: scrollTop operates in physical space with effective mapping.
+      // Do NOT snap editor.scrollTop (physical) to LINE_HEIGHT grid here; it can desync the
+      // effective mapping and cause VISUAL-only viewport/caret drift.
+      const _mdWrapNow = (function(){
+        try{ return (typeof _mdRichWrapOn === 'function') ? !!_mdRichWrapOn() : !!((_mdRichActive && _mdRichActive()) && (_wrapEnabled && _wrapEnabled())); }
+        catch{ return false; }
+      })();
       // Bring caret into view only when it would go off-screen; allow EOF pad visibility.
       const topCmp = _wrapActive ? (_topV1|0) : (topLine|0);
       if (caretLine1 < topCmp){
         const newTop = Math.max(1, caretLine1);
-        if (newTop !== topCmp) _setEditorScrollTop((newTop-1)*LINE_HEIGHT, {});
+        if (newTop !== topCmp) _setEditorScrollTop((newTop-1)*LINE_HEIGHT, _mdWrapNow ? { immediate:true, keepCaret:true } : {});
       } else if (caretLine1 > (topCmp + vis - 1)){
         let newTop = Math.max(1, caretLine1 - (vis - 1));
         if (!_wrapActive && caretLine1 === linesTotal){ newTop = Math.min(newTop, maxTopWithPad); }
-        if (newTop !== topCmp) _setEditorScrollTop((newTop-1)*LINE_HEIGHT, {});
+        if (newTop !== topCmp) _setEditorScrollTop((newTop-1)*LINE_HEIGHT, _mdWrapNow ? { immediate:true, keepCaret:true } : {});
       }
       // Clamp at EOF (with pad) and snap to grid
       try{
         topLine = _topLine();
         const maxTop = maxTopWithPad;
         const topNow = _wrapActive ? _topVisualLine1() : topLine;
-        if (topNow > maxTop){ _setEditorScrollTop((maxTop-1)*LINE_HEIGHT, {}); }
+        if (topNow > maxTop){ _setEditorScrollTop((maxTop-1)*LINE_HEIGHT, _mdWrapNow ? { immediate:true, keepCaret:true } : {}); }
+
+        // md-rich + wrap-on: skip physical grid snapping (see note above).
+        if (_mdWrapNow){
+          if (window.requestAnimationFrame){
+            requestAnimationFrame(()=>{ try{ _repositionCaret(); updateGutter(); }catch{} });
+          } else {
+            try{ _repositionCaret(); updateGutter(); }catch{}
+          }
+          return;
+        }
         // markdown-off + wrap-on: near physical EOF, scrollTop can be clamped to a non-grid max.
         // Floor-snapping there would move the remainder to the TOP and hide 1 EOF pad line.
         let skipSnapAtPhysEof = false;
@@ -29356,8 +29377,6 @@ try{
         const colHold = caretCol|0;
         _enterVisual(true);
         try{ _setCaret(caretRow, Math.max(0, Math.min(_lineLen(caretRow), colHold))); }catch{}
-      // markdown-rich: entering VISUAL linewise can leave the caret offscreen; enforce scrolloff once.
-      try{ if (_mdRichActive && _mdRichActive()) _ensureAfterMotion({ vertDir: 0 }); }catch{}
         _repositionCaret(); updateGutter();
         return;
       }
