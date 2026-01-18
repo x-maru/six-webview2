@@ -24464,7 +24464,10 @@ try{
       // Final overlay sync after scroll settles. During the scroll RAF we may skip caret updates,
       // and relying on a later input can leave the caret invisible (notably after large jumps).
       try{ updateGutter(); }catch{}
-      try{ _repositionCaret(); }catch{}
+      try{
+        if (window && window._imeComposing===true) _repositionCaret({ force:true });
+        else _repositionCaret();
+      }catch{}
       // If we skipped heavy overlays during continuous scroll, resync them once at the end.
       // This is important for incremental search preview (incprev) after large scroll/jumps.
       try{ _incPrevRefresh(); }catch{}
@@ -24510,9 +24513,7 @@ try{
       }
     }catch{}
 
-    // IME composition can fire frequent scroll events (e.g., scrollLeft auto-follow).
-    // Avoid scheduling/cancelling RAF on every event; we don't need overlay syncing while composing.
-    try{ if (window && window._imeComposing===true){ return; } }catch{}
+    const _evtImeComposing = (function(){ try{ return (window && window._imeComposing===true); }catch{ return false; } })();
 
     // Detect horizontal-only scroll at the event level.
     // (This is what happens when h/l causes the textarea to auto scrollLeft.)
@@ -25061,9 +25062,9 @@ try{
         if (window && window._imeComposing===true){
           const itIme = String((e && e.inputType) || '');
           if (itIme === 'insertCompositionText' || itIme === 'insertFromComposition'){
-            // markdown-rich: even during composition, we must keep overlay caret aligned,
-            // otherwise the very first preedit glyph can appear shifted.
-            try{ if (_mdRichActive && _mdRichActive()) _scheduleImeCompCaretSync && _scheduleImeCompCaretSync('beforeinput-' + itIme); }catch{}
+            // Even during composition, keep overlay caret aligned.
+            // (Non-md + wrap-on can change wrap metrics/scroll mapping during preedit.)
+            try{ _scheduleImeCompCaretSync && _scheduleImeCompCaretSync('beforeinput-' + itIme); }catch{}
             // Predictive candidate popup can show without explicit candidate-nav keys.
             // Keep a short window and enforce tiny scrolloff to reduce caret overlap.
             try{
@@ -26388,7 +26389,13 @@ try{
             const mdRich0 = (function(){ try{ return !!(_mdRichEnabled && _mdRichEnabled()); }catch{ return false; } })();
             const wrapOn0 = (function(){ try{ return !!(_wrapEnabled && _wrapEnabled()); }catch{ return false; } })();
             const len0 = (fullText0.length|0);
-            const thresh = mdRich0 ? 0 : (wrapOn0 ? 2000 : 20000);
+            // #1416: Reduced-text IME mode is a last-resort perf hack.
+            // For non-markdown, entering reduced-text mode causes visible UX artifacts:
+            // - vertical scrollbar can disappear (scrollHeight shrinks)
+            // - posInfo / line numbers become relative to the reduced subset
+            // - view can jump by several lines at composition start
+            // Keep markdown-rich behavior (always reduce) but make non-md reduction much rarer.
+            const thresh = mdRich0 ? 0 : 200000;
             if (len0 > (thresh|0)){
               const off0 = Math.max(0, Math.min(fullText0.length|0, _imeSelOff0|0));
               let startOff = off0;
@@ -35240,6 +35247,16 @@ try{
       } else {
         stack.push(seg);
       }
+    }
+
+    // While IME is composing, keep scroll handling lightweight but *do* sync the overlay caret.
+    // (Non-md + wrap-on can change wrap metrics/scrollTop during composition; skipping all sync
+    // causes the caret stripe/active-line background to appear to jump.)
+    if (_evtImeComposing){
+      try{ _syncTiledBgRemainder(); }catch{}
+      // Coalesce caret sync via the IME helper (also refreshes caretRow/Col from native selection).
+      try{ _scheduleImeCompCaretSync && _scheduleImeCompCaretSync('scroll'); }catch{}
+      return;
     }
     let out = prefix + stack.join('/');
     if (hadTrail && out && !out.endsWith('/')) out += '/';
