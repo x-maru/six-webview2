@@ -189,7 +189,9 @@ body.use-native-caret #caretLayer .caret { display: none !important; }
 /* #1418: While textarea is reduced during IME composition, hide the scrollbar THUMB only.
    Track can remain visible to avoid layout/contrast issues. */
 body.ime-reduced-text #editor,
-#editor.ime-reduced-text {
+#editor.ime-reduced-text,
+body.typing-reduced-text #editor,
+#editor.typing-reduced-text {
 	/* Best-effort for engines supporting scrollbar-color */
 	/* Do NOT make the track transparent; it can reveal the dark base fill as a "black bar" (esp. horizontal). */
 	scrollbar-color: transparent rgba(255,255,255,0.10) !important;
@@ -199,7 +201,13 @@ body.ime-reduced-text #editor::-webkit-scrollbar-thumb,
 body.ime-reduced-text #editor::-webkit-scrollbar-thumb:hover,
 #editor.ime-reduced-text::-webkit-scrollbar-thumb:hover,
 body.ime-reduced-text #editor::-webkit-scrollbar-thumb:active,
-#editor.ime-reduced-text::-webkit-scrollbar-thumb:active {
+#editor.ime-reduced-text::-webkit-scrollbar-thumb:active,
+body.typing-reduced-text #editor::-webkit-scrollbar-thumb,
+#editor.typing-reduced-text::-webkit-scrollbar-thumb,
+body.typing-reduced-text #editor::-webkit-scrollbar-thumb:hover,
+#editor.typing-reduced-text::-webkit-scrollbar-thumb:hover,
+body.typing-reduced-text #editor::-webkit-scrollbar-thumb:active,
+#editor.typing-reduced-text::-webkit-scrollbar-thumb:active {
 	background: transparent !important;
 	background-color: rgba(0,0,0,0) !important;
 	border-color: rgba(0,0,0,0) !important;
@@ -213,7 +221,13 @@ body.ime-reduced-text #editor::-webkit-scrollbar-track,
 body.ime-reduced-text #editor::-webkit-scrollbar-track-piece,
 #editor.ime-reduced-text::-webkit-scrollbar-track-piece,
 body.ime-reduced-text #editor::-webkit-scrollbar-corner,
-#editor.ime-reduced-text::-webkit-scrollbar-corner {
+#editor.ime-reduced-text::-webkit-scrollbar-corner,
+body.typing-reduced-text #editor::-webkit-scrollbar-track,
+#editor.typing-reduced-text::-webkit-scrollbar-track,
+body.typing-reduced-text #editor::-webkit-scrollbar-track-piece,
+#editor.typing-reduced-text::-webkit-scrollbar-track-piece,
+body.typing-reduced-text #editor::-webkit-scrollbar-corner,
+#editor.typing-reduced-text::-webkit-scrollbar-corner {
 	background: rgba(255,255,255,0.10) !important;
 }
 

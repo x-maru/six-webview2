@@ -2973,12 +2973,46 @@ try{
   }
   // グローバルrAFスケジューラ: キー入力直後の再描画を1フレームに集約
   let _rafRenderScheduled = false;
+
+  // Perf helper (opt-in): log only slow paths when SIX_OPTIONS.DEBUG_PERF is enabled.
+  function _perfNow(){ try{ return (performance && performance.now) ? performance.now() : Date.now(); }catch{ return Date.now(); } }
+  function _perfSlow(tag, t0, extra){
+    try{
+      const o = (window && window.SIX_OPTIONS) ? window.SIX_OPTIONS : null;
+      const dbg = !!(o && (o.DEBUG_PERF || o.debugperf));
+      if (!dbg) return;
+      const t1 = _perfNow();
+      const dt = Math.max(0, t1 - (+t0||0));
+      const thr = (o && Number.isFinite(o.PERF_LOG_MS)) ? (+o.PERF_LOG_MS||0) : 40;
+      if (!(dt > thr)) return;
+      if (!window.__sixPerfLastAt) window.__sixPerfLastAt = {};
+      const now = Date.now();
+      const last = +window.__sixPerfLastAt[tag] || 0;
+      if ((now - last) < 800) return; // rate-limit per tag
+      window.__sixPerfLastAt[tag] = now;
+      try{ console.debug('[six][perf] slow', Object.assign({ tag:String(tag||''), ms: Math.round(dt) }, (extra||{}))); }catch{}
+    }catch{}
+  }
+
   function _requestCaretRender(){
     try{
       if (_rafRenderScheduled) return;
       _rafRenderScheduled = true;
       requestAnimationFrame(()=>{
+        const __t0 = (performance && performance.now) ? performance.now() : Date.now();
         _rafRenderScheduled = false;
+        // During md-ime-native (textarea visible; overlay hidden), skip expensive overlay/gutter work.
+        // This path is used both for IME composition and for huge-buffer typing bursts.
+        try{
+          const b = (document && document.body) ? document.body : null;
+          if (b && b.classList && b.classList.contains('md-ime-native')){
+            try{ _refreshCaretMode && _refreshCaretMode('raf-md-ime-native'); }catch{}
+            // Always skip heavy caret/gutter/scrolloff work while md-ime-native is active.
+            // On huge buffers, even a single updateGutter/_repositionCaret can take seconds.
+            // We'll rebuild overlays once after the typing burst/INSERT ends.
+            return;
+          }
+        }catch{}
         // IME未確定中は重いスクロールオフ・キャレット再配置・行番号更新を一時停止
         try{ if (window._imeComposing===true){
           // 合成終了後に1回だけ再描画を補償
@@ -3025,6 +3059,19 @@ try{
             updateGutter();
           }
         }catch{ try{ _repositionCaret(); }catch{} try{ updateGutter(); }catch{} }
+
+        // Perf trace (opt-in)
+        try{
+          const o = (window && window.SIX_OPTIONS) ? window.SIX_OPTIONS : null;
+          const dbg = !!(o && (o.DEBUG_PERF || o.debugperf));
+          if (dbg){
+            const __t1 = (performance && performance.now) ? performance.now() : Date.now();
+            const dt = Math.max(0, __t1 - __t0);
+            if (dt > 30){
+              console.debug('[six][perf] rafRender', { ms: Math.round(dt), mode:_mode, md:!!(_mdRichActive && _mdRichActive()), ime:!!(window && window._imeComposing===true), typingGuard:(Date.now() < (_typingGuardUntil|0)), mdImeNative: !!(document && document.body && document.body.classList && document.body.classList.contains('md-ime-native')), len: (_editorTextLen ? (_editorTextLen()|0) : -1) });
+            }
+          }
+        }catch{}
       });
     }catch{}
   }
@@ -3092,6 +3139,212 @@ try{
   // IME未確定中の大量inputで重い処理が走るのを避ける（compositionendで一括反映）
   let _imeDeferredModifyPending = false;
   let _imeDeferredTickBumped = false;
+  // Typing reduced-text mode (non-IME): keep textarea small during INSERT on huge markdown buffers.
+  // This targets native textarea edit stalls (multi-second lag) that happen even with IME OFF.
+  let _typingReducedText = false;
+  let _typingReducedFullText = '';
+  let _typingReducedStartOff = 0;
+  let _typingReducedEndOff = 0;
+  let _typingReducedLastFullOff = 0;
+  let _typingReducedCommitTimer = 0;
+  let _typingReducedPendingSubset = '';
+  let _typingReducedPendingCaretInSubset = 0;
+  let _typingReducedEnterLastCheckAt = 0;
+  function _typingReducedEnabled(){
+    try{
+      const o = (window && window.SIX_OPTIONS) ? window.SIX_OPTIONS : null;
+      if (o && (o.disableTypingReducedText===true || o.noTypingReducedText===true)) return false;
+    }catch{}
+    return true;
+  }
+  function _typingReducedWindow(fullText, offFull){
+    const s = String(fullText||'');
+    const len = (s.length|0);
+    const off = Math.max(0, Math.min(len, (offFull|0)));
+    // Fixed char window around caret (fast; no line splitting).
+    const MAX_SUBSET_CHARS = 8000;
+    const half = Math.floor((MAX_SUBSET_CHARS|0) / 2);
+    let startOff = Math.max(0, (off - half)|0);
+    let endOff = Math.min(len|0, (off + half)|0);
+    if ((endOff|0) < (startOff|0)) endOff = startOff|0;
+    const subset = s.slice(startOff|0, endOff|0);
+    const offInSubset = Math.max(0, Math.min((subset.length|0), (off - (startOff|0))|0));
+    return { startOff:(startOff|0), endOff:(endOff|0), subset, offInSubset:(offInSubset|0) };
+  }
+  function _typingReducedEnter(why){
+    try{
+      if (!_typingReducedEnabled()) return false;
+      if (!editor) return false;
+      if (_mode !== 'INSERT') return false;
+      // Only target markdown-rich; the lag report is markdown-on.
+      if (!(_mdRichEnabled && _mdRichEnabled())) return false;
+      // If already active, keep it.
+      if (_typingReducedText) return true;
+      // Avoid doing even lightweight checks on every single input event.
+      // (Input bursts can be extremely frequent under IME.)
+      try{
+        const now = Date.now();
+        if ((now - (_typingReducedEnterLastCheckAt|0)) < 500) return false;
+        _typingReducedEnterLastCheckAt = now;
+      }catch{}
+      const b = currentBuffer();
+      if (!b || typeof b.text !== 'string') return false;
+      const fullText = b.text || '';
+      // Threshold: keep conservative but low enough to catch multi-second stalls.
+      if ((fullText.length|0) < 50000) return false;
+      const offFull = (editor && typeof editor.selectionStart==='number') ? (editor.selectionStart|0) : (_offsetFromRC(caretRow|0, caretCol|0)|0);
+      const win = _typingReducedWindow(fullText, offFull|0);
+      // Apply reduced textarea
+      _typingReducedFullText = fullText;
+      _typingReducedStartOff = win.startOff|0;
+      _typingReducedEndOff = win.endOff|0;
+      _typingReducedLastFullOff = offFull|0;
+      const stHold = (editor && typeof editor.scrollTop==='number') ? (editor.scrollTop|0) : 0;
+      const slHold = (editor && typeof editor.scrollLeft==='number') ? (editor.scrollLeft|0) : 0;
+      editor.value = String(win.subset||'');
+      try{ editor.selectionStart = editor.selectionEnd = (win.offInSubset|0); }catch{}
+      try{ editor.scrollTop = stHold|0; editor.scrollLeft = slHold|0; }catch{}
+      _typingReducedText = true;
+      try{ document.body && document.body.classList && document.body.classList.add('typing-reduced-text'); }catch{}
+      try{ editor && editor.classList && editor.classList.add('typing-reduced-text'); }catch{}
+      // Show native textarea and hide overlay while reduced.
+      try{ _mdImeSetNativeMode && _mdImeSetNativeMode(true, 'typing-reduced'); }catch{}
+      try{ if (_optDebugKeys) _debugPush({ t:Date.now(), type:'typing-reduced-enter', mode:_mode, why:String(why||''), len:(fullText.length|0) }); }catch{}
+      return true;
+    }catch{ return false; }
+  }
+
+  function _typingReducedCommitNow(reason){
+    try{
+      if (!_typingReducedText) return;
+      if (!editor) return;
+      try{ if (window && window._imeComposing===true) return; }catch{}
+      const b = currentBuffer();
+      if (!b || typeof b.text !== 'string') return;
+
+      const full0 = String(_typingReducedFullText || b.text || '');
+      const a0 = Math.max(0, Math.min((full0.length|0), (_typingReducedStartOff|0)));
+      const b0 = Math.max(a0, Math.min((full0.length|0), (_typingReducedEndOff|0)));
+      const subsetCur = String(_typingReducedPendingSubset || (editor && editor.value) || '');
+      const caretInSubset = (_typingReducedPendingCaretInSubset|0);
+
+      const full1 = full0.slice(0, a0) + subsetCur + full0.slice(b0);
+      const offFull1 = Math.max(0, Math.min((full1.length|0), (a0 + (caretInSubset|0))|0));
+
+      // Update buffer once per pause.
+      b.text = full1;
+      b._changeTick = ((b._changeTick|0) + 1)|0;
+      b.modified = ((b._changeTick|0) !== (b._savedTick|0));
+      _typingReducedFullText = full1;
+      _typingReducedLastFullOff = offFull1|0;
+
+      // Re-reduce around new caret (fast; fixed char window).
+      const win = _typingReducedWindow(full1, offFull1|0);
+      _typingReducedStartOff = win.startOff|0;
+      _typingReducedEndOff = win.endOff|0;
+      const stHold = (editor && typeof editor.scrollTop==='number') ? (editor.scrollTop|0) : 0;
+      const slHold = (editor && typeof editor.scrollLeft==='number') ? (editor.scrollLeft|0) : 0;
+      editor.value = String(win.subset||'');
+      try{ editor.selectionStart = editor.selectionEnd = (win.offInSubset|0); }catch{}
+      try{ editor.scrollTop = stHold|0; editor.scrollLeft = slHold|0; }catch{}
+
+      try{ _insertSegDirty = true; }catch{}
+      try{ _scheduleLargeDeferredModifyFlush && _scheduleLargeDeferredModifyFlush('typing-reduced-commit' + (reason?(':'+reason):'')); }catch{}
+      try{ _mdImeSchedulePostCommitRender && _mdImeSchedulePostCommitRender('typing-reduced'); }catch{}
+    }catch{}
+  }
+
+  function _typingReducedScheduleCommit(reason){
+    try{
+      if (!_typingReducedText) return;
+      try{ if (_typingReducedCommitTimer) clearTimeout(_typingReducedCommitTimer); }catch{}
+      _typingReducedCommitTimer = setTimeout(()=>{
+        _typingReducedCommitTimer = 0;
+        try{
+          // If IME started composing, wait until it ends.
+          if (window && window._imeComposing===true){ _typingReducedScheduleCommit('wait-ime'); return; }
+        }catch{}
+        _typingReducedCommitNow(reason||'timer');
+      }, 220);
+      // Keep native textarea visible during the burst.
+      try{ _mdImeEnterNativeMode && _mdImeEnterNativeMode('typing-reduced-schedule', 2200); }catch{}
+    }catch{}
+  }
+  function _typingReducedExit(why){
+    try{
+      if (!_typingReducedText) return;
+      // Ensure any pending subset edits are committed before restoring full text.
+      try{ if (_typingReducedCommitTimer){ clearTimeout(_typingReducedCommitTimer); _typingReducedCommitTimer = 0; } }catch{}
+      try{ _typingReducedCommitNow('exit' + (why?(':'+why):'')); }catch{}
+      const b = currentBuffer();
+      const fullText = (b && typeof b.text === 'string') ? String(b.text||'') : String(_typingReducedFullText||'');
+      const offFull = Math.max(0, Math.min((fullText.length|0), (_typingReducedLastFullOff|0)));
+      const stHold = (editor && typeof editor.scrollTop==='number') ? (editor.scrollTop|0) : 0;
+      const slHold = (editor && typeof editor.scrollLeft==='number') ? (editor.scrollLeft|0) : 0;
+      editor.value = fullText;
+      try{ editor.selectionStart = editor.selectionEnd = offFull|0; }catch{}
+      try{ editor.scrollTop = stHold|0; editor.scrollLeft = slHold|0; }catch{}
+      _typingReducedText = false;
+      _typingReducedFullText = '';
+      _typingReducedStartOff = 0;
+      _typingReducedEndOff = 0;
+      _typingReducedLastFullOff = offFull|0;
+      try{ document.body && document.body.classList && document.body.classList.remove('typing-reduced-text'); }catch{}
+      try{ editor && editor.classList && editor.classList.remove('typing-reduced-text'); }catch{}
+      // Restore overlay (unless IME composition is active).
+      try{ if (!(window && window._imeComposing===true)){ _mdImeSetNativeMode && _mdImeSetNativeMode(false, 'typing-reduced-exit'); } }catch{}
+      try{ if (_mdApplyVisualState && _mdRichEnabled && _mdRichEnabled()) _mdApplyVisualState(); }catch{}
+      try{ if (_optDebugKeys) _debugPush({ t:Date.now(), type:'typing-reduced-exit', mode:_mode, why:String(why||''), len:(fullText.length|0) }); }catch{}
+    }catch{}
+  }
+  // Huge-buffer typing: avoid copying full editor.value on every keystroke.
+  // Debounce full-text sync so input stays responsive even in md-rich.
+  let _largeDeferredModifyPending = false;
+  let _largeDeferredLastAt = 0;
+  let _largeDeferredTimer = 0;
+  function _scheduleLargeDeferredModifyFlush(reason, delayMs){
+    try{
+      _largeDeferredModifyPending = true;
+      _largeDeferredLastAt = Date.now();
+      try{ if (_largeDeferredTimer) clearTimeout(_largeDeferredTimer); }catch{}
+      _largeDeferredTimer = setTimeout(()=>{
+        try{
+          // While typing in INSERT on huge md-rich buffers, avoid full-text sync.
+          // Even a single _syncModifiedFromTick() can take seconds and backlog input events.
+          try{
+            const mdNow = !!(_mdRichActive && _mdRichActive());
+            if (mdNow && _mode === 'INSERT'){
+              const bdy = (document && document.body) ? document.body : null;
+              const nativeNow = !!(bdy && bdy.classList && bdy.classList.contains('md-ime-native'));
+              const o = (window && window.SIX_OPTIONS) ? window.SIX_OPTIONS : null;
+              const v = o ? (o.MD_NO_LARGEFLUSH_IN_INSERT_LEN || o.mdNoLargeFlushInInsertLen || o.MD_DEFER_TEXT_SYNC_IN_INSERT_LEN || o.mdDeferTextSyncInInsertLen) : 0;
+              const thr = (Number.isFinite(v) && (v|0) > 0) ? (v|0) : 20000;
+              const len = (_editorTextLen ? (_editorTextLen()|0) : 0);
+              if (nativeNow || (len|0) >= (thr|0)){
+                try{ _mdImePostCommitOwed = true; }catch{}
+                try{ _mdImeEnterNativeMode && _mdImeEnterNativeMode('large-flush-skip' + (reason?(':'+reason):''), 15000); }catch{}
+                // Re-arm with a longer delay; actual sync will happen after leaving INSERT.
+                _largeDeferredTimer = 0;
+                _scheduleLargeDeferredModifyFlush('wait-insert', 1200);
+                return;
+              }
+            }
+          }catch{}
+
+          // If new edits arrived very recently, keep waiting.
+          const now = Date.now();
+          if ((now - (_largeDeferredLastAt|0)) < 140) { _scheduleLargeDeferredModifyFlush('redebounce'); return; }
+          _largeDeferredModifyPending = false;
+          // Sync buffer text once (expensive) after the burst.
+          try{ _syncModifiedFromTick && _syncModifiedFromTick(); }catch{}
+          try{ _hideCursor && _hideCursor(); }catch{}
+          try{ _schedulePersist && _schedulePersist('large-flush' + (reason?(':'+reason):'')); }catch{}
+          // If markdown-rich visuals were deferred, rebuild overlays now.
+          try{ _mdImeSchedulePostCommitRender && _mdImeSchedulePostCommitRender('large-flush'); }catch{}
+        }catch{}
+      }, Math.max(60, (delayMs|0) || 220));
+    }catch{}
+  }
   // IME candidate popup avoidance (markdown-rich): while candidate UI is likely shown,
   // enforce a tiny (1-line) scrolloff so the caret moves at most by one line.
   // This helps avoid the candidate window covering the caret without causing large re-centers.
@@ -3111,6 +3364,12 @@ try{
           const now = Date.now();
           const until = (typeof window._imeCandidateUntil==='number') ? (window._imeCandidateUntil|0) : 0;
           if (!(until && now < until)) return;
+        }catch{}
+        // When using native IME surface (md-ime-native) or reduced-text, prioritize showing preedit
+        // text immediately and avoid forced overlay sync that can stall input on huge buffers.
+        try{
+          const b = (document && document.body) ? document.body : null;
+          if (b && b.classList && (b.classList.contains('md-ime-native') || b.classList.contains('ime-reduced-text'))) return;
         }catch{}
         // Temporarily use scrolloff=1 so ensureScrolloff nudges by ~1 line at most.
         let prevSo = null;
@@ -3154,6 +3413,12 @@ try{
             caretRow = rc.r|0;
             caretCol = rc.c|0;
           }
+        }catch{}
+        // If we're in native IME mode (overlay hidden) or reduced-text, skip expensive overlay
+        // work during composition to prevent visible input lag.
+        try{
+          const b = (document && document.body) ? document.body : null;
+          if (b && b.classList && (b.classList.contains('md-ime-native') || b.classList.contains('ime-reduced-text'))) return;
         }catch{}
         try{ _mdImeUpdateRange && _mdImeUpdateRange(); }catch{}
         try{
@@ -3262,6 +3527,8 @@ try{
   // IME composing 実状態（未確定文字列の編集中）を明示管理
   // 既存コードで参照される _imeComposing が未定義になる環境を防ぐ
   if (typeof window._imeComposing === 'undefined') { try{ window._imeComposing = false; }catch{} }
+  // Build marker (for troubleshooting whether the latest _six.js is loaded)
+  try{ if (typeof window.SIX_BUILD_ID === 'undefined') window.SIX_BUILD_ID = '2026-01-20-md-typing-burst-native-v1'; }catch{}
   // IME簡易計測: 未確定中のイベント頻度・処理時間・レイアウト負荷を把握
   // 低コストなリングバッファと `performance.mark/measure` を併用（DevToolsで視認可能）
   try{
@@ -3576,18 +3843,123 @@ try{
   function _imeBarReplaceInsertedText(nextText, why){
     try{
       if (!editor) return;
+
+      const _imeBarIsComposingNow = ()=>{
+        try{ return !!_imeBarComposing || !!(window && window._imeComposing===true); }catch{ return !!_imeBarComposing; }
+      };
+
+      const _imeBarFreshFastSelOff = ()=>{
+        try{
+          const off = (window && Number.isFinite(window.__sixImeBarFastSelOff)) ? (window.__sixImeBarFastSelOff|0) : null;
+          const at = (window && Number.isFinite(window.__sixImeBarFastSelAt)) ? (window.__sixImeBarFastSelAt|0) : 0;
+          if (off == null) return null;
+          // Only trust fastSelOff very shortly after it was recorded (during the same burst).
+          const now = Date.now();
+          if (!at || (now - at) > 1200) return null;
+          return off|0;
+        }catch{ return null; }
+      };
+      const _imeBarBestCaretOff = ()=>{
+        try{
+          const fastOff = _imeBarFreshFastSelOff();
+          if (fastOff != null) return fastOff|0;
+        }catch{}
+        try{ return (editor && typeof editor.selectionStart==='number') ? (editor.selectionStart|0) : (_offsetFromRC(caretRow|0, caretCol|0)|0); }catch{}
+        return 0;
+      };
+
+      // Fast path: IME bar edits can be extremely frequent (compositionupdate/input per keystroke).
+      // On large markdown-rich buffers, avoid running layout-heavy sync (afterTextMutation/ensureScrolloff/updateGutter)
+      // on every keystroke; instead show native textarea and finalize once after the burst.
+      const _imebarIsFast = (function(){
+        try{
+          if (!(_mdRichActive && _mdRichActive())) return false;
+          if (_mode !== 'INSERT') return false;
+          // If IME bar isn't active, keep legacy behavior.
+          if (!_imeBarActive) return false;
+          // Avoid fast path for newline-ish inserts or special commands.
+          const w = String(why||'');
+          if (w.includes('enter') || w.includes('md-list-enter') || w.includes('dummy-eof')) return false;
+          const nextS = String(nextText||'');
+          if (nextS.includes('\n') || nextS.includes('\r')) return false;
+          // Threshold (overrideable)
+          let thr = 50000;
+          try{
+            const o = (window && window.SIX_OPTIONS) ? window.SIX_OPTIONS : null;
+            const v = o ? (o.MD_FAST_INPUT_LEN || o.mdFastInputLen || o.PERF_FAST_INPUT_LEN || o.perfFastInputLen) : 0;
+            if (Number.isFinite(v) && (v|0) > 0) thr = (v|0);
+          }catch{}
+          const len = (_editorTextLen ? (_editorTextLen()|0) : 0);
+          return (len|0) >= (thr|0);
+        }catch{ return false; }
+      })();
+
+      // Shadow-preedit mode: while composing on huge buffers, do NOT mutate editor.value/b.text.
+      // This avoids O(N) string rebuild per composition tick (which caused 300ms-400ms input handlers).
+      // We will apply only once at commit (composing=false).
+      const composingNow = _imeBarIsComposingNow();
+      if (typeof window.__sixImeBarShadowPreedit !== 'boolean') window.__sixImeBarShadowPreedit = false;
+      if (_imebarIsFast && composingNow){
+        window.__sixImeBarShadowPreedit = true;
+        // Keep native textarea visible to avoid md-rich overlay sync during IME.
+        try{ _mdImeEnterNativeMode && _mdImeEnterNativeMode('imebar-shadow', 3000); }catch{}
+        // Update internal state so subsequent ticks know the current preedit.
+        try{ _imeBarPrevText = String(nextText||''); }catch{}
+        // Update predicted caret offset for later finalize/commit.
+        try{
+          const off0 = (_imeBarAnchorOff|0);
+          const newOff0 = (off0 + String(nextText||'').length)|0;
+          if (window){ window.__sixImeBarFastSelOff = newOff0|0; window.__sixImeBarFastSelAt = Date.now(); window.__sixImeBarFastActiveUntil = Date.now() + 1400; }
+        }catch{}
+        // Defer any heavy finalize until commit.
+        try{ _scheduleImeBarFinalize && _scheduleImeBarFinalize(String(why||'shadow')); }catch{}
+        return;
+      }
+
+      // Deferred finalize for fast-path IME bar edits.
+      if (typeof window.__sixImeBarFinalizeToken !== 'number') window.__sixImeBarFinalizeToken = 0;
+      const _scheduleImeBarFinalize = (reason)=>{
+        try{
+          window.__sixImeBarFinalizeToken = (window.__sixImeBarFinalizeToken|0) + 1;
+          const tok = (window.__sixImeBarFinalizeToken|0);
+          if (window.__sixImeBarFinalizeTimer){ try{ clearTimeout(window.__sixImeBarFinalizeTimer); }catch{} }
+          window.__sixImeBarFinalizeTimer = setTimeout(()=>{ try{
+            if ((window.__sixImeBarFinalizeToken|0) !== (tok|0)) return;
+            // Don't finalize while composing; wait until commit.
+            try{ if (_imeBarComposing || (window && window._imeComposing===true)) return; }catch{}
+            // Apply deferred native selection once, then sync caretRow/caretCol and run heavy sync.
+            let off = 0;
+            try{
+              const fastOff = _imeBarFreshFastSelOff();
+              if (fastOff != null){
+                off = fastOff|0;
+                try{ editor.selectionStart = editor.selectionEnd = off; }catch{ try{ editor.setSelectionRange(off, off); }catch{} }
+              } else {
+                off = _imeBarBestCaretOff();
+              }
+            }catch{ off = (editor && typeof editor.selectionStart==='number') ? (editor.selectionStart|0) : 0; }
+            try{ if (typeof _rcFromOffset === 'function'){ const rc = _rcFromOffset(off|0); caretRow = rc.r|0; caretCol = rc.c|0; } }catch{}
+            try{ _afterTextMutation && _afterTextMutation(); }catch{}
+            try{ _mdImeSchedulePostCommitRender && _mdImeSchedulePostCommitRender('imebar-finalize' + (reason?(':'+reason):'')); }catch{}
+            try{ if (window){ window.__sixImeBarFastActiveUntil = 0; } }catch{}
+          }catch{} }, 220);
+        }catch{}
+      };
+
       const prev = String(_imeBarPrevText||'');
+      // If we were shadowing preedit, nothing has been inserted into the document yet.
+      const prevDoc = (window && window.__sixImeBarShadowPreedit) ? '' : prev;
       const next = String(nextText||'');
       const s0 = String(editor.value||'');
       const start0 = Math.max(0, Math.min(s0.length, (_imeBarAnchorOff|0)));
       let delStart = start0;
-      let delEnd = Math.max(delStart, Math.min(s0.length, (delStart + prev.length)));
+      let delEnd = Math.max(delStart, Math.min(s0.length, (delStart + prevDoc.length)));
 
       // #1684: if a selection exists when starting a new segment, replace the selection.
       try{
         let ss = 0, se = 0;
         try{ ss = editor.selectionStart|0; se = editor.selectionEnd|0; }catch{}
-        if ((prev.length|0) === 0 && (next.length|0) > 0 && (ss|0) !== (se|0)){
+        if ((prevDoc.length|0) === 0 && (next.length|0) > 0 && (ss|0) !== (se|0)){
           const a = Math.max(0, Math.min(s0.length, Math.min(ss|0, se|0)));
           const b = Math.max(0, Math.min(s0.length, Math.max(ss|0, se|0)));
           delStart = a|0;
@@ -3615,20 +3987,75 @@ try{
         try{ _imeBarSegDirty = true; }catch{}
         try{ const b=currentBuffer && currentBuffer(); if (b) b.text = out; }catch{}
         try{ _touchBufferModified && _touchBufferModified(); }catch{}
-        try{ _afterTextMutation && _afterTextMutation(); }catch{}
+        // Fast path: defer heavy visual sync.
+        if (_imebarIsFast){
+          try{ _mdImeEnterNativeMode && _mdImeEnterNativeMode('imebar-fast', 2500); }catch{}
+          try{ _scheduleImeBarFinalize(String(why||'fast')); }catch{}
+        } else {
+          try{ _afterTextMutation && _afterTextMutation(); }catch{}
+        }
       }
       const newOff = (delStart + next.length)|0;
       // Guard: the selection update below is part of an edit, not a caret-only move.
       try{ _imeBarIgnoreSelectUntil = Date.now() + 120; }catch{}
-      try{ editor.selectionStart = editor.selectionEnd = newOff; }catch{ try{ editor.setSelectionRange(newOff, newOff); }catch{} }
-      try{ const rc = _rcFromOffset(newOff); caretRow = rc.r|0; caretCol = rc.c|0; }catch{}
-      try{ _repositionCaret && _repositionCaret({ force:true }); }catch{ try{ _repositionCaret && _repositionCaret(); }catch{} }
-      try{ ensureScrolloff && ensureScrolloff({ force:true }); }catch{ try{ ensureScrolloff && ensureScrolloff(); }catch{} }
-      try{ updateGutter && updateGutter({ force:true }); }catch{ try{ updateGutter && updateGutter(); }catch{} }
-      try{ _scheduleListCharsRender && _scheduleListCharsRender('imebar-' + String(why||'')); }catch{}
-      try{ if (_imeBarActive) _positionImeBar && _positionImeBar(); }catch{}
+      if (_imebarIsFast){
+        // Avoid selection->select handler churn and avoid offset->(row,col) per keystroke.
+        try{ if (window){ window.__sixImeBarFastSelOff = newOff|0; window.__sixImeBarFastSelAt = Date.now(); window.__sixImeBarFastActiveUntil = Date.now() + 1200; } }catch{}
+        try{ _scheduleImeBarFinalize(String(why||'fast')); }catch{}
+        try{
+          const o = (window && window.SIX_OPTIONS) ? window.SIX_OPTIONS : null;
+          const dbg = !!(o && (o.DEBUG_PERF || o.debugperf));
+          if (dbg){
+            const now = Date.now();
+            if (!window.__sixImeBarFastLogAt || (now - (window.__sixImeBarFastLogAt|0)) > 1000){
+              window.__sixImeBarFastLogAt = now;
+              console.debug('[six][perf] imeBarFastInput', { len: (_editorTextLen ? (_editorTextLen()|0) : -1), why:String(why||''), prevLen:(prev.length|0), nextLen:(next.length|0) });
+            }
+          }
+        }catch{}
+      } else {
+        try{ editor.selectionStart = editor.selectionEnd = newOff; }catch{ try{ editor.setSelectionRange(newOff, newOff); }catch{} }
+        try{ const rc = _rcFromOffset(newOff); caretRow = rc.r|0; caretCol = rc.c|0; }catch{}
+        try{ _repositionCaret && _repositionCaret({ force:true }); }catch{ try{ _repositionCaret && _repositionCaret(); }catch{} }
+        try{ ensureScrolloff && ensureScrolloff({ force:true }); }catch{ try{ ensureScrolloff && ensureScrolloff(); }catch{} }
+        try{ updateGutter && updateGutter({ force:true }); }catch{ try{ updateGutter && updateGutter(); }catch{} }
+        try{ _scheduleListCharsRender && _scheduleListCharsRender('imebar-' + String(why||'')); }catch{}
+        try{ if (_imeBarActive) _positionImeBar && _positionImeBar(); }catch{}
+      }
       _imeBarPrevText = next;
+      // If we reach here, we actually mutated the document; shadow mode is no longer owed.
+      try{ if (window) window.__sixImeBarShadowPreedit = false; }catch{}
     }catch{}
+  }
+
+  // IME bar positioning is layout-heavy (getBoundingClientRect). Coalesce it to one per frame.
+  let _imeBarPosPending = false;
+  let _imeBarPosLastAt = 0;
+  function _positionImeBarSoft(){
+    try{
+      if (!_imeBarActive) return;
+      // During composition, the caret anchor does not move; chasing it is pure forced-reflow cost.
+      // Keep IME bar geometry stable until commit (or until user scrolls).
+      try{ if (_imeBarComposing || (window && window._imeComposing===true)) return; }catch{}
+      // Further throttle: avoid forced reflow spam during input bursts.
+      try{ const now0 = Date.now(); if ((now0 - (_imeBarPosLastAt|0)) < 120) return; _imeBarPosLastAt = now0; }catch{}
+      // While md-ime-native is active and we're in an input burst, don't chase the caret each frame.
+      try{
+        const bdy = (document && document.body) ? document.body : null;
+        const nativeNow = !!(bdy && bdy.classList && bdy.classList.contains('md-ime-native'));
+        if (nativeNow){
+          const now1 = Date.now();
+          const burst = (now1 < (_typingGuardUntil|0)) || !!(window && window._imeComposing===true) || !!_largeDeferredModifyPending;
+          if (burst) return;
+        }
+      }catch{}
+      if (_imeBarPosPending) return;
+      _imeBarPosPending = true;
+      const __t0 = _perfNow();
+      const run = ()=>{ _imeBarPosPending = false; try{ _positionImeBar && _positionImeBar(); }catch{} try{ _perfSlow('imebar-position', __t0, { mdImeNative:!!(document&&document.body&&document.body.classList&&document.body.classList.contains('md-ime-native')) }); }catch{} };
+      if (window && window.requestAnimationFrame){ requestAnimationFrame(()=>{ try{ run(); }catch{} }); }
+      else { setTimeout(()=>{ try{ run(); }catch{} }, 0); }
+    }catch{ try{ _imeBarPosPending = false; }catch{} }
   }
 
   function _positionImeBar(){
@@ -3725,6 +4152,8 @@ try{
       _imeBarSnapshotTaken = false;
       _imeBarSegDirty = false;
       _imeBarSegPending = false;
+      // Clear any stale fast-path caret offset from previous sessions.
+      try{ if (window){ window.__sixImeBarFastSelOff = null; window.__sixImeBarFastSelAt = 0; window.__sixImeBarFastActiveUntil = 0; } }catch{}
       try{ _imeBarJustOpenedUntil = Date.now() + 260; }catch{}
       try{ cmdfloat.dataset.kind = 'ime'; }catch{}
       try{ const p=document.getElementById('cmdprefix'); if (p) p.textContent = ''; }catch{}
@@ -3771,6 +4200,8 @@ try{
       _imeBarSnapshotTaken = false;
       _imeBarSegDirty = false;
       _imeBarSegPending = false;
+      // Clear fast-path state so the next session anchors to the real caret.
+      try{ if (window){ window.__sixImeBarFastSelOff = null; window.__sixImeBarFastSelAt = 0; window.__sixImeBarFastActiveUntil = 0; } }catch{}
       try{ if (cmdfloat && cmdfloat.dataset) cmdfloat.dataset.kind = 'cmd'; }catch{}
       // Hide only when not in CMD.
       try{ if (cmdfloat && _mode !== 'CMD') cmdfloat.style.display = 'none'; }catch{}
@@ -4706,11 +5137,17 @@ try{
   let _mdImeLastSelA = 0, _mdImeLastSelB = 0;
   let _mdImeNativeUntil = 0;
   let _mdImePostCommitPending = false;
+  let _mdImePostCommitOwed = false;
 
   function _mdImeSetNativeMode(on, why){
     try{
       const b = document && document.body;
       if (!b || !b.classList) return;
+      // Avoid redundant classList churn; even no-op toggles can trigger style work on huge DOM.
+      try{
+        const cur = b.classList.contains('md-ime-native');
+        if (!!on === !!cur) return;
+      }catch{}
       if (on){
         b.classList.add('md-ime-native');
         try{ editor && editor.classList && editor.classList.add('md-ime-native'); }catch{}
@@ -4739,17 +5176,65 @@ try{
   }
   function _mdImeSchedulePostCommitRender(why){
     try{
+      // Huge md-rich buffers: rebuilding overlays (and syncing full text) inside INSERT can
+      // freeze the UI for seconds. Keep native textarea visible and defer the heavy work
+      // until leaving INSERT.
+      try{
+        const mdNow = !!(_mdRichEnabled && _mdRichEnabled());
+        if (mdNow && _mode === 'INSERT'){
+          const o = (window && window.SIX_OPTIONS) ? window.SIX_OPTIONS : null;
+          const v = o ? (o.MD_NO_POSTCOMMIT_IN_INSERT_LEN || o.mdNoPostCommitInInsertLen || o.MD_DEFER_RENDER_IN_INSERT_LEN || o.mdDeferRenderInInsertLen) : 0;
+          const thr = (Number.isFinite(v) && (v|0) > 0) ? (v|0) : 20000;
+          const len = (_editorTextLen ? (_editorTextLen()|0) : 0);
+          if ((len|0) >= (thr|0)){
+            _mdImePostCommitOwed = true;
+            try{ _mdImeEnterNativeMode && _mdImeEnterNativeMode('postcommit-skip' + (why?(':'+why):''), 15000); }catch{}
+            return;
+          }
+        }
+      }catch{}
+
       if (_mdImePostCommitPending) return;
       _mdImePostCommitPending = true;
-      const run = ()=>{
+      const runOnce = ()=>{
+        if (!_mdImePostCommitPending) return;
         _mdImePostCommitPending = false;
+        // If we deferred buffer text sync during fast typing on huge buffers,
+        // ensure b.text is flushed before rebuilding md-rich overlays.
+        // Otherwise the overlay can show stale content until the deferred flush fires.
+        try{
+          if (_largeDeferredModifyPending && typeof _syncModifiedFromTick === 'function'){
+            _syncModifiedFromTick();
+            // Mark the deferred-flush as completed; we just synced full text here.
+            try{ _largeDeferredModifyPending = false; }catch{}
+            try{ if (_largeDeferredTimer) clearTimeout(_largeDeferredTimer); _largeDeferredTimer = 0; }catch{}
+          }
+        }catch{}
+        // When we deferred visual updates during typing/IME, caretRow/caretCol can be stale.
+        // Resync them once here (expensive offset->(row,col) mapping is OK after user pauses).
+        try{
+          if (_mdRichEnabled && _mdRichEnabled()){
+            if (editor && typeof editor.selectionStart === 'number' && typeof _rcFromOffset === 'function'){
+              const off = (editor.selectionStart|0);
+              const rc = _rcFromOffset(off|0);
+              caretRow = rc.r; caretCol = rc.c;
+            }
+          }
+        }catch{}
         try{ if (_mdRichEnabled && _mdRichEnabled()) _mdApplyVisualState && _mdApplyVisualState(); }catch{}
+        try{ _mdImePostCommitOwed = false; }catch{}
         try{ _mdImeMaybeExitNativeMode('postcommit'); }catch{}
       };
       if (window && window.requestIdleCallback){
-        try{ window.requestIdleCallback(()=>{ try{ run(); }catch{} }, { timeout: 250 }); return; }catch{}
+        try{
+          window.requestIdleCallback(()=>{ try{ runOnce(); }catch{} }, { timeout: 250 });
+          // WebView2/Chromium: requestIdleCallback can be delayed under continuous work.
+          // Ensure we still run post-commit within a bounded time so text doesn't “appear in bursts”.
+          setTimeout(()=>{ try{ runOnce(); }catch{} }, 420);
+          return;
+        }catch{}
       }
-      try{ setTimeout(()=>{ try{ run(); }catch{} }, 0); }catch{}
+      try{ setTimeout(()=>{ try{ runOnce(); }catch{} }, 0); }catch{}
     }catch{}
   }
   try{
@@ -4984,12 +5469,15 @@ try{
 
   function _themeGetAny(keys, fallback){
     try{
-      const arr = Array.isArray(keys) ? keys : [keys];
-      for (const k of arr){
-        const v = _themeTryGet(k);
+      if (Array.isArray(keys)){
+        for (let i=0; i<keys.length; i++){
+          const v = _themeTryGet(keys[i]);
+          if (v !== undefined) return v;
+        }
+      } else {
+        const v = _themeTryGet(keys);
         if (v !== undefined) return v;
       }
-      try{ return _themeGet(arr[0], fallback); }catch{}
     }catch{}
     return (fallback != null ? fallback : 'yellow');
   }
@@ -9008,6 +9496,39 @@ try{
   // Capture raw keydown/keyup before any other listeners (once only)
   // Also retain last keydown for anomaly heuristics.
   let _lastKeydownForAnom = null; // {key, code, t}
+  // md-rich: during burst typing on huge buffers, temporarily show native textarea and
+  // defer expensive overlay rebuild until user pauses.
+  let _mdTypingPostCommitTimer = 0;
+  let _mdTypingPostCommitOwed = false;
+  function _mdTypingSchedulePostCommit(){
+    try{
+      if (_mdTypingPostCommitTimer) return;
+      _mdTypingPostCommitTimer = setTimeout(()=>{
+        _mdTypingPostCommitTimer = 0;
+        try{
+          if (window && window._imeComposing===true) return;
+          if (Date.now() < (_typingGuardUntil|0)) { _mdTypingSchedulePostCommit(); return; }
+          // For very large markdown buffers, rebuilding md-rich overlays in INSERT can block the UI
+          // for seconds. Keep native textarea visible instead, and rebuild once after leaving INSERT.
+          try{
+            const mdNow = !!(_mdRichActive && _mdRichActive());
+            if (mdNow && _mode === 'INSERT'){
+              const o = (window && window.SIX_OPTIONS) ? window.SIX_OPTIONS : null;
+              const v = o ? (o.MD_NO_POSTCOMMIT_IN_INSERT_LEN || o.mdNoPostCommitInInsertLen || o.MD_DEFER_RENDER_IN_INSERT_LEN || o.mdDeferRenderInInsertLen) : 0;
+              const thr = (Number.isFinite(v) && (v|0) > 0) ? (v|0) : 20000;
+              const len = (_editorTextLen ? (_editorTextLen()|0) : 0);
+              if ((len|0) >= (thr|0)){
+                _mdTypingPostCommitOwed = true;
+                try{ _mdImeEnterNativeMode && _mdImeEnterNativeMode('typing-insert-huge', 15000); }catch{}
+                return;
+              }
+            }
+          }catch{}
+          _mdImeSchedulePostCommitRender && _mdImeSchedulePostCommitRender('typing');
+        }catch{}
+      }, 220);
+    }catch{ try{ _mdTypingPostCommitTimer = 0; }catch{} }
+  }
   try{
     window.addEventListener('keydown', (e)=>{
       const now = Date.now();
@@ -9079,6 +9600,18 @@ try{
           _typingGuardUntil = now + 100 + extra;
           _imePollPausedUntil = now + 350 + extra;
           try{ _requestCaretRender(); }catch{}
+
+          // md-rich huge buffer: show native textarea during typing bursts so characters appear immediately,
+          // and defer expensive overlay rebuild until the user pauses.
+          try{
+            if (mode === 'INSERT' && (_mdRichActive && _mdRichActive())){
+              const len = _editorTextLen ? (_editorTextLen()|0) : 0;
+              if ((len|0) > 50000){
+                _mdImeEnterNativeMode && _mdImeEnterNativeMode('typing-keydown', 900);
+                _mdTypingSchedulePostCommit && _mdTypingSchedulePostCommit();
+              }
+            }
+          }catch{}
         }
       }catch{}
       // F19→Esc 変換（最上流キャプチャ段階）。
@@ -9153,6 +9686,16 @@ try{
   function _triggerVisualBell(){
     try{
       if (!_optVisualBell) return;
+      // IME typing can generate lots of synthetic key events; flashing here is very disruptive.
+      try{ if (window && window._imeComposing===true) return; }catch{}
+      try{ if (_imeActive) return; }catch{}
+      try{ if (typeof _imeBarActive !== 'undefined' && _imeBarActive) return; }catch{}
+      try{ if (cmdfloat && cmdfloat.dataset && cmdfloat.dataset.kind === 'ime') return; }catch{}
+      try{
+        const now = Date.now();
+        const u = (window && window.__sixImeBarFastActiveUntil) ? (window.__sixImeBarFastActiveUntil|0) : 0;
+        if ((now|0) < (u|0)) return;
+      }catch{}
       // popup専用ベル (#573): :e ファイルポップアップ表示中はポップアップ内だけフラッシュ
       if (typeof _filePopupVisible==='function' && _filePopupVisible() && bufpopup){
         try{
@@ -12861,6 +13404,13 @@ try{
   function _mdEofDbgEnabled(){
     try{
       const o = (window && window.SIX_OPTIONS) ? window.SIX_OPTIONS : null;
+      // Avoid any extra work while fast-typing / IME-bar fast path is active.
+      try{
+        const now = Date.now();
+        const a1 = (window && window.__sixImeBarFastActiveUntil) ? (window.__sixImeBarFastActiveUntil|0) : 0;
+        const a2 = (window && window.__sixMdFastTypingActiveUntil) ? (window.__sixMdFastTypingActiveUntil|0) : 0;
+        if ((now|0) < (a1|0) || (now|0) < (a2|0)) return false;
+      }catch{}
       return !!(o && (o.DEBUG_MD_EOF || o.debugmdeof || o.DEBUG_MDEOF));
     }catch{ return false; }
   }
@@ -16613,6 +17163,35 @@ try{
         }
       }catch{}
 
+      // Huge buffer: avoid per-keystroke full-text copy; debounce to keep typing responsive.
+      try{
+        const mdNow = (function(){ try{ return _mdRichActive && _mdRichActive(); }catch{ return false; } })();
+        const len = (_editorTextLen ? (_editorTextLen()|0) : 0);
+        let thr = mdNow ? 50000 : 200000;
+        try{
+          if (mdNow){
+            const o = (window && window.SIX_OPTIONS) ? window.SIX_OPTIONS : null;
+            const v = o ? (o.MD_DEFER_TEXT_LEN || o.mdDeferTextLen || o.PERF_HUGE_LEN || o.perfHugeLen) : 0;
+            if (Number.isFinite(v) && (v|0) > 0) thr = (v|0);
+          }
+        }catch{}
+        const huge = (_mode==='INSERT') && ((len|0) > (thr|0));
+        if (huge){
+          if (b){
+            b._changeTick = ((b._changeTick|0) + 1)|0;
+            // b.text stays stale briefly; UI/overlay sync happens on debounce flush.
+            b.modified = true;
+          }
+          // md-rich: while b.text is stale, the overlay cannot reflect the latest edits.
+          // Keep native textarea visible during the burst so users see input immediately.
+          try{ if (mdNow && _mdImeEnterNativeMode) _mdImeEnterNativeMode('huge-defer', 2500); }catch{}
+          try{ if (mdNow && _mdTypingSchedulePostCommit) _mdTypingSchedulePostCommit(); }catch{}
+          try{ if (mdNow && _mdImeSchedulePostCommitRender) _mdImeSchedulePostCommitRender('huge-defer'); }catch{}
+          try{ _scheduleLargeDeferredModifyFlush('touch'); }catch{}
+          return;
+        }
+      }catch{}
+
       if (b){
         const now = String(editor.value||'');
         b.text = now;
@@ -18933,6 +19512,23 @@ try{
    * updateGutter
    *********************************************************/
   function updateGutter(opts){
+    // While textarea is in typing-reduced-text mode, the textarea content is a small subset.
+    // Updating md-rich gutter/textLayer would be both expensive and visually misleading.
+    try{
+      if (document && document.body && document.body.classList && document.body.classList.contains('typing-reduced-text')) return;
+    }catch{}
+    // md-ime-native: textarea is visible and overlay is hidden; skip expensive md-rich gutter/text updates
+    // during composition or typing bursts (unless forced).
+    try{
+      const forced = !!(opts && opts.force);
+      if (!forced){
+        const b = (document && document.body) ? document.body : null;
+        if (b && b.classList && b.classList.contains('md-ime-native')){
+          const huge = (_editorTextLen && (_editorTextLen()|0) > 50000);
+          if ((window && window._imeComposing===true) || (huge && Date.now() < (_typingGuardUntil|0))) return;
+        }
+      }
+    }catch{}
     // IME未確定中はガター更新を停止（重いDOM更新を避ける）
     // ただし markdown-rich は行高同期が必要なので抑止しない (#1477)
     // #1587: Reduced-text IME mode changes editor.value to a small subset and makes caret coords
@@ -22409,9 +23005,32 @@ try{
       }catch{ try{ _syncNativeSelectionToCaret(); }catch{} }
       try{ if (cmdfloat && !_imeBarActive) cmdfloat.style.display='none'; }catch{}
       try{ _syncImeBarVisibility && _syncImeBarVisibility('setMode-INSERT'); }catch{}
+      // Huge markdown buffers: proactively reduce textarea content to keep native typing responsive.
+      try{ _typingReducedEnter && _typingReducedEnter('setMode-INSERT'); }catch{}
   // Caret color remains baseline (IME visualization removed)
     } else {
       // NORMAL/VISUAL/CMD
+      // Leaving INSERT: restore full textarea if we were in typing-reduced-text mode.
+      try{ _typingReducedExit && _typingReducedExit('setMode-exit'); }catch{}
+
+      // md-rich huge buffers: if we kept native textarea visible during INSERT (to avoid long stalls),
+      // rebuild overlays once after leaving INSERT.
+      try{
+        if (_prevMode==='INSERT' && (m==='NORMAL' || m==='VISUAL')){
+          const mdNow = (function(){ try{ return _mdRichActive && _mdRichActive(); }catch{ return false; } })();
+          if (mdNow){
+            const bdy = (document && document.body) ? document.body : null;
+            const nativeNow = !!(bdy && bdy.classList && bdy.classList.contains('md-ime-native'));
+            if (_mdImePostCommitOwed || _mdTypingPostCommitOwed || nativeNow || _largeDeferredModifyPending){
+              _mdImePostCommitOwed = false;
+              _mdTypingPostCommitOwed = false;
+              try{ _mdImeEnterNativeMode && _mdImeEnterNativeMode('leave-insert', 8000); }catch{}
+              try{ _mdImeSchedulePostCommitRender && _mdImeSchedulePostCommitRender('leave-insert'); }catch{}
+            }
+          }
+        }
+      }catch{}
+
       try{
         if (editor){
           editor.readOnly = false;
@@ -24567,6 +25186,19 @@ try{
         // Background tiling alignment (cheap): do this early each frame.
         try{ _syncTiledBgRemainder(); }catch{}
 
+        // md-ime-native (textarea visible; md overlay hidden): during typing bursts on huge buffers,
+        // avoid heavy scroll-sync work (gutter/caret/overlays) which can trigger forced reflow and
+        // backlog input events for seconds.
+        try{
+          const bdy = (document && document.body) ? document.body : null;
+          const nativeNow = !!(bdy && bdy.classList && bdy.classList.contains('md-ime-native'));
+          if (nativeNow){
+            const now0 = Date.now();
+            const burst = (now0 < (_typingGuardUntil|0)) || !!_largeDeferredModifyPending || !!_mdImePostCommitOwed || !!_mdTypingPostCommitOwed;
+            if (burst) return;
+          }
+        }catch{}
+
         // During IME composition, keep this RAF handler lightweight to avoid IME lag on larger buffers.
         try{ if (window && window._imeComposing===true){ return; } }catch{}
 
@@ -25059,24 +25691,30 @@ try{
       // IME未確定中の insertCompositionText はブラウザに任せ、追加処理を極力避ける。
       // (大きいテキストで editor.value を触ると高コストになりやすい)
       try{
-        if (window && window._imeComposing===true){
-          const itIme = String((e && e.inputType) || '');
-          if (itIme === 'insertCompositionText' || itIme === 'insertFromComposition'){
-            // Even during composition, keep overlay caret aligned.
-            // (Non-md + wrap-on can change wrap metrics/scroll mapping during preedit.)
-            try{ _scheduleImeCompCaretSync && _scheduleImeCompCaretSync('beforeinput-' + itIme); }catch{}
-            // Predictive candidate popup can show without explicit candidate-nav keys.
-            // Keep a short window and enforce tiny scrolloff to reduce caret overlap.
-            try{
-              if (_mdRichActive && _mdRichActive()){
-                if (typeof window._imeCandidateUntil !== 'number') window._imeCandidateUntil = 0;
-                window._imeCandidateUntil = Date.now() + 1200;
-                _scheduleImeCandidateEnsure && _scheduleImeCandidateEnsure('beforeinput-' + itIme);
-              }
-            }catch{}
-            try{ if (_optDebugKeys) _debugPush({ t:Date.now(), type:'beforeinput-ime', mode:_mode, inputType:itIme, isComp:true }); }catch{}
-            return;
+        const itIme = String((e && e.inputType) || '');
+        // Some WebView2/IME combinations can be sparse with compositionstart; use beforeinput.isComposing/inputType as fallback.
+        const isCompEv = !!(e && e.isComposing===true) || (itIme === 'insertCompositionText');
+        const isImeInsert = (itIme === 'insertCompositionText' || itIme === 'insertFromComposition');
+        if (isCompEv || isImeInsert){
+          // Keep global/local composing flags in sync so later handlers can cheaply bail out.
+          if (isCompEv){
+            try{ if (window) window._imeComposing = true; }catch{}
+            try{ _imeComposing = true; }catch{}
           }
+          // md-rich: ensure native textarea becomes visible even if compositionstart is missed.
+          try{ if (_mdRichActive && _mdRichActive()){ _mdImeEnterNativeMode && _mdImeEnterNativeMode('beforeinput-' + itIme, 5000); } }catch{}
+          // Even during composition, keep overlay caret aligned (lightweight; throttled internally).
+          try{ _scheduleImeCompCaretSync && _scheduleImeCompCaretSync('beforeinput-' + itIme); }catch{}
+          // Predictive candidate popup can show without explicit candidate-nav keys.
+          try{
+            if (_mdRichActive && _mdRichActive()){
+              if (typeof window._imeCandidateUntil !== 'number') window._imeCandidateUntil = 0;
+              window._imeCandidateUntil = Date.now() + 1200;
+              _scheduleImeCandidateEnsure && _scheduleImeCandidateEnsure('beforeinput-' + itIme);
+            }
+          }catch{}
+          try{ if (_optDebugKeys) _debugPush({ t:Date.now(), type:'beforeinput-ime', mode:_mode, inputType:itIme, isComp:true, isComposing:!!(e && e.isComposing===true) }); }catch{}
+          return;
         }
       }catch{}
 
@@ -25301,6 +25939,9 @@ try{
     // beforeinput で止めきれない実装差分（特に IME の insertFromComposition/insertCompositionText）に備え、
     // INSERT 以外で発火した input のうち insert*/delete* 系は直ちに巻き戻す。
     editor.addEventListener('input', (e)=>{
+      const __t0 = _perfNow();
+      const __dbgPerf = !!(window && window.SIX_OPTIONS && (window.SIX_OPTIONS.DEBUG_PERF || window.SIX_OPTIONS.debugperf));
+      try{
       try{ const M = window.SIX_IME_METRICS; if (M && window._imeComposing===true){ M.events.input++; } }catch{}
       try{
         if (_mode !== 'INSERT'){
@@ -25339,9 +25980,108 @@ try{
         }
       }catch{}
       try{ if (_optDebugKeys) _debugPush({ t:Date.now(), type:'input', mode:_mode, inputType:e.inputType, data:e.data, ctrl:e.ctrlKey, alt:e.altKey, meta:e.metaKey, isComp:false }); }catch{}
+      } finally {
+        try{
+          if (__dbgPerf){
+            _perfSlow('editor-input(rollback)', __t0, { mode:String(_mode||''), it:String((e&&e.inputType)||''), mdImeNative:!!(document&&document.body&&document.body.classList&&document.body.classList.contains('md-ime-native')) });
+          } else {
+            _perfSlow('editor-input(rollback)', __t0);
+          }
+        }catch{}
+      }
     });
     editor.addEventListener('input', (e)=>{
+      const __t0 = _perfNow();
+      const __dbgPerf = !!(window && window.SIX_OPTIONS && (window.SIX_OPTIONS.DEBUG_PERF || window.SIX_OPTIONS.debugperf));
+      try{
       if (_mode === 'INSERT'){
+        // If md-ime-native is active (textarea visible; overlay hidden), avoid any extra per-input work.
+        // We rebuild md-rich overlays once after the burst/INSERT ends.
+        try{
+          if (_mdRichActive && _mdRichActive()){
+            const bdy = (document && document.body) ? document.body : null;
+            const nativeNow = !!(bdy && bdy.classList && bdy.classList.contains('md-ime-native'));
+            if (nativeNow){
+              try{ _touchBufferModified && _touchBufferModified(); }catch{}
+              try{ _insertSegDirty = true; }catch{}
+              try{ _mdTypingSchedulePostCommit && _mdTypingSchedulePostCommit(); }catch{}
+              try{ _mdImePostCommitOwed = true; }catch{}
+              return;
+            }
+          }
+        }catch{}
+
+        // Typing reduced-text mode (non-IME): keep textarea small, apply edits to full buffer, and re-reduce.
+        try{
+          if (_typingReducedText){
+            const b = currentBuffer();
+            if (b && typeof b.text === 'string'){
+              // Do NOT rebuild the full buffer on every keystroke.
+              // Keep pending subset state and commit once after the user pauses.
+              const subsetCur = String(editor.value||'');
+              const caretInSubset = (editor && typeof editor.selectionStart==='number') ? (editor.selectionStart|0) : 0;
+              _typingReducedPendingSubset = subsetCur;
+              _typingReducedPendingCaretInSubset = caretInSubset|0;
+              // Keep native textarea visible while reduced.
+              try{ _mdImeSetNativeMode && _mdImeSetNativeMode(true, 'typing-reduced-input'); }catch{}
+              try{ _typingReducedScheduleCommit && _typingReducedScheduleCommit('input'); }catch{}
+              return;
+            }
+          }
+        }catch{}
+
+        // Enter typing-reduced-text proactively for huge markdown buffers to avoid native textarea stalls.
+        try{ _typingReducedEnter && _typingReducedEnter('input'); }catch{}
+
+        // Huge md-rich fast path (IME OFF too): bail out early so we don't hit expensive
+        // per-input work (wrap cache invalidation, splitLines, layout reads) that can
+        // stall the UI and make typed glyphs appear in bursts.
+        try{
+          const mdNow0 = (_mdRichActive && _mdRichActive());
+          if (mdNow0){
+            const it0 = String((e && e.inputType) || '');
+            const isSpecial0 = (it0 === 'insertFromPaste' || it0 === 'insertFromDrop' || it0 === 'historyUndo' || it0 === 'historyRedo');
+            const isEdit0 = (
+              (!!it0 && (it0.startsWith('insert') || it0.startsWith('delete')))
+              || (!it0 && !!(e && e.isTrusted))
+            );
+            const canDefer0 = isEdit0 && !isSpecial0;
+            const o0 = (window && window.SIX_OPTIONS) ? window.SIX_OPTIONS : null;
+            const v0 = o0 ? (o0.MD_FAST_INPUT_LEN || o0.mdFastInputLen || o0.PERF_FAST_INPUT_LEN || o0.perfFastInputLen) : 0;
+            const thr0 = (Number.isFinite(v0) && (v0|0) > 0) ? (v0|0) : 20000;
+            const len0 = (_editorTextLen ? (_editorTextLen()|0) : 0);
+            const bdy0 = (document && document.body) ? document.body : null;
+            const nativeNow0 = !!(bdy0 && bdy0.classList && bdy0.classList.contains('md-ime-native'));
+
+            if (nativeNow0 || _largeDeferredModifyPending || _typingReducedText || (canDefer0 && (len0|0) >= (thr0|0))){
+              // Record edit tick / schedule deferred sync (cheap; huge branch avoids full text copy).
+              try{ _touchBufferModified && _touchBufferModified(); }catch{}
+              try{ _insertSegDirty = true; }catch{}
+
+              // Keep native textarea visible during the burst.
+              try{ _mdImeEnterNativeMode && _mdImeEnterNativeMode('fast-input-pre', 1800); }catch{}
+              try{ _mdTypingSchedulePostCommit && _mdTypingSchedulePostCommit(); }catch{}
+              try{ _mdImeSchedulePostCommitRender && _mdImeSchedulePostCommitRender('fast-input-pre'); }catch{}
+
+              // Release large snapshots captured in beforeinput (avoid holding huge strings).
+              try{ _prevTextBeforeInput=''; _prevInputTypeBeforeInput=''; _bsEolSnap = null; }catch{}
+
+              // Optional perf breadcrumb (at most 1 line/sec)
+              try{
+                const dbg0 = !!(o0 && (o0.DEBUG_PERF || o0.debugperf));
+                if (dbg0){
+                  const now0 = Date.now();
+                  if (!window.__sixMdFastReturnLastLogAt || (now0 - (window.__sixMdFastReturnLastLogAt|0)) > 1000){
+                    window.__sixMdFastReturnLastLogAt = now0;
+                    console.debug('[six][perf] mdFastReturn', { len:(len0|0), thr:(thr0|0), inputType:it0, native:!!nativeNow0, deferred:!!_largeDeferredModifyPending, reduced:!!_typingReducedText });
+                  }
+                }
+              }catch{}
+              return;
+            }
+          }
+        }catch{}
+
         try{
           if (_optDebugKeys){
             const it = String((e && e.inputType) || '');
@@ -25354,6 +26094,24 @@ try{
         // centralize modified tracking (bump change tick on each input)
         _touchBufferModified();
         try{ _wrapInvalidateCache('input'); }catch{}
+
+        // Fallback: ensure composing state is visible to the rest of the pipeline even if composition events are missing.
+        try{
+          const it0 = String((e && e.inputType) || '');
+          const isComp0 = !!(e && e.isComposing===true) || (it0 === 'insertCompositionText');
+          if (isComp0){
+            try{ if (window) window._imeComposing = true; }catch{}
+            try{ _imeComposing = true; }catch{}
+          }
+          // If we see a commit-like input but composing is still stuck, clear it shortly after.
+          if (it0 === 'insertFromComposition'){
+            try{
+              if (window && window._imeComposing===true){
+                setTimeout(()=>{ try{ if (typeof _forceEndComposition === 'function') _forceEndComposition('input-insertFromComposition'); }catch{} }, 0);
+              }
+            }catch{}
+          }
+        }catch{}
 
         // Native textarea undo/redo (Ctrl+Z / Ctrl+Y or Ctrl+Shift+Z) arrives as inputType=historyUndo/historyRedo.
         // In md-rich + wrap, vertical layout and effective scroll mapping depend on md-wrap caches.
@@ -25381,6 +26139,63 @@ try{
         if (window && window._imeComposing===true){
           return;
         }
+
+        // md-rich fast input path:
+        // On large buffers, avoid per-input overlay/caret/gutter work (which uses _splitLines + layout reads)
+        // and keep native textarea visible during the typing burst.
+        try{
+          const mdNow = (_mdRichActive && _mdRichActive());
+          if (mdNow){
+            const itFast = String((e && e.inputType) || '');
+            // Some WebView2 builds can omit inputType on 'input' events.
+            // Treat trusted input as an edit so the fast path still applies.
+            const isEditIt = (
+              (!!itFast && (itFast.startsWith('insert') || itFast.startsWith('delete')))
+              || (!itFast && !!(e && e.isTrusted))
+            );
+            // Keep special/rare paths (paste/drop/history) on the slow-but-correct route.
+            const isSpecial = (itFast === 'insertFromPaste' || itFast === 'insertFromDrop' || itFast === 'historyUndo' || itFast === 'historyRedo');
+            const canDefer = isEditIt && !isSpecial;
+            const o = (window && window.SIX_OPTIONS) ? window.SIX_OPTIONS : null;
+            const v = o ? (o.MD_FAST_INPUT_LEN || o.mdFastInputLen || o.PERF_FAST_INPUT_LEN || o.perfFastInputLen) : 0;
+            const thr = (Number.isFinite(v) && (v|0) > 0) ? (v|0) : 20000;
+            const len = (_editorTextLen ? (_editorTextLen()|0) : 0);
+            if (canDefer && (len|0) >= (thr|0)){
+              try{ _mdImeEnterNativeMode && _mdImeEnterNativeMode('fast-input', 1600); }catch{}
+              try{ _mdTypingSchedulePostCommit && _mdTypingSchedulePostCommit(); }catch{}
+              // Ensure we eventually rebuild overlays/caches after the burst.
+              try{ _mdImeSchedulePostCommitRender && _mdImeSchedulePostCommitRender('fast-input'); }catch{}
+
+              // Optional perf breadcrumb (at most 1 line/sec)
+              try{
+                const o2 = (window && window.SIX_OPTIONS) ? window.SIX_OPTIONS : null;
+                const dbg = !!(o2 && (o2.DEBUG_PERF || o2.debugperf));
+                if (dbg){
+                  const now = Date.now();
+                  if (!window.__sixMdFastInputLastLogAt || (now - (window.__sixMdFastInputLastLogAt|0)) > 1000){
+                    window.__sixMdFastInputLastLogAt = now;
+                    console.debug('[six][perf] mdFastInput', { len:(len|0), thr:(thr|0), inputType:itFast });
+                  }
+                }
+              }catch{}
+              return;
+            }
+          }
+        }catch{}
+
+        // If we're already in md-ime-native (native textarea visible; overlay hidden),
+        // avoid any further per-input heavy work. We'll rebuild overlays after the burst.
+        try{
+          if (_mdRichActive && _mdRichActive()){
+            const bdy = (document && document.body) ? document.body : null;
+            const nativeNow = !!(bdy && bdy.classList && bdy.classList.contains('md-ime-native'));
+            if (nativeNow || _largeDeferredModifyPending || _typingReducedText){
+              try{ _mdTypingSchedulePostCommit && _mdTypingSchedulePostCommit(); }catch{}
+              try{ _mdImeSchedulePostCommitRender && _mdImeSchedulePostCommitRender('md-ime-native-input'); }catch{}
+              return;
+            }
+          }
+        }catch{}
 
         // Some environments keep selectionStart unchanged after Backspace at EOL,
         // effectively placing the caret "after" the newline. Correct it so the next
@@ -25599,6 +26414,15 @@ try{
           }
         }
       }catch{}
+      } finally {
+        try{
+          if (__dbgPerf){
+            _perfSlow('editor-input(main)', __t0, { mode:String(_mode||''), it:String((e&&e.inputType)||''), mdImeNative:!!(document&&document.body&&document.body.classList&&document.body.classList.contains('md-ime-native')) });
+          } else {
+            _perfSlow('editor-input(main)', __t0);
+          }
+        }catch{}
+      }
     });
     // Mouse selection/click: sync overlay caret with native selection
     const syncCaretFromSelection = ()=>{
@@ -26117,6 +26941,17 @@ try{
         try{ if (Date.now() < _selGuardUntil) return; }catch{}
         // IME composition can cause noisy selection churn; keep this handler light.
         try{ if (window && window._imeComposing===true) return; }catch{}
+        // IME bar composing: selection is internal noise (or programmatic collapse). Avoid heavy work.
+        try{ if ((typeof _imeBarActive !== 'undefined') && _imeBarActive && (_imeBarComposing || (cmdfloat && cmdfloat.dataset && cmdfloat.dataset.kind === 'ime'))) return; }catch{}
+        // After IME bar programmatic selection updates, ignore select for a short window.
+        try{ if ((typeof _imeBarActive !== 'undefined') && _imeBarActive){ if (Date.now() < (+_imeBarIgnoreSelectUntil||0)) return; } }catch{}
+        // IME bar fast typing: selection updates are deferred; avoid expensive caret/gutter/md renders here.
+        try{
+          if (typeof _imeBarActive !== 'undefined' && _imeBarActive){
+            const until = (window && typeof window.__sixImeBarFastActiveUntil === 'number') ? (window.__sixImeBarFastActiveUntil|0) : 0;
+            if (until && Date.now() < until) return;
+          }
+        }catch{}
         // Ignore redundant events where selection did not actually change.
         const sNow = (editor.selectionStart|0);
         const eNow = (editor.selectionEnd|0);
@@ -26541,11 +27376,23 @@ try{
     // Fallback IME full-width detection for platforms where composition events are sparse or skipped.
     // If in INSERT and not currently composing, inspect last committed character on input.
     editor.addEventListener('input', ()=>{
+      const __t0 = _perfNow();
+      const __dbgPerf = !!(window && window.SIX_OPTIONS && (window.SIX_OPTIONS.DEBUG_PERF || window.SIX_OPTIONS.debugperf));
+      try{
       try{
         if (_mode !== 'INSERT') return;
   // IME composition path removed
         // NOTE: keep this handler empty; reading editor.value here can be O(N) and hurts IME on huge buffers.
       }catch{}
+      } finally {
+        try{
+          if (__dbgPerf){
+            _perfSlow('editor-input(ime-detect)', __t0, { mode:String(_mode||''), mdImeNative:!!(document&&document.body&&document.body.classList&&document.body.classList.contains('md-ime-native')) });
+          } else {
+            _perfSlow('editor-input(ime-detect)', __t0);
+          }
+        }catch{}
+      }
     });
     // Also watch keydown of direct full-width alnum (rare cases where input fires after key processing with no composition events)
     editor.addEventListener('keydown', (e)=>{
@@ -31851,11 +32698,25 @@ try{
             try{
               if (!_imeBarActive) return;
               _imeBarComposing = true;
+              try{ if (window) window._imeComposing = true; }catch{}
               try{ _imeBarLastImeEvtAt = Date.now(); }catch{}
               // Anchor at current caret each composition session.
               try{ _syncNativeSelectionToCaret && _syncNativeSelectionToCaret(); }catch{}
-              try{ _imeBarAnchorOff = (editor && typeof editor.selectionStart==='number') ? (editor.selectionStart|0) : (_offsetFromRC(caretRow|0, caretCol|0)|0); }catch{ _imeBarAnchorOff = 0; }
-              try{ _positionImeBar && _positionImeBar(); }catch{}
+              try{
+                let fastOff = null;
+                try{
+                  const offX = (window && Number.isFinite(window.__sixImeBarFastSelOff)) ? (window.__sixImeBarFastSelOff|0) : null;
+                  const atX = (window && Number.isFinite(window.__sixImeBarFastSelAt)) ? (window.__sixImeBarFastSelAt|0) : 0;
+                  if (offX != null && atX && (Date.now() - atX) <= 1200) fastOff = offX|0;
+                }catch{ fastOff = null; }
+                const off0 = (fastOff != null) ? (fastOff|0) : ((editor && typeof editor.selectionStart==='number') ? (editor.selectionStart|0) : (_offsetFromRC(caretRow|0, caretCol|0)|0));
+                _imeBarAnchorOff = off0|0;
+                // Collapse any stale selection to avoid full-document highlight while composing.
+                try{ _imeBarIgnoreSelectUntil = Date.now() + 250; }catch{}
+                try{ if (window){ window.__sixImeBarFastActiveUntil = Date.now() + 1200; } }catch{}
+                try{ editor.setSelectionRange(off0|0, off0|0); }catch{ try{ editor.selectionStart = editor.selectionEnd = off0|0; }catch{} }
+              }catch{ _imeBarAnchorOff = 0; }
+              try{ _positionImeBarSoft && _positionImeBarSoft(); }catch{ try{ _positionImeBar && _positionImeBar(); }catch{} }
               // Apply immediately (some IMEs don't emit compositionupdate early).
               try{ _imeBarReplaceInsertedText(String(imeEl.value||''), 'compstart'); }catch{}
             }catch{}
@@ -31864,20 +32725,36 @@ try{
             try{
               if (!_imeBarActive) return;
               _imeBarComposing = true;
+              try{ if (window) window._imeComposing = true; }catch{}
               try{ _imeBarLastImeEvtAt = Date.now(); }catch{}
               _imeBarReplaceInsertedText(String(imeEl.value||''), 'compupdate');
-              try{ _positionImeBar && _positionImeBar(); }catch{}
+              try{ _positionImeBarSoft && _positionImeBarSoft(); }catch{ try{ _positionImeBar && _positionImeBar(); }catch{} }
             }catch{}
           });
           imeEl.addEventListener('compositionend', (e)=>{
             try{
               if (!_imeBarActive) return;
               _imeBarComposing = false;
+              try{ if (window) window._imeComposing = false; }catch{}
               try{ _imeBarLastImeEvtAt = Date.now(); }catch{}
               // Ensure final value is applied, then clear for the next segment.
               try{ _imeBarReplaceInsertedText(String(imeEl.value||''), 'compend'); }catch{}
               try{ imeEl.value = ''; }catch{}
-              try{ _imeBarPrevText = ''; _imeBarAnchorOff = (editor && typeof editor.selectionStart==='number') ? (editor.selectionStart|0) : ((_imeBarAnchorOff|0) + 0); }catch{}
+              try{
+                let fastOff = null;
+                try{
+                  const offX = (window && Number.isFinite(window.__sixImeBarFastSelOff)) ? (window.__sixImeBarFastSelOff|0) : null;
+                  const atX = (window && Number.isFinite(window.__sixImeBarFastSelAt)) ? (window.__sixImeBarFastSelAt|0) : 0;
+                  if (offX != null && atX && (Date.now() - atX) <= 1200) fastOff = offX|0;
+                }catch{ fastOff = null; }
+                const off1 = (fastOff != null) ? (fastOff|0) : ((editor && typeof editor.selectionStart==='number') ? (editor.selectionStart|0) : (_offsetFromRC(caretRow|0, caretCol|0)|0));
+                _imeBarPrevText = '';
+                _imeBarAnchorOff = off1|0;
+                // Collapse selection to the committed caret to avoid lingering full-range highlights.
+                try{ _imeBarIgnoreSelectUntil = Date.now() + 250; }catch{}
+                try{ if (window){ window.__sixImeBarFastActiveUntil = Date.now() + 1200; window.__sixImeBarFastSelOff = off1|0; window.__sixImeBarFastSelAt = Date.now(); } }catch{}
+                try{ editor.setSelectionRange(off1|0, off1|0); }catch{ try{ editor.selectionStart = editor.selectionEnd = off1|0; }catch{} }
+              }catch{}
             }catch{}
           });
           imeEl.addEventListener('keydown', (e)=>{
@@ -32253,17 +33130,31 @@ try{
           });
           imeEl.addEventListener('input', (e)=>{
             // IME bar: mirror current input into the document.
+            const __t0 = _perfNow();
+            const __dbgPerf = !!(window && window.SIX_OPTIONS && (window.SIX_OPTIONS.DEBUG_PERF || window.SIX_OPTIONS.debugperf));
+            let __vNowLen = 0;
             try{
               if (!_imeBarActive) return;
-              let composing = !!(e && e.isComposing===true) || !!_imeBarComposing;
+              const vNow = String(imeEl.value||'');
+              __vNowLen = (vNow.length|0);
+
+              // Determine composing state robustly.
+              // IMPORTANT: Do NOT flip composing=false just because the UI thread stalled.
+              // If we misclassify composing as committed, we clear imeEl.value and break IME
+              // conversion (causing duplicated roman letters, dropped chars, and insertion jumps).
+              let composing = false;
+              try{ composing = !!(e && e.isComposing===true) || !!_imeBarComposing || !!(window && window._imeComposing===true); }catch{ composing = !!_imeBarComposing; }
+
               // Some environments keep isComposing=true even for non-IME input.
-              // If no IME-bar IME event has occurred recently, treat this as committed text.
+              // Only apply the "stale" override when the bar is empty and we have no active preedit.
               try{
                 const now0 = Date.now();
-                const stale = (now0 - (+_imeBarLastImeEvtAt || 0)) > 450;
-                if (stale) composing = false;
+                const stale = (now0 - (+_imeBarLastImeEvtAt || 0)) > 650;
+                const emptyBar = !String(vNow||'') && !String(_imeBarPrevText||'');
+                const noPreedit = !(_imeBarComposing || (window && window._imeComposing===true));
+                if (stale && emptyBar && noPreedit) composing = false;
               }catch{}
-              const vNow = String(imeEl.value||'');
+
               if (composing){
                 _imeBarReplaceInsertedText(vNow, 'input-comp');
               } else {
@@ -32274,8 +33165,17 @@ try{
                   try{ _imeBarPrevText = ''; _imeBarAnchorOff = (editor && typeof editor.selectionStart==='number') ? (editor.selectionStart|0) : (_imeBarAnchorOff|0); }catch{}
                 }
               }
-              try{ _positionImeBar && _positionImeBar(); }catch{}
+              try{ _positionImeBarSoft && _positionImeBarSoft(); }catch{ try{ _positionImeBar && _positionImeBar(); }catch{} }
             }catch{}
+            finally{
+              try{
+                if (__dbgPerf){
+                  _perfSlow('imebar-input', __t0, { composing:!!(e&&e.isComposing===true), barComp:!!_imeBarComposing, wComp:!!(window&&window._imeComposing===true), vlen:(__vNowLen|0), mdImeNative:!!(document&&document.body&&document.body.classList&&document.body.classList.contains('md-ime-native')) });
+                } else {
+                  _perfSlow('imebar-input', __t0);
+                }
+              }catch{}
+            }
           });
         }
       }catch{}
