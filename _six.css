@@ -622,6 +622,8 @@ body.md-rich #editor::selection {
 }
 #textLayer .md-ulbox .md-ulbullet.md-ulb1 {
 	background: transparent;
+	/* Optional light fill without extra elements (low cost). */
+	background: color-mix(in srgb, currentColor var(--ulCircleFillPct, 25%), transparent);
 	border: 1px solid currentColor;
 	border-radius: 50%;
 }
