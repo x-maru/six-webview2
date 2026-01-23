@@ -918,15 +918,29 @@ try{
     }catch{}
   }
 
-  function _mdCodeBlockContentRangeAtRow(row, fc){
+  function _mdCodeBlockContentRangeAtRow(row, fc, ic){
     try{
-      if (!fc || !fc.kind) return null;
-      const k = (fc.kind[row|0]|0);
-      if ((k|0) !== 2) return null;
-      let s = (row|0);
-      let e = (row|0);
-      while ((s|0) > 0 && ((fc.kind[(s-1)|0]|0) === 2)) s = (s-1)|0;
-      while (((e+1)|0) < (fc.kind.length|0) && ((fc.kind[(e+1)|0]|0) === 2)) e = (e+1)|0;
+      const r0 = (row|0);
+      const fk = (fc && fc.kind && r0>=0 && r0<(fc.kind.length|0)) ? (fc.kind[r0]|0) : 0;
+      const ik = (ic && ic.kind && r0>=0 && r0<(ic.kind.length|0)) ? (ic.kind[r0]|0) : 0;
+      if (!(((fk|0) === 2) || ((ik|0) === 2))) return null;
+      const total = Math.max(
+        (fc && fc.kind) ? (fc.kind.length|0) : 0,
+        (ic && ic.kind) ? (ic.kind.length|0) : 0
+      )|0;
+      const _isCodeAt = (rr)=>{
+        try{
+          const r = rr|0;
+          const fk0 = (fc && fc.kind && r>=0 && r<(fc.kind.length|0)) ? (fc.kind[r]|0) : 0;
+          if ((fk0|0) === 2) return true;
+          const ik0 = (ic && ic.kind && r>=0 && r<(ic.kind.length|0)) ? (ic.kind[r]|0) : 0;
+          return ((ik0|0) === 2);
+        }catch{ return false; }
+      };
+      let s = r0|0;
+      let e = r0|0;
+      while ((s|0) > 0 && _isCodeAt((s-1)|0)) s = (s-1)|0;
+      while (((e+1)|0) < (total|0) && _isCodeAt((e+1)|0)) e = (e+1)|0;
       return { s:s|0, e:e|0 };
     }catch{ return null; }
   }
@@ -1008,7 +1022,8 @@ try{
 
       const lines = _splitLines();
       const fc = _mdCodeFenceEnsureCache && _mdCodeFenceEnsureCache(false, lines);
-      const rng = _mdCodeBlockContentRangeAtRow(row|0, fc);
+      const ic = _mdIndentCodeEnsureCache && _mdIndentCodeEnsureCache(false, lines, fc);
+      const rng = _mdCodeBlockContentRangeAtRow(row|0, fc, ic);
       if (!rng) { _mdCodeToolsHide(); return; }
 
       // Compute visible top of this block (within viewport).
@@ -1019,7 +1034,10 @@ try{
         if ((rr|0) < (rng.s|0)) break;
         topIdx = (topIdx-1)|0;
       }
-      const topPx = ((g.rowY[topIdx|0]|0) + 4)|0;
+      // #1887: For 2x-height code rows (indented code first/last), align tools to the content box
+      // (rowY + padTop), not the top of the padded block.
+      const padTop = (g.rowPadTop && (topIdx|0) >= 0 && (topIdx|0) < (g.rowPadTop.length|0)) ? (g.rowPadTop[topIdx|0]|0) : 0;
+      const topPx = ((g.rowY[topIdx|0]|0) + (padTop|0) + 4)|0;
       const rightPx = Math.max(0, (rightInset|0) + 6);
 
       _mdCodeToolsState = { row:row|0, s:(rng.s|0), e:(rng.e|0) };
@@ -1094,7 +1112,17 @@ try{
         if (fc && fc.kind && r>=0 && r<total) fenceKind = (fc.kind[r]|0);
       }catch{ fenceKind = 0; }
       const isFenceRow = ((fenceKind|0) === 1);
-      const isCodeRow = ((fenceKind|0) === 2);
+      let indentKind = 0;
+      let indentFirst = false;
+      let indentLast = false;
+      try{
+        const fc = _mdCodeFenceEnsureCache && _mdCodeFenceEnsureCache(false, lines);
+        const ic = _mdIndentCodeEnsureCache && _mdIndentCodeEnsureCache(false, lines, fc);
+        if (ic && ic.kind && r>=0 && r<(ic.kind.length|0)) indentKind = (ic.kind[r]|0);
+        indentFirst = !!(indentKind===2 && ic && ic.first && ic.first[r|0]);
+        indentLast = !!(indentKind===2 && ic && ic.last && ic.last[r|0]);
+      }catch{ indentKind = 0; indentFirst = false; indentLast = false; }
+      const isCodeRow = ((fenceKind|0) === 2) || ((indentKind|0) === 2);
 
       let lv0 = _mdHeadingLevel(srcText);
       let setextOn = _mdSetextEnabled();
@@ -1102,7 +1130,10 @@ try{
 
       if (isCodeRow){
         // Keep LINE_HEIGHT grid; code is plain text.
-        return { srcText, lv0:0, setextLv:0, lv:0, scale:1, lineHeightPx:(LINE_HEIGHT|0), hideSymbols:false, setextOn:false, isLooseGap:false, looseGapStart:-1, looseGapEnd:-1, blockHeightOverridePx:null, blockPadTopPx:0, blockPadBottomPx:0, isFenceRow:false, isCodeRow:true };
+        // #1882: Indented code blocks emulate fence spacing by doubling the first/last content row height.
+        const tp = indentFirst ? (LINE_HEIGHT|0) : 0;
+        const bp = indentLast ? (LINE_HEIGHT|0) : 0;
+        return { srcText, lv0:0, setextLv:0, lv:0, scale:1, lineHeightPx:(LINE_HEIGHT|0), hideSymbols:false, setextOn:false, isLooseGap:false, looseGapStart:-1, looseGapEnd:-1, blockHeightOverridePx:null, blockPadTopPx:(tp|0), blockPadBottomPx:(bp|0), isFenceRow:false, isCodeRow:true };
       }
 
       // Loose list spacer blanks (#1730)
@@ -1258,6 +1289,14 @@ try{
       if (!Array.isArray(lines) || lines.length===0) return false;
       const r = Math.max(0, Math.min(lines.length-1, caretRow|0));
       const src = String(lines[r]||'');
+      // Code blocks are displayed as raw text; never apply ordered-list half-space clamping.
+      try{
+        const fc = _mdCodeFenceEnsureCache && _mdCodeFenceEnsureCache(false, lines);
+        const ic = _mdIndentCodeEnsureCache && _mdIndentCodeEnsureCache(false, lines, fc);
+        const fk = (fc && fc.kind && (r|0) >= 0 && (r|0) < (lines.length|0)) ? (fc.kind[r|0]|0) : 0;
+        const ik = (ic && ic.kind && (r|0) >= 0 && (r|0) < (lines.length|0)) ? (ic.kind[r|0]|0) : 0;
+        if ((fk|0) === 2 || (ik|0) === 2) return false;
+      }catch{}
       const ul = _mdUListInfo && _mdUListInfo(src, r|0, lines);
       if (!(ul && ul.kind==='item' && String(ul.listType||'')==='ol')) return false;
       if (!Number.isFinite(ul.markerIdx) || !Number.isFinite(ul.markerLen)) return false;
@@ -1292,8 +1331,10 @@ try{
       // inline-link collapsing on those rows.
       try{
         const fc = _mdCodeFenceEnsureCache && _mdCodeFenceEnsureCache(false, lines);
+        const ic = _mdIndentCodeEnsureCache && _mdIndentCodeEnsureCache(false, lines, fc);
         const fk = (fc && fc.kind && (r|0) >= 0 && (r|0) < (lines.length|0)) ? (fc.kind[r|0]|0) : 0;
-        if ((fk|0) === 2) return false;
+        const ik = (ic && ic.kind && (r|0) >= 0 && (r|0) < (lines.length|0)) ? (ic.kind[r|0]|0) : 0;
+        if ((fk|0) === 2 || (ik|0) === 2) return false;
       }catch{}
 
       // Fast check: avoid overhead for non-link lines.
@@ -1409,6 +1450,130 @@ try{
       _mdCodeFenceCache = { tick, total, dirty:false, kind, first, last };
       return _mdCodeFenceCache;
     }catch{ return _mdCodeFenceCache; }
+  }
+
+  // GFM indented code blocks (4 spaces, or 0..3 spaces + TAB).
+  // Per request (#1882):
+  // - A nonblank line is code when it starts with:
+  //   - 4 ASCII spaces, OR
+  //   - 0..3 ASCII spaces then a TAB
+  // - A blank line is code if the previous line is in an indented code block.
+  // - The block closes when a nonblank line that doesn't match the rules appears.
+  // NOTE: Applied only outside fenced code blocks.
+  // Cache per-row kind:
+  // 0 none, 2 code content.
+  let _mdIndentCodeCache = null;
+  function _mdIndentCodeEnsureCache(force, lines, fenceCache){
+    try{
+      if (!(_mdRichEnabled && _mdRichEnabled())) { _mdIndentCodeCache = null; return null; }
+      const arr = Array.isArray(lines) ? lines : _splitLines();
+      const total = (arr && arr.length) ? (arr.length|0) : 0;
+      const b = currentBuffer && currentBuffer();
+      const tick = (b && Number.isFinite(b._changeTick)) ? (b._changeTick|0) : 0;
+      const prev = _mdIndentCodeCache;
+      const same = (!!prev && !prev.dirty && (prev.tick|0)===(tick|0) && (prev.total|0)===(total|0));
+      if (!force && same) return prev;
+
+      const kind = new Uint8Array(total);
+      const first = new Uint8Array(total);
+      const last = new Uint8Array(total);
+
+      const fc = fenceCache || (_mdCodeFenceEnsureCache && _mdCodeFenceEnsureCache(false, arr));
+
+      // Ensure list cache is available for list-priority checks (#1883).
+      try{ _mdListEnsureCache && _mdListEnsureCache(false); }catch{}
+
+      let inBlock = false;
+      let blockStart = -1;
+
+      const _isIndentedCodeLine = (s)=>{
+        try{ return ((_mdIndentCodePrefixLen ? (_mdIndentCodePrefixLen(s)|0) : 0)|0) > 0; }catch{ return false; }
+      };
+      const _isDepth2ListLine = (r, s)=>{
+        // #1883: list depth>=2 takes precedence over indented code blocks.
+        try{
+          const rr = (r|0);
+          if (rr < 0 || rr >= (total|0)) return false;
+          const line = String(s||'');
+          if (!line) return false;
+          const ul = _mdUListInfo && _mdUListInfo(line, rr|0, arr);
+          if (!ul) return false;
+          const k = String(ul.kind||'');
+          if (k !== 'item' && k !== 'cont') return false;
+          const d = Math.max(1, (ul.depth|0));
+          return (d|0) >= 2;
+        }catch{ return false; }
+      };
+
+      for (let r=0; r<total; r++){
+        const s = String(arr[r]||'');
+
+        // Exclude fenced code blocks (fence row + content row)
+        try{
+          const fk = (fc && fc.kind && r>=0 && r<(fc.kind.length|0)) ? (fc.kind[r]|0) : 0;
+          if ((fk|0) !== 0){
+            if (inBlock){
+              const end = (r-1)|0;
+              if ((blockStart|0) >= 0 && (end|0) >= (blockStart|0)){
+                first[blockStart|0] = 1;
+                last[end|0] = 1;
+              }
+              inBlock = false;
+              blockStart = -1;
+            }
+            continue;
+          }
+        }catch{}
+
+        const isBlank = (!s || s.trim()==='');
+        let isCode = false;
+        if (!isBlank){
+          const looksIndented = _isIndentedCodeLine(s);
+          if (looksIndented){
+            if (!_isDepth2ListLine(r|0, s)) isCode = true;
+          }
+        } else {
+          isCode = !!inBlock;
+        }
+
+        if (isCode){
+          kind[r] = 2;
+          if (!inBlock){ inBlock = true; blockStart = r|0; }
+        } else {
+          if (inBlock){
+            const end = (r-1)|0;
+            if ((blockStart|0) >= 0 && (end|0) >= (blockStart|0)){
+              first[blockStart|0] = 1;
+              last[end|0] = 1;
+            }
+          }
+          inBlock = false;
+          blockStart = -1;
+        }
+      }
+
+      if (inBlock && (blockStart|0) >= 0 && (blockStart|0) < total){
+        first[blockStart|0] = 1;
+        last[(total-1)|0] = 1;
+      }
+
+      _mdIndentCodeCache = { tick, total, dirty:false, kind, first, last };
+      return _mdIndentCodeCache;
+    }catch{ return _mdIndentCodeCache; }
+  }
+
+  function _mdIndentCodePrefixLen(line){
+    // Return indentation prefix length for a potential indented-code line.
+    // - 4 spaces
+    // - 0-3 spaces + TAB
+    try{
+      const t = String(line||'');
+      if (!t) return 0;
+      if (t.length >= 4 && t[0]===' ' && t[1]===' ' && t[2]===' ' && t[3]===' ') return 4;
+      let i = 0;
+      while (i < 3 && t[i] === ' ') i++;
+      return (t[i] === '\t') ? ((i + 1)|0) : 0;
+    }catch{ return 0; }
   }
 
   function _mdCharIndexForIndentCols(s, targetCols){
@@ -1594,7 +1759,9 @@ try{
           // Continuation line within a list item (simple: indentation must be >= current content indent)
           if (stack.length > 0 && (cols0|0) >= (stack[stack.length-1].contentIndentCol|0)){
             const top = stack[stack.length-1] || {};
-            items[row] = { kind:'cont', listType: (top.listType||''), contentIndentCol: (top.contentIndentCol|0) };
+            // Preserve depth for continuation lines so list-depth rules can apply consistently.
+            // (Used by indented-code precedence checks: depth>=2 list wins.)
+            items[row] = { kind:'cont', listType: (top.listType||''), contentIndentCol: (top.contentIndentCol|0), depth: (stack.length|0) };
           } else {
             items[row] = null;
           }
@@ -2192,6 +2359,10 @@ try{
       let _fence = null;
       try{ _fence = _mdCodeFenceEnsureCache && _mdCodeFenceEnsureCache(false, lines); }catch{ _fence = null; }
 
+      // Ensure indented code block cache is ready (#1882).
+      let _icode = null;
+      try{ _icode = _mdIndentCodeEnsureCache && _mdIndentCodeEnsureCache(false, lines, _fence); }catch{ _icode = null; }
+
       // 1ch width in px (base font). Used for codeblock margin/padding (0.5ch).
       let chPxBase = 0;
       try{
@@ -2262,9 +2433,11 @@ try{
         const isBlankRow = (!srcText || srcText.trim()==='');
         const fenceKind = (_fence && _fence.kind && row>=0 && row<total) ? (_fence.kind[row]|0) : 0;
         const isFenceRow = ((fenceKind|0) === 1);
-        const isCodeRow = ((fenceKind|0) === 2);
-        const isCodeFirst = !!(isCodeRow && _fence && _fence.first && _fence.first[row|0]);
-        const isCodeLast = !!(isCodeRow && _fence && _fence.last && _fence.last[row|0]);
+        const indentKind = (_icode && _icode.kind && row>=0 && row<total) ? (_icode.kind[row]|0) : 0;
+        const isIndentCodeRow = ((indentKind|0) === 2);
+        const isCodeRow = ((fenceKind|0) === 2) || isIndentCodeRow;
+        const isCodeFirst = !!(((fenceKind|0)===2) && _fence && _fence.first && _fence.first[row|0]) || !!(isIndentCodeRow && _icode && _icode.first && _icode.first[row|0]);
+        const isCodeLast = !!(((fenceKind|0)===2) && _fence && _fence.last && _fence.last[row|0]) || !!(isIndentCodeRow && _icode && _icode.last && _icode.last[row|0]);
 
         const lv0 = (isCodeRow ? 0 : _mdHeadingLevel(srcText));
         const isActiveRow = (row === (caretRow|0));
@@ -2282,7 +2455,7 @@ try{
         // - clean: collapse ALL blank lines in the run (height=0)
         // - draft: behave like clean by default, but expand raw blank run when caret is on the preceding list item
         let looseGap = null;
-        try{ if (isBlankRow) looseGap = _mdUListLooseGapInfo && _mdUListLooseGapInfo(row|0, lines); }catch{ looseGap = null; }
+        try{ if (isBlankRow && !isCodeRow && !isFenceRow) looseGap = _mdUListLooseGapInfo && _mdUListLooseGapInfo(row|0, lines); }catch{ looseGap = null; }
         const expandLooseGap = !!(draftMode0 && looseGap && (
           ((caretRow|0) === (looseGap.prevItemRow|0)) ||
           (((caretRow|0) >= (looseGap.start|0)) && ((caretRow|0) <= (looseGap.end|0)))
@@ -2307,14 +2480,15 @@ try{
         let padTopPx = 0;
         let padBottomPx = 0;
 
-        // Code block content lines: keep LINE_HEIGHT grid to avoid scroll/caret drift.
-        // (Spacing is handled purely by the background rectangle drawing.)
+        // Code block content lines: keep LINE_HEIGHT grid.
+        // Fenced blocks: spacing is handled purely by the background rectangle drawing.
+        // #1882: Indented blocks emulate fence spacing by adding 1-line padding on first/last rows.
         if (isCodeRow){
           scale = 1;
           lh = (LINE_HEIGHT|0);
           fs = Math.max(6, Math.round(baseFontPx));
-          padTopPx = 0;
-          padBottomPx = 0;
+          padTopPx = (isIndentCodeRow && isCodeFirst) ? (LINE_HEIGHT|0) : 0;
+          padBottomPx = (isIndentCodeRow && isCodeLast) ? (LINE_HEIGHT|0) : 0;
         }
 
         // Loose list spacing (#1730): apply H1 line-height to the two adjacent nonblank rows.
@@ -2373,6 +2547,19 @@ try{
 
         let text = srcText;
         let prefixLen = 0;
+
+        // #1882: Indented code blocks are rendered without the indentation prefix (GFM-like).
+        // Only affects the rendered layer; the underlying text remains unchanged.
+        if (isIndentCodeRow && !isFenceRow){
+          try{
+            const t0 = String(srcText||'');
+            const cut = (_mdIndentCodePrefixLen ? (_mdIndentCodePrefixLen(t0)|0) : 0)|0;
+            if ((cut|0) > 0){
+              prefixLen = (cut|0);
+              text = t0.slice(cut|0);
+            }
+          }catch{}
+        }
 
         // Fence rows in clean display: hide text (but keep as a margin spacer; see height logic below).
         if (isFenceRow && hideSymbols){
@@ -2526,7 +2713,7 @@ try{
               // Map selection columns to displayed text (prefix hidden in clean display).
               let c1 = (segS - off0)|0;
               let c2 = (segE - off0)|0;
-              if (hideSymbols && (dispPrefixLen|0) > 0){ c1 = Math.max(0, c1 - (dispPrefixLen|0)); c2 = Math.max(0, c2 - (dispPrefixLen|0)); }
+              if ((dispPrefixLen|0) > 0){ c1 = Math.max(0, c1 - (dispPrefixLen|0)); c2 = Math.max(0, c2 - (dispPrefixLen|0)); }
               c1 = Math.max(0, Math.min((text.length|0), c1|0));
               c2 = Math.max(c1, Math.min((text.length|0), c2|0));
               if (c2 > c1){
@@ -2579,7 +2766,7 @@ try{
               // Map underline columns to displayed text (prefix hidden in clean display).
               let c1 = (segS - off0)|0;
               let c2 = (segE - off0)|0;
-              if (hideSymbols && (dispPrefixLen|0) > 0){ c1 = Math.max(0, c1 - (dispPrefixLen|0)); c2 = Math.max(0, c2 - (dispPrefixLen|0)); }
+              if ((dispPrefixLen|0) > 0){ c1 = Math.max(0, c1 - (dispPrefixLen|0)); c2 = Math.max(0, c2 - (dispPrefixLen|0)); }
               c1 = Math.max(0, Math.min((text.length|0), c1|0));
               c2 = Math.max(0, Math.min((text.length|0), c2|0));
               const a = Math.min(c1|0, c2|0);
@@ -2791,11 +2978,28 @@ try{
             const y0 = (rowY[s]|0);
             const y1 = ((rowY[e]|0) + (rowH[e]|0))|0;
             let top = (y0|0);
-            let height = Math.max(0, (y1 - y0)|0);
+            let bottom = (y1|0);
 
-            // Visual padding: extend by ~0.5ch on real block edges (clamped to viewport).
-            if (rowCodeFirst[s]){ top = Math.max(0, (top|0) - (extPx|0)); height = (height|0) + (extPx|0); }
-            if (rowCodeLast[e]){ height = (height|0) + (extPx|0); }
+            // Visual padding: extend by ~0.5ch on real block edges.
+            // #1884: For indented code blocks, the first/last rows have double height.
+            // Apply the extension from the *middle* of the 2x row:
+            // - first row: extend upward from the middle (padTop boundary)
+            // - last row : extend downward from the middle (padBottom boundary)
+            if (rowCodeFirst[s]){
+              try{
+                const pt = (rowPadTop[s]|0);
+                if ((pt|0) > 0) top = ((y0|0) + (pt|0) - (extPx|0))|0;
+                else top = Math.max(0, (top|0) - (extPx|0));
+              }catch{ top = Math.max(0, (top|0) - (extPx|0)); }
+            }
+            if (rowCodeLast[e]){
+              try{
+                const pb = (rowPadBottom[e]|0);
+                if ((pb|0) > 0) bottom = ((y1|0) - (pb|0) + (extPx|0))|0;
+                else bottom = (bottom|0) + (extPx|0);
+              }catch{ bottom = (bottom|0) + (extPx|0); }
+            }
+            let height = Math.max(0, (bottom - top)|0);
 
             let rEl = rects[rectN];
             if (!rEl){
@@ -2829,8 +3033,21 @@ try{
             let sEl = kids[0];
             if (!sEl){ sEl = document.createElement('div'); _mdCodeStripeInner.appendChild(sEl); }
             sEl.className = 'md-codeblock-active';
-            try{ sEl.style.top = (rowY[activeIdx]|0) + 'px'; }catch{}
-            try{ sEl.style.height = (rowH[activeIdx]|0) + 'px'; }catch{}
+            // #1885: For indented code blocks, first/last rows can be 2x height via padTop/padBottom.
+            // Keep the active-line overlay constrained to the actual single-line content box.
+            try{
+              const y0 = (rowY[activeIdx]|0);
+              const h0 = (rowH[activeIdx]|0);
+              const pt = (rowPadTop && Number.isFinite(rowPadTop[activeIdx])) ? (rowPadTop[activeIdx]|0) : 0;
+              const pb = (rowPadBottom && Number.isFinite(rowPadBottom[activeIdx])) ? (rowPadBottom[activeIdx]|0) : 0;
+              const top = (y0|0) + Math.max(0, pt|0);
+              const height = Math.max(0, (h0|0) - Math.max(0, pt|0) - Math.max(0, pb|0));
+              sEl.style.top = (top|0) + 'px';
+              sEl.style.height = (height|0) + 'px';
+            }catch{
+              try{ sEl.style.top = (rowY[activeIdx]|0) + 'px'; }catch{}
+              try{ sEl.style.height = (rowH[activeIdx]|0) + 'px'; }catch{}
+            }
             try{ sEl.style.left = (_cbRectLeftPx|0) + 'px'; }catch{}
             try{ sEl.style.right = (_cbRectRightPx|0) + 'px'; }catch{}
             try{
@@ -3476,14 +3693,29 @@ try{
       try{
         if (_mdRichActive && _mdRichActive()){
           let _mdIsCodeRow = false;
+          let _mdIsIndentCodeRow = false;
+          let _mdIndentCut = 0;
           try{
             const fc = _mdCodeFenceEnsureCache && _mdCodeFenceEnsureCache(false, lines);
+            const ic = _mdIndentCodeEnsureCache && _mdIndentCodeEnsureCache(false, lines, fc);
             const fk = (fc && fc.kind && (r|0) >= 0 && (r|0) < (lines.length|0)) ? (fc.kind[r|0]|0) : 0;
-            _mdIsCodeRow = ((fk|0) === 2);
+            const ik = (ic && ic.kind && (r|0) >= 0 && (r|0) < (lines.length|0)) ? (ic.kind[r|0]|0) : 0;
+            _mdIsIndentCodeRow = ((ik|0) === 2);
+            _mdIsCodeRow = ((fk|0) === 2) || _mdIsIndentCodeRow;
+            if (_mdIsIndentCodeRow){
+              try{ _mdIndentCut = (_mdIndentCodePrefixLen ? (_mdIndentCodePrefixLen(line0)|0) : 0)|0; }catch{ _mdIndentCut = 0; }
+            }
           }catch{ _mdIsCodeRow = false; }
           const adj0 = _mdWysiwygAdjust ? _mdWysiwygAdjust(line0, c|0) : { line:line0, col:c|0 };
           line = String(adj0.line||'');
           c = (adj0.col|0);
+
+          // Indented code blocks are displayed without the indentation prefix in md-rich.
+          if (_mdIsIndentCodeRow && (_mdIndentCut|0) > 0){
+            line = String(line||'').slice(_mdIndentCut|0);
+            c = Math.max(0, (c|0) - (_mdIndentCut|0));
+          }
+
           const hide = (!_mdIsCodeRow) && !!(_mdHideSymbolsForRow && _mdHideSymbolsForRow(true));
           if (hide && !_mdIsCodeRow){
             const col = (_mdCleanDisplayCollapseInfo && typeof _mdCleanDisplayCollapseInfo === 'function') ? _mdCleanDisplayCollapseInfo(line) : null;
@@ -6843,7 +7075,16 @@ try{
   let _scrolloffPauseAnchorR = -1;
   let _scrolloffPauseAnchorC = -1;
   // global mouse cursor visibility state and helpers (used across modules)
-  const _hideCursor = ()=>{ try{ if (!_cursorHidden){ document.body.classList.add('hide-cursor'); _cursorHidden=true; } }catch{} };
+  const _hideCursor = ()=>{
+    try{
+      if (!_cursorHidden){
+        document.body.classList.add('hide-cursor');
+        _cursorHidden=true;
+      }
+    }catch{}
+    // #1888: md-rich hover tools should not stick during keyboard navigation/scroll.
+    try{ _mdCodeToolsHide && _mdCodeToolsHide(); }catch{}
+  };
   const _showCursor = (_reason)=>{
     try{
       // キーボード操作直後は塗りつぶしcaretを強制維持。
@@ -7950,11 +8191,15 @@ try{
 
       const mdRich = (function(){ try{ return _mdRichActive(); }catch{ return false; } })();
       let _mdIsCodeRow = false;
+      let _mdIsIndentCodeRow = false;
       try{
         if (mdRich){
           const fc = _mdCodeFenceEnsureCache && _mdCodeFenceEnsureCache(false, lines);
+          const ic = _mdIndentCodeEnsureCache && _mdIndentCodeEnsureCache(false, lines, fc);
           const fk = (fc && fc.kind && (_hoverLink.r|0) >= 0 && (_hoverLink.r|0) < (lines.length|0)) ? (fc.kind[_hoverLink.r|0]|0) : 0;
-          _mdIsCodeRow = ((fk|0) === 2);
+          const ik = (ic && ic.kind && (_hoverLink.r|0) >= 0 && (_hoverLink.r|0) < (lines.length|0)) ? (ic.kind[_hoverLink.r|0]|0) : 0;
+          _mdIsIndentCodeRow = ((ik|0) === 2);
+          _mdIsCodeRow = ((fk|0) === 2) || _mdIsIndentCodeRow;
         }
       }catch{ _mdIsCodeRow = false; }
       const mdScaleX = (function(){ try{ return mdRich ? ((_mdIsCodeRow ? 1 : (_mdLineScale(line)||1))||1) : 1; }catch{ return 1; } })();
@@ -8026,6 +8271,16 @@ try{
             dispC1 = Math.max(0, Math.min((dispLine.length|0), (_hoverLink.dispC1|0)));
             dispC2 = Math.max(dispC1, Math.min((dispLine.length|0), (_hoverLink.dispC2|0)));
           } else {
+            // Indented code blocks: displayed without indentation prefix.
+            if (_mdIsIndentCodeRow){
+              const cut = (_mdIndentCodePrefixLen ? (_mdIndentCodePrefixLen(line)|0) : 0)|0;
+              if ((cut|0) > 0){
+                prefixLen = (cut|0);
+                dispLine = String(line||'').slice(cut|0);
+                dispC1 = Math.max(0, c1 - (cut|0));
+                dispC2 = Math.max(dispC1, c2 - (cut|0));
+              }
+            } else {
             // When markdown symbols are hidden on this row, subtract heading prefix.
             const isActiveRow = (targetIdx === (caretRow|0));
             const hide = _mdHideSymbolsForRow(isActiveRow);
@@ -8056,6 +8311,7 @@ try{
                   }
                 }
               }catch{}
+            }
             }
           }
         }
@@ -8375,11 +8631,15 @@ try{
       // md-rich: per-line scale + optional hidden heading prefix affects X->col mapping.
       const mdRich = (function(){ try{ return _mdRichActive(); }catch{ return false; } })();
       let _mdIsCodeRow = false;
+      let _mdIsIndentCodeRow = false;
       try{
         if (mdRich){
           const fc = _mdCodeFenceEnsureCache && _mdCodeFenceEnsureCache(false, lines);
+          const ic = _mdIndentCodeEnsureCache && _mdIndentCodeEnsureCache(false, lines, fc);
           const fk = (fc && fc.kind && (row|0) >= 0 && (row|0) < (lines.length|0)) ? (fc.kind[row|0]|0) : 0;
-          _mdIsCodeRow = ((fk|0) === 2);
+          const ik = (ic && ic.kind && (row|0) >= 0 && (row|0) < (lines.length|0)) ? (ic.kind[row|0]|0) : 0;
+          _mdIsIndentCodeRow = ((ik|0) === 2);
+          _mdIsCodeRow = ((fk|0) === 2) || _mdIsIndentCodeRow;
         }
       }catch{ _mdIsCodeRow = false; }
       const mdScaleX = (function(){ try{ return mdRich ? ((_mdIsCodeRow ? 1 : (_mdLineScale(line)||1))||1) : 1; }catch{ return 1; } })();
@@ -8400,6 +8660,14 @@ try{
             // #1767: hide root depth-1 slack (<=3) from all levels in clean display.
           }
             try{
+
+      // Indented code blocks are displayed without indentation prefix.
+      try{
+        if (mdRich && _mdIsIndentCodeRow){
+          const cut = (_mdIndentCodePrefixLen ? (_mdIndentCodePrefixLen(line)|0) : 0)|0;
+          if ((cut|0) > 0){ prefixLen = (cut|0); dispLine = String(line||'').slice(cut|0); }
+        }
+      }catch{}
               if ((prefixLen|0) === 0){
                 _mdListEnsureCache && _mdListEnsureCache(false);
                 const ul = _mdUListInfo && _mdUListInfo(line, row|0, lines);
@@ -10811,6 +11079,8 @@ try{
 
       const mdRich = !!(function(){ try{ return _mdRichActive(); }catch{ return false; } })();
       let _mdIsCodeRow = false;
+      let _mdPadTopPx = 0;
+      let _mdPadBottomPx = 0;
       let rowHeightPx = LINE_HEIGHT;
       let yTop = (row1 - topLine) * LINE_HEIGHT;
       let scale = 1;
@@ -10823,6 +11093,8 @@ try{
           try{ _mdIsCodeRow = !!(info && info.isCodeRow); }catch{ _mdIsCodeRow = false; }
           scale = info.scale || 1;
           rowHeightPx = info.lineHeightPx || LINE_HEIGHT;
+          try{ _mdPadTopPx = (info && Number.isFinite(info.blockPadTopPx)) ? (info.blockPadTopPx|0) : 0; }catch{ _mdPadTopPx = 0; }
+          try{ _mdPadBottomPx = (info && Number.isFinite(info.blockPadBottomPx)) ? (info.blockPadBottomPx|0) : 0; }catch{ _mdPadBottomPx = 0; }
           // #1730: Clean-mode loose-gap blank rows are fully collapsed (height=0). Do not render listchars for them.
           try{
             if (info && info.isLooseGap && Number.isFinite(info.blockHeightOverridePx) && ((info.blockHeightOverridePx|0) === 0)) return;
@@ -10874,11 +11146,25 @@ try{
       try{
         if (mdRich){
           const isActiveRow = (row1 === ((caretRow|0) + 1));
+          let _mdIsIndentCodeRow = false;
+          try{
+            const fc = _mdCodeFenceEnsureCache && _mdCodeFenceEnsureCache(false, lines);
+            const ic = _mdIndentCodeEnsureCache && _mdIndentCodeEnsureCache(false, lines, fc);
+            const ik = (ic && ic.kind && (idx|0) >= 0 && (idx|0) < (ic.kind.length|0)) ? (ic.kind[idx|0]|0) : 0;
+            _mdIsIndentCodeRow = ((ik|0) === 2);
+          }catch{ _mdIsIndentCodeRow = false; }
           // Fenced code block content: always show raw text; do not apply clean-display hiding/collapse.
           if (_mdIsCodeRow){
             hide = false;
             dispLine = line;
             dispPrefix = 0;
+            // #1884: Indented code blocks are displayed without the indentation prefix.
+            try{
+              if (_mdIsIndentCodeRow){
+                const cut = (_mdIndentCodePrefixLen ? (_mdIndentCodePrefixLen(line)|0) : 0)|0;
+                if ((cut|0) > 0){ dispPrefix = (cut|0); dispLine = String(line||'').slice(cut|0); }
+              }
+            }catch{}
             _mdUlSkipSpaceCol = -1;
             ulSrc = null;
             ulDisp = null;
@@ -10934,6 +11220,43 @@ try{
         }
       }catch{ dispLine = line; dispPrefix = 0; _mdUlSkipSpaceCol = -1; ulSrc = null; ulDisp = null; hide = false; _mdIsCodeRow = false; }
 
+      const wrapOn = (function(){ try{ return !!(_wrapEnabled && _wrapEnabled()); }catch{ return false; } })();
+      let wPx = 0;
+      // IMPORTANT: keep fractional CSS px. Truncating to int can create boundary drift where
+      // glyphs still fit but probe-based positions (esp. EOL) wrap to the next line.
+      try{ if (wrapOn) wPx = (+_wrapAvailWidthPx()||0); }catch{ wPx = 0; }
+
+      // md-rich: code blocks have inner left padding (1ch) in the text layer.
+      // Apply the same x inset to listchars so EOL/whitespace markers line up with rendered glyphs.
+      let _mdCodePadLeftPx = 0;
+      let _mdCodePadRightPx = 0;
+      try{
+        if (mdRich && _mdIsCodeRow){
+          _measureSpan.textContent = '0';
+          let chPxBase = +(_measureSpan.getBoundingClientRect().width||0);
+          if (!(chPxBase > 0)) chPxBase = Math.max(1, (baseFontPx||16) * 0.60);
+          // 0.5ch left inset + 0.5ch inner pad = 1ch
+          const cbRectLeftPx = Math.max(0, Math.round((chPxBase||10) * 0.5));
+          let cbRectRightPx = Math.max(0, Math.round((chPxBase||10) * 12));
+          const cbPadPx = Math.max(0, Math.round((chPxBase||10) * 0.5));
+          // Mirror the renderer's wrap-on right inset adjustment (subtract textarea padding-right).
+          let edPadRightPx = 0;
+          try{ const csE = getComputedStyle(editor); edPadRightPx = Math.max(0, Math.round(parseFloat(csE.paddingRight||'0')||0)); }catch{ edPadRightPx = 0; }
+          let cbRectRightEffPx = Math.max(0, (cbRectRightPx|0) - (edPadRightPx|0));
+          try{
+            const ww = Math.max(20, (+wPx||0));
+            const minW = 4;
+            if (((cbRectLeftPx|0) + (cbRectRightEffPx|0) + minW) > (ww|0)) cbRectRightEffPx = Math.max(0, (ww|0) - (minW|0) - (cbRectLeftPx|0));
+          }catch{}
+          _mdCodePadLeftPx = ((cbRectLeftPx|0) + (cbPadPx|0))|0;
+          _mdCodePadRightPx = ((cbRectRightEffPx|0) + (cbPadPx|0))|0;
+        }
+      }catch{ _mdCodePadLeftPx = 0; _mdCodePadRightPx = 0; }
+
+      // md-rich: respect block padding (2x-height first/last rows) so markers render in the correct half.
+      // NOTE: yTop is the row box top; glyphs are rendered at yTop + padTop.
+      const yBase = mdRich ? ((yTop|0) + (_mdPadTopPx|0)) : (yTop|0);
+
       // md-rich clean display: collapse inline links so EOL/listchars align with visible text.
       try{
         if (mdRich && hide && !_mdIsCodeRow){
@@ -10941,12 +11264,6 @@ try{
           if (col && typeof col.dispText === 'string') dispLine = String(col.dispText||'');
         }
       }catch{}
-
-      const wrapOn = (function(){ try{ return !!(_wrapEnabled && _wrapEnabled()); }catch{ return false; } })();
-      let wPx = 0;
-      // IMPORTANT: keep fractional CSS px. Truncating to int can create boundary drift where
-      // glyphs still fit but probe-based positions (esp. EOL) wrap to the next line.
-      try{ if (wrapOn) wPx = (+_wrapAvailWidthPx()||0); }catch{ wPx = 0; }
 
       const _wrapPosForCol = (cc)=>{
         try{
@@ -10965,10 +11282,17 @@ try{
                 if (ul && lt !== 'ol') indentOpts = _mdIndentOptsForListLine(dispLine, ul, wPx|0, fs|0, rowHeightPx|0);
               }
             }catch{ indentOpts = null; }
+
+            // Code block padding: align probe x/intra with the renderer's inner padding.
+            let ww = (+wPx||0);
+            if (_mdIsCodeRow){
+              ww = Math.max(20, (+ww||0) - (_mdCodePadRightPx|0));
+              indentOpts = { padLeftPx: (_mdCodePadLeftPx|0), textIndentPx: 0 };
+            }
             let intra = 0;
             let x = null;
-            try{ intra = _wrapProbeIntraFromColStyled(dispLine, col, wPx||0, rowHeightPx|0, fs|0, indentOpts) | 0; }catch{ intra = 0; }
-            try{ x = _wrapProbeXFromColStyled(dispLine, col, wPx||0, fs|0, rowHeightPx|0, indentOpts); }catch{ x = null; }
+            try{ intra = _wrapProbeIntraFromColStyled(dispLine, col, ww||0, rowHeightPx|0, fs|0, indentOpts) | 0; }catch{ intra = 0; }
+            try{ x = _wrapProbeXFromColStyled(dispLine, col, ww||0, fs|0, rowHeightPx|0, indentOpts); }catch{ x = null; }
             return { intra: Math.max(0, intra|0), x };
           }
           let intra = 0;
@@ -11062,11 +11386,11 @@ try{
         if ((_mdUlSkipSpaceCol|0) >= 0 && (c|0) === (_mdUlSkipSpaceCol|0) && ch===' ') continue;
         if (ch==='\t' || ch==='\u3000' || (c>=trailStart && ch===' ')){
           let x1 = 0;
-          let y1 = yTop;
+          let y1 = yBase;
           if (wrapOn){
             const p = _wrapPosForCol(c|0);
             const lh = mdRich ? (rowHeightPx|0) : (LINE_HEIGHT|0);
-            y1 = (yTop|0) + (Math.max(0, (p.intra|0)) * Math.max(1, lh|0));
+            y1 = (yBase|0) + (Math.max(0, (p.intra|0)) * Math.max(1, lh|0));
             x1 = Number.isFinite(p.x) ? Math.max(0, (+p.x||0)) : 0;
             try{ x1 += _mdOlExtraXpxList(c|0); }catch{}
           } else {
@@ -11074,6 +11398,7 @@ try{
             const x1b = _measureSpan.getBoundingClientRect().width;
             x1 = mdRich ? (x1b * scale) : x1b;
             try{ x1 += _mdOlExtraXpxList(c|0); }catch{}
+            try{ if (mdRich && _mdIsCodeRow && (_mdCodePadLeftPx|0) > 0) x1 += (_mdCodePadLeftPx|0); }catch{}
           }
           const el = document.createElement('div');
           el.className='listchar';
@@ -11097,7 +11422,7 @@ try{
         let _hs=0; try{ _hs = (mdRich || wrapOn) ? 0 : (editor.scrollLeft||0); }catch{}
         // If this row is rendered as a horizontal rule in clean display, place EOL at the rule's right edge.
         let xEnd = 0;
-        let yEnd = yTop;
+        let yEnd = yBase;
         let hrEol = false;
         try{
           if (mdRich){
@@ -11170,7 +11495,7 @@ try{
                 }
               }
             }catch{}
-            yEnd = (yTop|0) + (intraE|0) * Math.max(1, lh|0);
+            yEnd = (yBase|0) + (intraE|0) * Math.max(1, lh|0);
             xEnd = xE;
             try{ xEnd += _mdOlExtraXpxList(len0|0); }catch{}
           } else {
@@ -11178,6 +11503,7 @@ try{
             const xEndb = _measureSpan.getBoundingClientRect().width;
             xEnd = mdRich ? (xEndb * scale) : xEndb;
             try{ xEnd += _mdOlExtraXpxList(dispLine.length|0); }catch{}
+            try{ if (mdRich && _mdIsCodeRow && (_mdCodePadLeftPx|0) > 0) xEnd += (_mdCodePadLeftPx|0); }catch{}
           }
         }
         const elE = document.createElement('div');
@@ -16588,6 +16914,11 @@ try{
         let wPx = 80;
         try{ if (wrapOn) wPx = _wrapAvailWidthPx()|0; }catch{ wPx = 80; }
 
+        let _fc = null;
+        let _ic = null;
+        try{ _fc = _mdCodeFenceEnsureCache && _mdCodeFenceEnsureCache(false, lines); }catch{ _fc = null; }
+        try{ _ic = _mdIndentCodeEnsureCache && _mdIndentCodeEnsureCache(false, lines, _fc); }catch{ _ic = null; }
+
         const _dispTextForRow = (r0, isActiveRow)=>{
           const r = (r0|0);
           const srcText = (r>=0 && r<total) ? String(lines[r]||'') : '';
@@ -16598,10 +16929,21 @@ try{
           try{ if (info && info.isLooseGap) disp = ''; }catch{}
           // Fenced code blocks: keep code content raw; hide fence rows in clean display.
           try{
-            const fc = _mdCodeFenceEnsureCache && _mdCodeFenceEnsureCache(false, lines);
+            const fc = _fc;
             const fk = (fc && fc.kind && r>=0 && r<total) ? (fc.kind[r]|0) : 0;
             if (hideSymbols && (fk|0) === 1) disp = '';
             if ((fk|0) === 2) return { disp, info };
+          }catch{}
+
+          // Indented code blocks: keep code content raw but display without indentation prefix.
+          try{
+            const ic = _ic;
+            const ik = (ic && ic.kind && r>=0 && r<total) ? (ic.kind[r]|0) : 0;
+            if ((ik|0) === 2){
+              const cut = (_mdIndentCodePrefixLen ? (_mdIndentCodePrefixLen(srcText)|0) : 0)|0;
+              if ((cut|0) > 0) disp = String(srcText||'').slice(cut|0);
+              return { disp, info };
+            }
           }catch{}
           if (hideSymbols){
             let renderHr = false;
@@ -16937,13 +17279,27 @@ try{
     // For those rows, do NOT apply clean-display collapsing (it would shorten the measured line
     // and clamp caret movement to the collapsed length).
     let _mdIsCodeRow = false;
+    let _mdIsIndentCodeRow = false;
+    let _mdIndentCut = 0;
     try{
       if (_mdRichActive && _mdRichActive()){
         const fc = _mdCodeFenceEnsureCache && _mdCodeFenceEnsureCache(false, lines);
+        const ic = _mdIndentCodeEnsureCache && _mdIndentCodeEnsureCache(false, lines, fc);
         const fk = (fc && fc.kind && (caretRow|0) >= 0 && (caretRow|0) < (lines.length|0)) ? (fc.kind[caretRow|0]|0) : 0;
-        _mdIsCodeRow = ((fk|0) === 2);
+        const ik = (ic && ic.kind && (caretRow|0) >= 0 && (caretRow|0) < (lines.length|0)) ? (ic.kind[caretRow|0]|0) : 0;
+        _mdIsIndentCodeRow = ((ik|0) === 2);
+        _mdIsCodeRow = ((fk|0) === 2) || _mdIsIndentCodeRow;
+        if (_mdIsIndentCodeRow){
+          try{ _mdIndentCut = (_mdIndentCodePrefixLen ? (_mdIndentCodePrefixLen(lineRawForCaret)|0) : 0)|0; }catch{ _mdIndentCut = 0; }
+        }
       }
     }catch{ _mdIsCodeRow = false; }
+
+    // Indented code blocks are displayed without indentation prefix in md-rich.
+    if (_mdIsIndentCodeRow && (_mdIndentCut|0) > 0){
+      try{ line = String(line||'').slice(_mdIndentCut|0); }catch{}
+      caretColVis = Math.max(0, (caretColVis|0) - (_mdIndentCut|0));
+    }
     // md-rich clean display: collapse inline links so caret X matches visible text.
     try{
       const mdRich = !!(_mdRichActive && _mdRichActive());
@@ -16962,6 +17318,20 @@ try{
     let _mdScaleX = 1;
     // NOTE: scale is based on the original line (heading level markers still define scale).
     try{ if (_mdRichActive()) _mdScaleX = _mdIsCodeRow ? 1 : (_mdLineScale(line0) || 1); }catch{ _mdScaleX = 1; }
+
+    // md-rich: code blocks have inner left padding in the rendered text layer (1ch).
+    // Apply the same x inset to the overlay caret (wrap-off) so EOL and columns line up.
+    let _mdCodePadLeftPx = 0;
+    try{
+      if (_mdIsCodeRow){
+        _measureSpan.textContent = '0';
+        let chPxBase = +(_measureSpan.getBoundingClientRect().width||0);
+        if (!(chPxBase > 0)) chPxBase = Math.max(1, (_mdCaretFontSizePx||16) * 0.60);
+        const cbRectLeftPx = Math.max(0, Math.round((chPxBase||10) * 0.5));
+        const cbPadPx = Math.max(0, Math.round((chPxBase||10) * 0.5));
+        _mdCodePadLeftPx = ((cbRectLeftPx|0) + (cbPadPx|0))|0;
+      }
+    }catch{ _mdCodePadLeftPx = 0; }
     // Expand tabs using pixel-based tab stops (columns measured in space-width units) (#507)
     // This keeps overlay caret aligned with the textarea's native rendering even after full-width chars.
     const _expandTabs = (s)=>{
@@ -17166,6 +17536,9 @@ try{
     try{ x += _mdOlExtraXpx(caretCol|0); }catch{}
     try{ x += _mdIcodeExtraXpx(caretColVis|0); }catch{}
 
+    // Code block left padding (wrap-off only; wrap path uses indent opts below).
+    try{ if (_mdIsCodeRow && !(_wrapEnabled && _wrapEnabled()) && (_mdCodePadLeftPx|0) > 0) x += (_mdCodePadLeftPx|0); }catch{}
+
     // Cache wrap-probe params for caret (used by both x and next-char width).
     let _wrapWpxForCaret = null;
     let _wrapIndentOptsForCaret = null;
@@ -17195,8 +17568,10 @@ try{
           if (_mdRichActive && _mdRichActive()){
             const lines2 = _splitLines();
             let fk = 0;
+            let ik = 0;
             try{ const fc = _mdCodeFenceEnsureCache && _mdCodeFenceEnsureCache(false, lines2); if (fc && fc.kind && (caretRow|0) >= 0 && (caretRow|0) < (lines2.length|0)) fk = (fc.kind[caretRow|0]|0); }catch{ fk = 0; }
-            if ((fk|0) === 2){
+            try{ const fc2 = _mdCodeFenceEnsureCache && _mdCodeFenceEnsureCache(false, lines2); const ic2 = _mdIndentCodeEnsureCache && _mdIndentCodeEnsureCache(false, lines2, fc2); if (ic2 && ic2.kind && (caretRow|0) >= 0 && (caretRow|0) < (lines2.length|0)) ik = (ic2.kind[caretRow|0]|0); }catch{ ik = 0; }
+            if ((fk|0) === 2 || (ik|0) === 2){
               let chPxBase = 0;
               try{ if (typeof _measureSpan !== 'undefined' && _measureSpan){ _measureSpan.textContent = '0'; chPxBase = +(_measureSpan.getBoundingClientRect().width||0); } }catch{ chPxBase = 0; }
               if (!(chPxBase > 0)){
@@ -17241,6 +17616,7 @@ try{
       let x2 = _measureXAbsToCol((caretColVis+1)|0);
       try{ x2 += _mdOlExtraXpx((caretCol|0) + 1); }catch{}
       try{ x2 += _mdIcodeExtraXpx((caretColVis+1)|0); }catch{}
+      try{ if (_mdIsCodeRow && !(_wrapEnabled && _wrapEnabled()) && (_mdCodePadLeftPx|0) > 0) x2 += (_mdCodePadLeftPx|0); }catch{}
       try{
         if (_wrapEnabled()){
           const c = _wrapEnsureCache(false);
@@ -17384,8 +17760,10 @@ try{
           if (mdRich){
             const lines = _splitLines();
             const fc = _mdCodeFenceEnsureCache && _mdCodeFenceEnsureCache(false, lines);
+            const ic = _mdIndentCodeEnsureCache && _mdIndentCodeEnsureCache(false, lines, fc);
             const fk = (fc && fc.kind && (caretRow|0) >= 0 && (caretRow|0) < (lines.length|0)) ? (fc.kind[caretRow|0]|0) : 0;
-            if ((fk|0) === 2){
+            const ik = (ic && ic.kind && (caretRow|0) >= 0 && (caretRow|0) < (lines.length|0)) ? (ic.kind[caretRow|0]|0) : 0;
+            if ((fk|0) === 2 || (ik|0) === 2){
               suppressRaw = true;
             } else {
               const draftMode = !!(_mdDraftEditEnabled && _mdDraftEditEnabled());
@@ -19334,6 +19712,62 @@ try{
       }catch{}
       _centerScrolloffOnce = false;
     } else {
+      // md-rich: variable-height rows (e.g. indented code 2x edge rows) should use
+      // renderer geometry (px) for scrolloff/keep-in-view decisions.
+      // This makes the boundary match what was actually rendered, not the logical line grid.
+      try{
+        const mdNow = (function(){ try{ return _mdRichActive && _mdRichActive(); }catch{ return false; } })();
+        if (mdNow && !centerOnce && !big && _mdRenderGeom && viewport && editor){
+          const g = _mdRenderGeom;
+          const startIdx = Math.max(0, (topLine|0) - 1);
+          const idx = ((caretRow|0) - (startIdx|0))|0;
+          const vpH = (viewport && viewport.clientHeight) ? (viewport.clientHeight|0) : ((editor && editor.clientHeight) ? (editor.clientHeight|0) : 0);
+          if ((vpH|0) > 0 && g && (g.start|0) === (startIdx|0) && Array.isArray(g.rowY) && Array.isArray(g.rowH) && idx >= 0 && idx < (g.rowY.length|0)){
+            const y0 = (g.rowY[idx]|0);
+            const h0 = (g.rowH[idx]|0);
+            const y1 = ((y0|0) + (h0|0))|0;
+            const pt0 = (g.rowPadTop && Number.isFinite(g.rowPadTop[idx])) ? (g.rowPadTop[idx]|0) : 0;
+            const pb0 = (g.rowPadBottom && Number.isFinite(g.rowPadBottom[idx])) ? (g.rowPadBottom[idx]|0) : 0;
+            const varRow = ((h0|0) !== (LINE_HEIGHT|0)) || ((pt0|0) > 0) || ((pb0|0) > 0);
+            if (varRow){
+              const so = Math.max(0, (scrolloff|0));
+              const soPx = (so|0) * Math.max(1, (LINE_HEIGHT|0));
+              const topMargin = (soPx|0);
+              const bottomMargin = Math.max(0, (vpH|0) - (soPx|0));
+              // Determine current effective scrollTop (used as the adjustment base).
+              let stEff = 0;
+              try{
+                const mdWrap = (typeof _mdRichWrapOn === 'function') ? !!_mdRichWrapOn() : !!((_mdRichActive && _mdRichActive()) && (_wrapEnabled && _wrapEnabled()));
+                if (mdWrap && typeof _mdEffectiveScrollTopPx === 'function'){
+                  const snap = !(opts && opts.noSnap);
+                  stEff = _mdEffectiveScrollTopPx({ snap })|0;
+                } else {
+                  stEff = (editor.scrollTop||0)|0;
+                }
+              }catch{ stEff = (editor.scrollTop||0)|0; }
+
+              // Enforce margins using the full rendered row box.
+              let targetEff = null;
+              const hardTop = ((y0|0) < 0);
+              const hardBottom = ((y1|0) > (vpH|0));
+              if (hardTop || (_allowTopSO && ((y0|0) < (topMargin|0)))){
+                const m = hardTop ? 0 : (topMargin|0);
+                targetEff = (stEff|0) + ((y0|0) - (m|0));
+              } else if (hardBottom || (_allowBottomSO && ((y1|0) > (bottomMargin|0)))){
+                const m = hardBottom ? (vpH|0) : (bottomMargin|0);
+                targetEff = (stEff|0) + ((y1|0) - (m|0));
+              }
+              if (targetEff != null){
+                _setEditorScrollTop(Math.max(0, targetEff|0), Object.assign({}, (opts||null), { keepCaret:true }));
+                scrolled = true;
+                _centerScrolloffOnce = false;
+                return;
+              }
+            }
+          }
+        }
+      }catch{}
+
       // Near BOF/EOF, it may be impossible to satisfy full scrolloff.
       // Reduce the effective margin based on available lines (EOF also includes virtual pad).
       const so = Math.max(0, (scrolloff|0));
@@ -19969,6 +20403,7 @@ try{
           let padTopPx = 0;
           let padBottomPx = 0;
           let usedGeomRow = false;
+          let _centerNumInTallCodeRow = false;
           if (r.eof){
             lh = LINE_HEIGHT;
             hPx = LINE_HEIGHT;
@@ -20067,9 +20502,18 @@ try{
               }
             }catch{}
 
+            // #1885: For 2x-height indented code edge rows, vertically center the line number
+            // like wrapped rows (instead of aligning to the padded content box).
+            try{
+              if (usedGeomRow && _g && Array.isArray(_g.rowIsCode) && !!_g.rowIsCode[i] && (((padTopPx|0) > 0) || ((padBottomPx|0) > 0))){
+                const baseLh = Math.max(1, (lh|0));
+                if ((hPx|0) >= ((baseLh|0) * 2 - 1)) _centerNumInTallCodeRow = true;
+              }
+            }catch{ _centerNumInTallCodeRow = false; }
+
             try{ el.style.boxSizing = 'border-box'; }catch{}
-            try{ el.style.paddingTop = (padTopPx ? (padTopPx + 'px') : ''); }catch{}
-            try{ el.style.paddingBottom = (padBottomPx ? (padBottomPx + 'px') : ''); }catch{}
+            try{ el.style.paddingTop = (_centerNumInTallCodeRow ? '' : (padTopPx ? (padTopPx + 'px') : '')); }catch{}
+            try{ el.style.paddingBottom = (_centerNumInTallCodeRow ? '' : (padBottomPx ? (padBottomPx + 'px') : '')); }catch{}
           }
           try{
             el.style.display = 'block';
@@ -20088,6 +20532,8 @@ try{
                 }
               }
             }catch{}
+            // For tall code edge rows (2x), center within the full row box.
+            try{ if (!r.eof && _centerNumInTallCodeRow) _lhNum = Math.max(1, hPx|0); }catch{}
             el.style.lineHeight = _lhNum + 'px';
             el.style.position = 'relative';
             el.style.zIndex = '1';
@@ -25498,6 +25944,9 @@ try{
     // Horizontal-only scrollLeft changes should NOT clear listchars or toggle is-scrolling.
     if (!_evtMostlyHorizontal){
       try{
+        // #1888: hover tools are anchored to mouse position; on scroll they become stale.
+        // Hide them so they don't appear detached from the hovered code block.
+        try{ _mdCodeToolsHide && _mdCodeToolsHide(); }catch{}
         try{ _lastNativeScrollAt = Date.now(); }catch{}
         if (document && document.body && document.body.classList){
           if (!document.body.classList.contains('is-scrolling')) document.body.classList.add('is-scrolling');
@@ -26820,6 +27269,11 @@ try{
         let wPx = 80;
         try{ if (wrapOn) wPx = _wrapAvailWidthPx()|0; }catch{ wPx = 80; }
         const total = (lines.length|0);
+        // Cache code block kinds for consistent hit-testing (fenced + indented).
+        let _fc = null;
+        let _ic = null;
+        try{ _fc = _mdCodeFenceEnsureCache && _mdCodeFenceEnsureCache(false, lines); }catch{ _fc = null; }
+        try{ _ic = _mdIndentCodeEnsureCache && _mdIndentCodeEnsureCache(false, lines, _fc); }catch{ _ic = null; }
         const _dispInfoAtRow = (row0, isActiveRow)=>{
           const r0 = (row0|0);
           const srcText = (r0>=0 && r0<total) ? String(lines[r0]||'') : '';
@@ -26839,7 +27293,34 @@ try{
           let ulSrc = null;
           let ulDisp = null;
           try{ if (info && info.isLooseGap){ dispText = ''; prefixLen = 0; renderHr = false; renderSetextUnderlineRow = false; } }catch{}
-          if (hideSymbols){
+          // Code blocks: treat as raw content (and for indented code, hide the indentation prefix).
+          // This must run before any heading/list clean-display adjustments.
+          let isCodeRow = false;
+          try{
+            const fk = (_fc && _fc.kind && r0>=0 && r0<total) ? (_fc.kind[r0]|0) : 0;
+            const ik = (_ic && _ic.kind && r0>=0 && r0<total) ? (_ic.kind[r0]|0) : 0;
+            // Fenced fence rows can be hidden in clean display.
+            if ((fk|0) === 1 && hideSymbols){
+              dispText = '';
+              prefixLen = 0;
+              renderHr = false;
+              renderSetextUnderlineRow = false;
+            }
+            if ((fk|0) === 2){
+              isCodeRow = true;
+              dispText = srcText;
+              prefixLen = 0;
+            }
+            if ((ik|0) === 2){
+              isCodeRow = true;
+              let cut = 0;
+              try{ cut = (_mdIndentCodePrefixLen ? (_mdIndentCodePrefixLen(srcText)|0) : 0)|0; }catch{ cut = 0; }
+              prefixLen = Math.max(0, cut|0);
+              if ((prefixLen|0) > 0) dispText = String(srcText||'').slice(prefixLen|0);
+              else dispText = srcText;
+            }
+          }catch{}
+          if (hideSymbols && !isCodeRow){
             try{ renderHr = _mdIsHrLineForDisplay(srcText, lines, r0, !!isActiveRow); }catch{ renderHr = false; }
             try{ renderSetextUnderlineRow = _mdIsSetextUnderlineRowForDisplay(srcText, lines, r0, !!isActiveRow); }catch{ renderSetextUnderlineRow = false; }
             if (renderHr || renderSetextUnderlineRow){
@@ -26886,7 +27367,7 @@ try{
           // Hanging indent for list items/continuations in clean display.
           let indentOpts = null;
           try{
-            if (wrapOn && hideSymbols){
+            if (wrapOn && hideSymbols && !isCodeRow){
               const ul0 = ulDisp || ulSrc || (_mdUListInfo && _mdUListInfo(srcText, r0|0, lines));
               const lt = (ul0 && ul0.listType) ? String(ul0.listType||'') : '';
               if (ul0 && lt !== 'ol') indentOpts = _mdIndentOptsForListLine(dispText, ul0, wPx|0, fs|0, lh|0);
@@ -26904,7 +27385,8 @@ try{
             hBlock = (Math.max(1, n|0) * (lh|0))|0;
           }
           try{ hBlock = (hBlock|0) + (padTopPx|0) + (padBottomPx|0); }catch{}
-          return { srcText, dispText, prefixLen:(prefixLen|0), lh:(lh|0), fs:(fs|0), hideSymbols:!!hideSymbols, bhOverride, padTopPx:(padTopPx|0), padBottomPx:(padBottomPx|0), indentOpts, hBlock:(hBlock|0), ulSrc, ulDisp };
+          const hideSymbolsEff = isCodeRow ? false : !!hideSymbols;
+          return { srcText, dispText, prefixLen:(prefixLen|0), lh:(lh|0), fs:(fs|0), hideSymbols:!!hideSymbolsEff, bhOverride, padTopPx:(padTopPx|0), padBottomPx:(padBottomPx|0), indentOpts, hBlock:(hBlock|0), ulSrc, ulDisp };
         };
 
         // Find row by accumulating per-row block heights from current topLine.
@@ -30687,8 +31169,10 @@ try{
         const mdRich = (function(){ try{ return _mdRichActive(); }catch{ return false; } })();
         if (mdRich){
           const fc = _mdCodeFenceEnsureCache && _mdCodeFenceEnsureCache(false, lines);
+          const ic = _mdIndentCodeEnsureCache && _mdIndentCodeEnsureCache(false, lines, fc);
           const fk = (fc && fc.kind && (caretRow|0) >= 0 && (caretRow|0) < (lines.length|0)) ? (fc.kind[caretRow|0]|0) : 0;
-          if ((fk|0) === 2){
+          const ik = (ic && ic.kind && (caretRow|0) >= 0 && (caretRow|0) < (lines.length|0)) ? (ic.kind[caretRow|0]|0) : 0;
+          if ((fk|0) === 2 || (ik|0) === 2){
             suppressRaw = true;
           } else {
             const draftMode = !!(_mdDraftEditEnabled && _mdDraftEditEnabled());
@@ -31571,6 +32055,18 @@ try{
         ensureScrolloff({ force:true, preferEOFPad:true, eofToBottom:true });
         _repositionCaret(); updateGutter();
         // md-rich + wrap-on: handled by ensureScrolloff(eofToBottom) + physical thumb pin.
+
+        // #1888: md-rich wrap-off can have variable-height rows (e.g. indented code 2x edges).
+        // Line-based EOF pinning can then leave the caret below the viewport. Use DOM-rect based
+        // correction and reserve EOF-pad space below the caret.
+        try{
+          const mdNow = (function(){ try{ return !!(_mdRichActive && _mdRichActive()); }catch{ return false; } })();
+          const mdWrap = (typeof _mdRichWrapOn === 'function') ? !!_mdRichWrapOn() : !!(mdNow && (_wrapEnabled && _wrapEnabled()));
+          if (mdNow && !mdWrap && typeof _mdEnsureCaretInViewPx === 'function'){
+            const eofPadPx = (typeof _eofPadPx === 'function') ? (_eofPadPx()|0) : Math.max(0, (_eofPadLines()|0) * Math.max(1, (LINE_HEIGHT|0)));
+            _mdEnsureCaretInViewPx({ marginPx: Math.max(0, eofPadPx|0), keepCaret:true, noSnap:true, vertDir:1 });
+          }
+        }catch{}
 
         // Reinforce: snap scrollTop to exact line grid over a few frames so
         // leading blank / half-line drift cannot persist after a large jump (#423/#424)
