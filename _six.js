@@ -4499,16 +4499,38 @@ try{
 
               if (rootItem && String(rootItem.kind||'') === 'item'){
                 const rootDepth = Math.max(1, (rootItem.depth|0));
-                // #1878: If the root is depth-1, outdent must be a no-op (do NOT shift only descendants)
+                // #1881: For depth-1 outdent, behave like non-list '<<' (shiftwidth-based) for the whole subtree.
+                // But if the root line itself cannot outdent (indent already 0), keep it a no-op to avoid shifting only descendants.
+                let _forceShiftwidth = false;
                 if (((units|0) < 0) && ((rootDepth|0) <= 1)){
-                  return true;
+                  try{
+                    const sw0 = (typeof _getShiftWidth === 'function') ? _getShiftWidth() : 4;
+                    const line0 = String(lines[rootRow|0]||'');
+                    if (sw0 === 'TAB'){
+                      const leadTabs = (function(){ try{ const m = line0.match(/^\t+/); return m ? (m[0].length|0) : 0; }catch{ return 0; } })();
+                      if ((leadTabs|0) <= 0) return true;
+                    } else {
+                      const mTabs = line0.match(/^\t+/);
+                      const tlen = mTabs ? (mTabs[0].length|0) : 0;
+                      const rest0 = line0.slice(tlen|0);
+                      let leadSpaces = 0;
+                      try{ let k=0; const n=rest0.length|0; while(k<n && rest0.charCodeAt(k)===0x20) k++; leadSpaces=k|0; }catch{ leadSpaces = 0; }
+                      if ((leadSpaces|0) <= 0) return true;
+                    }
+                    _forceShiftwidth = true;
+                  }catch{ return true; }
+                }
+
+                // #1881: depth-1 ordered-list indent (>>) should honor shiftwidth (not marker-width delta).
+                if (((units|0) > 0) && ((rootDepth|0) <= 1) && String(rootItem.listType||'') === 'ol'){
+                  _forceShiftwidth = true;
                 }
 
                 // #1879: Ordered-list indent/outdent is a hierarchy change; delta depends on marker width.
                 // For OL, use previous sibling's contentIndentCol (indent) / parent's indentCol (outdent).
                 let deltaCols = null;
                 try{
-                  if (String(rootItem.listType||'') === 'ol'){
+                  if (!_forceShiftwidth && String(rootItem.listType||'') === 'ol'){
                     const curIndent = Number.isFinite(rootItem.indentCol) ? (rootItem.indentCol|0) : 0;
                     if ((units|0) > 0){
                       for (let r=(rootRow|0)-1; r>=0; r--){
@@ -17561,8 +17583,16 @@ try{
     try{
       const b=currentBuffer();
       if (b && b.shiftwidth === 'TAB') return 'TAB';
-      const sw = Number.isFinite(b&&b.shiftwidth)? (b.shiftwidth|0) : 4;
-      return Math.max(1, sw);
+      // Accept numeric strings as well (e.g. '2').
+      let swRaw = (b ? b.shiftwidth : undefined);
+      let swNum = null;
+      if (Number.isFinite(swRaw)) swNum = (swRaw|0);
+      else {
+        const n = parseInt(String(swRaw||''), 10);
+        if (Number.isFinite(n)) swNum = (n|0);
+      }
+      const sw = (swNum != null) ? (swNum|0) : 4;
+      return Math.max(1, sw|0);
     }catch{ return 4; }
   }
   // Check for truncation or syntax errors
@@ -28354,15 +28384,37 @@ try{
 
                   if (rootItem && String(rootItem.kind||'') === 'item'){
                     const rootDepth = Math.max(1, (rootItem.depth|0));
-                    // #1878: If the root is depth-1, outdent must be a no-op (do NOT shift only descendants)
+                    // #1881: For depth-1 outdent, behave like non-list '<<' (shiftwidth-based) for the whole subtree.
+                    // But if the root line itself cannot outdent (indent already 0), keep it a no-op to avoid shifting only descendants.
+                    let _forceShiftwidth = false;
                     if (((units|0) < 0) && ((rootDepth|0) <= 1)){
-                      return; // handled (no change)
+                      try{
+                        const sw0 = (typeof _getShiftWidth === 'function') ? _getShiftWidth() : 4;
+                        const line0 = String(lines[rootRow|0]||'');
+                        if (sw0 === 'TAB'){
+                          const leadTabs = (function(){ try{ const m = line0.match(/^\t+/); return m ? (m[0].length|0) : 0; }catch{ return 0; } })();
+                          if ((leadTabs|0) <= 0) return; // handled (no change)
+                        } else {
+                          const mTabs = line0.match(/^\t+/);
+                          const tlen = mTabs ? (mTabs[0].length|0) : 0;
+                          const rest0 = line0.slice(tlen|0);
+                          let leadSpaces = 0;
+                          try{ let k=0; const n=rest0.length|0; while(k<n && rest0.charCodeAt(k)===0x20) k++; leadSpaces=k|0; }catch{ leadSpaces = 0; }
+                          if ((leadSpaces|0) <= 0) return; // handled (no change)
+                        }
+                        _forceShiftwidth = true;
+                      }catch{ return; }
+                    }
+
+                    // #1881: depth-1 ordered-list indent (TAB/>>) should honor shiftwidth (not marker-width delta).
+                    if (((units|0) > 0) && ((rootDepth|0) <= 1) && String(rootItem.listType||'') === 'ol'){
+                      _forceShiftwidth = true;
                     }
 
                     // #1879: Ordered-list indent/outdent is a hierarchy change; delta depends on marker width.
                     let deltaCols = null;
                     try{
-                      if (String(rootItem.listType||'') === 'ol'){
+                      if (!_forceShiftwidth && String(rootItem.listType||'') === 'ol'){
                         const curIndent = Number.isFinite(rootItem.indentCol) ? (rootItem.indentCol|0) : 0;
                         if ((units|0) > 0){
                           for (let r=(rootRow|0)-1; r>=0; r--){
@@ -30530,15 +30582,37 @@ try{
 
             if (rootItem && String(rootItem.kind||'') === 'item'){
               const rootDepth = Math.max(1, (rootItem.depth|0));
-              // #1878: If the root is depth-1, outdent must be a no-op (do NOT shift only descendants)
+              // #1881: For depth-1 outdent, behave like non-list '<<' (shiftwidth-based) for the whole subtree.
+              // But if the root line itself cannot outdent (indent already 0), keep it a no-op to avoid shifting only descendants.
+              let _forceShiftwidth = false;
               if (((units|0) < 0) && ((rootDepth|0) <= 1)){
-                return;
+                try{
+                  const sw0 = (typeof _getShiftWidth === 'function') ? _getShiftWidth() : 4;
+                  const line0 = String(lines[rootRow|0]||'');
+                  if (sw0 === 'TAB'){
+                    const leadTabs = (function(){ try{ const m = line0.match(/^\t+/); return m ? (m[0].length|0) : 0; }catch{ return 0; } })();
+                    if ((leadTabs|0) <= 0) return; // handled (no change)
+                  } else {
+                    const mTabs = line0.match(/^\t+/);
+                    const tlen = mTabs ? (mTabs[0].length|0) : 0;
+                    const rest0 = line0.slice(tlen|0);
+                    let leadSpaces = 0;
+                    try{ let k=0; const n=rest0.length|0; while(k<n && rest0.charCodeAt(k)===0x20) k++; leadSpaces=k|0; }catch{ leadSpaces = 0; }
+                    if ((leadSpaces|0) <= 0) return; // handled (no change)
+                  }
+                  _forceShiftwidth = true;
+                }catch{ return; }
+              }
+
+              // #1881: depth-1 ordered-list indent (TAB/>>) should honor shiftwidth (not marker-width delta).
+              if (((units|0) > 0) && ((rootDepth|0) <= 1) && String(rootItem.listType||'') === 'ol'){
+                _forceShiftwidth = true;
               }
 
               // #1879: For ordered lists, indent/outdent is a hierarchy change; compute column delta.
               let deltaCols = null;
               try{
-                if (String(rootItem.listType||'') === 'ol'){
+                if (!_forceShiftwidth && String(rootItem.listType||'') === 'ol'){
                   const curIndent = Number.isFinite(rootItem.indentCol) ? (rootItem.indentCol|0) : 0;
                   if ((units|0) > 0){
                     for (let r=(rootRow|0)-1; r>=0; r--){
@@ -31032,15 +31106,37 @@ try{
       if (!(rootItem && String(rootItem.kind||'') === 'item')) return false;
 
       const rootDepth = Math.max(1, (rootItem.depth|0));
-      // If root is depth-1, outdent must be a no-op (do NOT shift only descendants)
+      // #1881: For depth-1 outdent, behave like non-list '<<' (shiftwidth-based) for the whole subtree.
+      // But if the root line itself cannot outdent (indent already 0), keep it a no-op to avoid shifting only descendants.
+      let _forceShiftwidth = false;
       if (((units|0) < 0) && ((rootDepth|0) <= 1)){
-        return true; // handled (no change)
+        try{
+          const sw0 = (typeof _getShiftWidth === 'function') ? _getShiftWidth() : 4;
+          const line0 = String(lines[rootRow|0]||'');
+          if (sw0 === 'TAB'){
+            const leadTabs = (function(){ try{ const m = line0.match(/^\t+/); return m ? (m[0].length|0) : 0; }catch{ return 0; } })();
+            if ((leadTabs|0) <= 0) return true; // handled (no change)
+          } else {
+            const mTabs = line0.match(/^\t+/);
+            const tlen = mTabs ? (mTabs[0].length|0) : 0;
+            const rest0 = line0.slice(tlen|0);
+            let leadSpaces = 0;
+            try{ let k=0; const n=rest0.length|0; while(k<n && rest0.charCodeAt(k)===0x20) k++; leadSpaces=k|0; }catch{ leadSpaces = 0; }
+            if ((leadSpaces|0) <= 0) return true; // handled (no change)
+          }
+          _forceShiftwidth = true;
+        }catch{ return true; }
+      }
+
+      // #1881: depth-1 ordered-list indent (>>) should honor shiftwidth (not marker-width delta).
+      if (((units|0) > 0) && ((rootDepth|0) <= 1) && String(rootItem.listType||'') === 'ol'){
+        _forceShiftwidth = true;
       }
 
       // #1879: For ordered lists, indent/outdent is a hierarchy change; compute column delta.
       let deltaCols = null;
       try{
-        if (String(rootItem.listType||'') === 'ol'){
+        if (!_forceShiftwidth && String(rootItem.listType||'') === 'ol'){
           const curIndent = Number.isFinite(rootItem.indentCol) ? (rootItem.indentCol|0) : 0;
           if ((units|0) > 0){
             for (let r=(rootRow|0)-1; r>=0; r--){
