@@ -210,26 +210,28 @@ try{
       const re = hasRange ? Math.max(0, Math.min(src.length|0, rangeEnd|0)) : 0;
       const segs = (src.indexOf('`') >= 0) ? _mdInlineCodeParse(src) : [{ t:'text', s:src, a:0, b:(src.length|0) }];
       const wrap = (cls, inner)=>{ try{ return '<span class="' + cls + '">' + inner + '</span>'; }catch{ return inner; } };
-      const emitPlain = (t, a, b)=>{
+      const emitPlain = (a0, b0)=>{
         try{
-          const txt = String(t||'');
-          if (!hasRange || re <= (a|0) || rs >= (b|0)) return _mdEscHtml(txt);
-          // Split within this plain chunk
-          const x0 = Math.max((a|0), (rs|0));
-          const x1 = Math.min((b|0), (re|0));
+          const a = Math.max(0, Math.min(src.length|0, a0|0));
+          const b = Math.max(a|0, Math.min(src.length|0, b0|0));
+          if (!hasRange || (re|0) <= (a|0) || (rs|0) >= (b|0)) return _mdEscHtml(src.slice(a|0, b|0));
+          const selS = Math.min(rs|0, re|0);
+          const selE = Math.max(rs|0, re|0);
+          const x0 = Math.max(a|0, Math.min(b|0, selS|0));
+          const x1 = Math.max(a|0, Math.min(b|0, selE|0));
           let out = '';
           if ((x0|0) > (a|0)) out += _mdEscHtml(src.slice(a|0, x0|0));
           if ((x1|0) > (x0|0)) out += wrap(rangeClass, _mdEscHtml(src.slice(x0|0, x1|0)));
           if ((b|0) > (x1|0)) out += _mdEscHtml(src.slice(x1|0, b|0));
           return out;
-        }catch{ return _mdEscHtml(String(t||'')); }
+        }catch{ return _mdEscHtml(String(src||'')); }
       };
 
       let out = '';
       for (const it of segs){
         if (!it) continue;
         if (it.t === 'text'){
-          out += emitPlain(it.s, it.a, it.b);
+          out += emitPlain(it.a, it.b);
           continue;
         }
         const a = (it.a|0), b = (it.b|0);
@@ -4374,9 +4376,259 @@ try{
     }catch{ return false; }
   }
 
-  function _imeBarInsertTabInDoc(reason){
+  function _imeBarInsertTabInDoc(reason, shiftKey){
     try{
       if (!editor) return false;
+
+      const _dbgTab = (function(){
+        try{
+          if (window && window.__sixDbgTabIndentOnce){ window.__sixDbgTabIndentOnce = false; return true; }
+          if (window && window.__sixDbgTabIndent) return true;
+        }catch{}
+        return false;
+      })();
+
+      // markdown on + list line: treat Tab/Shift+Tab as >>/<< (indent/outdent subtree)
+      try{
+        const mdEnabled = (function(){
+          try{ const b = currentBuffer && currentBuffer(); return !!(b && b.markdown); }catch{}
+          return false;
+        })();
+        if (mdEnabled){
+          // Determine caret from native selection
+          let ss0 = 0;
+          try{ ss0 = editor.selectionStart|0; }catch{ ss0 = 0; }
+          try{ const rc0 = _rcFromOffset(ss0|0); caretRow = rc0.r|0; caretCol = rc0.c|0; }catch{}
+
+          const lines = _splitLines();
+          const row0 = caretRow|0;
+          if (lines && row0 >= 0 && row0 < (lines.length|0)){
+            try{ if (_dbgTab) console.log('[six][imebar-tab] start reason=' + String(reason||'') + ' shift=' + (!!shiftKey) + ' off=' + (ss0|0) + ' rc=' + (row0|0) + ',' + (caretCol|0)); }catch{}
+            // Lightweight list parse (md-rich independent)
+            const TAB = 4;
+            const _indentInfo = (s)=>{
+              let idx = 0;
+              let cols = 0;
+              while (idx < (s.length|0)){
+                const ch = s[idx];
+                if (ch === ' '){ cols += 1; idx += 1; continue; }
+                if (ch === '\t'){ cols += (TAB - (cols % TAB)) || TAB; idx += 1; continue; }
+                break;
+              }
+              return { idx, cols };
+            };
+            const items = new Array(lines.length|0);
+            const stack = [];
+            for (let row=0; row<(lines.length|0); row++){
+              const s = String(lines[row]||'');
+              if (!s || s.trim()===''){ items[row] = null; continue; }
+              const ind = _indentInfo(s);
+              const idx0 = ind.idx|0;
+              const cols0 = ind.cols|0;
+              while (stack.length > 0 && (cols0|0) < (stack[stack.length-1].contentIndentCol|0)) stack.pop();
+              const marker = s[idx0];
+              let listType = '';
+              let markerLen = 0;
+              let sp = 0;
+              let contentIndentCol = 0;
+              let depth = 0;
+              if (marker==='-' || marker==='*' || marker==='+'){
+                listType = 'ul';
+                markerLen = 1;
+                sp = 0;
+                let j = (idx0 + 1)|0;
+                while (j < (s.length|0) && s[j] === ' ' && sp < 5){ sp++; j++; }
+                if (sp < 1 || sp > 4){ items[row] = null; continue; }
+                if (s[(idx0 + 1)|0] === '\t'){ items[row] = null; continue; }
+                depth = (stack.length + 1)|0;
+                contentIndentCol = (cols0 + markerLen + sp)|0;
+              }
+              if (!listType && marker>='0' && marker<='9'){
+                let k = idx0|0;
+                while (k < (s.length|0) && s[k]>='0' && s[k]<='9') k++;
+                const digitsLen = (k - (idx0|0))|0;
+                const delim = (k < (s.length|0)) ? s[k] : '';
+                if ((digitsLen|0) > 0 && (delim==='.' || delim===')')){
+                  listType = 'ol';
+                  markerLen = (digitsLen + 1)|0;
+                  sp = 0;
+                  let j = (k + 1)|0;
+                  while (j < (s.length|0) && s[j] === ' ' && sp < 5){ sp++; j++; }
+                  if (sp < 1 || sp > 4){ items[row] = null; continue; }
+                  if (s[(k + 1)|0] === '\t'){ items[row] = null; continue; }
+                  depth = (stack.length + 1)|0;
+                  contentIndentCol = (cols0 + markerLen + sp)|0;
+                }
+              }
+              if (!listType){
+                if (stack.length > 0 && (cols0|0) >= (stack[stack.length-1].contentIndentCol|0)){
+                  const top = stack[stack.length-1] || {};
+                  items[row] = { kind:'cont', listType: (top.listType||''), contentIndentCol: (top.contentIndentCol|0) };
+                } else {
+                  items[row] = null;
+                }
+                continue;
+              }
+              items[row] = { kind:'item', listType, depth:(depth|0), indentCol:(cols0|0), contentIndentCol:(contentIndentCol|0) };
+              stack.push({ listType, contentIndentCol:(contentIndentCol|0) });
+            }
+
+            const info0 = (items && row0>=0 && row0<(items.length|0)) ? (items[row0]||null) : null;
+            const lt0 = info0 ? String(info0.listType||'') : '';
+            const k0 = info0 ? String(info0.kind||'') : '';
+            if (_dbgTab){ try{ console.log('[six][imebar-tab] info kind=' + (k0||'') + ' type=' + (lt0||'')); }catch{} }
+            if (info0 && (lt0==='ul' || lt0==='ol') && (k0==='item' || k0==='cont')){
+              const units = (!!shiftKey) ? -1 : 1;
+
+              // Resolve owning item row for cont
+              let rootRow = row0|0;
+              let rootItem = info0;
+              if (String(rootItem.kind||'') === 'cont'){
+                const wantCI = (rootItem.contentIndentCol|0);
+                for (let r=(row0|0)-1; r>=0; r--){
+                  const s = String(lines[r]||'');
+                  if (s.trim() === '') continue;
+                  const it = (items && r>=0 && r<(items.length|0)) ? (items[r]||null) : null;
+                  if (it && String(it.kind||'') === 'cont') continue;
+                  if (it && String(it.kind||'') === 'item' && String(it.listType||'') === lt0 && ((it.contentIndentCol|0) === (wantCI|0))){
+                    rootRow = r|0; rootItem = it; break;
+                  }
+                  break;
+                }
+              }
+
+              if (rootItem && String(rootItem.kind||'') === 'item'){
+                const rootDepth = Math.max(1, (rootItem.depth|0));
+                // #1878: If the root is depth-1, outdent must be a no-op (do NOT shift only descendants)
+                if (((units|0) < 0) && ((rootDepth|0) <= 1)){
+                  return true;
+                }
+
+                // #1879: Ordered-list indent/outdent is a hierarchy change; delta depends on marker width.
+                // For OL, use previous sibling's contentIndentCol (indent) / parent's indentCol (outdent).
+                let deltaCols = null;
+                try{
+                  if (String(rootItem.listType||'') === 'ol'){
+                    const curIndent = Number.isFinite(rootItem.indentCol) ? (rootItem.indentCol|0) : 0;
+                    if ((units|0) > 0){
+                      for (let r=(rootRow|0)-1; r>=0; r--){
+                        const it = (items && r>=0 && r<(items.length|0)) ? (items[r]||null) : null;
+                        if (it && String(it.kind||'') === 'item' && Math.max(1,(it.depth|0)) === (rootDepth|0)){
+                          const tgt = Number.isFinite(it.contentIndentCol) ? (it.contentIndentCol|0) : 0;
+                          const d = (tgt|0) - (curIndent|0);
+                          if ((d|0) > 0) deltaCols = d|0;
+                          break;
+                        }
+                      }
+                      if (deltaCols == null){
+                        const sw0 = (typeof _getShiftWidth === 'function') ? _getShiftWidth() : 4;
+                        deltaCols = (sw0 === 'TAB') ? 4 : Math.max(1, sw0|0);
+                      }
+                    } else if ((units|0) < 0){
+                      for (let r=(rootRow|0)-1; r>=0; r--){
+                        const it = (items && r>=0 && r<(items.length|0)) ? (items[r]||null) : null;
+                        if (it && String(it.kind||'') === 'item' && Math.max(1,(it.depth|0)) === ((rootDepth|0)-1)){
+                          const tgt = Number.isFinite(it.indentCol) ? (it.indentCol|0) : 0;
+                          const d = (tgt|0) - (curIndent|0);
+                          if ((d|0) < 0) deltaCols = d|0;
+                          break;
+                        }
+                      }
+                      if (deltaCols == null){
+                        const sw0 = (typeof _getShiftWidth === 'function') ? _getShiftWidth() : 4;
+                        deltaCols = -((sw0 === 'TAB') ? 4 : Math.max(1, sw0|0));
+                      }
+                    }
+                  }
+                }catch{ deltaCols = null; }
+                let rs = rootRow|0;
+                let re = rootRow|0;
+                for (let r=(rootRow|0)+1; r<(lines.length|0); r++){
+                  const s = String(lines[r]||'');
+                  const it = (items && r>=0 && r<(items.length|0)) ? (items[r]||null) : null;
+                  if (s.trim() === ''){ re = r|0; continue; }
+                  if (it && String(it.kind||'') === 'cont'){ re = r|0; continue; }
+                  if (it && String(it.kind||'') === 'item'){
+                    const d = Math.max(1, (it.depth|0));
+                    if ((d|0) > (rootDepth|0)) { re = r|0; continue; }
+                    break;
+                  }
+                  break;
+                }
+
+                try{ if (_dbgTab) console.log('[six][imebar-tab] range rs=' + (rs|0) + ' re=' + (re|0) + ' units=' + (units|0)); }catch{}
+
+                if (!_imeBarSnapshotTaken){ _imeBarSnapshotTaken = true; try{ _pushUndoSnapshot && _pushUndoSnapshot('imebar'); }catch{} }
+
+                // Keep caret column roughly stable
+                let newCaretCol = caretCol|0;
+                try{
+                  const lineAtCaret = String(lines[caretRow|0]||'');
+                  // When deltaCols is set (ordered list), we adjust by actual inserted/removed spaces.
+                  if (deltaCols != null){
+                    const mTabs = lineAtCaret.match(/^\t+/);
+                    const tlen = mTabs ? (mTabs[0].length|0) : 0;
+                    const rest0 = lineAtCaret.slice(tlen|0);
+                    let leadSpaces = 0;
+                    try{ let k=0; const n=rest0.length|0; while(k<n && rest0.charCodeAt(k)===0x20) k++; leadSpaces=k|0; }catch{ leadSpaces = 0; }
+                    const insPos = (tlen|0);
+                    if ((deltaCols|0) > 0){
+                      const add = (deltaCols|0);
+                      if ((newCaretCol|0) >= (insPos|0)) newCaretCol = (newCaretCol|0) + (add|0);
+                    } else if ((deltaCols|0) < 0){
+                      const del = Math.min(((-deltaCols)|0), (leadSpaces|0));
+                      if ((newCaretCol|0) > (insPos|0) && (newCaretCol|0) <= ((insPos|0) + (del|0))) newCaretCol = (insPos|0);
+                      else if ((newCaretCol|0) > ((insPos|0) + (del|0))) newCaretCol = (newCaretCol|0) - (del|0);
+                    }
+                  } else {
+                    const sw0 = (typeof _getShiftWidth === 'function') ? _getShiftWidth() : 4;
+                    if (sw0 === 'TAB'){
+                      const leadTabs = (function(){ try{ const m = lineAtCaret.match(/^\t+/); return m ? (m[0].length|0) : 0; }catch{ return 0; } })();
+                      if (units > 0) newCaretCol = (newCaretCol|0) + (units|0);
+                      else if (units < 0){
+                        const rem = Math.max(0, Math.min((-units)|0, leadTabs|0));
+                        if ((newCaretCol|0) <= (rem|0)) newCaretCol = 0;
+                        else newCaretCol = (newCaretCol|0) - (rem|0);
+                      }
+                    } else {
+                      const swN = Math.max(1, sw0|0);
+                      const mTabs = lineAtCaret.match(/^\t+/);
+                      const tlen = mTabs ? (mTabs[0].length|0) : 0;
+                      const rest0 = lineAtCaret.slice(tlen|0);
+                      let leadSpaces = 0;
+                      try{ let k=0; const n=rest0.length|0; while(k<n && rest0.charCodeAt(k)===0x20) k++; leadSpaces=k|0; }catch{ leadSpaces = 0; }
+                      const insPos = (tlen|0);
+                      if (units > 0){
+                        const add = (swN|0);
+                        if ((newCaretCol|0) >= (insPos|0)) newCaretCol = (newCaretCol|0) + (add|0);
+                      } else if (units < 0){
+                        const del = Math.min((swN|0), (leadSpaces|0));
+                        if ((newCaretCol|0) > (insPos|0) && (newCaretCol|0) <= ((insPos|0) + (del|0))) newCaretCol = (insPos|0);
+                        else if ((newCaretCol|0) > ((insPos|0) + (del|0))) newCaretCol = (newCaretCol|0) - (del|0);
+                      }
+                    }
+                  }
+                }catch{}
+
+                try{
+                  if (deltaCols != null) _applyIndentRangeCols && _applyIndentRangeCols(rs|0, re|0, deltaCols|0, false);
+                  else _applyIndentRange && _applyIndentRange(rs|0, re|0, units|0);
+                }catch{}
+                try{ const bb=currentBuffer && currentBuffer(); if (bb) bb.text = String(editor.value||''); }catch{}
+                try{ caretCol = Math.max(0, newCaretCol|0); _setCaret && _setCaret(caretRow|0, caretCol|0, { suppressWrapDesired:true }); }catch{}
+                try{ _syncNativeSelectionToCaret && _syncNativeSelectionToCaret(); }catch{}
+                try{ _imeBarSelAnchorOff = null; }catch{}
+                try{ _imeBarSegDirty = true; }catch{}
+                try{ _imeBarApplyCaretAndSync && _imeBarApplyCaretAndSync('md-tab:' + String(reason||'')); }catch{}
+                try{ _scheduleListCharsRender && _scheduleListCharsRender('imebar-md-tab'); }catch{}
+                try{ if (_imeBarActive) _positionImeBar && _positionImeBar(); }catch{}
+                return true;
+              }
+            }
+          }
+        }
+      }catch{}
+
       // Match INSERT-mode Tab behavior: insert shiftwidth (or literal TAB when shiftwidth=TAB)
       const sw = (typeof _getShiftWidth === 'function') ? _getShiftWidth() : 4;
       const insStr = (sw === 'TAB') ? '\t' : ' '.repeat(Math.max(1, sw|0));
@@ -6750,7 +7002,7 @@ try{
                 return;
               }
               if (isTab || isCtrlI){
-                try{ _imeBarInsertTabInDoc && _imeBarInsertTabInDoc(isCtrlI ? 'ctrli' : 'tab'); }catch{}
+                try{ _imeBarInsertTabInDoc && _imeBarInsertTabInDoc(isCtrlI ? 'ctrli' : 'tab', !!(e && e.shiftKey)); }catch{}
                 return;
               }
             }
@@ -17388,6 +17640,54 @@ try{
     }
     _afterTextMutation();
   }
+
+  // Apply indentation change by a specific number of columns (spaces).
+  // - deltaCols > 0: insert that many spaces after leading tabs
+  // - deltaCols < 0: remove up to -deltaCols leading spaces after leading tabs
+  // This is used for markdown ordered-list hierarchy indent/outdent where the proper delta
+  // depends on marker width (e.g. '10.' vs '1.') rather than shiftwidth.
+  function _applyIndentRangeCols(rs, re, deltaCols, takeSnapshot){
+    const doSnap = (takeSnapshot === undefined) ? true : !!takeSnapshot;
+    const s = String(editor.value||'');
+    const raw = _splitLinesRaw();
+    const last = raw.length - 1;
+    const hasFinalLF = s.endsWith('\n');
+    const maxIdx = hasFinalLF && raw[last]==='' ? Math.max(0, last-1) : last;
+    if (maxIdx < 0) return;
+    let r1 = Math.max(0, Math.min(maxIdx, rs|0));
+    let r2 = Math.max(0, Math.min(maxIdx, re|0));
+    if (r2 < r1){ const t=r1; r1=r2; r2=t; }
+
+    const add = Math.max(0, deltaCols|0);
+    const del = Math.max(0, (-(deltaCols|0))|0);
+    if ((add|0) === 0 && (del|0) === 0) return;
+
+    const buf = raw.slice();
+    let changed = false;
+    for (let r=r1; r<=r2; r++){
+      const line0 = String(buf[r]||'');
+      if (line0.length === 0) continue;
+      const m = line0.match(/^\t+/);
+      const tabs = m ? m[0] : '';
+      const rest0 = line0.slice(tabs.length);
+      let lineNew = line0;
+      if ((add|0) > 0){
+        lineNew = tabs + ' '.repeat(add|0) + rest0;
+      } else if ((del|0) > 0){
+        let k = 0;
+        const n = Math.min(del|0, rest0.length|0);
+        while (k < n && rest0.charCodeAt(k) === 0x20) k++;
+        if (k > 0) lineNew = tabs + rest0.slice(k);
+      }
+      if (lineNew !== line0){ buf[r] = lineNew; changed = true; }
+    }
+    if (changed){
+      if (doSnap) _pushUndoSnapshot('indent');
+      const out = buf.join('\n');
+      if (out !== s){ editor.value = out; _touchBufferModified(); }
+    }
+    _afterTextMutation();
+  }
   function _syncNativeSelectionToCaret(){
     try{
       let st = 0, sl = 0;
@@ -24247,7 +24547,8 @@ try{
             const mkSec = (title)=>{ const h=mkH(title); try{ h.style.fontSize='1.1em'; h.style.fontWeight='700'; }catch{} return h; };
             wrap.appendChild(mkSec('基本編集'));
             wrap.appendChild(mkList([
-              [K('TAB'), sep('  '), K('shiftwidth'), sep(' 設定に従いインデント（空白またはTAB文字）を挿入')],
+              [K('TAB'), sep('  '), K('shiftwidth'), sep(' 設定に従いインデント（空白またはTAB文字）を挿入。markdownモードの(un)ordered list行では '), K('>>'), sep(' 相当（行インデント増）')],
+              [K('Shift+TAB'), sep('  markdownモードの(un)ordered list行では '), K('<<'), sep(' 相当（行インデント減）')],
               [K('Backspace'), sep('  左の1文字を削除')],
               [K('Delete'), sep('  右の1文字を削除')],
               [K('Enter'), sep('  改行を挿入（Sixの最終改行ポリシー: 視覚のみのダミー最終行あり、保存で自動追加/削除しない）')]
@@ -27509,6 +27810,24 @@ try{
 
   editor.addEventListener('keydown', (e)=>{
       try{ if (e && e.shiftKey) _shiftHeld = true; }catch{}
+
+      // Debug hook (opt-in): log raw keydown info even if Tab isn't recognized later.
+      // Usage (DevTools):
+      //   window.__sixDbgTabIndentOnce = true; // one-shot log for next keydown
+      //   window.__sixDbgTabIndent = true;     // persistent logging
+      try{
+        let dbg = false;
+        try{ if (window && window.__sixDbgTabIndentOnce){ window.__sixDbgTabIndentOnce = false; dbg = true; } }catch{}
+        try{ if (!dbg && window && window.__sixDbgTabIndent) dbg = true; }catch{}
+        if (dbg){
+          const k = String((e && e.key) || '');
+          const c = String((e && e.code) || '');
+          const kc = (typeof e.keyCode==='number') ? (e.keyCode|0) : null;
+          const wh = (typeof e.which==='number') ? (e.which|0) : null;
+          const isTabish = (k==='Tab' || c==='Tab' || (kc===9) || (wh===9));
+          console.log('[six][dbg-keydown] mode=' + String(_mode||'') + ' key=' + JSON.stringify(k) + ' code=' + JSON.stringify(c) + ' keyCode=' + kc + ' which=' + wh + ' shift=' + (!!(e&&e.shiftKey)) + ' ctrl=' + (!!(e&&e.ctrlKey)) + ' alt=' + (!!(e&&e.altKey)) + ' meta=' + (!!(e&&e.metaKey)) + ' isComp=' + (!!(e&&e.isComposing)) + ' tabish=' + (!!isTabish));
+        }
+      }catch{}
       // Short guard: absorb any stray keydown right after modal close
       if (Date.now() < _kbdGuardUntil){ try{ e.preventDefault(); e.stopPropagation(); }catch{} return; }
       // #1339: Block editor interaction if modal is open
@@ -27860,12 +28179,319 @@ try{
           }
         }catch{}
 
-        // INSERTモードで Tab または Ctrl+I でタブ文字を挿入 (#459)
-        // ブラウザのデフォルト Tab 挙動(フォーカス移動)を抑止し、明示的に '\t' を挿入する。
+        // INSERTモードで Tab または Ctrl+I でインデント挿入 (#459)
+        // - 通常: shiftwidth に従い空白 or TAB 文字を挿入
+        // - markdown on かつ (un)ordered list 行: Tab/Shift+Tab を >>/<< 相当（行インデント増減）として扱う (#1875)
+        //   NOTE: markdown on では list 行内で TAB 文字を入力する術が無くなるが、それでよい。
         try{
           const isCtrlI = (e.ctrlKey && !e.altKey && !e.metaKey && (e.key==='i' || e.key==='I'));
           if (e.key==='Tab' || isCtrlI){
             e.preventDefault(); e.stopPropagation();
+
+            // Debug hook (opt-in): set in DevTools
+            //   window.__sixDbgTabIndentOnce = true;  // one-shot log
+            //   window.__sixDbgTabIndent = true;      // persistent log
+            const _dbgTab = (function(){
+              try{
+                if (window && window.__sixDbgTabIndentOnce){ window.__sixDbgTabIndentOnce = false; return true; }
+                if (window && window.__sixDbgTabIndent) return true;
+              }catch{}
+              return false;
+            })();
+
+            // #1875: markdown on + ul/ol line => treat Tab as >>/<< (indent/outdent lines)
+            try{
+              const mdEnabled = (function(){
+                try{ if (typeof _mdRichEnabled === 'function') return !!_mdRichEnabled(); }catch{}
+                try{ const b = currentBuffer && currentBuffer(); return !!(b && b.markdown); }catch{}
+                return false;
+              })();
+
+              try{
+                if (_dbgTab){
+                  let bn = null, bm = null, bmd = null;
+                  try{ const b = currentBuffer && currentBuffer(); bn = b && b.name; bm = !!(b && b.markdown); bmd = !!(b && b.md_draftedit); }catch{}
+                  console.log('[six][md-tab] INSERT key=Tab shift=' + (!!e.shiftKey) + ' ctrlI=' + (!!isCtrlI) + ' mdEnabled=' + (!!mdEnabled) + ' buf=' + (bn||'?') + ' markdown=' + (!!bm) + ' draft=' + (!!bmd));
+                }
+              }catch{}
+
+              if (mdEnabled && editor){
+                // Sync caretRow/Col from native selection (robust)
+                const selS0 = (editor.selectionStart|0);
+                const selE0 = (editor.selectionEnd|0);
+                try{ const rc0 = _rcFromOffset(selS0|0); caretRow = rc0.r|0; caretCol = rc0.c|0; }catch{}
+
+                const lines = _splitLines();
+                const row0 = (caretRow|0);
+
+                try{
+                  if (_dbgTab){
+                    const s0 = (lines && row0>=0 && row0<(lines.length|0)) ? String(lines[row0]||'') : '';
+                    console.log('[six][md-tab] sel=' + (selS0|0) + '..' + (selE0|0) + ' rc=' + (row0|0) + ',' + (caretCol|0) + ' line=' + JSON.stringify(s0));
+                  }
+                }catch{}
+
+                // Resolve list info from cache (row-based)
+                let cache0 = null;
+                try{ cache0 = (_mdListEnsureCache && _mdListEnsureCache(false)) || (_mdListEnsureCache && _mdListEnsureCache(true)) || null; }catch{ cache0 = null; }
+                let items0 = (cache0 && cache0.items) ? cache0.items : null;
+
+                // Fallback: parse list structure without relying on md-rich being enabled.
+                // (md-rich cache builder is gated by _mdRichEnabled(), but Tab behavior should
+                // still work when currentBuffer().markdown is true.)
+                if (!items0){
+                  try{
+                    const TAB = 4;
+                    const _indentInfo = (s)=>{
+                      let idx = 0;
+                      let cols = 0;
+                      while (idx < (s.length|0)){
+                        const ch = s[idx];
+                        if (ch === ' '){ cols += 1; idx += 1; continue; }
+                        if (ch === '\t'){ cols += (TAB - (cols % TAB)) || TAB; idx += 1; continue; }
+                        break;
+                      }
+                      return { idx, cols };
+                    };
+                    const out = new Array(lines.length|0);
+                    const stack = [];
+                    for (let row=0; row<(lines.length|0); row++){
+                      const s = String(lines[row]||'');
+                      if (!s || s.trim()===''){ out[row] = null; continue; }
+
+                      const ind = _indentInfo(s);
+                      const idx0 = ind.idx|0;
+                      const cols0 = ind.cols|0;
+
+                      while (stack.length > 0 && (cols0|0) < (stack[stack.length-1].contentIndentCol|0)) stack.pop();
+
+                      const marker = s[idx0];
+                      let listType = '';
+                      let markerLen = 0;
+                      let sp = 0;
+                      let contentIndentCol = 0;
+                      let depth = 0;
+
+                      if (marker==='-' || marker==='*' || marker==='+'){
+                        listType = 'ul';
+                        markerLen = 1;
+                        sp = 0;
+                        let j = (idx0 + 1)|0;
+                        while (j < (s.length|0) && s[j] === ' ' && sp < 5){ sp++; j++; }
+                        if (sp < 1 || sp > 4){ out[row] = null; continue; }
+                        if (s[(idx0 + 1)|0] === '\t'){ out[row] = null; continue; }
+                        depth = (stack.length + 1)|0;
+                        contentIndentCol = (cols0 + markerLen + sp)|0;
+                      }
+
+                      if (!listType && marker>='0' && marker<='9'){
+                        let k = idx0|0;
+                        while (k < (s.length|0) && s[k]>='0' && s[k]<='9') k++;
+                        const digitsLen = (k - (idx0|0))|0;
+                        const delim = (k < (s.length|0)) ? s[k] : '';
+                        if ((digitsLen|0) > 0 && (delim==='.' || delim===')')){
+                          listType = 'ol';
+                          markerLen = (digitsLen + 1)|0;
+                          sp = 0;
+                          let j = (k + 1)|0;
+                          while (j < (s.length|0) && s[j] === ' ' && sp < 5){ sp++; j++; }
+                          if (sp < 1 || sp > 4){ out[row] = null; continue; }
+                          if (s[(k + 1)|0] === '\t'){ out[row] = null; continue; }
+                          depth = (stack.length + 1)|0;
+                          contentIndentCol = (cols0 + markerLen + sp)|0;
+                        }
+                      }
+
+                      if (!listType){
+                        if (stack.length > 0 && (cols0|0) >= (stack[stack.length-1].contentIndentCol|0)){
+                          const top = stack[stack.length-1] || {};
+                          out[row] = { kind:'cont', listType: (top.listType||''), contentIndentCol: (top.contentIndentCol|0) };
+                        } else {
+                          out[row] = null;
+                        }
+                        continue;
+                      }
+
+                      out[row] = { kind:'item', listType, depth:(depth|0), contentIndentCol:(contentIndentCol|0), indentCol:(cols0|0) };
+                      stack.push({ listType, contentIndentCol:(contentIndentCol|0) });
+                    }
+                    items0 = out;
+                  }catch{}
+                }
+                const info0 = (items0 && row0 >= 0 && row0 < (items0.length|0)) ? (items0[row0] || null) : null;
+                const lt0 = info0 ? String(info0.listType||'') : '';
+                const k0 = info0 ? String(info0.kind||'') : '';
+
+                try{
+                  if (_dbgTab){
+                    console.log('[six][md-tab] info kind=' + (k0||'') + ' type=' + (lt0||'') + ' hasItems=' + (!!items0));
+                  }
+                }catch{}
+
+                if (info0 && (lt0 === 'ul' || lt0 === 'ol') && (k0 === 'item' || k0 === 'cont')){
+                  const units = e.shiftKey ? -1 : 1;
+
+                  // Determine list item subtree range using cached depth:
+                  // - include the item line, its continuation lines, and all descendant items/continuations
+                  // - stop before the next item at the same or shallower depth
+                  let rootRow = row0|0;
+                  let rootItem = info0;
+                  if (String(rootItem.kind||'') === 'cont'){
+                    const wantCI = (rootItem.contentIndentCol|0);
+                    // Find the owning item above (best-effort; stops at nonblank non-list)
+                    for (let r=(row0|0)-1; r>=0; r--){
+                      const it = (items0 && r>=0 && r<(items0.length|0)) ? (items0[r]||null) : null;
+                      const s = String(lines[r]||'');
+                      if (s.trim() === '') continue;
+                      if (it && String(it.kind||'') === 'cont') continue;
+                      if (it && String(it.kind||'') === 'item' && String(it.listType||'') === lt0 && ((it.contentIndentCol|0) === (wantCI|0))){
+                        rootRow = r|0; rootItem = it; break;
+                      }
+                      // hit something else => give up
+                      break;
+                    }
+                  }
+
+                  if (rootItem && String(rootItem.kind||'') === 'item'){
+                    const rootDepth = Math.max(1, (rootItem.depth|0));
+                    // #1878: If the root is depth-1, outdent must be a no-op (do NOT shift only descendants)
+                    if (((units|0) < 0) && ((rootDepth|0) <= 1)){
+                      return; // handled (no change)
+                    }
+
+                    // #1879: Ordered-list indent/outdent is a hierarchy change; delta depends on marker width.
+                    let deltaCols = null;
+                    try{
+                      if (String(rootItem.listType||'') === 'ol'){
+                        const curIndent = Number.isFinite(rootItem.indentCol) ? (rootItem.indentCol|0) : 0;
+                        if ((units|0) > 0){
+                          for (let r=(rootRow|0)-1; r>=0; r--){
+                            const it = (items0 && r>=0 && r<(items0.length|0)) ? (items0[r]||null) : null;
+                            if (it && String(it.kind||'') === 'item' && Math.max(1,(it.depth|0)) === (rootDepth|0)){
+                              const tgt = Number.isFinite(it.contentIndentCol) ? (it.contentIndentCol|0) : 0;
+                              const d = (tgt|0) - (curIndent|0);
+                              if ((d|0) > 0) deltaCols = d|0;
+                              break;
+                            }
+                          }
+                          if (deltaCols == null){
+                            const sw0 = (typeof _getShiftWidth === 'function') ? _getShiftWidth() : 4;
+                            deltaCols = (sw0 === 'TAB') ? 4 : Math.max(1, sw0|0);
+                          }
+                        } else if ((units|0) < 0){
+                          for (let r=(rootRow|0)-1; r>=0; r--){
+                            const it = (items0 && r>=0 && r<(items0.length|0)) ? (items0[r]||null) : null;
+                            if (it && String(it.kind||'') === 'item' && Math.max(1,(it.depth|0)) === ((rootDepth|0)-1)){
+                              const tgt = Number.isFinite(it.indentCol) ? (it.indentCol|0) : 0;
+                              const d = (tgt|0) - (curIndent|0);
+                              if ((d|0) < 0) deltaCols = d|0;
+                              break;
+                            }
+                          }
+                          if (deltaCols == null){
+                            const sw0 = (typeof _getShiftWidth === 'function') ? _getShiftWidth() : 4;
+                            deltaCols = -((sw0 === 'TAB') ? 4 : Math.max(1, sw0|0));
+                          }
+                        }
+                      }
+                    }catch{ deltaCols = null; }
+                    let rs = rootRow|0;
+                    let re = rootRow|0;
+                    for (let r=(rootRow|0)+1; r<(lines.length|0); r++){
+                      const s = String(lines[r]||'');
+                      const it = (items0 && r>=0 && r<(items0.length|0)) ? (items0[r]||null) : null;
+                      if (s.trim() === ''){ re = r|0; continue; }
+                      if (it && String(it.kind||'') === 'cont'){ re = r|0; continue; }
+                      if (it && String(it.kind||'') === 'item'){
+                        const d = Math.max(1, (it.depth|0));
+                        if ((d|0) > (rootDepth|0)) { re = r|0; continue; }
+                        break;
+                      }
+                      break;
+                    }
+
+                    try{ if (_dbgTab) console.log('[six][md-tab] range rs=' + (rs|0) + ' re=' + (re|0) + ' rootDepth=' + (rootDepth|0)); }catch{}
+
+                    // Compute caret column adjustment for current line (keep caret on same text)
+                    let newCaretCol = (caretCol|0);
+                    try{
+                      const sw = (typeof _getShiftWidth === 'function') ? _getShiftWidth() : 4;
+                      const lineAtCaret = String(lines[caretRow|0]||'');
+                      if (deltaCols != null){
+                        const mTabs = lineAtCaret.match(/^\t+/);
+                        const tlen = mTabs ? (mTabs[0].length|0) : 0;
+                        const rest0 = lineAtCaret.slice(tlen|0);
+                        const leadSpaces = (function(){
+                          try{
+                            let k = 0;
+                            const n = rest0.length|0;
+                            while (k < n && rest0.charCodeAt(k) === 0x20) k++;
+                            return k|0;
+                          }catch{ return 0; }
+                        })();
+                        const insPos = (tlen|0);
+                        if ((deltaCols|0) > 0){
+                          const add = (deltaCols|0);
+                          if ((newCaretCol|0) >= (insPos|0)) newCaretCol = (newCaretCol|0) + (add|0);
+                        } else if ((deltaCols|0) < 0){
+                          const del = Math.min(((-deltaCols)|0), (leadSpaces|0));
+                          if ((newCaretCol|0) > (insPos|0) && (newCaretCol|0) <= ((insPos|0) + (del|0))) newCaretCol = (insPos|0);
+                          else if ((newCaretCol|0) > ((insPos|0) + (del|0))) newCaretCol = (newCaretCol|0) - (del|0);
+                        }
+                      } else if (sw === 'TAB'){
+                        // TAB shiftwidth: insert/remove raw '\t' at the beginning
+                        const leadTabs = (function(){ try{ const m = lineAtCaret.match(/^\t+/); return m ? (m[0].length|0) : 0; }catch{ return 0; } })();
+                        if (units > 0){
+                          newCaretCol = (newCaretCol|0) + (units|0);
+                        } else if (units < 0){
+                          const rem = Math.max(0, Math.min((-units)|0, leadTabs|0));
+                          if ((newCaretCol|0) <= 0) newCaretCol = 0;
+                          else if ((newCaretCol|0) <= (rem|0)) newCaretCol = 0;
+                          else newCaretCol = (newCaretCol|0) - (rem|0);
+                        }
+                      } else {
+                        const swN = Math.max(1, sw|0);
+                        const mTabs = lineAtCaret.match(/^\t+/);
+                        const tlen = mTabs ? (mTabs[0].length|0) : 0;
+                        const rest0 = lineAtCaret.slice(tlen|0);
+                        const leadSpaces = (function(){
+                          try{
+                            let k = 0;
+                            const n = rest0.length|0;
+                            while (k < n && rest0.charCodeAt(k) === 0x20) k++;
+                            return k|0;
+                          }catch{ return 0; }
+                        })();
+                        const insPos = (tlen|0);
+                        if (units > 0){
+                          const add = (swN|0);
+                          if ((newCaretCol|0) >= (insPos|0)) newCaretCol = (newCaretCol|0) + (add|0);
+                        } else if (units < 0){
+                          const del = Math.min((swN|0), (leadSpaces|0));
+                          if ((newCaretCol|0) > (insPos|0) && (newCaretCol|0) <= ((insPos|0) + (del|0))) newCaretCol = (insPos|0);
+                          else if ((newCaretCol|0) > ((insPos|0) + (del|0))) newCaretCol = (newCaretCol|0) - (del|0);
+                        }
+                      }
+                    }catch{}
+
+                    if (deltaCols != null) _applyIndentRangeCols(rs|0, re|0, deltaCols|0);
+                    else _applyIndentRange(rs|0, re|0, units|0);
+                    // Restore caret to keep logical position in INSERT
+                    try{ caretCol = Math.max(0, newCaretCol|0); _setCaret && _setCaret(caretRow|0, caretCol|0); }catch{}
+                    try{ _syncNativeSelectionToCaret && _syncNativeSelectionToCaret(); }catch{}
+                    try{ _insertSegDirty = true; }catch{}
+                    try{ _insertSegIgnoreSelectUntil = Date.now() + 80; }catch{}
+                    try{ ensureScrolloff && ensureScrolloff(); }catch{}
+                    try{ if (_mdRenderTextLayer) _mdRenderTextLayer(); }catch{}
+                    try{ _repositionCaret && _repositionCaret(); }catch{}
+                    try{ updateGutter && updateGutter(); }catch{}
+                    try{ _scheduleListCharsRender && _scheduleListCharsRender('md-tab-indent'); }catch{}
+                    return; // handled
+                  }
+                }
+              }
+            }catch{}
+
             // #1323: INSERT mode TAB respects shiftwidth
             const sw = _getShiftWidth();
             const insStr = (sw === 'TAB') ? '\t' : ' '.repeat(Math.max(1, sw|0));
@@ -29794,6 +30420,181 @@ try{
     e.preventDefault(); e.stopPropagation();
     const count = Math.max(1, _consumeCount()|0); // #1324: Support count
     const units = e.shiftKey ? -1 : 1;
+
+    // markdown on かつ (un)ordered list 行では Tab/Shift+Tab を >>/<< 相当（subtree）として扱う (#1875/#1877)
+    try{
+      const mdEnabled = (function(){
+        try{ const b = currentBuffer && currentBuffer(); return !!(b && b.markdown); }catch{}
+        return false;
+      })();
+      if (mdEnabled){
+        const lines = _splitLines();
+        const row0 = (caretRow|0);
+        if (lines && row0 >= 0 && row0 < (lines.length|0)){
+          // Prefer cached list info when available; fallback to lightweight parser when md-rich is off.
+          let items0 = null;
+          try{ const c = (_mdListEnsureCache && _mdListEnsureCache(false)) || (_mdListEnsureCache && _mdListEnsureCache(true)); items0 = (c && c.items) ? c.items : null; }catch{ items0 = null; }
+          if (!items0){
+            try{
+              const TAB = 4;
+              const _indentInfo = (s)=>{
+                let idx = 0;
+                let cols = 0;
+                while (idx < (s.length|0)){
+                  const ch = s[idx];
+                  if (ch === ' '){ cols += 1; idx += 1; continue; }
+                  if (ch === '\t'){ cols += (TAB - (cols % TAB)) || TAB; idx += 1; continue; }
+                  break;
+                }
+                return { idx, cols };
+              };
+              const out = new Array(lines.length|0);
+              const stack = [];
+              for (let row=0; row<(lines.length|0); row++){
+                const s = String(lines[row]||'');
+                if (!s || s.trim()===''){ out[row] = null; continue; }
+                const ind = _indentInfo(s);
+                const idx0 = ind.idx|0;
+                const cols0 = ind.cols|0;
+                while (stack.length > 0 && (cols0|0) < (stack[stack.length-1].contentIndentCol|0)) stack.pop();
+                const marker = s[idx0];
+                let listType = '';
+                let markerLen = 0;
+                let sp = 0;
+                let contentIndentCol = 0;
+                let depth = 0;
+                if (marker==='-' || marker==='*' || marker==='+'){
+                  listType = 'ul';
+                  markerLen = 1;
+                  sp = 0;
+                  let j = (idx0 + 1)|0;
+                  while (j < (s.length|0) && s[j] === ' ' && sp < 5){ sp++; j++; }
+                  if (sp < 1 || sp > 4){ out[row] = null; continue; }
+                  if (s[(idx0 + 1)|0] === '\t'){ out[row] = null; continue; }
+                  depth = (stack.length + 1)|0;
+                  contentIndentCol = (cols0 + markerLen + sp)|0;
+                }
+                if (!listType && marker>='0' && marker<='9'){
+                  let k = idx0|0;
+                  while (k < (s.length|0) && s[k]>='0' && s[k]<='9') k++;
+                  const digitsLen = (k - (idx0|0))|0;
+                  const delim = (k < (s.length|0)) ? s[k] : '';
+                  if ((digitsLen|0) > 0 && (delim==='.' || delim===')')){
+                    listType = 'ol';
+                    markerLen = (digitsLen + 1)|0;
+                    sp = 0;
+                    let j = (k + 1)|0;
+                    while (j < (s.length|0) && s[j] === ' ' && sp < 5){ sp++; j++; }
+                    if (sp < 1 || sp > 4){ out[row] = null; continue; }
+                    if (s[(k + 1)|0] === '\t'){ out[row] = null; continue; }
+                    depth = (stack.length + 1)|0;
+                    contentIndentCol = (cols0 + markerLen + sp)|0;
+                  }
+                }
+                if (!listType){
+                  if (stack.length > 0 && (cols0|0) >= (stack[stack.length-1].contentIndentCol|0)){
+                    const top = stack[stack.length-1] || {};
+                    out[row] = { kind:'cont', listType: (top.listType||''), contentIndentCol: (top.contentIndentCol|0) };
+                  } else {
+                    out[row] = null;
+                  }
+                  continue;
+                }
+                out[row] = { kind:'item', listType, depth:(depth|0), indentCol:(cols0|0), contentIndentCol:(contentIndentCol|0) };
+                stack.push({ listType, contentIndentCol:(contentIndentCol|0) });
+              }
+              items0 = out;
+            }catch{}
+          }
+
+          const info0 = (items0 && row0 >= 0 && row0 < (items0.length|0)) ? (items0[row0] || null) : null;
+          const lt0 = info0 ? String(info0.listType||'') : '';
+          const k0 = info0 ? String(info0.kind||'') : '';
+          if (info0 && (lt0 === 'ul' || lt0 === 'ol') && (k0 === 'item' || k0 === 'cont')){
+            // Resolve owning item row for cont
+            let rootRow = row0|0;
+            let rootItem = info0;
+            if (String(rootItem.kind||'') === 'cont'){
+              const wantCI = (rootItem.contentIndentCol|0);
+              for (let r=(row0|0)-1; r>=0; r--){
+                const s = String(lines[r]||'');
+                if (s.trim() === '') continue;
+                const it = (items0 && r>=0 && r<(items0.length|0)) ? (items0[r]||null) : null;
+                if (it && String(it.kind||'') === 'cont') continue;
+                if (it && String(it.kind||'') === 'item' && String(it.listType||'') === lt0 && ((it.contentIndentCol|0) === (wantCI|0))){
+                  rootRow = r|0; rootItem = it; break;
+                }
+                break;
+              }
+            }
+
+            if (rootItem && String(rootItem.kind||'') === 'item'){
+              const rootDepth = Math.max(1, (rootItem.depth|0));
+              // #1878: If the root is depth-1, outdent must be a no-op (do NOT shift only descendants)
+              if (((units|0) < 0) && ((rootDepth|0) <= 1)){
+                return;
+              }
+
+              // #1879: For ordered lists, indent/outdent is a hierarchy change; compute column delta.
+              let deltaCols = null;
+              try{
+                if (String(rootItem.listType||'') === 'ol'){
+                  const curIndent = Number.isFinite(rootItem.indentCol) ? (rootItem.indentCol|0) : 0;
+                  if ((units|0) > 0){
+                    for (let r=(rootRow|0)-1; r>=0; r--){
+                      const it = (items0 && r>=0 && r<(items0.length|0)) ? (items0[r]||null) : null;
+                      if (it && String(it.kind||'') === 'item' && Math.max(1,(it.depth|0)) === (rootDepth|0)){
+                        const tgt = Number.isFinite(it.contentIndentCol) ? (it.contentIndentCol|0) : 0;
+                        const d = (tgt|0) - (curIndent|0);
+                        if ((d|0) > 0) deltaCols = d|0;
+                        break;
+                      }
+                    }
+                    if (deltaCols == null){
+                      const sw0 = (typeof _getShiftWidth === 'function') ? _getShiftWidth() : 4;
+                      deltaCols = (sw0 === 'TAB') ? 4 : Math.max(1, sw0|0);
+                    }
+                  } else if ((units|0) < 0){
+                    for (let r=(rootRow|0)-1; r>=0; r--){
+                      const it = (items0 && r>=0 && r<(items0.length|0)) ? (items0[r]||null) : null;
+                      if (it && String(it.kind||'') === 'item' && Math.max(1,(it.depth|0)) === ((rootDepth|0)-1)){
+                        const tgt = Number.isFinite(it.indentCol) ? (it.indentCol|0) : 0;
+                        const d = (tgt|0) - (curIndent|0);
+                        if ((d|0) < 0) deltaCols = d|0;
+                        break;
+                      }
+                    }
+                    if (deltaCols == null){
+                      const sw0 = (typeof _getShiftWidth === 'function') ? _getShiftWidth() : 4;
+                      deltaCols = -((sw0 === 'TAB') ? 4 : Math.max(1, sw0|0));
+                    }
+                  }
+                }
+              }catch{ deltaCols = null; }
+              let rs = rootRow|0;
+              let re = rootRow|0;
+              for (let r=(rootRow|0)+1; r<(lines.length|0); r++){
+                const s = String(lines[r]||'');
+                const it = (items0 && r>=0 && r<(items0.length|0)) ? (items0[r]||null) : null;
+                if (s.trim() === ''){ re = r|0; continue; }
+                if (it && String(it.kind||'') === 'cont'){ re = r|0; continue; }
+                if (it && String(it.kind||'') === 'item'){
+                  const d = Math.max(1, (it.depth|0));
+                  if ((d|0) > (rootDepth|0)) { re = r|0; continue; }
+                  break;
+                }
+                break;
+              }
+
+              if (deltaCols != null) _applyIndentRangeCols(rs|0, re|0, deltaCols|0);
+              else _applyIndentRange(rs|0, re|0, units|0);
+              return;
+            }
+          }
+        }
+      }
+    }catch{}
+
     // Apply to N lines starting from caret (match '>>' behavior)
     const totalLines = _totalLines();
     const rs = caretRow;
@@ -30119,6 +30920,181 @@ try{
   }
   // delete: x (delete char(s) under cursor / join newline)
   if (e.key==='x' && !e.ctrlKey && !e.metaKey && !e.altKey){ e.preventDefault(); const n=_consumeCount(); _doDeleteX(n); ensureScrolloff(); _repositionCaret(); updateGutter(); return; }
+
+  // #1878: markdown on + list line => indent/outdent subtree together for NORMAL >>/<<
+  const _tryMdListSubtreeIndentInNormal = (units)=>{
+    try{
+      const b0 = currentBuffer && currentBuffer();
+      if (!(b0 && b0.markdown)) return false;
+      const lines = _splitLines();
+      const row0 = (caretRow|0);
+      if (!lines || row0 < 0 || row0 >= (lines.length|0)) return false;
+
+      // Prefer cached list info when available; fallback to lightweight parser when md-rich is off.
+      let items0 = null;
+      try{ const c = (_mdListEnsureCache && _mdListEnsureCache(false)) || (_mdListEnsureCache && _mdListEnsureCache(true)); items0 = (c && c.items) ? c.items : null; }catch{ items0 = null; }
+      if (!items0){
+        try{
+          const TAB = 4;
+          const _indentInfo = (s)=>{
+            let idx = 0;
+            let cols = 0;
+            while (idx < (s.length|0)){
+              const ch = s[idx];
+              if (ch === ' '){ cols += 1; idx += 1; continue; }
+              if (ch === '\t'){ cols += (TAB - (cols % TAB)) || TAB; idx += 1; continue; }
+              break;
+            }
+            return { idx, cols };
+          };
+          const out = new Array(lines.length|0);
+          const stack = [];
+          for (let row=0; row<(lines.length|0); row++){
+            const s = String(lines[row]||'');
+            if (!s || s.trim()===''){ out[row] = null; continue; }
+            const ind = _indentInfo(s);
+            const idx0 = ind.idx|0;
+            const cols0 = ind.cols|0;
+            while (stack.length > 0 && (cols0|0) < (stack[stack.length-1].contentIndentCol|0)) stack.pop();
+            const marker = s[idx0];
+            let listType = '';
+            let markerLen = 0;
+            let sp = 0;
+            let contentIndentCol = 0;
+            let depth = 0;
+
+            if (marker==='-' || marker==='*' || marker==='+'){
+              listType = 'ul';
+              markerLen = 1;
+              sp = 0;
+              let j = (idx0 + 1)|0;
+              while (j < (s.length|0) && s[j] === ' ' && sp < 5){ sp++; j++; }
+              if (sp < 1 || sp > 4){ out[row] = null; continue; }
+              if (s[(idx0 + 1)|0] === '\t'){ out[row] = null; continue; }
+              depth = (stack.length + 1)|0;
+              contentIndentCol = (cols0 + markerLen + sp)|0;
+            }
+            if (!listType && marker>='0' && marker<='9'){
+              let k = idx0|0;
+              while (k < (s.length|0) && s[k]>='0' && s[k]<='9') k++;
+              const digitsLen = (k - (idx0|0))|0;
+              const delim = (k < (s.length|0)) ? s[k] : '';
+              if ((digitsLen|0) > 0 && (delim==='.' || delim===')')){
+                listType = 'ol';
+                markerLen = (digitsLen + 1)|0;
+                sp = 0;
+                let j = (k + 1)|0;
+                while (j < (s.length|0) && s[j] === ' ' && sp < 5){ sp++; j++; }
+                if (sp < 1 || sp > 4){ out[row] = null; continue; }
+                if (s[(k + 1)|0] === '\t'){ out[row] = null; continue; }
+                depth = (stack.length + 1)|0;
+                contentIndentCol = (cols0 + markerLen + sp)|0;
+              }
+            }
+
+            if (!listType){
+              if (stack.length > 0 && (cols0|0) >= (stack[stack.length-1].contentIndentCol|0)){
+                const top = stack[stack.length-1] || {};
+                out[row] = { kind:'cont', listType: (top.listType||''), contentIndentCol: (top.contentIndentCol|0) };
+              } else {
+                out[row] = null;
+              }
+              continue;
+            }
+            out[row] = { kind:'item', listType, depth:(depth|0), indentCol:(cols0|0), contentIndentCol:(contentIndentCol|0) };
+            stack.push({ listType, contentIndentCol:(contentIndentCol|0) });
+          }
+          items0 = out;
+        }catch{ items0 = null; }
+      }
+
+      const info0 = (items0 && row0>=0 && row0<(items0.length|0)) ? (items0[row0]||null) : null;
+      const lt0 = info0 ? String(info0.listType||'') : '';
+      const k0 = info0 ? String(info0.kind||'') : '';
+      if (!(info0 && (lt0==='ul' || lt0==='ol') && (k0==='item' || k0==='cont'))) return false;
+
+      // Resolve owning item row for cont
+      let rootRow = row0|0;
+      let rootItem = info0;
+      if (String(rootItem.kind||'') === 'cont'){
+        const wantCI = (rootItem.contentIndentCol|0);
+        for (let r=(row0|0)-1; r>=0; r--){
+          const s = String(lines[r]||'');
+          if (s.trim() === '') continue;
+          const it = (items0 && r>=0 && r<(items0.length|0)) ? (items0[r]||null) : null;
+          if (it && String(it.kind||'') === 'cont') continue;
+          if (it && String(it.kind||'') === 'item' && String(it.listType||'') === lt0 && ((it.contentIndentCol|0) === (wantCI|0))){
+            rootRow = r|0; rootItem = it; break;
+          }
+          break;
+        }
+      }
+      if (!(rootItem && String(rootItem.kind||'') === 'item')) return false;
+
+      const rootDepth = Math.max(1, (rootItem.depth|0));
+      // If root is depth-1, outdent must be a no-op (do NOT shift only descendants)
+      if (((units|0) < 0) && ((rootDepth|0) <= 1)){
+        return true; // handled (no change)
+      }
+
+      // #1879: For ordered lists, indent/outdent is a hierarchy change; compute column delta.
+      let deltaCols = null;
+      try{
+        if (String(rootItem.listType||'') === 'ol'){
+          const curIndent = Number.isFinite(rootItem.indentCol) ? (rootItem.indentCol|0) : 0;
+          if ((units|0) > 0){
+            for (let r=(rootRow|0)-1; r>=0; r--){
+              const it = (items0 && r>=0 && r<(items0.length|0)) ? (items0[r]||null) : null;
+              if (it && String(it.kind||'') === 'item' && Math.max(1,(it.depth|0)) === (rootDepth|0)){
+                const tgt = Number.isFinite(it.contentIndentCol) ? (it.contentIndentCol|0) : 0;
+                const d = (tgt|0) - (curIndent|0);
+                if ((d|0) > 0) deltaCols = d|0;
+                break;
+              }
+            }
+            if (deltaCols == null){
+              const sw0 = (typeof _getShiftWidth === 'function') ? _getShiftWidth() : 4;
+              deltaCols = (sw0 === 'TAB') ? 4 : Math.max(1, sw0|0);
+            }
+          } else if ((units|0) < 0){
+            for (let r=(rootRow|0)-1; r>=0; r--){
+              const it = (items0 && r>=0 && r<(items0.length|0)) ? (items0[r]||null) : null;
+              if (it && String(it.kind||'') === 'item' && Math.max(1,(it.depth|0)) === ((rootDepth|0)-1)){
+                const tgt = Number.isFinite(it.indentCol) ? (it.indentCol|0) : 0;
+                const d = (tgt|0) - (curIndent|0);
+                if ((d|0) < 0) deltaCols = d|0;
+                break;
+              }
+            }
+            if (deltaCols == null){
+              const sw0 = (typeof _getShiftWidth === 'function') ? _getShiftWidth() : 4;
+              deltaCols = -((sw0 === 'TAB') ? 4 : Math.max(1, sw0|0));
+            }
+          }
+        }
+      }catch{ deltaCols = null; }
+
+      let rs = rootRow|0;
+      let re = rootRow|0;
+      for (let r=(rootRow|0)+1; r<(lines.length|0); r++){
+        const s = String(lines[r]||'');
+        const it = (items0 && r>=0 && r<(items0.length|0)) ? (items0[r]||null) : null;
+        if (s.trim() === ''){ re = r|0; continue; }
+        if (it && String(it.kind||'') === 'cont'){ re = r|0; continue; }
+        if (it && String(it.kind||'') === 'item'){
+          const d = Math.max(1, (it.depth|0));
+          if ((d|0) > (rootDepth|0)) { re = r|0; continue; }
+          break;
+        }
+        break;
+      }
+      if (deltaCols != null) _applyIndentRangeCols(rs|0, re|0, deltaCols|0);
+      else _applyIndentRange(rs|0, re|0, units|0);
+      return true;
+    }catch{}
+    return false;
+  };
+
   // >> / << — indent/outdent current and following N-1 lines by shiftwidth
   // >> — allow layout-agnostic detection via e.code 'Period' + Shift, and Process-coded
   if ((!e.ctrlKey && !e.metaKey && !e.altKey) && (e.key==='>' || (e.code==='Period' && e.shiftKey) || (e.key==='Process' && e.code==='Period' && e.shiftKey))){
@@ -30131,6 +31107,8 @@ try{
       if (!(mcount>0)) mcount = 1;
       // debug removed: commit >> mcount
       _pendingNormalCount = null; _countAcc = null;
+
+      if (_tryMdListSubtreeIndentInNormal(+1)) return;
       const totalLines = _totalLines();
       const rs = caretRow;
       const re = Math.max(rs, Math.min(totalLines-1, rs + Math.max(1,mcount|0) - 1));
@@ -30156,6 +31134,8 @@ try{
       if (!(mcount>0)) mcount = 1;
       // debug removed: commit << mcount
       _pendingNormalCount = null; _countAcc = null;
+
+      if (_tryMdListSubtreeIndentInNormal(-1)) return;
       const totalLines = _totalLines();
       const rs = caretRow;
       const re = Math.max(rs, Math.min(totalLines-1, rs + Math.max(1,mcount|0) - 1));

@@ -3,7 +3,10 @@
 INSERT中は textarea の標準編集機能（WebView2/Chromium 準拠）も利用できます。挙動はOS/環境に依存します。
 
 ## 基本編集
-- `TAB` 'shiftwidth' 設定に従いインデント（空白またはTAB文字）を挿入
+- `TAB` 通常は 'shiftwidth' 設定に従いインデント（空白またはTAB文字）を挿入
+  - markdownモードの(un)ordered list行では `>>` と同等（現在項目のサブツリーを同時にインデント増）
+- `Shift+TAB` markdownモードの(un)ordered list行では `<<` と同等（現在項目のサブツリーを同時にインデント減）
+  - ただし階層1（ルート項目）での `Shift+TAB` は no-op（下位階層も動かさない）
 - `Backspace`左の1文字を削除
 - `Delete`右の1文字を削除
 - `Enter`改行を挿入（Sixの最終改行ポリシー: 視覚のみのダミー最終行あり、保存で自動追加/削除しない）
