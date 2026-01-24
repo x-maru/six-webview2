@@ -636,6 +636,7 @@ body.md-rich #editor::selection {
 /* disc/circle/square drawn in CSS (font-independent) */
 #textLayer .md-ulbox .md-ulbullet.md-ulb0 {
 	background: currentColor;
+	border: 2px solid color-mix(in srgb, currentColor 50%, transparent);
 	border-radius: 50%;
 }
 #textLayer .md-ulbox .md-ulbullet.md-ulb1 {
@@ -646,7 +647,8 @@ body.md-rich #editor::selection {
 	border-radius: 50%;
 }
 #textLayer .md-ulbox .md-ulbullet.md-ulb2 {
-	background: currentColor;
+	background: color-mix(in srgb, currentColor 60%, transparent);
+	border: 1px solid color-mix(in srgb, currentColor 80%, transparent);
 	border-radius: 0;
 }
 
