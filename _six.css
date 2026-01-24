@@ -303,6 +303,24 @@ body.typing-reduced-text #editor::-webkit-scrollbar-corner,
 	pointer-events: none;
 }
 
+/* Overlay palette: hatch-mask for buttons disabled by mode (e.g., wrap in markdown-on) */
+#overlayPaletteTop button.six-masked {
+	/* keep base opacity; add a visual "disabled" cue without hiding meaning */
+	filter: none;
+}
+#overlayPaletteTop button.six-masked::after {
+	content: '';
+	position: absolute;
+	inset: 0;
+	border-radius: 6px;
+	pointer-events: none;
+	background: rgba(255, 255, 255, 0.10);
+}
+/* Avoid browser default dimming that can make it unreadable */
+#overlayPaletteTop #overlayBtnWrap:disabled {
+	opacity: 0.92;
+}
+
 /* Markdown-rich: vertically center text within tall heading lines (H1/H2) */
 #textLayer .md-line.md-h1,
 #textLayer .md-line.md-h2 {

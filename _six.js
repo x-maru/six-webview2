@@ -39250,8 +39250,9 @@ try{
         if (!el) return;
         const baseBg = '#1a2030';
         const hovBg  = '#5a1a1a';
-        el.addEventListener('mouseenter', ()=>{ try{ el.style.background = hovBg; }catch{} });
-        el.addEventListener('mouseleave', ()=>{ try{ el.style.background = baseBg; }catch{} });
+        const _skip = ()=>{ try{ return !!(el.disabled || (el.classList && el.classList.contains('six-masked'))); }catch{ return !!el.disabled; } };
+        el.addEventListener('mouseenter', ()=>{ try{ if (_skip()) return; el.style.background = hovBg; }catch{} });
+        el.addEventListener('mouseleave', ()=>{ try{ if (_skip()) return; el.style.background = baseBg; }catch{} });
       };
 
   // Create buttons first (append to respective palettes later)
@@ -39901,6 +39902,9 @@ try{
       });
       palTR.appendChild(mdDraftBtn);
 
+      // 制御文字表示（list）を右上へ移動（markdown編集の下、幅揃え）
+      palTR.appendChild(listBtn);
+
       // Wrap button（右上パレット：バッファ毎設定） (#1524)
       // 表示折り返し（改行は挿入しない）: :set wrap / :set nowrap / :set wrap!
       const wrapBtn = document.createElement('button');
@@ -39911,6 +39915,9 @@ try{
       wrapBtn.style.background = '#1a2030';
       wrapBtn.style.color = '#e6e6e6';
       wrapBtn.style.borderRadius = '6px';
+      // Needed for hatch-mask overlay (pseudo-element).
+      wrapBtn.style.position = 'relative';
+      wrapBtn.style.overflow = 'hidden';
       wrapBtn.style.padding = '4px 3px';
       wrapBtn.style.cursor = 'pointer';
       wrapBtn.style.font = "12px/1.25 system-ui, -apple-system, 'Segoe UI', sans-serif";
@@ -39925,6 +39932,7 @@ try{
       wrapWrap.style.flexDirection = 'column';
       wrapWrap.style.gap = '2px';
       const wrapTitle = document.createElement('div');
+      wrapTitle.id = 'overlayBtnWrap_title';
       wrapTitle.textContent = '折り返し';
       wrapTitle.style.textAlign = 'center';
       wrapTitle.style.fontWeight = '500';
@@ -39951,9 +39959,6 @@ try{
         try{ if (lastFocusedEl && typeof lastFocusedEl.focus === 'function'){ lastFocusedEl.focus(); } }catch{}
       });
       palTR.appendChild(wrapBtn);
-
-      // 制御文字表示（list）を右上へ移動（折り返しの下、幅揃え） (#1769)
-      palTR.appendChild(listBtn);
 
   // initialize visual state for hlsearch & list pills
   try{ _updateOverlayHlsearchVisual(); }catch{}
@@ -40262,6 +40267,32 @@ try{
         off.style.background = gray; off.style.color = '#000';
       }
 
+      // markdown-on forces wrap-on behavior; the wrap toggle remains buffer-local but is not applicable.
+      // Mask the wrap button so users can still identify it, but it won't react.
+      try{
+        const wrapBtn = document.getElementById('overlayBtnWrap');
+        if (wrapBtn){
+          const masked = !!md;
+          try{ wrapBtn.classList && wrapBtn.classList.toggle('six-masked', masked); }catch{}
+          try{ wrapBtn.disabled = !!masked; }catch{}
+          try{ wrapBtn.style.cursor = masked ? 'default' : 'pointer'; }catch{}
+          // If it was hovered just before masking, restore base background.
+          try{ if (masked) wrapBtn.style.background = '#1a2030'; }catch{}
+          try{ wrapBtn.title = masked ? 'markdown on中は常に折り返し表示（wrap設定は保持）' : '折り返し表示（改行は挿入しない）'; }catch{}
+
+
+
+          // Title color while masked.
+          try{
+            const t = document.getElementById('overlayBtnWrap_title');
+            if (t) t.style.color = masked ? '#a0a0a0' : '';
+          }catch{}
+        }
+      }catch{}
+
+      // Ensure wrap button rendering updates immediately when markdown toggles.
+      try{ _updateOverlayWrapVisual && _updateOverlayWrapVisual(); }catch{}
+
       // md_draftedit visual (draft/WYSIWYG)
       try{
         const d = document.getElementById('overlayBtnMdDraft_draft');
@@ -40293,8 +40324,44 @@ try{
       off.style.color = '#e6e6e6';
       on .style.color = '#e6e6e6';
       const b = currentBuffer();
-      const w = !!(b && b.wrap);
-      if (w){
+      const md = !!(b && b.markdown);
+      const w = md ? true : !!(b && b.wrap);
+
+      // Masked display (markdown-on): show only a single option: [　　する　] (5 fullwidth chars)
+      // and exclude it from the usual two-pill layout.
+      try{
+        const line = on.parentElement;
+        if (md){
+          try{ off.style.display = 'none'; }catch{}
+          try{ if (line && line.style) line.style.gap = '0px'; }catch{}
+          // Use fixed width + centered text (avoid fullwidth-space bias).
+          try{ on.textContent = 'する'; }catch{}
+          try{ on.style.display = 'inline-block'; }catch{}
+          try{ on.style.width = '5em'; on.style.minWidth = '5em'; }catch{}
+          try{ on.style.textAlign = 'center'; }catch{}
+          try{ on.style.paddingLeft = '0px'; on.style.paddingRight = '0px'; }catch{}
+        } else {
+          try{ off.style.display = 'inline-block'; }catch{}
+          try{ if (line && line.style) line.style.gap = '6px'; }catch{}
+          // Match width with "しない" (commit 7af579d behavior): pad with one fullwidth space.
+          try{ on.textContent = 'する\u3000'; }catch{}
+          try{ on.style.display = 'inline-block'; }catch{}
+          try{ on.style.padding = '1px 8px'; }catch{}
+          try{ on.style.removeProperty && on.style.removeProperty('width'); }catch{}
+          try{ on.style.removeProperty && on.style.removeProperty('min-width'); }catch{}
+          try{ on.style.removeProperty && on.style.removeProperty('text-align'); }catch{}
+          try{ on.style.removeProperty && on.style.removeProperty('padding-left'); }catch{}
+          try{ on.style.removeProperty && on.style.removeProperty('padding-right'); }catch{}
+          try{ on.style.width = ''; on.style.minWidth = ''; }catch{}
+          try{ on.style.textAlign = ''; }catch{}
+          try{ on.style.paddingLeft = ''; on.style.paddingRight = ''; }catch{}
+        }
+      }catch{}
+
+      if (md){
+        // In markdown-on, wrap is forced on; show it as "on" but with muted (markdown-OFF-like) color.
+        on.style.background = gray; on.style.color = '#000';
+      } else if (w){
         on.style.background = green; on.style.color = '#000';
       } else {
         off.style.background = gray; off.style.color = '#000';
