@@ -13676,6 +13676,10 @@ try{
   let _mdEofPadExtraLines = 0;
   let _mdEofPadLastPbPx = -1;
   let _mdEofPadLastExtraPx = 0;
+  // md-rich + wrap-on: reduce visible EOF pad by the last row's bottom padding.
+  // Rationale (#1890): padded 2x edge rows (e.g. code blocks) can visually add blank space at EOF.
+  // Users expect the total visible blank area at EOF to stay at --eofPadLines.
+  let _mdEofPadConsumePx = 0;
   // md-rich + wrap-on: keep physical maxScrollTop aligned to LINE_HEIGHT.
   // Add a tiny (0..LINE_HEIGHT-1) px remainder compensation to paddingBottom.
   // This avoids a visible half-row drift near EOF and prevents losing ~1 pad line.
@@ -13714,8 +13718,14 @@ try{
         else clientH = (editor.clientHeight||0)|0;
       }catch{ clientH = (editor.clientHeight||0)|0; }
       const physMax = Math.max(0, ((editor.scrollHeight||0) - (clientH|0))|0);
-      // Effective (overlay) scroll grid: visual line count (wrap cache prefix) * LINE_HEIGHT.
-      // This keeps caret/scrolloff/clamp stable even when the overlay uses variable padding/line-height.
+      // Effective (overlay) scroll height:
+      // Prefer the md-wrap cache's pixel total (includes variable line-height + per-row padding).
+      // Fallback to visual line count (prefix) * LINE_HEIGHT.
+      let cacheTotalPx = 0;
+      try{
+        const c = (typeof _mdWrapEnsureCacheClean === 'function') ? (_mdWrapEnsureCacheClean(false) || _mdWrapEnsureCacheClean(true)) : null;
+        cacheTotalPx = (c && Number.isFinite(c.totalPx)) ? (c.totalPx|0) : 0;
+      }catch{ cacheTotalPx = 0; }
       let visLines = 0;
       try{ if (typeof _mdWrapTotalVisLines === 'function') visLines = (_mdWrapTotalVisLines()|0); }catch{ visLines = 0; }
       if ((visLines|0) <= 0){
@@ -13723,8 +13733,15 @@ try{
         try{ if ((nLines|0) <= 0 && typeof _totalLines === 'function') nLines = (_totalLines()|0); }catch{}
         visLines = Math.max(0, (nLines|0));
       }
-      const totalPx = Math.max(0, (visLines|0) * lh);
-      const basePadPx = Math.max(0, (_eofPadLines()|0) * lh);
+      const gridTotalPx = Math.max(0, (visLines|0) * lh);
+      const totalPx = Math.max(gridTotalPx|0, cacheTotalPx|0);
+      let basePadPx = Math.max(0, (_eofPadLines()|0) * lh);
+      // Consume EOF padding budget by the last row's bottom padding so the visible EOF blank area
+      // remains stable (does not grow to 8 lines when --eofPadLines is 6).
+      try{
+        const cons = Math.max(0, Math.round(_mdEofPadConsumePx||0));
+        if (cons > 0) basePadPx = Math.max(0, (basePadPx|0) - Math.min((basePadPx|0), (cons|0)));
+      }catch{}
       // Include textarea padding-top so effMax aligns with physMax after padding compensation.
       const effTotal = Math.max(0, (ptPx|0) + (totalPx|0) + (basePadPx|0));
       const effMax = Math.max(0, (effTotal|0) - (clientH|0));
@@ -14169,18 +14186,18 @@ try{
         try{ cacheWpx = (c && Number.isFinite(c.wPx)) ? (c.wPx|0) : 0; }catch{ cacheWpx = 0; }
 
         // IMPORTANT (md-rich + wrap-on): unify scroll model heights.
-        // Use the md-wrap visual-line grid (counts/prefix) * LINE_HEIGHT as the canonical height.
-        // This keeps:
-        //   - effective scroll space (overlay)
-        //   - physical scroll range (textarea thumb)
-        // aligned, eliminating the EOF thumb gap and EOF blank toggling.
+        // Use the md-wrap cache pixel total as the canonical height (includes variable line-height
+        // and per-row padding). Fallback to the visual-line grid (prefix) * LINE_HEIGHT.
+        // This prevents "thumb at bottom but caret is not visible" when the overlay is taller
+        // than the line-grid model (e.g., 2x rows / padded code blocks).
         let visLines = 0;
         try{
           if (c && c.prefix && c.prefix.length) visLines = (c.prefix[c.prefix.length-1]|0);
           else if (typeof _mdWrapTotalVisLines === 'function') visLines = (_mdWrapTotalVisLines()|0);
         }catch{ visLines = 0; }
         if ((visLines|0) <= 0) visLines = Math.max(0, (linesTotal|0));
-        totalPx = Math.max(0, (visLines|0) * Math.max(1, (LINE_HEIGHT|0)));
+        const gridTotalPx = Math.max(0, (visLines|0) * Math.max(1, (LINE_HEIGHT|0)));
+        totalPx = Math.max(gridTotalPx|0, (cacheTotalPx|0));
         textPx = Math.max(0, (linesTotal|0) * Math.max(1, (LINE_HEIGHT|0)));
 
         // Measure textarea native content height (wrapped by browser) excluding paddings.
@@ -14216,7 +14233,22 @@ try{
         // Use pixel-precise padding to reduce clamp/jitter near EOF.
         // Additionally align the physical maxScrollTop to the LINE_HEIGHT grid.
         const lh = Math.max(1, (LINE_HEIGHT|0));
-        const basePb = Math.max(0, ((basePad|0) * lh) + (extraPx|0));
+        // Consume EOF padding budget by the last row's bottom padding (see _mdEofPadConsumePx).
+        try{
+          let consPx = 0;
+          try{
+            const last = Math.max(0, (linesTotal|0) - 1);
+            const infoLast = (last >= 0) ? (_mdLineLayoutInfoAtRow ? _mdLineLayoutInfoAtRow(lines, last|0, false) : null) : null;
+            const pb = (infoLast && Number.isFinite(infoLast.blockPadBottomPx)) ? (infoLast.blockPadBottomPx|0) : 0;
+            consPx = Math.max(0, pb|0);
+          }catch{ consPx = 0; }
+          const basePadPx0 = Math.max(0, (basePad|0) * (lh|0));
+          consPx = Math.min(basePadPx0|0, consPx|0);
+          _mdEofPadConsumePx = consPx|0;
+        }catch{ _mdEofPadConsumePx = 0; }
+
+        const basePadPxEff = Math.max(0, ((basePad|0) * lh) - Math.max(0, (_mdEofPadConsumePx|0)));
+        const basePb = Math.max(0, (basePadPxEff|0) + (extraPx|0));
         let targetPb = (basePb|0);
         try{
           // If baseline changed, reset to it first so remainder math is stable.
@@ -19719,10 +19751,13 @@ try{
         const mdNow = (function(){ try{ return _mdRichActive && _mdRichActive(); }catch{ return false; } })();
         if (mdNow && !centerOnce && !big && _mdRenderGeom && viewport && editor){
           const g = _mdRenderGeom;
-          const startIdx = Math.max(0, (topLine|0) - 1);
+          // md-rich + wrap-on: _topLine() is based on fixed LINE_HEIGHT and can disagree with
+          // the md renderer's effective scroll->row mapping. Use the renderer's own start row
+          // to keep geometry/index stable and avoid reverse-direction scroll corrections.
+          const startIdx = (g && Number.isFinite(g.start)) ? (g.start|0) : Math.max(0, (topLine|0) - 1);
           const idx = ((caretRow|0) - (startIdx|0))|0;
           const vpH = (viewport && viewport.clientHeight) ? (viewport.clientHeight|0) : ((editor && editor.clientHeight) ? (editor.clientHeight|0) : 0);
-          if ((vpH|0) > 0 && g && (g.start|0) === (startIdx|0) && Array.isArray(g.rowY) && Array.isArray(g.rowH) && idx >= 0 && idx < (g.rowY.length|0)){
+          if ((vpH|0) > 0 && g && Array.isArray(g.rowY) && Array.isArray(g.rowH) && idx >= 0 && idx < (g.rowY.length|0)){
             const y0 = (g.rowY[idx]|0);
             const h0 = (g.rowH[idx]|0);
             const y1 = ((y0|0) + (h0|0))|0;
@@ -19969,6 +20004,11 @@ try{
     // so compare against visual top line to avoid spurious corrections.
     const maxTop = maxTopWithPad;
     try{
+      // md-rich + wrap-on: do NOT clamp using line-based maxTopWithPad.
+      // Effective↔physical mapping already bounds the scroll range, and maxTopWithPad can
+      // under-estimate when variable-height last rows / padding compensation are involved,
+      // which manifests as an upward "snap back" (reverse scroll) near EOF.
+      try{ if (typeof _mdRichWrapOn === 'function' && _mdRichWrapOn()) { /* skip */ return; } }catch{}
       const topNow = _wrapActive ? (_topVisualLine1()|0) : (_topLine()|0);
       if (topNow > (maxTop|0)){
         _setEditorScrollTop((maxTop-1)*LINE_HEIGHT, {});
@@ -27510,11 +27550,15 @@ try{
     let _mdMouseSelActive = false;
     let _mdMouseSelDragging = false;
     let _mdMouseSelAnchorOff = 0;
+    // Timestamp of last user pointer interaction within the editor.
+    // Used to ignore spurious selection churn right after buffer switches (restore/layout).
+    let _lastUserPointerAt = 0;
 
     // Ensure single-click updates after browser updates selection
     // 未確定中は選択同期の遅延呼び出しを抑制（不要なレイアウト測定を避ける）
     editor.addEventListener('mousedown', (e)=>{
       if (window._imeComposing===true) return;
+      try{ _lastUserPointerAt = Date.now(); }catch{}
       try{
         if (_mdRichActive()){
           // #1761: Native textarea hit-testing assumes fixed line height and can jump the anchor.
@@ -27750,6 +27794,25 @@ try{
     editor.addEventListener('select', ()=>{
       let _selChanged = true;
       try{
+        // Right after a buffer switch, some environments can emit selection events that reflect
+        // transient/native caret positions (often EOF) even though we just restored the caret.
+        // Ignore these unless we have clear evidence of a recent user interaction.
+        try{
+          const nowSel = Date.now();
+          const swAt = (_lastBufferSwitchAt|0);
+          if (swAt && (nowSel - swAt) < 900){
+            let recentKey = false;
+            let recentPtr = false;
+            try{
+              const kt = (typeof _lastKeydownForAnom==='object' && _lastKeydownForAnom && Number.isFinite(_lastKeydownForAnom.t)) ? (+_lastKeydownForAnom.t) : 0;
+              recentKey = !!(kt && (nowSel - kt) < 240);
+            }catch{ recentKey = false; }
+            try{ recentPtr = !!((_lastUserPointerAt|0) && (nowSel - (_lastUserPointerAt|0)) < 240); }catch{ recentPtr = false; }
+            if (!recentKey && !recentPtr){
+              return;
+            }
+          }
+        }catch{}
         // Guard: ignore transient selection changes during protected windows (e.g., right after save)
         try{ if (Date.now() < _selGuardUntil) return; }catch{}
         // IME composition can cause noisy selection churn; keep this handler light.
@@ -32035,7 +32098,15 @@ try{
           _countAcc = null;
           // Clear paused scrolloff state set by recent search/substitute so jump can recenter
           _scrolloffPaused = false; _scrolloffPauseAnchorR = -1; _scrolloffPauseAnchorC = -1;
-          caretRow = 0; ensureScrolloff({ force:true }); _repositionCaret(); updateGutter();
+          caretRow = 0;
+          try{ caretCol = 0; }catch{}
+          // Cancel any persisted bottom-pin state so gg never keeps the previous EOF viewport.
+          try{ const b=currentBuffer && currentBuffer(); if (b) b.viewPinnedBottomAtEof = false; }catch{}
+          // For md-rich + wrap-on, force an explicit scrollTop=0 before ensureScrolloff so
+          // no stale EOF mapping/compensation can keep the viewport in the middle (#1890).
+          try{ _setEditorScrollTop && _setEditorScrollTop(0, { immediate:true, keepCaret:true }); }catch{}
+          ensureScrolloff({ force:true, immediate:true, keepCaret:true });
+          _repositionCaret(); updateGutter();
           try{ _mdEnsureCaretInViewPx(); }catch{}
         } else {
           _pendingNormal = 'g';
