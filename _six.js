@@ -1611,13 +1611,41 @@ try{
       const lh = (lineHeightPx|0);
       if (!ul) return null;
 
+      const lt0 = (ul && ul.listType) ? String(ul.listType||'') : '';
+
       if (ul.kind === 'item'){
         if (!Number.isFinite(ul.markerIdx) || !Number.isFinite(ul.contentStartIdx)) return null;
         const mi = Math.max(0, ul.markerIdx|0);
         const ci = Math.max(mi, ul.contentStartIdx|0);
         const xContent = _wrapProbeXFromColStyled(s, ci|0, ww, fs, lh);
         if (!Number.isFinite(xContent) || (xContent||0) <= 0.5) return null;
-        const xc = (+xContent||0);
+
+        // Ordered list markers can include extra visual padding (digit alignment) in clean display.
+        // Compensate so wrapped lines start under the actual content, not under the source marker.
+        let olExtraPx = 0;
+        try{
+          if (lt0 === 'ol'){
+            const maxDigits = (ul && Number.isFinite(ul.olMaxDigits)) ? (ul.olMaxDigits|0) : 0;
+            const markerLen = (ul && Number.isFinite(ul.markerLen)) ? (ul.markerLen|0) : 0;
+            const srcDigitsLen = Math.max(1, (markerLen|0) - 1);
+            let dispDigitsLen = srcDigitsLen|0;
+            try{ if (ul && ul.olDispDigitsText != null) dispDigitsLen = Math.max(1, (String(ul.olDispDigitsText||'').length|0)); }catch{ dispDigitsLen = srcDigitsLen|0; }
+            const indentEff = Math.max(0, (ul.indentCol|0));
+            const slack = ((ul.depth|0) === 1) ? Math.max(0, Math.min(3, indentEff|0)) : 0;
+            const pad = Math.max(0, (maxDigits|0) - (dispDigitsLen|0) - (slack|0));
+            const deltaDigits = (dispDigitsLen|0) - (srcDigitsLen|0);
+            if (((pad|0) !== 0) || ((deltaDigits|0) !== 0)){
+              let spaceW = 0;
+              try{
+                const spx = _wrapProbeXFromColStyled(' ', 1, 1000000, fs|0, lh|0, null);
+                if (Number.isFinite(spx) && (spx||0) > 0) spaceW = (+spx||0);
+              }catch{ spaceW = 0; }
+              if (spaceW > 0) olExtraPx = ((pad + deltaDigits) * spaceW);
+            }
+          }
+        }catch{ olExtraPx = 0; }
+
+        const xc = (+xContent||0) + (+olExtraPx||0);
         // IMPORTANT: Our rendered text still contains the leading indentation and marker.
         // To avoid double-indenting the first visual line (notably when the line starts with spaces),
         // cancel the full padding on the first line via textIndent = -padLeft.
@@ -1636,6 +1664,64 @@ try{
         const xi = (+xIndent||0);
         // Same idea as list items: keep the first visual line unchanged; indent wrapped lines.
         return { padLeftPx: xi, textIndentPx: -xi };
+      }
+
+      return null;
+    }catch{ return null; }
+  }
+
+  // IME composing (md-rich+wrap): cheap approximation for list hanging-indent.
+  // Uses a monospace-ish width per visual column (chPx) to avoid per-row DOM probes.
+  function _mdIndentOptsForListLineApprox(srcText, ul, chPx){
+    try{
+      const s = String(srcText||'');
+      const ch = (+chPx||0);
+      if (!ul) return null;
+      if (!(ch > 0.01)) return null;
+
+      const lt0 = (ul && ul.listType) ? String(ul.listType||'') : '';
+
+      if (ul.kind === 'item'){
+        if (!Number.isFinite(ul.markerIdx) || !Number.isFinite(ul.contentStartIdx)) return null;
+        const mi = Math.max(0, ul.markerIdx|0);
+        const ci = Math.max(mi, ul.contentStartIdx|0);
+
+        let cols = 0;
+        try{ cols = _visualWidthUpToLine(s, ci|0)|0; }catch{ cols = (ci|0); }
+
+        // Ordered list marker rendering can add extra visual padding (digit alignment) in clean display.
+        // Approximate the same shift in columns.
+        let extraCols = 0;
+        try{
+          if (lt0 === 'ol'){
+            const maxDigits = (ul && Number.isFinite(ul.olMaxDigits)) ? (ul.olMaxDigits|0) : 0;
+            const markerLen = (ul && Number.isFinite(ul.markerLen)) ? (ul.markerLen|0) : 0;
+            const srcDigitsLen = Math.max(1, (markerLen|0) - 1);
+            let dispDigitsLen = srcDigitsLen|0;
+            try{ if (ul && ul.olDispDigitsText != null) dispDigitsLen = Math.max(1, (String(ul.olDispDigitsText||'').length|0)); }catch{ dispDigitsLen = srcDigitsLen|0; }
+            const indentEff = Math.max(0, (ul.indentCol|0));
+            const slack = ((ul.depth|0) === 1) ? Math.max(0, Math.min(3, indentEff|0)) : 0;
+            const pad = Math.max(0, (maxDigits|0) - (dispDigitsLen|0) - (slack|0));
+            const deltaDigits = (dispDigitsLen|0) - (srcDigitsLen|0);
+            extraCols = (pad + deltaDigits)|0;
+          }
+        }catch{ extraCols = 0; }
+
+        const px = Math.max(0, (cols + (extraCols|0)) * ch);
+        if (!(px > 0.5)) return null;
+        return { padLeftPx: px, textIndentPx: -px };
+      }
+
+      if (ul.kind === 'cont'){
+        if (!Number.isFinite(ul.contentIndentCol)) return null;
+        let cols = 0;
+        try{
+          const idx = _mdCharIndexForIndentCols(s, ul.contentIndentCol|0);
+          cols = _visualWidthUpToLine(s, idx|0)|0;
+        }catch{ cols = Math.max(0, ul.contentIndentCol|0); }
+        const px = Math.max(0, (cols|0) * ch);
+        if (!(px > 0.5)) return null;
+        return { padLeftPx: px, textIndentPx: -px };
       }
 
       return null;
@@ -2832,24 +2918,36 @@ try{
         }
 
         // List hanging indent (md-rich+wrap): keep leading indent; hang only marker-width.
-        // NOTE: During IME composition, skip indent probing (it calls DOM measurement and is expensive).
+        // IME composing: avoid per-row DOM probes, but keep indentation via a cheap approximation.
         let indentOpts = null;
-        if (!isCodeRow && !isFenceRow && wrapOn && hideSymbols && listInfoDisp && !imeComp){
-          // #1752: Ordered-list markers were being shifted/clipped by hanging-indent math under WebView2.
-          // Keep hanging-indent for unordered lists only.
-          const lt = (listInfoDisp && listInfoDisp.listType) ? String(listInfoDisp.listType||'') : '';
-          if (lt !== 'ol'){
+        let imeVisCols = null;
+        if (!isCodeRow && !isFenceRow && wrapOn && hideSymbols && listInfoDisp){
+          if (imeComp){
+            try{
+              const sc = (baseFontPx>0) ? (fs / baseFontPx) : 1;
+              const chPx = Math.max(1, (imeChPxBase||10) * (Number.isFinite(sc) ? sc : 1));
+              // Only matters when the line actually wraps.
+              try{ imeVisCols = _visualWidthUpToLine(String(text||''), (String(text||'').length|0))|0; }catch{ imeVisCols = null; }
+              let needsWrap = true;
+              try{
+                const wEffPx = (+wPx||0);
+                const colsPerLine = Math.max(1, Math.floor((wEffPx|0) / (chPx||1)));
+                needsWrap = (imeVisCols != null) ? ((imeVisCols|0) > (colsPerLine|0)) : true;
+              }catch{ needsWrap = true; }
+              if (needsWrap) indentOpts = _mdIndentOptsForListLineApprox(text, listInfoDisp, chPx);
+            }catch{ indentOpts = null; }
+          } else {
             try{ indentOpts = _mdIndentOptsForListLine(text, listInfoDisp, (+wPx||0), fs|0, lh|0); }catch{ indentOpts = null; }
           }
         }
         // NOTE: WebView2 can visually clip/overlap the first few characters when using
         // padding-left + negative text-indent together with inline-flex list markers.
-        // For UL list items (marker is replaced with .md-ulbox), emulate hanging-indent
-        // without text-indent by inserting a 0-width negative-margin span at line start.
+        // Emulate hanging-indent without text-indent by inserting a 0-width negative-margin span at line start.
+        // This avoids occasional clipping/overlap in some engines.
         let ulHangHackPx = 0;
         try{
           const lt2 = (listInfoDisp && listInfoDisp.listType) ? String(listInfoDisp.listType||'') : '';
-          if (indentOpts && lt2 === 'ul' && listItemDisp && Number.isFinite(indentOpts.padLeftPx) && (indentOpts.padLeftPx||0) > 0.5){
+          if (indentOpts && (lt2 === 'ul' || lt2 === 'ol') && listItemDisp && Number.isFinite(indentOpts.padLeftPx) && (indentOpts.padLeftPx||0) > 0.5){
             ulHangHackPx = (+indentOpts.padLeftPx||0);
           }
         }catch{ ulHangHackPx = 0; }
@@ -2896,7 +2994,7 @@ try{
             const disp = String(text||'');
             if (imeComp){
               // Cheap approximation in monospace columns.
-              const visCols = _visualWidthUpToLine(disp, (disp.length|0))|0;
+              const visCols = (imeVisCols != null) ? (imeVisCols|0) : (_visualWidthUpToLine(disp, (disp.length|0))|0);
               const sc = (baseFontPx>0) ? (fs / baseFontPx) : 1;
               const chPx = Math.max(1, (imeChPxBase||10) * (Number.isFinite(sc) ? sc : 1));
               let wEffPx = (+wPx||0);
@@ -11278,8 +11376,7 @@ try{
               const hide = !!(_mdHideSymbolsForRow && _mdHideSymbolsForRow(!!isActiveRow));
               if (hide){
                 const ul = ulDisp || ulSrc || (_mdUListInfo && _mdUListInfo(line, idx|0, lines));
-                const lt = (ul && ul.listType) ? String(ul.listType||'') : '';
-                if (ul && lt !== 'ol') indentOpts = _mdIndentOptsForListLine(dispLine, ul, wPx|0, fs|0, rowHeightPx|0);
+                if (ul) indentOpts = _mdIndentOptsForListLine(dispLine, ul, wPx|0, fs|0, rowHeightPx|0);
               }
             }catch{ indentOpts = null; }
 
@@ -17112,8 +17209,7 @@ try{
                   }
                 }
               }catch{}
-              const lt = (ulForProbe && ulForProbe.listType) ? String(ulForProbe.listType||'') : '';
-              if (ulForProbe && lt !== 'ol') indentOpts = _mdIndentOptsForListLine(dispForProbe, ulForProbe, wPx|0, _mdCaretFontSizePx|0, _mdCaretLineHeightPx|0);
+              if (ulForProbe) indentOpts = _mdIndentOptsForListLine(dispForProbe, ulForProbe, wPx|0, _mdCaretFontSizePx|0, _mdCaretLineHeightPx|0);
             }
           }catch{ indentOpts = null; }
           // Code block padding: left 0.5ch + padding 0.5ch, right 12ch + padding 0.5ch.
@@ -17589,8 +17685,7 @@ try{
               const lines2 = _splitLines();
               const src = String(lines2[caretRow|0]||'');
               const ul = _mdUListInfo && _mdUListInfo(src, caretRow|0, lines2);
-              const lt = (ul && ul.listType) ? String(ul.listType||'') : '';
-              if (ul && lt !== 'ol') indentOpts = _mdIndentOptsForListLine(String(line||''), ul, wPx|0, (_mdCaretFontSizePx||Math.max(6, Math.round(FONT_SIZE)))|0, (_mdCaretLineHeightPx||LINE_HEIGHT)|0);
+              if (ul) indentOpts = _mdIndentOptsForListLine(String(line||''), ul, wPx|0, (_mdCaretFontSizePx||Math.max(6, Math.round(FONT_SIZE)))|0, (_mdCaretLineHeightPx||LINE_HEIGHT)|0);
             }
           }
         }catch{ indentOpts = null; }
@@ -27409,8 +27504,7 @@ try{
           try{
             if (wrapOn && hideSymbols && !isCodeRow){
               const ul0 = ulDisp || ulSrc || (_mdUListInfo && _mdUListInfo(srcText, r0|0, lines));
-              const lt = (ul0 && ul0.listType) ? String(ul0.listType||'') : '';
-              if (ul0 && lt !== 'ol') indentOpts = _mdIndentOptsForListLine(dispText, ul0, wPx|0, fs|0, lh|0);
+              if (ul0) indentOpts = _mdIndentOptsForListLine(dispText, ul0, wPx|0, fs|0, lh|0);
             }
           }catch{ indentOpts = null; }
 
