@@ -105,6 +105,24 @@ body { font: var(--fontBase, 18px)/20px Consolas, 'Courier New', monospace; over
 	box-shadow: 0 0 0 2px rgba(230,230,230,0.22);
 }
 
+/* :e file popup is open: visually mask and disable CMD history button */
+#cmdfloat #cmdHistBtn.six-masked {
+	position: relative;
+	overflow: hidden;
+}
+#cmdfloat #cmdHistBtn.six-masked::after {
+	content: '';
+	position: absolute;
+	inset: 0;
+	border-radius: 6px;
+	pointer-events: none;
+	background: rgba(255, 255, 255, 0.10);
+}
+#cmdfloat #cmdHistBtn:disabled {
+	opacity: 0.92;
+	cursor: default;
+}
+
 #pane { position: absolute; top: 2.25rem; bottom: 0; left: 0; right: 0; display:flex; }
 #editorViewport {
 	position: relative;

@@ -6040,10 +6040,12 @@ try{
   let _skipPersistOnUnloadOnce = false; // suppress one-time session persist at unload
   let _suppressPersistOnQuit = false;   // do not rewrite session on this quit path
 
-  // Global theme profile (shared by all buffers)
+  // Theme profile (buffer-local)
   // - 'basic': read from window.THEME only (missing => yellow)
   // - 'ex1'  : for ALL theme keys, read from window.EX1_THEME then fall back to window.THEME (missing => yellow)
-  let _themeName = 'basic';
+  // Each buffer carries b.theme. When no buffer is active, fall back to _defaultThemeName.
+  let _defaultThemeName = 'basic';
+  let _lastAppliedThemeName = null;
 
   function _normalizeThemeName(v){
     try{
@@ -6064,10 +6066,34 @@ try{
     return undefined;
   }
 
+  function _themeNameOfBuffer(b){
+    try{
+      const v = (b && (b.theme != null ? b.theme : (b.themeName != null ? b.themeName : null)));
+      return _normalizeThemeName(v) || _normalizeThemeName(_defaultThemeName) || 'basic';
+    }catch{ return _normalizeThemeName(_defaultThemeName) || 'basic'; }
+  }
+
+  function _currentThemeName(){
+    try{
+      const b = (typeof currentBuffer === 'function') ? currentBuffer() : null;
+      return _themeNameOfBuffer(b);
+    }catch{ return _normalizeThemeName(_defaultThemeName) || 'basic'; }
+  }
+
+  function _applyThemeIfNeeded(opts){
+    try{
+      const force = !!(opts && opts.force);
+      const n = _currentThemeName();
+      if (!force && _lastAppliedThemeName === n) return;
+      _lastAppliedThemeName = n;
+      _applyTheme();
+    }catch{ try{ _applyTheme(); }catch{} }
+  }
+
   function _themeTryGet(key){
     try{
       const base = (window && window.THEME) ? window.THEME : {};
-      const mode = (_themeName === 'ex1') ? 'ex1' : 'basic';
+      const mode = (_currentThemeName() === 'ex1') ? 'ex1' : 'basic';
       if (mode === 'ex1'){
         const ex1 = (window && window.EX1_THEME) ? window.EX1_THEME : {};
         let v = _themeGetRawFrom(ex1, key);
@@ -6117,8 +6143,24 @@ try{
     try{
       const n = _normalizeThemeName(name);
       if (!n) return false;
-      if (_themeName === n) return true;
-      _themeName = n;
+      let changed = false;
+      try{
+        const b = (typeof currentBuffer === 'function') ? currentBuffer() : null;
+        if (b){
+          const cur = _themeNameOfBuffer(b);
+          if (cur === n) return true;
+          b.theme = n;
+          changed = true;
+        } else {
+          const curD = _normalizeThemeName(_defaultThemeName) || 'basic';
+          if (curD === n) return true;
+          _defaultThemeName = n;
+          changed = true;
+        }
+      }catch{}
+      if (!changed) return true;
+
+      try{ _lastAppliedThemeName = null; }catch{}
       try{ _applyTheme(); }catch{}
       try{ _applyCaretGradient && _applyCaretGradient(); }catch{}
       try{ _repositionCaret && _repositionCaret(); }catch{}
@@ -6527,6 +6569,7 @@ try{
         md_draftedit: (typeof b.md_draftedit === 'boolean') ? !!b.md_draftedit : true,
         setext: !!b.setext,
         wrap: !!b.wrap,
+        theme: _normalizeThemeName(b && b.theme) || 'basic',
     undo: undoArr,
     extMtime: (typeof b._extMtime === 'number') ? b._extMtime : null,
     extSize: (typeof b._extSize === 'number') ? b._extSize : null,
@@ -6536,7 +6579,7 @@ try{
       const payload = {
         version: 1,
         when: Date.now(),
-        theme: (_themeName === 'ex1') ? 'ex1' : 'basic',
+        theme: (_currentThemeName() === 'ex1') ? 'ex1' : 'basic',
         active: Math.max(0, Math.min((buffers.length?buffers.length-1:0), currentIdx|0)),
         buffers: bufs,
         scrolloff: Number.isFinite(scrolloff) ? (scrolloff|0) : 3,
@@ -6694,12 +6737,14 @@ try{
         }
       }catch{ scrolloff = 3; }
 
-      // Restore global theme profile (basic/ex1) (#1499)
+      // Resolve session-default theme profile (basic/ex1). Actual theme is buffer-local.
+      let sessionDefaultThemeName = 'basic';
       try{
         const tn = (j && typeof j.theme === 'string') ? j.theme : null;
-        const nn = _normalizeThemeName(tn) || 'basic';
-        _setThemeName(nn, { persist:false });
-      }catch{}
+        sessionDefaultThemeName = _normalizeThemeName(tn) || _normalizeThemeName(_defaultThemeName) || 'basic';
+        _defaultThemeName = sessionDefaultThemeName;
+        _lastAppliedThemeName = null;
+      }catch{ sessionDefaultThemeName = _normalizeThemeName(_defaultThemeName) || 'basic'; }
 
       // Restore md_autoIncrement (global, all buffers) (#1768)
       // If the session does not include it (older sessions), adopt SIX_OPTIONS.md_autoIncrement (or false).
@@ -6801,8 +6846,9 @@ try{
         const md_draftedit = (it && typeof it.md_draftedit === 'boolean') ? !!it.md_draftedit : true;
         const setext = !!(it && it.setext);
         const wrap = !!(it && it.wrap);
+        const theme = (function(){ try{ return _normalizeThemeName(it && it.theme) || sessionDefaultThemeName || 'basic'; }catch{ return sessionDefaultThemeName || 'basic'; } })();
         const edScale = Number.isFinite(it && it.edScale) ? _nearestScale(it.edScale) : 1;
-        _addBuffer({ name, path, text, modified, enc, ff, bom, shiftwidth, list, ignorecase, smartcase, markdown, md_draftedit, setext, wrap, edScale });
+        _addBuffer({ name, path, text, modified, enc, ff, bom, shiftwidth, list, ignorecase, smartcase, markdown, md_draftedit, setext, wrap, edScale, theme });
         try{
           const b = buffers[buffers.length-1];
           // If savedText is provided, trust it; otherwise, if not modified, set savedText=text
@@ -12598,6 +12644,17 @@ try{
       else _cmdHistPopupShow();
     }catch{}
   }
+
+  function _updateCmdHistBtnMaskForFilePopup(){
+    try{
+      const btn = _cmdHistPopupBtn || document.getElementById('cmdHistBtn');
+      if (!btn) return;
+      const masked = (typeof _filePopupVisible === 'function') ? !!_filePopupVisible() : false;
+      try{ btn.classList && btn.classList.toggle('six-masked', !!masked); }catch{}
+      try{ btn.disabled = !!masked; }catch{}
+    }catch{}
+  }
+
   function _cmdHistPopupEnsureButton(){
     try{
       if (!cmdfloat) return;
@@ -12605,6 +12662,7 @@ try{
       if (existing){
         _cmdHistPopupBtn = existing;
         try{ existing.style.display = ''; }catch{}
+        try{ _updateCmdHistBtnMaskForFilePopup(); }catch{}
         return;
       }
       const btn = document.createElement('button');
@@ -12615,6 +12673,7 @@ try{
       btn.addEventListener('click', (e)=>{ try{ e.preventDefault(); e.stopPropagation(); }catch{}; try{ _histPopupToggleForCmdInput && _histPopupToggleForCmdInput(); }catch{}; try{ cmdinput && cmdinput.focus && cmdinput.focus({preventScroll:true}); }catch{} }, true);
       cmdfloat.appendChild(btn);
       _cmdHistPopupBtn = btn;
+      try{ _updateCmdHistBtnMaskForFilePopup(); }catch{}
     }catch{}
   }
 
@@ -15215,8 +15274,8 @@ try{
   // Command input colors
   setVar('cmdInputFg', themeGet('cmdInputFg', t.cmdInputFg));
   setVar('cmdInputBg', themeGet('cmdInputBg', t.cmdInputBg));
-      const _gkS = (_themeName === 'ex1') ? 'inactiveGutterGradientStart' : 'gutterGradientStart';
-      const _gkE = (_themeName === 'ex1') ? 'inactiveGutterGradientEnd' : 'gutterGradientEnd';
+      const _gkS = (_currentThemeName() === 'ex1') ? 'inactiveGutterGradientStart' : 'gutterGradientStart';
+      const _gkE = (_currentThemeName() === 'ex1') ? 'inactiveGutterGradientEnd' : 'gutterGradientEnd';
       setVar('gutterGradientStart', themeGet(_gkS, t.gutterGradientStart));
       setVar('gutterGradientEnd', themeGet(_gkE, t.gutterGradientEnd));
       setVar('gutterNumberColor', themeGet('gutterNumberColor', t.gutterNumberColor));
@@ -15469,6 +15528,10 @@ try{
         setext: !!b.setext,
         // per-buffer wrap (visual only; default OFF) (#1508)
         wrap: !!b.wrap,
+        // per-buffer theme profile (basic/ex1) (#1912)
+        theme: (function(){
+          try{ return _normalizeThemeName(b && b.theme) || _normalizeThemeName(b && b.themeName) || _themeNameOfBuffer((typeof currentBuffer==='function') ? currentBuffer() : null); }catch{ return _normalizeThemeName(_defaultThemeName) || 'basic'; }
+        })(),
         // original final newline presence (established on initial load/create) — #598
         _origHadFinalLF: text0.endsWith('\n'),
         // encoding/newline metadata
@@ -15600,6 +15663,9 @@ try{
       // Apply per-buffer 'list' (control chars) option immediately (#1769)
       try{ _syncListOptFromBuffer(); }catch{}
       try{ _updateOverlayListVisual && _updateOverlayListVisual(); }catch{}
+      // Apply buffer-local theme profile on switch (#1912)
+      try{ _applyThemeIfNeeded && _applyThemeIfNeeded(); }catch{}
+      try{ _updateOverlayThemeVisual && _updateOverlayThemeVisual(); }catch{}
       // 3) Load text into editor
       editor.value = String(b.text||'');
       // Ensure listchars layer matches current list option (clear when off)
@@ -23183,7 +23249,7 @@ try{
     }
     // :set theme?
     if (/^:set\s+theme\?\s*$/i.test(cmd)){
-      try{ toast('theme = ' + ((_themeName === 'ex1') ? 'ex1' : 'basic'), 1200); }catch{}
+      try{ toast('theme = ' + (_currentThemeName() === 'ex1' ? 'ex1' : 'basic'), 1200); }catch{}
       return;
     }
     // :set visualbell / :set novisualbell / :set visualbell! / :set visualbell?
@@ -39125,6 +39191,7 @@ try{
     bufpopup.dataset.kind='file';
     bufpopup.style.display='';
     _layoutBufPopup();
+    try{ _updateCmdHistBtnMaskForFilePopup(); }catch{}
     // 相対モード判定（空の :e で開いた場合）と基点設定
     try{
       const vRaw = (cmdinput && cmdinput.value)||'';
@@ -39175,8 +39242,9 @@ try{
     }catch{}
     // 同期列挙完了済みなら即適用試行
     try{ _filePopupApplyInitialUpPrefill(); }catch{}
+    try{ _updateCmdHistBtnMaskForFilePopup(); }catch{}
   }
-  function _filePopupHide(){ if (!bufpopup) return; if (_filePopupVisible()){ bufpopup.style.display='none'; _fileLoading=false; try{ _fileReflectedOnOpen=false; }catch{} try{ window.__sixFileRendering=false; }catch{} } }
+  function _filePopupHide(){ if (!bufpopup) return; if (_filePopupVisible()){ bufpopup.style.display='none'; _fileLoading=false; try{ _fileReflectedOnOpen=false; }catch{} try{ window.__sixFileRendering=false; }catch{} } try{ _updateCmdHistBtnMaskForFilePopup(); }catch{} }
   // 旧: 一覧の単純移動は廃止（反映ロジック付きの新実装は下）
   // ↑↓で選択を動かしたときは、即座に入力欄へ反映（末尾 '/' なし、".." は例外で反映しない）
   function _filePopupMove(d){
@@ -39934,17 +40002,17 @@ try{
         try{ if (lastFocusedEl && typeof lastFocusedEl.focus === 'function'){ lastFocusedEl.focus(); } }catch{}
       });
 
-      // 清書カラーボタン（右下パレット：グローバル、theme=basic/ex1）
+      // 清書カラーボタン（右上パレット：バッファ毎、theme=basic/ex1）
       const themeBtn = document.createElement('button');
       themeBtn.type = 'button';
       themeBtn.id = 'overlayBtnTheme';
-      // Narrower than other 2-pill buttons (#1500+)
-      themeBtn.style.minWidth = '92px';
+      // Match other 2-pill buttons in top-right palette (markdown/list/wrap)
+      themeBtn.style.minWidth = '100px';
       themeBtn.style.border = '1px solid #2a3244';
       themeBtn.style.background = '#1a2030';
       themeBtn.style.color = '#e6e6e6';
       themeBtn.style.borderRadius = '6px';
-      themeBtn.style.padding = '4px 1px';
+      themeBtn.style.padding = '4px 3px';
       themeBtn.style.cursor = 'pointer';
       themeBtn.style.font = "12px/1.25 system-ui, -apple-system, 'Segoe UI', sans-serif";
       themeBtn.style.opacity = '0.92';
@@ -39964,12 +40032,9 @@ try{
       const themeLine = document.createElement('div');
       themeLine.style.display = 'flex';
       themeLine.style.justifyContent = 'center';
-      themeLine.style.gap = '3px';
+      themeLine.style.gap = '6px';
       const themeOff = pillBase('OFF', 'overlayBtnTheme_off');
       const themeOn  = pillBase('ON',  'overlayBtnTheme_on');
-      // Tighten pills to reduce overall button width.
-      try{ themeOff.style.padding = '1px 5px'; themeOn.style.padding = '1px 5px'; }catch{}
-      try{ themeOff.style.fontSize = '10px'; themeOn.style.fontSize = '10px'; }catch{}
       themeLine.appendChild(themeOff);
       themeLine.appendChild(themeOn);
       themeWrap.appendChild(themeTitle);
@@ -39978,7 +40043,7 @@ try{
       themeBtn.addEventListener('click', (e)=>{
         try{ e.preventDefault(); e.stopPropagation(); }catch{}
         try{
-          const next = (_themeName === 'ex1') ? 'basic' : 'ex1';
+          const next = (_currentThemeName() === 'ex1') ? 'basic' : 'ex1';
           _setThemeName(next);
           try{ toast('theme = ' + next, 900); }catch{}
         }catch{}
@@ -40024,12 +40089,13 @@ try{
       gridBR.style.gridTemplateColumns = 'auto auto auto';
       gridBR.style.columnGap = '4px';
       gridBR.style.rowGap = '4px';
-      // Row0: [empty][empty][theme]
+      // Row0: [empty][empty][empty]
       const empty00 = document.createElement('div');
       const empty01 = document.createElement('div');
+      const empty02 = document.createElement('div');
       gridBR.appendChild(empty00);
       gridBR.appendChild(empty01);
-      gridBR.appendChild(themeBtn);
+      gridBR.appendChild(empty02);
       // Row1: [empty][list][quit]
       const emptyTL = document.createElement('div');
       gridBR.appendChild(emptyTL);   // top-left empty
@@ -40374,6 +40440,8 @@ try{
         try{ const b = currentBuffer(); toast('wrap: ' + (b&&b.wrap?'on':'off'), 900); }catch{}
         try{ if (lastFocusedEl && typeof lastFocusedEl.focus === 'function'){ lastFocusedEl.focus(); } }catch{}
       });
+      // Place theme toggle just above wrap (right-top palette)
+      palTR.appendChild(themeBtn);
       palTR.appendChild(wrapBtn);
 
   // initialize visual state for hlsearch & list pills
@@ -40605,7 +40673,7 @@ try{
     }catch{}
   }
 
-  // Reflect current global theme profile to overlay theme button
+  // Reflect current buffer-local theme profile to overlay theme button
   function _updateOverlayThemeVisual(){
     try{
       const off = document.getElementById('overlayBtnTheme_off');
@@ -40617,7 +40685,7 @@ try{
       on.style.background  = 'transparent';
       off.style.color = '#e6e6e6';
       on .style.color = '#e6e6e6';
-      const isEx1 = (_themeName === 'ex1');
+      const isEx1 = (_currentThemeName() === 'ex1');
       if (isEx1){
         on.style.background = green; on.style.color = '#000';
       } else {
@@ -40735,10 +40803,14 @@ try{
       if (!off || !on) return;
       const gray = '#9aa0aa';
       const green = '#49e26f';
+      const baseBorder = '#2a3244';
+      const mutedText = '#a0a0a0';
       off.style.background = 'transparent';
       on.style.background  = 'transparent';
       off.style.color = '#e6e6e6';
       on .style.color = '#e6e6e6';
+      try{ off.style.borderColor = baseBorder; }catch{}
+      try{ on.style.borderColor = baseBorder; }catch{}
       const b = currentBuffer();
       const md = !!(b && b.markdown);
       const w = md ? true : !!(b && b.wrap);
@@ -40775,8 +40847,10 @@ try{
       }catch{}
 
       if (md){
-        // In markdown-on, wrap is forced on; show it as "on" but with muted (markdown-OFF-like) color.
-        on.style.background = gray; on.style.color = '#000';
+        // In markdown-on, wrap is forced on; show outline-only (no fill).
+        try{ on.style.background = 'transparent'; }catch{}
+        try{ on.style.borderColor = gray; }catch{}
+        try{ on.style.color = mutedText; }catch{}
       } else if (w){
         on.style.background = green; on.style.color = '#000';
       } else {
