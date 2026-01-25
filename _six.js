@@ -282,6 +282,43 @@ try{
     try{ return _mdInlineCodeHtmlWithRange(s, null, 0, 0); }catch{ return _mdEscHtml(String(s||'')); }
   }
 
+  // Inline-code span helper for link hit-testing suppression (#1936)
+  let _mdInlineCodeSpanCacheLine = null;
+  let _mdInlineCodeSpanCacheSpans = null;
+  function _mdInlineCodeSpansForLine(line){
+    try{
+      const s = String(line||'');
+      if (!s || s.indexOf('`') < 0 || typeof _mdInlineCodeParse !== 'function') return [];
+      if (_mdInlineCodeSpanCacheLine === s && Array.isArray(_mdInlineCodeSpanCacheSpans)) return _mdInlineCodeSpanCacheSpans;
+      const segs = _mdInlineCodeParse(s);
+      const spans = [];
+      const n = (s.length|0);
+      for (const it of (segs||[])){
+        if (it && it.t === 'code' && Number.isFinite(it.a) && Number.isFinite(it.b)){
+          const a = Math.max(0, Math.min(n|0, it.a|0));
+          const b = Math.max(a|0, Math.min(n|0, it.b|0));
+          if ((b|0) > (a|0)) spans.push({ a:(a|0), b:(b|0) }); // [a,b)
+        }
+      }
+      _mdInlineCodeSpanCacheLine = s;
+      _mdInlineCodeSpanCacheSpans = spans;
+      return spans;
+    }catch{ return []; }
+  }
+  function _mdInlineCodeOverlaps(line, a0, b0){
+    try{
+      const spans = _mdInlineCodeSpansForLine(line);
+      if (!spans || !spans.length) return false;
+      const a = Math.max(0, a0|0);
+      const b = Math.max(a|0, b0|0);
+      for (const sp of spans){
+        const sa = sp.a|0, sb = sp.b|0;
+        if ((a|0) < (sb|0) && (b|0) > (sa|0)) return true;
+      }
+      return false;
+    }catch{ return false; }
+  }
+
   // --- Markdown inline links (GFM-ish): [text](url "title") (#1825/#1826/#1827)
   function _mdInlineLinkScan(s){
     // Returns array of { lb, rb, rp, textStart, textEnd, url, tooltip }
@@ -398,7 +435,46 @@ try{
     try{
       const src = String(s||'');
       const n = src.length|0;
-      const links0 = _mdInlineLinkScan(src);
+      let links0 = _mdInlineLinkScan(src);
+      // #1922: Keep caret/wrap mapping consistent with HTML renderer:
+      // do NOT collapse inline links that overlap inline code spans.
+      try{
+        if (links0 && links0.length && src.indexOf('`') >= 0 && typeof _mdInlineCodeParse === 'function'){
+          const segs = _mdInlineCodeParse(src);
+          if (segs && segs.length){
+            const codeSpans = [];
+            for (const it of segs){
+              if (it && it.t === 'code' && Number.isFinite(it.a) && Number.isFinite(it.b)){
+                const a = Math.max(0, Math.min(n|0, it.a|0));
+                const b = Math.max(a, Math.min(n|0, it.b|0));
+                if (b > a) codeSpans.push({ a, b });
+              }
+            }
+            if (codeSpans.length){
+              const overlaps = (a0, b0)=>{
+                try{
+                  const a = Math.max(0, a0|0);
+                  const b = Math.max(a, b0|0);
+                  for (const sp of codeSpans){
+                    const sa = sp.a|0, sb = sp.b|0;
+                    if (a < sb && b > sa) return true;
+                  }
+                }catch{}
+                return false;
+              };
+              links0 = links0.filter((lk)=>{
+                try{
+                  if (!lk) return false;
+                  const lb = (lk.lb|0);
+                  const rp1 = ((lk.rp|0) + 1)|0;
+                  if (rp1 <= lb) return false;
+                  return !overlaps(lb|0, rp1|0);
+                }catch{ return true; }
+              });
+            }
+          }
+        }
+      }catch{}
       if (!links0 || !links0.length) return { dispText: src, links: [], srcToDisp:(c)=>Math.max(0, Math.min(n|0, c|0)), dispToSrc:(c)=>Math.max(0, Math.min(n|0, c|0)) };
 
       let removed = 0;
@@ -657,8 +733,49 @@ try{
       if (!src) return '';
       // Fast check
       if (src.indexOf('](') < 0 || src.indexOf('[') < 0) return null;
-      const links0 = _mdInlineLinkScan(src);
+      let links0 = _mdInlineLinkScan(src);
       if (!links0 || !links0.length) return null;
+
+      // #1919: Disable inline-link collapsing inside inline code spans.
+      // If a link overlaps any inline code span, ignore that link so inline code renderer can handle it.
+      try{
+        if (src.indexOf('`') >= 0 && typeof _mdInlineCodeParse === 'function'){
+          const segs = _mdInlineCodeParse(src);
+          if (segs && segs.length){
+            const codeSpans = [];
+            for (const it of segs){
+              if (it && it.t === 'code' && Number.isFinite(it.a) && Number.isFinite(it.b)){
+                const a = Math.max(0, Math.min(src.length|0, it.a|0));
+                const b = Math.max(a, Math.min(src.length|0, it.b|0));
+                if (b > a) codeSpans.push({ a, b });
+              }
+            }
+            if (codeSpans.length){
+              const overlaps = (a0, b0)=>{
+                try{
+                  const a = Math.max(0, a0|0);
+                  const b = Math.max(a, b0|0);
+                  for (const sp of codeSpans){
+                    const sa = sp.a|0, sb = sp.b|0;
+                    if (a < sb && b > sa) return true;
+                  }
+                }catch{}
+                return false;
+              };
+              links0 = links0.filter((lk)=>{
+                try{
+                  if (!lk) return false;
+                  const lb = (lk.lb|0);
+                  const rp1 = ((lk.rp|0) + 1)|0;
+                  if (rp1 <= lb) return false;
+                  return !overlaps(lb|0, rp1|0);
+                }catch{ return true; }
+              });
+              if (!links0.length) return null;
+            }
+          }
+        }
+      }catch{}
 
       const hasRange = !!(rangeClass && Number.isFinite(rangeStart) && Number.isFinite(rangeEnd));
       const rs = hasRange ? Math.max(0, Math.min(src.length|0, rangeStart|0)) : 0;
@@ -1315,12 +1432,12 @@ try{
   }
 
   function _mdClampCaretForCleanInlineLinks(){
-    // In md-rich clean (wysiwyg) display, inline links are visually collapsed: [text](url) -> text.
+    // In md-rich display, inline links are visually collapsed: [text](url "title") -> text.
     // Ensure the caret never rests in a removed (hidden) span (e.g., brackets/URL/title), by snapping
     // caretCol to a *visible* source column (inside the link text region).
     try{
-      if (!_mdWysiwygActive || !_mdWysiwygActive()) return false;
-      if (!(_mdHideSymbolsForRow && _mdHideSymbolsForRow(true))) return false;
+      if (!_mdRichActive || !_mdRichActive()) return false;
+
       const lines = _splitLinesRaw();
       if (!Array.isArray(lines) || lines.length===0) return false;
       const r = Math.max(0, Math.min((lines.length-1)|0, caretRow|0));
@@ -1349,6 +1466,977 @@ try{
       if ((out|0) !== (col0|0)) { caretCol = out|0; return true; }
       return false;
     }catch{ return false; }
+  }
+
+  // --- markdown inline-link URL bar (draft mode) ---
+  let _mdUrlBar = null;
+  let _mdUrlBarInput = null;
+  let _mdUrlBarOk = null;
+  let _mdUrlBarCancel = null;
+  let _mdUrlBarHotkey = null;
+  let _mdUrlBarChProbe = null;
+  let _mdUrlBarFocused = false;
+  let _mdUrlBarComposing = false;
+  let _mdUrlBarGlobalGuardInstalled = false;
+  let _mdUrlBarCtx = null; // { row, lp, rp1, span, caretRow0, caretCol0 }
+  let _mdUrlBarKeepSelUntil = 0;
+  let _mdUrlBarSnapToEndOnFocus = false;
+  let _mdUrlBarLastSelS = -1;
+  let _mdUrlBarLastSelE = -1;
+  let _mdUrlBarForceOpenOnce = false;
+  let _mdUrlBarPinnedOpen = false;
+
+  function _mdUrlBarForceOpenEdit(ctx, why){
+    try{
+      let c = ctx || null;
+      if (!c){
+        try{ c = (_mdUrlBarComputeCtx && _mdUrlBarComputeCtx()) || null; }catch{ c = null; }
+      }
+      if (!c) return false;
+
+      try{ _mdUrlBarEnsure && _mdUrlBarEnsure(); }catch{}
+      if (!_mdUrlBar || !_mdUrlBarInput) return false;
+
+      // Pin open so subsequent maybeUpdate(reposition) in clean mode won't revert to hint.
+      _mdUrlBarPinnedOpen = true;
+      _mdUrlBarCtx = c;
+
+      try{ _mdUrlBar.style.display = ''; }catch{}
+      try{ _mdUrlBar.dataset.hint = '0'; }catch{}
+      try{ _mdUrlBar.dataset.active = '1'; }catch{}
+
+      // Populate input when entering edit mode.
+      try{ _mdUrlBarInput.value = String(c.span||''); }catch{}
+
+      try{ _mdUrlBarReposition && _mdUrlBarReposition(); }catch{}
+      try{ _mdUrlBarSnapToEndOnFocus = true; }catch{}
+      try{ _mdUrlBarFocus && _mdUrlBarFocus(); }catch{}
+      try{ _mdUrlBarInput && _mdUrlBarInput.focus && _mdUrlBarInput.focus(); }catch{}
+      return true;
+    }catch{ return false; }
+  }
+
+  // #1931: Ctrl+E must work even in clean-mode hint state (before global guards exist).
+  (function(){
+    try{
+      if (window && window.__sixMdUrlBarCtrlECaptureOnce) return;
+      if (window) window.__sixMdUrlBarCtrlECaptureOnce = true;
+      const onCap = (e)=>{
+        try{
+          const ctrl = !!(e && (e.ctrlKey || e.metaKey));
+          const alt = !!(e && e.altKey);
+          if (!ctrl || alt) return;
+          const k = String((e && e.key) || '');
+          const c = String((e && e.code) || '');
+          const isE = (k === 'e' || k === 'E' || c === 'KeyE' || (k === 'Process' && c === 'KeyE'));
+          if (!isE) return;
+          if (!(_mdRichActive && _mdRichActive())) return;
+          const m = String(_mode||'');
+          if (!(m === 'INSERT' || m === 'NORMAL')) return;
+
+          // In clean display, caret can land in a visually-collapsed span (brackets/url/title).
+          // Clamp first so link hit-testing/URL bar ctx detection is stable.
+          try{ _mdClampCaretForCleanInlineLinks && _mdClampCaretForCleanInlineLinks(); }catch{}
+
+          // IMPORTANT: do not steal Ctrl+E unless caret is actually on an inline-link context.
+          // (Compute ctx first; INSERT can have selectionStart drift, so computeCtx has its own fallback.)
+          let _ctxDbg = null;
+          try{ _ctxDbg = (_mdUrlBarComputeCtx && _mdUrlBarComputeCtx()) || null; }catch{ _ctxDbg = null; }
+          try{
+            if (window && window.__sixDbgMdUrlBarOnce){
+              window.__sixDbgMdUrlBarOnce = false;
+              const payload = {
+                mode: String(_mode||''),
+                key: String((e&&e.key)||''), code: String((e&&e.code)||''),
+                ctrl: !!(e&&(e.ctrlKey||e.metaKey)), alt: !!(e&&e.altKey), meta: !!(e&&e.metaKey),
+                caretRow: (caretRow|0), caretCol: (caretCol|0),
+                selStart: (editor && typeof editor.selectionStart==='number') ? (editor.selectionStart|0) : null,
+                ctx: _ctxDbg,
+                barVisible: !!(_mdUrlBarVisible && _mdUrlBarVisible()),
+                barDisplay: (_mdUrlBar && _mdUrlBar.style) ? String(_mdUrlBar.style.display||'') : null,
+                barHint: (_mdUrlBar && _mdUrlBar.dataset) ? String(_mdUrlBar.dataset.hint||'') : null,
+                barActive: (_mdUrlBar && _mdUrlBar.dataset) ? String(_mdUrlBar.dataset.active||'') : null,
+              };
+              console.log('[six][md-urlbar][ctrl+e][cap]', payload);
+              try{ console.log('[six][md-urlbar][ctrl+e][cap.json] ' + JSON.stringify(payload)); }catch{}
+            }
+          }catch{}
+          if (!_ctxDbg) return;
+
+          try{ e.preventDefault(); e.stopImmediatePropagation(); e.stopPropagation(); }catch{}
+          try{ _mdUrlBarForceOpenOnce = true; }catch{}
+          try{ _mdUrlBarForceOpenEdit && _mdUrlBarForceOpenEdit(_ctxDbg, 'ctrl+e:capture'); }catch{}
+          return;
+        }catch{}
+      };
+      try{ window && window.addEventListener && window.addEventListener('keydown', onCap, true); }catch{}
+      try{ document && document.addEventListener && document.addEventListener('keydown', onCap, true); }catch{}
+    }catch{}
+  })();
+
+  function _mdUrlBarRememberSel(){
+    try{
+      const inp = _mdUrlBarInput;
+      if (!inp || typeof inp.value !== 'string') return;
+      const len = (String(inp.value||'').length|0);
+      const s0 = (typeof inp.selectionStart === 'number') ? (inp.selectionStart|0) : -1;
+      const e0 = (typeof inp.selectionEnd === 'number') ? (inp.selectionEnd|0) : -1;
+      if (s0 < 0 || e0 < 0) return;
+      const s = Math.max(0, Math.min(len|0, s0|0));
+      const e = Math.max(0, Math.min(len|0, e0|0));
+      _mdUrlBarLastSelS = s|0;
+      _mdUrlBarLastSelE = e|0;
+    }catch{}
+  }
+
+  // #1924: Esc must cancel URL bar even if other capture handlers exist.
+  // Install a very-early capture handler so Esc is not consumed by editor (INSERT->NORMAL) or overlays.
+  (function(){
+    try{
+      if (window && window.__sixMdUrlBarEscCaptureOnce) return;
+      if (window) window.__sixMdUrlBarEscCaptureOnce = true;
+      const onCap = (e)=>{
+        try{
+          if (!_mdUrlBar || !_mdUrlBar.style || _mdUrlBar.style.display === 'none') return;
+          const active = (_mdUrlBar.dataset && _mdUrlBar.dataset.active === '1') || _mdUrlBarHasFocus() || _mdUrlBarComposing;
+          if (!active) return;
+          const tgt = (e && e.target) ? e.target : null;
+          const isInBar = !!(tgt && (_mdUrlBar === tgt || (_mdUrlBar.contains && _mdUrlBar.contains(tgt))));
+          const k = String((e && e.key) || '');
+          const c = String((e && e.code) || '');
+          const kc = (typeof (e && e.keyCode) === 'number') ? (e.keyCode|0) : 0;
+          const esc = (typeof _isEsc === 'function') ? !!_isEsc(e) : (k === 'Escape' || k === 'Esc' || kc === 27 || c === 'Escape');
+          if (!esc) return;
+          try{ e.preventDefault(); e.stopImmediatePropagation(); e.stopPropagation(); }catch{}
+          try{ _mdUrlBarCancelEdit && _mdUrlBarCancelEdit(); }catch{}
+          return;
+        }catch{}
+      };
+      try{ window && window.addEventListener && window.addEventListener('keydown', onCap, true); }catch{}
+      try{ document && document.addEventListener && document.addEventListener('keydown', onCap, true); }catch{}
+    }catch{}
+  })();
+
+  // #1925: While URL bar is active in INSERT, ArrowLeft/Right can be consumed by editor (caret moves in text).
+  // Capture early and redirect nav keys to URL bar input if focus is outside the bar.
+  (function(){
+    try{
+      if (window && window.__sixMdUrlBarNavCaptureOnce) return;
+      if (window) window.__sixMdUrlBarNavCaptureOnce = true;
+      const onCap = (e)=>{
+        try{
+          if (!_mdUrlBar || !_mdUrlBar.style || _mdUrlBar.style.display === 'none') return;
+          const active = (_mdUrlBar.dataset && _mdUrlBar.dataset.active === '1') || _mdUrlBarHasFocus() || _mdUrlBarComposing;
+          if (!active) return;
+          const tgt = (e && e.target) ? e.target : null;
+          const isInBar = !!(tgt && (_mdUrlBar === tgt || (_mdUrlBar.contains && _mdUrlBar.contains(tgt))));
+          const k = String((e && e.key) || '');
+          const c = String((e && e.code) || '');
+          const kc = (typeof (e && e.keyCode) === 'number') ? (e.keyCode|0) : 0;
+          const isLeft = (k === 'ArrowLeft' || c === 'ArrowLeft' || kc === 37);
+          const isRight = (k === 'ArrowRight' || c === 'ArrowRight' || kc === 39);
+          const isHome = (k === 'Home' || c === 'Home' || kc === 36);
+          const isEnd = (k === 'End' || c === 'End' || kc === 35);
+          const isUp = (k === 'ArrowUp' || c === 'ArrowUp' || kc === 38);
+          const isDown = (k === 'ArrowDown' || c === 'ArrowDown' || kc === 40);
+          // Up/Down should do nothing while URL bar is active.
+          if (!(isLeft || isRight || isHome || isEnd || isUp || isDown)) return;
+
+          // Always consume these nav keys while URL bar is active.
+          // Even when the input has focus, other global/editor handlers may steal Left/Right/Home/End.
+          try{ e.preventDefault(); e.stopImmediatePropagation(); e.stopPropagation(); }catch{}
+
+          const fromOutside = !isInBar;
+          // Only focus when the event target is outside the bar. Focusing can (async) reset selection to end.
+          if (fromOutside){
+            // Prevent input's focus handler from snapping selection to EOL.
+            try{ _mdUrlBarKeepSelUntil = Date.now() + 220; }catch{}
+            try{ _mdUrlBarInput && _mdUrlBarInput.focus && _mdUrlBarInput.focus(); }catch{}
+          }
+          try{ if (_mdUrlBar) _mdUrlBar.dataset.active = '1'; }catch{}
+
+          const applyNav = ()=>{
+            try{
+              const inp = _mdUrlBarInput;
+              if (!inp || typeof inp.value !== 'string') return;
+              const val = String(inp.value||'');
+              const ss0 = (typeof inp.selectionStart==='number') ? (inp.selectionStart|0) : (val.length|0);
+              const se0 = (typeof inp.selectionEnd==='number') ? (inp.selectionEnd|0) : (ss0|0);
+              const ss = Math.max(0, Math.min(val.length|0, ss0|0));
+              const se = Math.max(0, Math.min(val.length|0, se0|0));
+
+              // Keep it simple: collapse selection and move caret.
+              if (isHome){ try{ inp.setSelectionRange(0, 0, 'backward'); }catch{} return; }
+              if (isEnd){ const p = (val.length|0); try{ inp.setSelectionRange(p, p, 'forward'); }catch{} return; }
+              if (isUp || isDown){ return; }
+              if (isLeft){
+                const base = (ss !== se) ? Math.min(ss, se) : ss;
+                const p = Math.max(0, (base-1)|0);
+                try{ inp.setSelectionRange(p, p, 'backward'); }catch{} return;
+                return;
+              }
+              if (isRight){
+                const base = (ss !== se) ? Math.max(ss, se) : ss;
+                const p = Math.max(0, Math.min((val.length|0), (base+1)|0));
+                try{ inp.setSelectionRange(p, p, 'forward'); }catch{} return;
+                return;
+              }
+            }catch{}
+            try{ _mdUrlBarRememberSel && _mdUrlBarRememberSel(); }catch{}
+          };
+
+          // If focus was outside the bar, focusing the input may (async) place the caret at end.
+          // Apply navigation after that settles so it doesn't snap back to EOL.
+          if (fromOutside){
+            try{ setTimeout(()=>{ try{ applyNav(); }catch{} }, 0); }catch{ try{ applyNav(); }catch{} }
+          } else {
+            try{ applyNav(); }catch{}
+          }
+        }catch{}
+      };
+      try{ window && window.addEventListener && window.addEventListener('keydown', onCap, true); }catch{}
+      try{ document && document.addEventListener && document.addEventListener('keydown', onCap, true); }catch{}
+    }catch{}
+  })();
+
+  function _mdUrlBarEnsure(){
+    try{
+      if (_mdUrlBar && _mdUrlBarInput) return;
+      const host = (caretLayer && caretLayer.appendChild) ? caretLayer : (document && document.body);
+      if (!host) return;
+      const bar = document.createElement('div');
+      bar.id = 'mdUrlBar';
+      bar.style.display = 'none';
+      bar.dataset.active = '0';
+      bar.dataset.pos = 'above';
+      bar.setAttribute('role', 'dialog');
+      bar.setAttribute('aria-label', 'inline link');
+
+      const hk = document.createElement('div');
+      hk.className = 'md-urlbar-hotkey';
+      hk.textContent = 'Ctrl+E';
+      hk.setAttribute('role', 'button');
+      hk.setAttribute('tabindex', '0');
+      hk.setAttribute('aria-label', 'focus URL bar');
+
+      const input = document.createElement('input');
+      input.type = 'text';
+      input.id = 'mdUrlBarInput';
+      input.autocomplete = 'off';
+      input.spellcheck = false;
+      input.autocapitalize = 'off';
+      input.autocorrect = 'off';
+      input.inputMode = 'text';
+
+      // Probe for 4ch margin (measured in this bar's font)
+      const chProbe = document.createElement('span');
+      chProbe.className = 'md-urlbar-chprobe';
+      chProbe.textContent = '0000';
+
+      const ok = document.createElement('div');
+      ok.className = 'md-urlbar-btn md-urlbar-ok';
+      ok.textContent = '確定 ↲';
+
+      const cancel = document.createElement('div');
+      cancel.className = 'md-urlbar-btn md-urlbar-cancel';
+      cancel.textContent = 'キャンセル Esc';
+
+      const actions = document.createElement('div');
+      actions.className = 'md-urlbar-actions';
+      actions.appendChild(ok);
+      actions.appendChild(cancel);
+
+      bar.appendChild(hk);
+      bar.appendChild(input);
+      bar.appendChild(actions);
+      bar.appendChild(chProbe);
+      host.appendChild(bar);
+
+      // Guard against duplicate firing (pointerdown+click etc) without permanently disabling buttons.
+      let _btnLockUntil = 0;
+      const _btnGuard = (fn)=>{
+        return (ev)=>{
+          try{
+            const now = Date.now();
+            if (now < (_btnLockUntil|0)) return;
+            _btnLockUntil = (now + 220)|0;
+            fn(ev);
+          }catch{}
+        };
+      };
+      const _okApply = _btnGuard(()=>{ try{ _mdUrlBarCommit && _mdUrlBarCommit(); }catch{} });
+      const _cancelApply = _btnGuard(()=>{ try{ _mdUrlBarCancelEdit && _mdUrlBarCancelEdit(); }catch{} });
+
+      // NOTE: hk must remain clickable every time (do NOT one-shot).
+      const _openApply = ()=>{
+        try{ _mdUrlBarForceOpenOnce = true; }catch{}
+        try{ _mdUrlBarForceOpenEdit && _mdUrlBarForceOpenEdit(null, 'hk'); }catch{}
+      };
+
+      // In clean mode, hk acts as the entrypoint: open bar + enter editing state.
+      try{ hk.addEventListener('pointerdown', (e)=>{ try{ e.preventDefault(); e.stopPropagation(); }catch{} _openApply(); }); }catch{}
+      hk.addEventListener('mousedown', (e)=>{ try{ e.preventDefault(); e.stopPropagation(); }catch{} _openApply(); });
+      hk.addEventListener('click', (e)=>{ try{ e.preventDefault(); e.stopPropagation(); }catch{} _openApply(); });
+      hk.addEventListener('keydown', (e)=>{ try{ if ((e && (e.key==='Enter' || e.key===' '))){ try{ e.preventDefault(); e.stopPropagation(); }catch{} _openApply(); } }catch{} });
+
+      try{ ok.addEventListener('pointerdown', (e)=>{ try{ e.preventDefault(); e.stopPropagation(); }catch{} _okApply(e); }); }catch{}
+      ok.addEventListener('mousedown', (e)=>{ try{ e.preventDefault(); e.stopPropagation(); }catch{} _okApply(e); });
+      ok.addEventListener('click', (e)=>{ try{ e.preventDefault(); e.stopPropagation(); }catch{} _okApply(e); });
+
+      try{ cancel.addEventListener('pointerdown', (e)=>{ try{ e.preventDefault(); e.stopPropagation(); }catch{} _cancelApply(e); }); }catch{}
+      cancel.addEventListener('mousedown', (e)=>{ try{ e.preventDefault(); e.stopPropagation(); }catch{} _cancelApply(e); });
+      cancel.addEventListener('click', (e)=>{ try{ e.preventDefault(); e.stopPropagation(); }catch{} _cancelApply(e); });
+
+      input.addEventListener('keydown', (e)=>{
+        try{
+          const k = String((e && e.key) || '');
+          const c = String((e && e.code) || '');
+          const kc = (typeof (e && e.keyCode) === 'number') ? (e.keyCode|0) : 0;
+          if (k === 'Enter'){
+            try{ e.preventDefault(); e.stopPropagation(); }catch{}
+            try{ _mdUrlBarCommit && _mdUrlBarCommit(); }catch{}
+            return;
+          }
+          const esc = (typeof _isEsc === 'function') ? !!_isEsc(e) : (k === 'Escape' || k === 'Esc' || kc === 27 || c === 'Escape');
+          if (esc){
+            try{ e.preventDefault(); e.stopPropagation(); }catch{}
+            try{ _mdUrlBarCancelEdit && _mdUrlBarCancelEdit(); }catch{}
+            return;
+          }
+          if (k === 'ArrowUp' || k === 'ArrowDown'){
+            // #1922: While editing URL bar, Up/Down should not affect editor nor scroll/caret.
+            try{ e.preventDefault(); e.stopPropagation(); }catch{}
+            return;
+          }
+        }catch{}
+      });
+
+      input.addEventListener('focus', ()=>{
+        try{ _mdUrlBarFocused = true; }catch{}
+        try{ if (_mdUrlBar) _mdUrlBar.dataset.active = '1'; }catch{}
+        try{
+          // If we are focusing due to an external nav key redirect (Home/End/Left/Right),
+          // keep the selection set by the redirect handler.
+          try{ if (Date.now() < (_mdUrlBarKeepSelUntil|0)) return; }catch{}
+          // IMPORTANT: do not force-caret-to-EOL on every focus. Focus can bounce in INSERT,
+          // and that would overwrite Home/Left navigation.
+          if (_mdUrlBarSnapToEndOnFocus){
+            const v = String((_mdUrlBarInput && _mdUrlBarInput.value) || '');
+            const p = (v.length|0);
+            _mdUrlBarInput && _mdUrlBarInput.setSelectionRange && _mdUrlBarInput.setSelectionRange(p, p);
+            try{ _mdUrlBarRememberSel && _mdUrlBarRememberSel(); }catch{}
+            _mdUrlBarSnapToEndOnFocus = false;
+          } else {
+            // Restore last known selection (if any) to survive focus bounce.
+            try{
+              const inp = _mdUrlBarInput;
+              if (inp && _mdUrlBarLastSelS >= 0 && _mdUrlBarLastSelE >= 0){
+                inp.setSelectionRange(_mdUrlBarLastSelS|0, _mdUrlBarLastSelE|0);
+              }
+            }catch{}
+          }
+        }catch{}
+      });
+      input.addEventListener('blur', ()=>{
+        try{ _mdUrlBarRememberSel && _mdUrlBarRememberSel(); }catch{}
+        try{ _mdUrlBarFocused = false; }catch{}
+        // Do NOT deactivate on blur; keep active until Esc/commit/cancel.
+      });
+      // Keep last selection for focus-bounce recovery.
+      try{ input.addEventListener('select', ()=>{ try{ _mdUrlBarRememberSel && _mdUrlBarRememberSel(); }catch{} }); }catch{}
+      try{ input.addEventListener('mouseup', ()=>{ try{ _mdUrlBarRememberSel && _mdUrlBarRememberSel(); }catch{} }); }catch{}
+      try{ input.addEventListener('keyup', ()=>{ try{ _mdUrlBarRememberSel && _mdUrlBarRememberSel(); }catch{} }); }catch{}
+      try{ input.addEventListener('input', ()=>{ try{ _mdUrlBarRememberSel && _mdUrlBarRememberSel(); }catch{} }); }catch{}
+      input.addEventListener('compositionstart', ()=>{ try{ _mdUrlBarComposing = true; _mdUrlBarFocused = true; if (_mdUrlBar) _mdUrlBar.dataset.active = '1'; }catch{} });
+      input.addEventListener('compositionend', ()=>{ try{ _mdUrlBarComposing = false; _mdUrlBarFocused = true; if (_mdUrlBar) _mdUrlBar.dataset.active = '1'; }catch{} });
+
+      // Global key guard: while URL bar is active, don't let keys leak to the editor (IME/mode switches/caret moves).
+      try{
+        if (!_mdUrlBarGlobalGuardInstalled && window && window.addEventListener){
+          _mdUrlBarGlobalGuardInstalled = true;
+          // Keep focus on URL bar while active (some code paths re-focus editor during INSERT).
+          window.addEventListener('focusin', (e)=>{
+            try{
+              if (!_mdUrlBar || _mdUrlBar.style.display === 'none') return;
+              const active = (_mdUrlBar.dataset && _mdUrlBar.dataset.active === '1') || _mdUrlBarHasFocus() || _mdUrlBarComposing;
+              if (!active) return;
+              const tgt = (e && e.target) ? e.target : null;
+              const isInBar = !!(tgt && (_mdUrlBar === tgt || (_mdUrlBar.contains && _mdUrlBar.contains(tgt))));
+              if (isInBar) return;
+              // If focus moved to editor (or elsewhere), pull it back.
+              try{ _mdUrlBarKeepSelUntil = Date.now() + 220; }catch{}
+              try{ _mdUrlBarInput && _mdUrlBarInput.focus && _mdUrlBarInput.focus(); }catch{}
+              try{ if (_mdUrlBar) _mdUrlBar.dataset.active = '1'; }catch{}
+            }catch{}
+          }, true);
+
+          window.addEventListener('keydown', (e)=>{
+            try{
+              if (!_mdUrlBar || _mdUrlBar.style.display === 'none') return;
+              const tgt = (e && e.target) ? e.target : null;
+              const isInBar = !!(tgt && (_mdUrlBar === tgt || (_mdUrlBar.contains && _mdUrlBar.contains(tgt))));
+              const k = String((e && e.key) || '');
+              const c = String((e && e.code) || '');
+              const kc = (typeof (e && e.keyCode) === 'number') ? (e.keyCode|0) : 0;
+              const ctrl = !!(e && (e.ctrlKey || e.metaKey));
+              const alt = !!(e && e.altKey);
+
+              // Ctrl+E always focuses URL bar when visible (even in INSERT).
+              if (ctrl && !alt){
+                const isE = (k === 'e' || k === 'E' || c === 'KeyE' || (k === 'Process' && c === 'KeyE'));
+                if (isE){
+                  try{ e.preventDefault(); e.stopPropagation(); e.stopImmediatePropagation(); }catch{}
+                  try{ _mdUrlBarForceOpenOnce = true; }catch{}
+                  // If bar is already visible (hint or full), force it into edit mode.
+                  try{ _mdUrlBarForceOpenEdit && _mdUrlBarForceOpenEdit(null, 'ctrl+e:global'); }catch{}
+                  return;
+                }
+              }
+
+              const active = (_mdUrlBar.dataset && _mdUrlBar.dataset.active === '1') || _mdUrlBarHasFocus() || _mdUrlBarComposing;
+              if (!active) return;
+
+              // Always allow Esc to close.
+              const esc = (typeof _isEsc === 'function') ? !!_isEsc(e) : (k === 'Escape' || k === 'Esc' || kc === 27 || c === 'Escape');
+              if (esc){
+                try{ e.preventDefault(); e.stopPropagation(); e.stopImmediatePropagation(); }catch{}
+                try{ _mdUrlBarCancelEdit && _mdUrlBarCancelEdit(); }catch{}
+                return;
+              }
+              // Let explicit shortcuts (Ctrl/Meta/Alt) pass through (tab switching/help etc).
+              if (ctrl || alt) return;
+              // While active, swallow ArrowUp/Down regardless of focus target.
+              if (k === 'ArrowUp' || k === 'ArrowDown'){
+                try{ e.preventDefault(); e.stopPropagation(); e.stopImmediatePropagation(); }catch{}
+                try{ if (!isInBar){ _mdUrlBarInput && _mdUrlBarInput.focus && _mdUrlBarInput.focus(); } }catch{}
+                return;
+              }
+              // If event is not targeting the bar, pull focus back and consume.
+              // Additionally, redirect simple editing keys to the URL bar so INSERT doesn't "eat" input.
+              if (!isInBar){
+                try{ e.preventDefault(); e.stopPropagation(); e.stopImmediatePropagation(); }catch{}
+                try{ _mdUrlBarKeepSelUntil = Date.now() + 220; }catch{}
+                try{ _mdUrlBarInput && _mdUrlBarInput.focus && _mdUrlBarInput.focus(); }catch{}
+                try{ if (_mdUrlBar) _mdUrlBar.dataset.active = '1'; }catch{}
+
+                try{
+                  const inp = _mdUrlBarInput;
+                  if (inp && typeof inp.value === 'string'){
+                    const val = String(inp.value||'');
+                    const ss0 = (typeof inp.selectionStart==='number') ? (inp.selectionStart|0) : (val.length|0);
+                    const se0 = (typeof inp.selectionEnd==='number') ? (inp.selectionEnd|0) : (ss0|0);
+                    const ss = Math.max(0, Math.min(val.length|0, ss0|0));
+                    const se = Math.max(0, Math.min(val.length|0, se0|0));
+
+                    const isPrintable = ((k && k.length===1) && !ctrl && !alt);
+                    if (isPrintable){
+                      const next = val.slice(0, ss) + k + val.slice(se);
+                      inp.value = next;
+                      const p = (ss + 1)|0;
+                      try{ inp.setSelectionRange(p, p); }catch{}
+                    } else if (k === 'Backspace'){
+                      if (ss !== se){
+                        const next = val.slice(0, ss) + val.slice(se);
+                        inp.value = next;
+                        try{ inp.setSelectionRange(ss, ss); }catch{}
+                      } else if (ss > 0){
+                        const next = val.slice(0, (ss-1)|0) + val.slice(ss);
+                        inp.value = next;
+                        const p = Math.max(0, (ss-1)|0);
+                        try{ inp.setSelectionRange(p, p); }catch{}
+                      }
+                    } else if (k === 'Delete'){
+                      if (ss !== se){
+                        const next = val.slice(0, ss) + val.slice(se);
+                        inp.value = next;
+                        try{ inp.setSelectionRange(ss, ss); }catch{}
+                      } else if (ss < (val.length|0)){
+                        const next = val.slice(0, ss) + val.slice((ss+1)|0);
+                        inp.value = next;
+                        try{ inp.setSelectionRange(ss, ss); }catch{}
+                      }
+                    } else if (k === 'Home'){
+                      try{ inp.setSelectionRange(0, 0); }catch{}
+                    } else if (k === 'End'){
+                      const p = (String(inp.value||'').length|0);
+                      try{ inp.setSelectionRange(p, p); }catch{}
+                    } else if (k === 'ArrowLeft'){
+                      const p = Math.max(0, (ss - 1)|0);
+                      try{ inp.setSelectionRange(p, p); }catch{}
+                    } else if (k === 'ArrowRight'){
+                      const p = Math.max(0, Math.min((val.length|0), (ss + 1)|0));
+                      try{ inp.setSelectionRange(p, p); }catch{}
+                    }
+                  }
+                }catch{}
+                return;
+              }
+            }catch{}
+          }, true);
+
+          // Prevent IME/beforeinput from inserting into the main editor while URL bar is active.
+          window.addEventListener('beforeinput', (e)=>{
+            try{
+              if (!_mdUrlBar || _mdUrlBar.style.display === 'none') return;
+              const active = (_mdUrlBar.dataset && _mdUrlBar.dataset.active === '1') || _mdUrlBarHasFocus() || _mdUrlBarComposing;
+              if (!active) return;
+              const tgt = (e && e.target) ? e.target : null;
+              if (tgt === editor){
+                try{ e.preventDefault(); e.stopPropagation(); e.stopImmediatePropagation(); }catch{}
+                try{ _mdUrlBarInput && _mdUrlBarInput.focus && _mdUrlBarInput.focus(); }catch{}
+              }
+            }catch{}
+          }, true);
+
+          // #1931: While URL bar is active, clicking inside the editor must NOT move caret.
+          // (Tabbar / overlay palette remain clickable because we only block events targeting editor.)
+          try{
+            const blockEditorMouse = (e)=>{
+              try{
+                if (!_mdUrlBar || _mdUrlBar.style.display === 'none') return;
+                const active = (_mdUrlBar.dataset && _mdUrlBar.dataset.active === '1') || _mdUrlBarHasFocus() || _mdUrlBarComposing;
+                if (!active) return;
+                try{ e.preventDefault(); e.stopImmediatePropagation(); e.stopPropagation(); }catch{}
+                try{ _mdUrlBarKeepSelUntil = Date.now() + 220; }catch{}
+                try{ _mdUrlBarInput && _mdUrlBarInput.focus && _mdUrlBarInput.focus(); }catch{}
+              }catch{}
+            };
+            editor && editor.addEventListener && editor.addEventListener('pointerdown', blockEditorMouse, true);
+            editor && editor.addEventListener && editor.addEventListener('pointerup', blockEditorMouse, true);
+            editor && editor.addEventListener && editor.addEventListener('mousedown', blockEditorMouse, true);
+            editor && editor.addEventListener && editor.addEventListener('mouseup', blockEditorMouse, true);
+            editor && editor.addEventListener && editor.addEventListener('click', blockEditorMouse, true);
+            editor && editor.addEventListener && editor.addEventListener('dblclick', blockEditorMouse, true);
+            editor && editor.addEventListener && editor.addEventListener('selectstart', blockEditorMouse, true);
+          }catch{}
+        }
+      }catch{}
+
+      _mdUrlBar = bar;
+      _mdUrlBarHotkey = hk;
+      _mdUrlBarInput = input;
+      _mdUrlBarOk = ok;
+      _mdUrlBarCancel = cancel;
+      _mdUrlBarChProbe = chProbe;
+    }catch{}
+  }
+  function _mdUrlBarVisible(){
+    try{ return !!(_mdUrlBar && _mdUrlBar.style && _mdUrlBar.style.display !== 'none'); }catch{ return false; }
+  }
+  function _mdUrlBarHasFocus(){
+    try{
+      if (_mdUrlBarFocused || _mdUrlBarComposing) return true;
+      return !!(_mdUrlBarInput && document && document.activeElement === _mdUrlBarInput);
+    }catch{ return false; }
+  }
+  function _mdUrlBarHide(reason){
+    try{
+      if (_mdUrlBar){ _mdUrlBar.style.display = 'none'; }
+      _mdUrlBarCtx = null;
+      try{ _mdUrlBarPinnedOpen = false; }catch{}
+      try{ _mdUrlBarForceOpenOnce = false; }catch{}
+      try{ if (_mdUrlBar) _mdUrlBar.dataset.active = '0'; }catch{}
+      try{ _mdUrlBarFocused = false; _mdUrlBarComposing = false; }catch{}
+    }catch{}
+  }
+  function _mdUrlBarCancelEdit(){
+    try{
+      const ctx = _mdUrlBarCtx;
+      _mdUrlBarHide('cancel');
+      if (ctx && Number.isFinite(ctx.caretRow0) && Number.isFinite(ctx.caretCol0)){
+        try{ _setCaret(ctx.caretRow0|0, ctx.caretCol0|0); }catch{}
+      }
+      try{ editor && editor.focus && editor.focus(); }catch{}
+    }catch{ try{ _mdUrlBarHide('cancel-fail'); }catch{} }
+  }
+  function _mdUrlBarReposition(){
+    try{
+      if (!_mdUrlBarVisible()) return;
+      if (!_mdUrlBar) return;
+      const caretEl = (caretLayer && caretLayer.querySelector) ? caretLayer.querySelector('.caret') : null;
+      const vr = (viewport && viewport.getBoundingClientRect) ? viewport.getBoundingClientRect() : null;
+      const hr = (caretLayer && caretLayer.getBoundingClientRect) ? caretLayer.getBoundingClientRect() : (vr||null);
+      const cr = (caretEl && caretEl.getBoundingClientRect) ? caretEl.getBoundingClientRect() : null;
+      if (!vr || !cr || !hr) return;
+
+      const vw = (vr.width||0);
+      const vh = (vr.height||0);
+      const hw = (hr.width||0);
+      const hh = (hr.height||0);
+
+      // Positioning is relative to caretLayer (bar host). Use host-rect space.
+      const yTopH = (cr.top - hr.top);
+      const yBotH = (cr.bottom - hr.top);
+
+      const hintOnly = !!(_mdUrlBar && _mdUrlBar.dataset && _mdUrlBar.dataset.hint === '1');
+      if (hintOnly){
+        // Hint-only: show only Ctrl+E badge near caret; keep container size minimal.
+        _mdUrlBar.style.width = '0px';
+        const x = (cr.left - hr.left);
+        const left2 = Math.max(0, Math.min((hw|0) - 1, Math.round((x|0) - 12)));
+        _mdUrlBar.style.left = (left2|0) + 'px';
+      } else {
+        // Full-width bar with 4ch horizontal margins (measured in bar font)
+        let pad = 32;
+        try{ if (_mdUrlBarChProbe && _mdUrlBarChProbe.getBoundingClientRect){ pad = Math.max(8, Math.round(_mdUrlBarChProbe.getBoundingClientRect().width||pad)); } }catch{}
+        const left = Math.max(0, Math.min((hw|0) - 8, pad|0));
+        const w = Math.max(120, (hw|0) - (left*2)|0);
+        _mdUrlBar.style.width = (w|0) + 'px';
+        _mdUrlBar.style.left = (left|0) + 'px';
+      }
+
+      // Position above/below based on caret vertical half
+      const preferAbove = ((yTopH|0) > (hh*0.52));
+      _mdUrlBar.dataset.pos = preferAbove ? 'above' : 'below';
+      // Set top now; after layout we may adjust to avoid clipping.
+      let top = preferAbove ? Math.round((yTopH|0) - 6) : Math.round((yBotH|0) + 6);
+      if (preferAbove){
+        // will subtract bar height after rAF
+      }
+      _mdUrlBar.style.top = (top|0) + 'px';
+      requestAnimationFrame(()=>{
+        try{
+          if (!_mdUrlBarVisible()) return;
+          // Hint-only badge: no need to clamp container height (it's 0px).
+          try{ if (_mdUrlBar && _mdUrlBar.dataset && _mdUrlBar.dataset.hint === '1') return; }catch{}
+          const br = _mdUrlBar.getBoundingClientRect();
+          const bh = (br.height||0);
+          let top2 = preferAbove ? Math.round((yTopH|0) - (bh|0) - 6) : Math.round((yBotH|0) + 6);
+          top2 = Math.max(8, Math.min((hh|0) - (bh|0) - 8, top2|0));
+          _mdUrlBar.style.top = (top2|0) + 'px';
+        }catch{}
+      });
+    }catch{}
+  }
+  function _mdUrlBarComputeCtx(){
+    try{
+      if (!(_mdRichActive && _mdRichActive())) return null;
+      const m = String(_mode||'');
+      if (!(m === 'INSERT' || m === 'NORMAL')) return null;
+      if (!editor) return null;
+      // Avoid conflicts with other floating UI
+      try{
+        if (cmdfloat && cmdfloat.style && cmdfloat.style.display !== 'none'){
+          const k = (cmdfloat && cmdfloat.dataset) ? String(cmdfloat.dataset.kind||'') : '';
+          // IME anchor bar is allowed to coexist.
+          if (k !== 'ime') return null;
+        }
+      }catch{}
+      try{ if ((_modalOverlay && _modalOverlay.style && _modalOverlay.style.display !== 'none') || document.getElementById('grepDialog')) return null; }catch{}
+
+      const lines = _splitLinesRaw();
+      if (!Array.isArray(lines) || lines.length===0) return null;
+
+      const rowOverlay = (caretRow|0);
+      const colOverlay = (caretCol|0);
+      let rowSel = null;
+      let colSel = null;
+      try{
+        if (editor && typeof editor.selectionStart === 'number' && typeof _rcFromOffset === 'function'){
+          const rc = _rcFromOffset(editor.selectionStart|0);
+          if (rc && Number.isFinite(rc.r) && Number.isFinite(rc.c)){
+            rowSel = (rc.r|0);
+            colSel = (rc.c|0);
+          }
+        }
+      }catch{}
+
+      const _tryAt = (rowCur, colCur)=>{
+        try{
+          const row = Math.max(0, Math.min((lines.length-1)|0, rowCur|0));
+          const src = String(lines[row]||'');
+          if (!src) return null;
+
+          // Skip code rows (fence / indent)
+          try{
+            const fc = _mdCodeFenceEnsureCache && _mdCodeFenceEnsureCache(false, lines);
+            const ic = _mdIndentCodeEnsureCache && _mdIndentCodeEnsureCache(false, lines, fc);
+            const fk = (fc && fc.kind && row>=0 && row<(lines.length|0)) ? (fc.kind[row]|0) : 0;
+            const ik = (ic && ic.kind && row>=0 && row<(lines.length|0)) ? (ic.kind[row]|0) : 0;
+            if ((fk|0) === 2 || (ik|0) === 2) return null;
+          }catch{}
+
+          // Build display-time base string to match the md clean renderer:
+          // - when symbols are hidden (clean display), heading prefix and up-to-3 leading spaces before
+          //   list markers may be removed. If we don't mirror that, caretCol can be offset and link hit
+          //   testing fails (seen as Ctrl+E needing double-press / never opening).
+          let dispBase = src;
+          let leftCut = 0;
+          try{
+            const hide = !!(_mdHideSymbolsForRow && _mdHideSymbolsForRow(true));
+            if (hide){
+              // Heading prefix removal (# ... )
+              try{
+                const lv0 = (_mdHeadingLevel ? (_mdHeadingLevel(src)|0) : 0)|0;
+                if ((lv0|0) >= 1 && (lv0|0) <= 6){
+                  const p0 = (_mdHeadingPrefixLen ? (_mdHeadingPrefixLen(src)|0) : 0)|0;
+                  if ((p0|0) > 0){
+                    dispBase = String(dispBase||'').slice(p0|0);
+                    leftCut = (leftCut + (p0|0))|0;
+                  }
+                }
+              }catch{}
+
+              // CommonMark/GFM: hide up to 3 leading spaces before list markers in clean display.
+              // Mirror the same *prefix-only* cut so caret/link indices stay aligned.
+              try{
+                if ((leftCut|0) === 0 && _mdUListInfo){
+                  const ul = _mdUListInfo(src, row|0, lines);
+                  if (ul && ul.kind==='item'){
+                    const baseSlack = Math.max(0, Math.min(3, (ul.rootLeadSlackCols|0) || 0));
+                    let removed = 0;
+                    try{ while ((removed|0) < (baseSlack|0) && src && src[removed|0] === ' ') removed++; }catch{ removed = 0; }
+                    if ((removed|0) > 0){
+                      dispBase = String(dispBase||'').slice(removed|0);
+                      leftCut = (leftCut + (removed|0))|0;
+                    }
+                  }
+                }
+              }catch{}
+            }
+          }catch{}
+
+          if (dispBase.indexOf('](') < 0 || dispBase.indexOf('[') < 0) return null;
+
+          const col = (_mdCleanDisplayCollapseInfo && typeof _mdCleanDisplayCollapseInfo === 'function') ? _mdCleanDisplayCollapseInfo(dispBase) : null;
+          if (!col || !Array.isArray(col.links) || typeof col.srcToDispCaret !== 'function') return null;
+
+          const ccBase0 = Math.max(0, Math.min((dispBase.length|0), ((colCur|0) - (leftCut|0))|0))|0;
+
+          const _findHit = (dc0)=>{
+            try{
+              const dc = (dc0|0);
+              for (const it of col.links){
+                if (!it) continue;
+                const ds = (it.dispStart|0);
+                const de = (it.dispEnd|0);
+                if ((dc|0) >= (ds|0) && (dc|0) <= (de|0)) return it;
+              }
+            }catch{}
+            return null;
+          };
+
+          // Primary path: treat caret col as source-column in dispBase (pre-cut raw).
+          let ccBase = (ccBase0|0);
+          let dcCand = (col.srcToDispCaret(ccBase|0)|0);
+          let hit = _findHit(dcCand|0);
+          let ccSrcForChecks = ((ccBase|0) + (leftCut|0))|0;
+
+          // Fallback path: some code paths may store caretCol already in display-space.
+          // Try treating ccBase0 as display-column and map back to source via dispToSrcCaret.
+          if (!hit && typeof col.dispToSrcCaret === 'function' && typeof col.dispText === 'string'){
+            try{
+              const dn = (col.dispText.length|0);
+              const dcAlt = Math.max(0, Math.min(dn|0, ccBase0|0))|0;
+              const ccBaseAlt = (col.dispToSrcCaret(dcAlt|0)|0);
+              const hitAlt = _findHit(dcAlt|0);
+              if (hitAlt){
+                hit = hitAlt;
+                dcCand = (dcAlt|0);
+                ccBase = (ccBaseAlt|0);
+                ccSrcForChecks = ((ccBaseAlt|0) + (leftCut|0))|0;
+              }
+            }catch{}
+          }
+          if (!hit) return null;
+
+          const lb0 = ((hit.lb|0) + (leftCut|0))|0;
+          const lp = ((hit.lp|0) + (leftCut|0))|0;
+          const rp1 = (((hit.rp|0) + 1) + (leftCut|0))|0;
+          if (!(rp1 > lp) || lp < 0) return null;
+
+          // Accept caret anywhere inside the inline-link span.
+          // This enables Ctrl+E / badge to open URL bar even when caret is on destination/title.
+          // (Auto hint in clean mode is still gated by hint-only policy; see maybeUpdate.)
+          try{ if ((ccSrcForChecks|0) < (lb0|0) || (ccSrcForChecks|0) > (rp1|0)) return null; }catch{}
+
+          const span = src.slice(lp|0, rp1|0);
+          return { row:(row|0), lp:(lp|0), rp1:(rp1|0), span:String(span||''), caretRow0:(rowCur|0), caretCol0:(colCur|0) };
+        }catch{ return null; }
+      };
+
+      // Prefer selectionStart in INSERT when it points at the same visual caret.
+      // But when clean-display mapping drifts (notably around collapsed inline links), selectionStart can
+      // land in hidden spans; fall back to overlay caret if selection doesn't hit a link.
+      let ctx = null;
+      if ((rowSel != null) && (colSel != null)){
+        const preferSel = (function(){
+          try{
+            if (_mode === 'INSERT') return true;
+            if (document && document.activeElement === editor) return true;
+            if ((rowSel|0) === (rowOverlay|0) && Math.abs((colSel|0) - (colOverlay|0)) <= 2) return true;
+            return false;
+          }catch{ return false; }
+        })();
+        if (preferSel) ctx = _tryAt(rowSel|0, colSel|0);
+      }
+      if (!ctx) ctx = _tryAt(rowOverlay|0, colOverlay|0);
+      return ctx;
+    }catch{ return null; }
+  }
+  function _mdUrlBarMaybeUpdate(reason){
+    try{
+      // If user is editing inside the bar, keep it stable.
+      if (_mdUrlBarHasFocus() || _mdUrlBarComposing){
+        try{ if (_mdUrlBar) _mdUrlBar.dataset.hint = '0'; }catch{}
+        try{ if (_mdUrlBar) _mdUrlBar.dataset.active = '1'; }catch{}
+        try{ _mdUrlBarReposition(); }catch{}
+        return;
+      }
+      const ctx = _mdUrlBarComputeCtx();
+      if (!ctx){
+        // If user explicitly opened the bar, don't auto-hide just because caret drifted.
+        if (_mdUrlBarVisible() && !_mdUrlBarPinnedOpen) _mdUrlBarHide('no-ctx');
+        if (_mdUrlBarVisible() && _mdUrlBarPinnedOpen){
+          try{ if (_mdUrlBar) _mdUrlBar.dataset.hint = '0'; }catch{}
+          try{ if (_mdUrlBar) _mdUrlBar.dataset.active = '1'; }catch{}
+          try{ _mdUrlBarReposition(); }catch{}
+        }
+        return;
+      }
+      _mdUrlBarEnsure();
+      if (!_mdUrlBar || !_mdUrlBarInput) return;
+
+      const draftEnabled = (function(){ try{ return !!(_mdDraftEditEnabled && _mdDraftEditEnabled()); }catch{ return false; } })();
+      const forceOpen = !!_mdUrlBarForceOpenOnce;
+      try{ _mdUrlBarForceOpenOnce = false; }catch{}
+      const pinned = !!_mdUrlBarPinnedOpen;
+      const hintOnly = (!!(!draftEnabled) && !forceOpen && !pinned);
+
+      // One-shot debug: helps diagnose why URL bar doesn't open / why it needs double press.
+      // NOTE: use window.__sixDbgMdUrlBarUpdateOnce (Ctrl+E capture uses __sixDbgMdUrlBarOnce).
+      try{
+        if (window && window.__sixDbgMdUrlBarUpdateOnce){
+          window.__sixDbgMdUrlBarUpdateOnce = false;
+          const payload = {
+            why: String(reason||''),
+            mode: String(_mode||''),
+            draftEnabled: !!draftEnabled,
+            forceOpen: !!forceOpen,
+            hintOnly: !!hintOnly,
+            caretRow: (caretRow|0), caretCol: (caretCol|0),
+            ctx,
+            wasVisible: !!(_mdUrlBarVisible && _mdUrlBarVisible()),
+          };
+          console.log('[six][md-urlbar][maybeUpdate]', payload);
+          try{ console.log('[six][md-urlbar][maybeUpdate.json] ' + JSON.stringify(payload)); }catch{}
+        }
+      }catch{}
+
+      const prevHint = (function(){ try{ return !!(_mdUrlBar && _mdUrlBar.dataset && _mdUrlBar.dataset.hint === '1'); }catch{ return false; } })();
+
+      // Keep current ctx if same span; otherwise replace.
+      const same = !!(_mdUrlBarCtx && (_mdUrlBarCtx.row|0) === (ctx.row|0) && (_mdUrlBarCtx.lp|0) === (ctx.lp|0) && (_mdUrlBarCtx.rp1|0) === (ctx.rp1|0));
+      _mdUrlBarCtx = ctx;
+      if (!hintOnly){
+        try{ _mdUrlBar.dataset.hint = '0'; }catch{}
+        if (!same || prevHint || forceOpen){
+          try{ _mdUrlBarInput.value = String(ctx.span||''); }catch{}
+        }
+        // If user explicitly opened it, keep editing active (prevents immediate hint-revert).
+        try{ _mdUrlBar.dataset.active = (pinned || forceOpen) ? '1' : '0'; }catch{}
+        _mdUrlBar.style.display = '';
+        _mdUrlBarReposition();
+      } else {
+        // Clean mode: show only Ctrl+E badge (no input, no actions).
+        try{ _mdUrlBar.dataset.hint = '1'; }catch{}
+        try{ _mdUrlBar.dataset.active = '0'; }catch{}
+        _mdUrlBar.style.display = '';
+        _mdUrlBarReposition();
+      }
+    }catch{}
+  }
+  function _mdUrlBarFocus(){
+    try{
+      if (!_mdUrlBarVisible()) return false;
+      try{ _mdUrlBarSnapToEndOnFocus = true; }catch{}
+      _mdUrlBarInput && _mdUrlBarInput.focus && _mdUrlBarInput.focus();
+      try{
+        const v = String((_mdUrlBarInput && _mdUrlBarInput.value) || '');
+        const p = (v.length|0);
+        _mdUrlBarInput && _mdUrlBarInput.setSelectionRange && _mdUrlBarInput.setSelectionRange(p, p);
+        try{ _mdUrlBarRememberSel && _mdUrlBarRememberSel(); }catch{}
+        try{ _mdUrlBarSnapToEndOnFocus = false; }catch{}
+      }catch{}
+      return true;
+    }catch{ return false; }
+  }
+  function _mdUrlBarCommit(){
+    try{
+      const ctx = _mdUrlBarCtx;
+      if (!ctx || !_mdUrlBarInput) { _mdUrlBarHide('no-ctx'); return; }
+      try{ _mdUrlBarPinnedOpen = false; }catch{}
+      const row = (ctx.row|0);
+      const lp = (ctx.lp|0);
+      const rp1 = (ctx.rp1|0);
+      const caretRowPre = (caretRow|0);
+      const caretColPre = (caretCol|0);
+      let newSpan = String(_mdUrlBarInput.value||'');
+      try{
+        const t = String(newSpan||'').trim();
+        if (!t){
+          try{ toast && toast('URLバー: 空です (中断)', 900); }catch{}
+          try{ editor && editor.focus && editor.focus(); }catch{}
+          return;
+        }
+        // #1922: If user typed outside the closing ')', fold the suffix back inside
+        // so we never generate a double ')' like '(URL)abc)'.
+        let tt = t;
+        try{
+          if (tt[0] === '('){
+            const lastClose = tt.lastIndexOf(')');
+            if (lastClose >= 0 && lastClose < (tt.length-1)){
+              const inside0 = tt.slice(1, lastClose);
+              const suffix = String(tt.slice(lastClose+1)||'').trim();
+              const inside = suffix ? (String(inside0||'') + ' ' + suffix) : String(inside0||'');
+              tt = '(' + String(inside||'').trim() + ')';
+            }
+          }
+        }catch{}
+
+        if (!(tt[0]==='(' && tt[(tt.length-1)|0]===')')){
+          const core = tt.replace(/^\(+/,'').replace(/\)+$/,'').trim();
+          newSpan = '(' + core + ')';
+        } else {
+          newSpan = tt;
+        }
+      }catch{ newSpan = String(_mdUrlBarInput.value||''); }
+      const lines = _splitLinesRaw();
+      if (!Array.isArray(lines) || row<0 || row>=(lines.length|0)) { _mdUrlBarHide('row-oob'); return; }
+      const srcLine = String(lines[row]||'');
+      const oldSpan = srcLine.slice(lp|0, rp1|0);
+      // Compute offsets in whole-text space
+      const offA = _offsetFromRC(row|0, lp|0)|0;
+      const offB = _offsetFromRC(row|0, rp1|0)|0;
+      const curText = String(editor.value||'');
+      const curSlice = curText.slice(offA|0, offB|0);
+      if (curSlice !== oldSpan){
+        try{ toast && toast('URLバー: 本文が変更されました (中断)', 900); }catch{}
+        _mdUrlBarHide('mismatch');
+        try{ editor && editor.focus && editor.focus(); }catch{}
+        return;
+      }
+      if (newSpan === oldSpan){
+        _mdUrlBarHide('nochange');
+        try{ editor && editor.focus && editor.focus(); }catch{}
+        return;
+      }
+      try{ _pushUndoSnapshot && _pushUndoSnapshot('md-urlbar'); }catch{}
+      const nextText = curText.slice(0, offA|0) + newSpan + curText.slice(offB|0);
+      editor.value = nextText;
+      // Keep caret where it was right before commit (reduces surprises if caret moved while URL bar was open).
+      try{
+        caretRow = (caretRowPre|0);
+        caretCol = (caretColPre|0);
+        try{ const len = _lineLen(caretRow|0); if ((caretCol|0) > (len|0)) caretCol = (len|0); }catch{}
+      }catch{}
+      _mdUrlBarHide('commit');
+      try{ _afterTextMutation && _afterTextMutation(); }catch{}
+      try{ editor && editor.focus && editor.focus(); }catch{}
+    }catch{
+      try{ _mdUrlBarHide('commit-fail'); }catch{}
+      try{ editor && editor.focus && editor.focus(); }catch{}
+    }
   }
 
   // Setext heading underline line info: "===" => H1, "---" => H2
@@ -2806,18 +3894,20 @@ try{
                 const pre = text.slice(0, c1);
                 const mid = text.slice(c1, c2);
                 const post = text.slice(c2);
-                if (isCodeRow || isFenceRow){
+                if (isCodeRow || isFenceRow || isIndentCodeRow){
                   el.innerHTML = _mdPlainHtmlWithRange(text, 'md-sel', c1|0, c2|0);
                 } else if (listItemDisp){
                   el.innerHTML = _mdUListHtmlWithRange(text, listItemDisp, 'md-sel', c1|0, c2|0);
                 } else {
-                  // Clean display: collapse [text](url ...) to text only.
+                  // Inline links are collapsed in md-rich display (also in draft active row).
                   if (hideSymbols){
                     const clean = _mdInlineLinkCleanHtmlWithRange(text, 'md-sel', c1|0, c2|0);
                     if (clean) el.innerHTML = clean;
                     else el.innerHTML = _mdInlineCodeHtmlWithRange(text, 'md-sel', c1|0, c2|0);
                   } else {
-                    el.innerHTML = _mdInlineCodeHtmlWithRange(text, 'md-sel', c1|0, c2|0);
+                    const clean = _mdInlineLinkCleanHtmlWithRange(text, 'md-sel', c1|0, c2|0);
+                    if (clean) el.innerHTML = clean;
+                    else el.innerHTML = _mdInlineCodeHtmlWithRange(text, 'md-sel', c1|0, c2|0);
                   }
                 }
                 usedHtml = true;
@@ -2858,19 +3948,21 @@ try{
               const a = Math.min(c1|0, c2|0);
               const b = Math.max(c1|0, c2|0);
               if (b >= a){
-                if (isCodeRow || isFenceRow){
+                if (isCodeRow || isFenceRow || isIndentCodeRow){
                   el.innerHTML = _mdPlainHtmlWithRange(text, 'md-ime-uline', a|0, b|0);
                 } else if (listItemDisp){
                   // For list lines we don't need headingCjkHtml; keep it simple and stable.
                   el.innerHTML = _mdUListHtmlWithRange(text, listItemDisp, 'md-ime-uline', a|0, b|0);
                 } else {
-                  // Inline code + IME underline (range-aware)
+                  // Inline links are collapsed in md-rich display (also in draft active row).
                   if (hideSymbols){
                     const clean = _mdInlineLinkCleanHtmlWithRange(text, 'md-ime-uline', a|0, b|0);
                     if (clean) el.innerHTML = clean;
                     else el.innerHTML = _mdInlineCodeHtmlWithRange(text, 'md-ime-uline', a|0, b|0);
                   } else {
-                    el.innerHTML = _mdInlineCodeHtmlWithRange(text, 'md-ime-uline', a|0, b|0);
+                    const clean = _mdInlineLinkCleanHtmlWithRange(text, 'md-ime-uline', a|0, b|0);
+                    if (clean) el.innerHTML = clean;
+                    else el.innerHTML = _mdInlineCodeHtmlWithRange(text, 'md-ime-uline', a|0, b|0);
                   }
                 }
                 usedHtml = true;
@@ -2880,13 +3972,11 @@ try{
         }catch{ usedHtml = false; }
 
         // Heading H2-H6: make Japanese/CJK runs slightly bolder while keeping ASCII weight as-is (#1486)
-        if (!usedHtml && !isCodeRow && !isFenceRow && headingCjkHtml){
-          // If clean display needs link collapsing, prefer link-aware renderer over headingCjkHtml.
+        if (!usedHtml && !isCodeRow && !isFenceRow && !isIndentCodeRow && headingCjkHtml){
+          // If link collapsing is needed, prefer link-aware renderer over headingCjkHtml.
           try{
-            if (hideSymbols){
-              const clean0 = _mdInlineLinkCleanHtmlWithRange(text, null, 0, 0);
-              if (clean0){ el.innerHTML = clean0; usedHtml = true; }
-            }
+            const clean0 = _mdInlineLinkCleanHtmlWithRange(text, null, 0, 0);
+            if (clean0){ el.innerHTML = clean0; usedHtml = true; }
           }catch{}
           if (!usedHtml){
             try{ el.innerHTML = headingCjkHtml; usedHtml = true; }catch{ usedHtml = false; }
@@ -2899,7 +3989,7 @@ try{
             try{ el.innerHTML = _mdUListHtmlWithRange(text, listItemDisp, null, 0, 0); usedHtml = true; }catch{ usedHtml = false; }
           }
           // Inline code spans (`code`) in clean display (#1772)
-          if (!usedHtml && !isCodeRow && !isFenceRow && hideSymbols){
+          if (!usedHtml && !isCodeRow && !isFenceRow && !isIndentCodeRow && hideSymbols){
             try{
               const clean = _mdInlineLinkCleanHtmlWithRange(text, null, 0, 0);
               if (clean){
@@ -2913,6 +4003,13 @@ try{
                 }
               }
             }catch{ /* fall through */ }
+          }
+          // Draft active row: collapse inline links too (keep other markdown symbols raw).
+          if (!usedHtml && !isCodeRow && !isFenceRow && !isIndentCodeRow && !hideSymbols){
+            try{
+              const clean = _mdInlineLinkCleanHtmlWithRange(text, null, 0, 0);
+              if (clean){ el.innerHTML = clean; usedHtml = true; }
+            }catch{}
           }
           if (!usedHtml) el.textContent = text;
         }
@@ -2991,7 +4088,13 @@ try{
         if (wrapOn){
           try{
             // Use the displayed text (after symbol hiding) for wrap measurement.
-            const disp = String(text||'');
+            let disp = String(text||'');
+            try{
+              if (!isCodeRow && !isFenceRow && !isIndentCodeRow && disp && disp.indexOf('](') >= 0 && disp.indexOf('[') >= 0){
+                const col = (_mdCleanDisplayCollapseInfo && typeof _mdCleanDisplayCollapseInfo === 'function') ? _mdCleanDisplayCollapseInfo(disp) : null;
+                if (col && typeof col.dispText === 'string') disp = String(col.dispText||'');
+              }
+            }catch{}
             if (imeComp){
               // Cheap approximation in monospace columns.
               const visCols = (imeVisCols != null) ? (imeVisCols|0) : (_visualWidthUpToLine(disp, (disp.length|0))|0);
@@ -8402,6 +9505,8 @@ try{
       if (!_optUrlLink || !_hoverLink) return;
       // markdown off ではツールチップを出さない (#1826)
       try{ if (!(_mdRichEnabled && _mdRichEnabled())) return; }catch{}
+      // caret由来のhoverはハイライトのみ。ツールチップはmouse hover時だけ出す。
+      try{ if (_hoverLink && _hoverLink._fromCaret) return; }catch{}
       const tip = String(_hoverLink.tooltip||'');
       if (!tip) return;
 
@@ -8690,6 +9795,18 @@ try{
     try{
       if (!line) return null;
       let i = Math.max(0, Math.min((line.length|0), (col|0)));
+
+      // #1936: Do not treat anything inside inline code spans as a link.
+      // (applies to draft inline-link detection; clean mode uses collapse filter separately)
+      try{
+        if (_mdRichActive && _mdRichActive()){
+          if (line.indexOf('`') >= 0){
+            // If caret is within any inline code span, bail early.
+            if (_mdInlineCodeOverlaps(line, i|0, (i+1)|0)) return null;
+          }
+        }
+      }catch{}
+
       const isEsc = (pos)=>{ try{ return pos>0 && line[pos-1]==='\\'; }catch{ return false; } };
       const findUnescFwd = (ch, start)=>{
         try{
@@ -8773,6 +9890,15 @@ try{
         if (line[p] !== ')'){ lb = findUnescBwd('[', lb-1); continue; }
         const rp = p;
 
+        // #1936: inline-link inside inline code is inert.
+        try{
+          if (_mdRichActive && _mdRichActive()){
+            if (line.indexOf('`') >= 0){
+              if (_mdInlineCodeOverlaps(line, lb|0, (rp+1)|0)) { lb = findUnescBwd('[', lb-1); continue; }
+            }
+          }
+        }catch{}
+
         // Ensure col is inside the whole construct
         if ((col|0) >= (lb|0) && (col|0) <= (rp|0)){
           // Infer kind
@@ -8803,6 +9929,12 @@ try{
     try{
       if (!line) return null;
 
+      // #1936: In markdown rich mode, URLs/paths inside inline code spans are inert.
+      // Apply this as an overlap filter on the matched range to be robust against display<->src drift.
+      const mdNoLinkInIcode = (function(){
+        try{ return !!(_mdRichActive && _mdRichActive() && String(line||'').indexOf('`') >= 0); }catch{ return false; }
+      })();
+
       // Check for Grep result link FIRST: 📌Line:Col:
       // This must be checked before Windows paths because "C:/..." matches reWin
       const mGrep = line.match(/^📌\s*(\d+):\s*(\d+):/);
@@ -8828,6 +9960,7 @@ try{
       while ((m=re.exec(line))){
         const s=m.index|0; const l=(m[0]||'').length|0; if (l<=0){ re.lastIndex++; continue; }
         const e = s + l;
+        try{ if (mdNoLinkInIcode && _mdInlineCodeOverlaps && _mdInlineCodeOverlaps(line, s|0, e|0)) { if (re.lastIndex === m.index) re.lastIndex++; continue; } }catch{}
         // #1369: If it's file://wsl$/..., treat as six-open (local) instead of external
         if (m[0].startsWith('file://wsl$/') || m[0].startsWith('file://wsl.localhost/')) {
              let p = m[0].slice(7); // remove file://
@@ -8841,6 +9974,7 @@ try{
       while ((mw=reWin.exec(line))){
         const s=mw.index|0; const l=(mw[0]||'').length|0; if (l<=0){ reWin.lastIndex++; continue; }
         const e = s + l;
+        try{ if (mdNoLinkInIcode && _mdInlineCodeOverlaps && _mdInlineCodeOverlaps(line, s|0, e|0)) { if (reWin.lastIndex === mw.index) reWin.lastIndex++; continue; } }catch{}
         if (col>=s && col<e){
           let p = String(mw[1]||'');
           // Normalize backslashes to forward for :e processing convenience
@@ -8854,6 +9988,7 @@ try{
       while ((mu=reUNC.exec(line))){
         const s=mu.index|0; const l=(mu[0]||'').length|0; if (l<=0){ reUNC.lastIndex++; continue; }
         const e = s + l;
+        try{ if (mdNoLinkInIcode && _mdInlineCodeOverlaps && _mdInlineCodeOverlaps(line, s|0, e|0)) { if (reUNC.lastIndex === mu.index) reUNC.lastIndex++; continue; } }catch{}
         if (col>=s && col<e){ return { c1:s, c2:e, url:String(mu[1]||mu[0]||''), kind:'six-open' }; }
         if (reUNC.lastIndex === mu.index) reUNC.lastIndex++;
       }
@@ -9220,7 +10355,11 @@ try{
               const isActiveRow = (row === (caretRow|0));
               if (draftMode && isActiveRow){
                 const mdInline = _detectMdInlineLinkAt && _detectMdInlineLinkAt(line, c|0);
-                if (mdInline) suppressRaw = true;
+                if (mdInline){
+                  suppressRaw = true;
+                  // Also use md-inline hit so tooltip/title is available on hover in INSERT.
+                  hit = mdInline;
+                }
               }
             }
           }
@@ -9261,6 +10400,23 @@ try{
   function _onEditorClickForLink(e){
     try{
       if (!_optUrlLink) return;
+      // #1922: For markdown inline links (draft), _hoverLink may be suppressed.
+      // If URLバーが表示されていて Ctrl+E 状態(非アクティブ)なら、caret位置から再検出して開く。
+      if (!_hoverLink){
+        try{
+          const mdRich = (function(){ try{ return _mdRichActive && _mdRichActive(); }catch{ return false; } })();
+          const draft = (function(){ try{ return _mdDraftEditEnabled && _mdDraftEditEnabled(); }catch{ return false; } })();
+          const ubVis = (typeof _mdUrlBarVisible==='function') ? !!_mdUrlBarVisible() : false;
+          const ubActive = !!(_mdUrlBar && _mdUrlBar.dataset && _mdUrlBar.dataset.active === '1');
+          if (mdRich && draft && ubVis && !ubActive && typeof _detectMdInlineLinkAt === 'function'){
+            const line = String((_splitLines()[caretRow] || '')||'');
+            const hit = _detectMdInlineLinkAt(line, caretCol|0);
+            if (hit && hit.url){
+              _hoverLink = Object.assign({ r: (caretRow|0) }, hit);
+            }
+          }
+        }catch{}
+      }
       if (!_hoverLink) return;
       if (e){ try{ e.preventDefault(); e.stopPropagation(); }catch{} }
       
@@ -13791,6 +14947,14 @@ try{
           }
         }catch{ disp = src; }
 
+        // Inline links are visually collapsed in md-rich display; keep wrap counts stable.
+        try{
+          if (!isCodeRow && disp && disp.indexOf('](') >= 0 && disp.indexOf('[') >= 0){
+            const col = (_mdCleanDisplayCollapseInfo && typeof _mdCleanDisplayCollapseInfo === 'function') ? _mdCleanDisplayCollapseInfo(disp) : null;
+            if (col && typeof col.dispText === 'string') disp = String(col.dispText||'');
+          }
+        }catch{}
+
         const info = (function(){ try{ return _mdLineLayoutInfoAtRow(lines, i, false); }catch{ return null; } })();
         const lh = (info && info.lineHeightPx) ? (info.lineHeightPx|0) : (LINE_HEIGHT|0);
         const sc = (info && info.scale) ? (+info.scale || 1) : 1;
@@ -13904,6 +15068,14 @@ try{
             }
           }
         }catch{ disp = src; }
+
+        // Inline links are visually collapsed in md-rich display; keep wrap counts stable.
+        try{
+          if (!isCodeRow && disp && disp.indexOf('](') >= 0 && disp.indexOf('[') >= 0){
+            const col = (_mdCleanDisplayCollapseInfo && typeof _mdCleanDisplayCollapseInfo === 'function') ? _mdCleanDisplayCollapseInfo(disp) : null;
+            if (col && typeof col.dispText === 'string') disp = String(col.dispText||'');
+          }
+        }catch{}
 
         const info = (function(){ try{ return _mdLineLayoutInfoAtRow(lines, i, false); }catch{ return null; } })();
         const lh = isCodeRow ? (LINE_HEIGHT|0) : ((info && info.lineHeightPx) ? (info.lineHeightPx|0) : (LINE_HEIGHT|0));
@@ -17563,10 +18735,11 @@ try{
         const adj0 = ((fk|0) === 2 || (fk|0) === 1) ? { line:srcLine0, col:(caretCol|0), prefix:0 } : _mdWysiwygAdjust(srcLine0, caretCol|0);
         let dispLine = String(adj0.line||'');
         let caretColVis0 = (adj0.col|0);
-        // md-rich clean display: collapse inline links for wrap intra calculation.
+        // md-rich display: collapse inline links for wrap intra calculation.
         try{
           const hide = !!(_mdHideSymbolsForRow && _mdHideSymbolsForRow(true));
-          if (hide && (fk|0) !== 2){
+          const draft = !!(_mdDraftEditEnabled && _mdDraftEditEnabled());
+          if ((draft || hide) && (fk|0) !== 2){
             const col = (_mdCleanDisplayCollapseInfo && typeof _mdCleanDisplayCollapseInfo === 'function') ? _mdCleanDisplayCollapseInfo(dispLine) : null;
             if (col && typeof col.dispText === 'string' && typeof col.srcToDispCaret === 'function'){
               caretColVis0 = (col.srcToDispCaret(caretColVis0|0)|0);
@@ -17824,11 +18997,13 @@ try{
       try{ line = String(line||'').slice(_mdIndentCut|0); }catch{}
       caretColVis = Math.max(0, (caretColVis|0) - (_mdIndentCut|0));
     }
-    // md-rich clean display: collapse inline links so caret X matches visible text.
+    // md-rich display: collapse inline links so caret X matches visible text.
     try{
       const mdRich = !!(_mdRichActive && _mdRichActive());
       const hide = (mdRich && !_mdIsCodeRow) ? !!(_mdHideSymbolsForRow && _mdHideSymbolsForRow(true)) : false;
-      if (mdRich && hide && !_mdIsCodeRow){
+      const draft = !!(_mdDraftEditEnabled && _mdDraftEditEnabled());
+      const collapse = (mdRich && !_mdIsCodeRow) ? (!!draft || !!hide) : false;
+      if (mdRich && collapse && !_mdIsCodeRow){
         const col = (_mdCleanDisplayCollapseInfo && typeof _mdCleanDisplayCollapseInfo === 'function') ? _mdCleanDisplayCollapseInfo(line) : null;
         if (col && typeof col.dispText === 'string' && typeof col.srcToDispCaret === 'function'){
           caretColVis = (col.srcToDispCaret(caretColVis|0)|0);
@@ -18238,6 +19413,9 @@ try{
     // keep hlsearch overlay in sync with caret/scroll
     try{ if (!(window && window._imeComposing===true)) _renderHlMatchesVisible(); }catch{}
 
+    // markdown draft inline-link URL bar
+    try{ _mdUrlBarMaybeUpdate && _mdUrlBarMaybeUpdate('reposition'); }catch{}
+
     // markdown draft: caret行だけ raw 表示なので、行移動でEOL位置が変わり得る。
     // 旧行＋新行を差分再描画して、清書/生表示の切替を即反映する (#1491)
     try{
@@ -18289,21 +19467,92 @@ try{
             if ((fk|0) === 2 || (ik|0) === 2){
               suppressRaw = true;
             } else {
+              // md-rich: In clean display (and in draft), highlight markdown inline links using the
+              // same collapsed display ranges as mouse hover. This fixes +1ch drift in draft.
+              try{
+                const draftMode = !!(_mdDraftEditEnabled && _mdDraftEditEnabled());
+                const hide = !!(_mdHideSymbolsForRow && _mdHideSymbolsForRow(true));
+                if ((draftMode || hide) && (_mdCleanDisplayCollapseInfo && typeof _mdCleanDisplayCollapseInfo === 'function')){
+                  const col = _mdCleanDisplayCollapseInfo(String(lineRawForCaret||line||''));
+                  if (col && Array.isArray(col.links) && typeof col.srcToDispCaret === 'function' && typeof col.dispText === 'string'){
+                    const dispCol = (col.srcToDispCaret(caretColRawForCaret|0)|0);
+                    for (const it of col.links){
+                      if (!it) continue;
+                      if ((dispCol|0) >= (it.dispStart|0) && (dispCol|0) < (it.dispEnd|0)){
+                        let kind = 'external';
+                        let finalUrl = String(it.url||'');
+                        try{
+                          if (/^file:\/\/wsl\$\//.test(finalUrl) || /^file:\/\/wsl\.localhost\//.test(finalUrl)){
+                            finalUrl = finalUrl.slice(7);
+                            kind = 'six-open';
+                          } else if (/^[A-Za-z]:[\\/]/.test(finalUrl)){
+                            kind = 'six-open';
+                          } else if (/^[a-zA-Z][a-zA-Z0-9+.-]*:/.test(finalUrl) && !/^[A-Za-z]:/.test(finalUrl)){
+                            kind = 'external';
+                          } else {
+                            kind = 'six-open';
+                          }
+                          try{ if (kind==='six-open') finalUrl = finalUrl.replace(/\\/g,'/'); }catch{}
+                        }catch{}
+                        link = {
+                          c1: (it.textStart|0),
+                          c2: (it.textEnd|0),
+                          url: finalUrl,
+                          kind,
+                          tooltip: String(it.tooltip||''),
+                          dispLine: String(col.dispText||''),
+                          dispC1: (it.dispStart|0),
+                          dispC2: (it.dispEnd|0),
+                        };
+                        suppressRaw = true;
+                        break;
+                      }
+                    }
+                    if (link) suppressRaw = true;
+                  }
+                }
+              }catch{}
               const draftMode = !!(_mdDraftEditEnabled && _mdDraftEditEnabled());
               if (draftMode){
                 const mdInline = _detectMdInlineLinkAt && _detectMdInlineLinkAt(String(line||''), caretCol|0);
-                if (mdInline) suppressRaw = true;
+                if (mdInline){
+                  suppressRaw = true;
+                  // draft: link text is displayed without surrounding brackets in md-rich.
+                  // Use the same display-space ranges as mouse hover to avoid 1ch right-shift.
+                  link = mdInline;
+                  try{
+                    if (_mdCleanDisplayCollapseInfo && typeof _mdCleanDisplayCollapseInfo === 'function'){
+                      const col = _mdCleanDisplayCollapseInfo(String(line||''));
+                      if (col && Array.isArray(col.links) && typeof col.dispText === 'string'){
+                        const dispCol = (col.srcToDispCaret ? (col.srcToDispCaret(caretCol|0)|0) : (caretCol|0));
+                        for (const it of col.links){
+                          if (!it) continue;
+                          if ((dispCol|0) >= (it.dispStart|0) && (dispCol|0) < (it.dispEnd|0)){
+                            link = Object.assign({}, mdInline, {
+                              c1: (it.textStart|0),
+                              c2: (it.textEnd|0),
+                              dispLine: String(col.dispText||''),
+                              dispC1: (it.dispStart|0),
+                              dispC2: (it.dispEnd|0),
+                            });
+                            break;
+                          }
+                        }
+                      }
+                    }
+                  }catch{}
+                }
               }
             }
           }
-          if (!suppressRaw) link = _detectUrlAt(line, caretCol, caretRow);
+          if (!link && !suppressRaw) link = _detectUrlAt(line, caretCol, caretRow);
         }catch{ link = _detectUrlAt(line, caretCol, caretRow); }
 
         if (link){
-          _hoverLink = { ...link, r: caretRow };
+          _hoverLink = { ...link, r: caretRow, _fromCaret:true };
           _renderLinkHover();
         } else {
-          if (_hoverLink) { _linkClear(); if (editor) editor.style.cursor=''; }
+          if (_hoverLink) { _clearLinkHover(); }
         }
       }
     }catch{}
@@ -21803,26 +23052,32 @@ try{
       nc = minCol;
     }
 
-    // md-rich clean (wysiwyg): move in collapsed display caret-space for inline links ([text](url) -> text).
-    // Use caret-position mapping to avoid unreachable columns or hidden "phantom" ranges (#1836/#1837).
+    // md-rich: move in collapsed display caret-space for inline links.
+    // - Clean(wysiwyg): avoid unreachable/phantom ranges (#1836/#1837)
+    // - Draft(edit): allow moving through the visible link-text region, but never land in hidden URL/title spans.
     let movedInDisp = false;
     try{
-      if (delta && (_mdWysiwygActive && _mdWysiwygActive()) && (_mdHideSymbolsForRow && _mdHideSymbolsForRow(true))){
-        const linesRaw = _splitLinesRaw();
-        const src = String((linesRaw && linesRaw.length) ? (linesRaw[caretRow]||'') : line);
-        if (src && src.indexOf('](') >= 0 && src.indexOf('[') >= 0){
-          const col = (_mdCleanDisplayCollapseInfo && typeof _mdCleanDisplayCollapseInfo === 'function') ? _mdCleanDisplayCollapseInfo(src) : null;
-          if (col && typeof col.srcToDispCaret === 'function' && typeof col.dispToSrcCaret === 'function' && typeof col.dispText === 'string'){
-            const disp = String(col.dispText||'');
-            let dc = (col.srcToDispCaret(Math.max(0, Math.min((src.length|0), nc|0)) )|0);
-            if (delta > 0){
-              for (let i=0; i<(delta|0); i++) dc = _nextIndex(disp, dc);
-            } else if (delta < 0){
-              const count = (-delta)|0;
-              for (let i=0; i<count; i++) dc = _prevIndex(disp, dc);
+      if (delta){
+        const mdRich = (function(){ try{ return !!(_mdRichActive && _mdRichActive()); }catch{ return false; } })();
+        const draft = (function(){ try{ return !!(_mdDraftEditEnabled && _mdDraftEditEnabled()); }catch{ return false; } })();
+        const clean = (function(){ try{ return !!(_mdWysiwygActive && _mdWysiwygActive()) && !!(_mdHideSymbolsForRow && _mdHideSymbolsForRow(true)); }catch{ return false; } })();
+        if (mdRich && (draft || clean)){
+          const linesRaw = _splitLinesRaw();
+          const src = String((linesRaw && linesRaw.length) ? (linesRaw[caretRow]||'') : line);
+          if (src && src.indexOf('](') >= 0 && src.indexOf('[') >= 0){
+            const col = (_mdCleanDisplayCollapseInfo && typeof _mdCleanDisplayCollapseInfo === 'function') ? _mdCleanDisplayCollapseInfo(src) : null;
+            if (col && typeof col.srcToDispCaret === 'function' && typeof col.dispToSrcCaret === 'function' && typeof col.dispText === 'string'){
+              const disp = String(col.dispText||'');
+              let dc = (col.srcToDispCaret(Math.max(0, Math.min((src.length|0), nc|0)) )|0);
+              if (delta > 0){
+                for (let i=0; i<(delta|0); i++) dc = _nextIndex(disp, dc);
+              } else if (delta < 0){
+                const count = (-delta)|0;
+                for (let i=0; i<count; i++) dc = _prevIndex(disp, dc);
+              }
+              nc = (col.dispToSrcCaret(dc|0)|0);
+              movedInDisp = true;
             }
-            nc = (col.dispToSrcCaret(dc|0)|0);
-            movedInDisp = true;
           }
         }
       }
@@ -22027,32 +23282,104 @@ try{
     if (_isHanCp(cp)) return _WT_HAN;
     return _WT_SYMBOL;
   }
+
+  function _mdWordMotionLineInfo(lines, row){
+    // For markdown-rich clean display, inline links are visually collapsed.
+    // Word motions should be based on the displayed text; map caret between src<->disp.
+    try{
+      const srcLine = String((lines && lines[row|0]) || '');
+      const id = (row|0);
+      const identity = {
+        row: id,
+        srcLine,
+        wordLine: srcLine,
+        srcToWordCaret: (c)=>Math.max(0, Math.min((srcLine.length|0), c|0)),
+        wordToSrcCaret: (c)=>Math.max(0, Math.min((srcLine.length|0), c|0)),
+      };
+      if (!_mdRichActive || !_mdRichActive()) return identity;
+
+      // NOTE: Even in draft mode (active row shows most markdown symbols raw), inline links are
+      // still visually collapsed in the rendered text layer. Word motions must follow that.
+      const _isActiveRow = ((id|0) === (caretRow|0));
+      const hide = (function(){
+        try{ return !!(_mdHideSymbolsForRow && _mdHideSymbolsForRow(!!_isActiveRow)); }catch{ return false; }
+      })();
+
+      // Fenced/indented code rows are displayed raw even in clean mode.
+      try{
+        const fc = _mdCodeFenceEnsureCache && _mdCodeFenceEnsureCache(false, lines);
+        const ic = _mdIndentCodeEnsureCache && _mdIndentCodeEnsureCache(false, lines, fc);
+        const fk = (fc && fc.kind && (id|0) >= 0 && (id|0) < (lines.length|0)) ? (fc.kind[id|0]|0) : 0;
+        const ik = (ic && ic.kind && (id|0) >= 0 && (id|0) < (lines.length|0)) ? (ic.kind[id|0]|0) : 0;
+        if ((fk|0) === 2 || (ik|0) === 2) return identity;
+      }catch{}
+
+      // Collapse inline links (do not collapse inline code here).
+      // In md-rich:
+      // - clean: always collapsed
+      // - draft: also collapsed on the active row (even though other markdown symbols are shown raw)
+      // So we apply link collapsing regardless of hide, matching the rendered layer.
+      if (srcLine.indexOf('](') < 0 || srcLine.indexOf('[') < 0) return identity;
+      const col = (_mdCleanDisplayCollapseInfo && typeof _mdCleanDisplayCollapseInfo === 'function') ? _mdCleanDisplayCollapseInfo(srcLine) : null;
+      if (!col || typeof col.dispText !== 'string') return identity;
+
+      const wordLine = String(col.dispText||'');
+      const srcToWord = (typeof col.srcToDispCaret === 'function') ? col.srcToDispCaret
+        : (typeof col.srcToDisp === 'function') ? col.srcToDisp
+        : ((c)=>c|0);
+      const wordToSrc = (typeof col.dispToSrcCaret === 'function') ? col.dispToSrcCaret
+        : (typeof col.dispToSrc === 'function') ? col.dispToSrc
+        : ((c)=>c|0);
+
+      return {
+        row: id,
+        srcLine,
+        wordLine,
+        srcToWordCaret: (c)=>{
+          try{ return Math.max(0, Math.min((wordLine.length|0), (srcToWord(c|0)|0))); }catch{ return Math.max(0, Math.min((wordLine.length|0), c|0)); }
+        },
+        wordToSrcCaret: (c)=>{
+          try{ return Math.max(0, Math.min((srcLine.length|0), (wordToSrc(c|0)|0))); }catch{ return Math.max(0, Math.min((srcLine.length|0), c|0)); }
+        },
+      };
+    }catch{
+      const srcLine = String((lines && lines[row|0]) || '');
+      return { row:(row|0), srcLine, wordLine:srcLine, srcToWordCaret:(c)=>c|0, wordToSrcCaret:(c)=>c|0 };
+    }
+  }
   function _nextWordStart(row, col){
     const lines = _splitLines();
     let r = row, c = col;
     for(;;){
       if (r >= lines.length) return { r: Math.max(0, lines.length-1), c: _lineLen(Math.max(0, lines.length-1)) };
-      const line = lines[r] || '';
+      const info = _mdWordMotionLineInfo(lines, r|0);
+      const line = info.wordLine || '';
       const n = line.length;
-      if (c < 0) c = 0;
-      if (c > n) c = n;
+      let cW = info.srcToWordCaret ? (info.srcToWordCaret(c|0)|0) : (c|0);
+      if (cW < 0) cW = 0;
+      if (cW > n) cW = n;
       // At end-of-line: treat stepping to start of next line as one 'w' unit (counts each newline) (#701)
-      if (c >= n){
+      if (cW >= n){
         // #702: Group consecutive newlines as one whitespace run. Skip all empty lines,
         // then land on the first non-space column of the next non-empty line.
         let r2 = r + 1;
         while (r2 < lines.length && (lines[r2]||'') === ''){ r2++; }
         if (r2 >= lines.length){ return { r, c: n }; }
-        const line2 = lines[r2] || '';
+        const info2 = _mdWordMotionLineInfo(lines, r2|0);
+        const line2 = info2.wordLine || '';
         let c2 = 0;
         while (c2 < line2.length && _wordTypeAtInLine(line2, c2) === _WT_SPACE){ c2 = _nextIndex(line2, c2); }
-        return { r: r2, c: c2 };
+        const srcC2 = info2.wordToSrcCaret ? (info2.wordToSrcCaret(c2|0)|0) : (c2|0);
+        return { r: r2, c: srcC2 };
       }
       // If on spaces within the line, jump to the next non-space within this line (spaces as one unit)
-      let t = _wordTypeAtInLine(line, c);
+      let t = _wordTypeAtInLine(line, cW);
       if (t === _WT_SPACE){
-        while (c < n && _wordTypeAtInLine(line, c) === _WT_SPACE){ c = _nextIndex(line, c); }
-        if (c < n) return { r, c };
+        while (cW < n && _wordTypeAtInLine(line, cW) === _WT_SPACE){ cW = _nextIndex(line, cW); }
+        if (cW < n){
+          const srcC = info.wordToSrcCaret ? (info.wordToSrcCaret(cW|0)|0) : (cW|0);
+          return { r, c: srcC };
+        }
         // fell off end; next loop iteration will treat newline as its own step
         continue;
       }
@@ -22060,37 +23387,38 @@ try{
       const tRun = t;
       if (tRun === _WT_HAN){
         let seenKana = false;
-        while (c < n){
-          const tCur = _wordTypeAtInLine(line, c);
+        while (cW < n){
+          const tCur = _wordTypeAtInLine(line, cW);
           if (!seenKana){
-            if (tCur===_WT_HAN){ c = _nextIndex(line, c); continue; }
-            if (tCur===_WT_HIRA || tCur===_WT_KATA){ seenKana=true; c=_nextIndex(line,c); continue; }
+            if (tCur===_WT_HAN){ cW = _nextIndex(line, cW); continue; }
+            if (tCur===_WT_HIRA || tCur===_WT_KATA){ seenKana=true; cW=_nextIndex(line,cW); continue; }
           } else {
-            if (tCur===_WT_HIRA || tCur===_WT_KATA){ c=_nextIndex(line,c); continue; }
+            if (tCur===_WT_HIRA || tCur===_WT_KATA){ cW=_nextIndex(line,cW); continue; }
             if (tCur===_WT_HAN){ break; }
           }
           break;
         }
       } else if (tRun === _WT_KATA){
-        while (c < n){
-          const tCur=_wordTypeAtInLine(line,c);
-          if (tCur===_WT_KATA){ c=_nextIndex(line,c); continue; }
-          const cpCur=_cpAt(line,c);
-          if (_isKanaLongLikeCp(cpCur)){ c=_nextIndex(line,c); continue; }
+        while (cW < n){
+          const tCur=_wordTypeAtInLine(line,cW);
+          if (tCur===_WT_KATA){ cW=_nextIndex(line,cW); continue; }
+          const cpCur=_cpAt(line,cW);
+          if (_isKanaLongLikeCp(cpCur)){ cW=_nextIndex(line,cW); continue; }
           break;
         }
       } else if (tRun === _WT_HIRA){
-        while (c < n){
-          const tCur=_wordTypeAtInLine(line,c);
-          if (tCur===_WT_HIRA){ c=_nextIndex(line,c); continue; }
-          const cpCur=_cpAt(line,c);
-          if (_isKanaLongLikeCp(cpCur)){ c=_nextIndex(line,c); continue; }
+        while (cW < n){
+          const tCur=_wordTypeAtInLine(line,cW);
+          if (tCur===_WT_HIRA){ cW=_nextIndex(line,cW); continue; }
+          const cpCur=_cpAt(line,cW);
+          if (_isKanaLongLikeCp(cpCur)){ cW=_nextIndex(line,cW); continue; }
           break;
         }
       } else {
-        while (c < n && _wordTypeAtInLine(line, c) === tRun){ c = _nextIndex(line, c); }
+        while (cW < n && _wordTypeAtInLine(line, cW) === tRun){ cW = _nextIndex(line, cW); }
       }
-      return { r, c };
+      const srcC = info.wordToSrcCaret ? (info.wordToSrcCaret(cW|0)|0) : (cW|0);
+      return { r, c: srcC };
     }
   }
   function _prevWordStart(row, col){
@@ -22098,30 +23426,36 @@ try{
     let r = row, c = col;
     for(;;){
       if (r < 0) return { r:0, c:0 };
-      const line = (r>=0 && r<lines.length) ? (lines[r]||'') : '';
+      const info = _mdWordMotionLineInfo(lines, r|0);
+      const line = (r>=0 && r<lines.length) ? (info.wordLine||'') : '';
       const n = line.length;
-      if (c > n) c = n;
+      let cW = info.srcToWordCaret ? (info.srcToWordCaret(c|0)|0) : (c|0);
+      if (cW > n) cW = n;
       // At start-of-line: jump across consecutive empty lines to the previous non-empty line end (grouped) (#702)
-      if (c === 0){
+      if (cW === 0){
         let r2 = r - 1;
         while (r2 >= 0 && (lines[r2]||'') === ''){ r2--; }
-        if (r2 >= 0){ return { r: r2, c: (lines[r2]||'').length }; }
+        if (r2 >= 0){
+          const info2 = _mdWordMotionLineInfo(lines, r2|0);
+          const srcEnd = (info2 && info2.srcLine) ? (info2.srcLine.length|0) : ((lines[r2]||'').length|0);
+          return { r: r2, c: srcEnd };
+        }
         return { r:0, c:0 };
       }
       // Move left one code point, then if on spaces skip leftward spaces; otherwise, move to start of the current run
-      c = _prevIndex(line, c);
+      cW = _prevIndex(line, cW);
       // If landed within spaces, skip spaces (but stay on the same line)
-      while (c >= 0 && _wordTypeAtInLine(line, c) === _WT_SPACE){
-        if (c === 0) break;
-        c = _prevIndex(line, c);
+      while (cW >= 0 && _wordTypeAtInLine(line, cW) === _WT_SPACE){
+        if (cW === 0) break;
+        cW = _prevIndex(line, cW);
       }
-      if (c < 0){ return { r: Math.max(0, r-1), c: _lineLen(Math.max(0, r-1)) }; }
-      const tRun = _wordTypeAtInLine(line, c);
-      const startCp = _cpAt(line, c);
+      if (cW < 0){ return { r: Math.max(0, r-1), c: _lineLen(Math.max(0, r-1)) }; }
+      const tRun = _wordTypeAtInLine(line, cW);
+      const startCp = _cpAt(line, cW);
       if (tRun === _WT_HAN){
-        while (c > 0){
-          const p=_prevIndex(line,c); if (p<0) break; const tPrev=_wordTypeAtInLine(line,p);
-          if (tPrev===_WT_HAN){ c=p; continue; }
+        while (cW > 0){
+          const p=_prevIndex(line,cW); if (p<0) break; const tPrev=_wordTypeAtInLine(line,p);
+          if (tPrev===_WT_HAN){ cW=p; continue; }
           // Stop before kana (asymmetric)
           break;
         }
@@ -22129,40 +23463,47 @@ try{
         // 後方 kana 語: 現在のかな連続 + 直前の漢字連続 までを 1 語。さらにその前のかなには跨らない。
         const treatKatakanaAsKana = (tRun===_WT_HIRA && _isKanaLongLikeCp(startCp));
         let consumedHanBlock = false;
-        while (c > 0){
-          const p=_prevIndex(line,c); if (p<0) break; const tPrev=_wordTypeAtInLine(line,p); const cpPrev=_cpAt(line,p);
+        while (cW > 0){
+          const p=_prevIndex(line,cW); if (p<0) break; const tPrev=_wordTypeAtInLine(line,p); const cpPrev=_cpAt(line,p);
           if (!consumedHanBlock){
             // まず同種かな/長音類を巻き取る
             if (tPrev===_WT_HIRA || (tPrev===_WT_KATA && (tRun===_WT_KATA || treatKatakanaAsKana)) || _isKanaLongLikeCp(cpPrev)){
-              c=p; continue;
+              cW=p; continue;
             }
             // 次に直前の漢字連続ブロックを 1 度だけ巻き取る
-            if (tPrev===_WT_HAN){ consumedHanBlock=true; c=p; continue; }
+            if (tPrev===_WT_HAN){ consumedHanBlock=true; cW=p; continue; }
             break;
           } else {
             // 漢字ブロック継続中: 連続漢字のみ巻き取る。それ以外(かな/記号等)で停止。
-            if (tPrev===_WT_HAN){ c=p; continue; }
+            if (tPrev===_WT_HAN){ cW=p; continue; }
             break;
           }
         }
       } else {
-        while (c > 0){
-          const p=_prevIndex(line,c); if (p<0) break; if (_wordTypeAtInLine(line,p)!==tRun) break; c=p;
+        while (cW > 0){
+          const p=_prevIndex(line,cW); if (p<0) break; if (_wordTypeAtInLine(line,p)!==tRun) break; cW=p;
         }
       }
-      return { r, c };
+      const srcC = info.wordToSrcCaret ? (info.wordToSrcCaret(cW|0)|0) : (cW|0);
+      return { r, c: srcC };
     }
   }
   function _moveWordW(count){ let r=caretRow, c=caretCol; const times=Math.max(1,count|0); for(let i=0;i<times;i++){ const p=_nextWordStart(r,c); r=p.r; c=p.c; } _setCaret(r,c); }
   function _moveWordB(count){ let r=caretRow, c=caretCol; const times=Math.max(1,count|0); for(let i=0;i<times;i++){ const p=_prevWordStart(r,c); r=p.r; c=p.c; } _setCaret(r,c); }
   // JP-aware end-of-word (for cw behaving like ce): compute end column of current word run within the line.
   function _wordEndInLine(row, col){
-    const line = (_splitLines()[row]||'');
+    const lines = _splitLines();
+    const info = _mdWordMotionLineInfo(lines, row|0);
+    const line = (info.wordLine||'');
     const n = line.length;
-    let c = Math.max(0, Math.min(n, col|0));
+    let c = info.srcToWordCaret ? (info.srcToWordCaret(col|0)|0) : (col|0);
+    c = Math.max(0, Math.min(n, c|0));
     // If starting on spaces, skip spaces first; cw should eat leading spaces then the next word
     while (c < n && _wordTypeAtInLine(line, c) === _WT_SPACE){ c = _nextIndex(line, c); }
-    if (c >= n) return { r: row, c: n };
+    if (c >= n){
+      const srcC = info.wordToSrcCaret ? (info.wordToSrcCaret(n|0)|0) : (n|0);
+      return { r: row, c: srcC };
+    }
     const tRun = _wordTypeAtInLine(line, c);
     if (tRun === _WT_HAN){
       let seenKana = false;
@@ -22177,16 +23518,20 @@ try{
         }
         break;
       }
-      return { r: row, c };
+      const srcC = info.wordToSrcCaret ? (info.wordToSrcCaret(c|0)|0) : (c|0);
+      return { r: row, c: srcC };
     } else if (tRun === _WT_KATA){
       while (c < n){ const tCur=_wordTypeAtInLine(line,c); if (tCur===_WT_KATA){ c=_nextIndex(line,c); continue; } const cpCur=_cpAt(line,c); if (_isKanaLongLikeCp(cpCur)){ c=_nextIndex(line,c); continue; } break; }
-      return { r: row, c };
+      const srcC = info.wordToSrcCaret ? (info.wordToSrcCaret(c|0)|0) : (c|0);
+      return { r: row, c: srcC };
     } else if (tRun === _WT_HIRA){
       while (c < n){ const tCur=_wordTypeAtInLine(line,c); if (tCur===_WT_HIRA){ c=_nextIndex(line,c); continue; } const cpCur=_cpAt(line,c); if (_isKanaLongLikeCp(cpCur)){ c=_nextIndex(line,c); continue; } break; }
-      return { r: row, c };
+      const srcC = info.wordToSrcCaret ? (info.wordToSrcCaret(c|0)|0) : (c|0);
+      return { r: row, c: srcC };
     } else {
       while (c < n && _wordTypeAtInLine(line, c) === tRun){ c = _nextIndex(line, c); }
-      return { r: row, c };
+      const srcC = info.wordToSrcCaret ? (info.wordToSrcCaret(c|0)|0) : (c|0);
+      return { r: row, c: srcC };
     }
   }
   // WORD (capital W/B) motions: treat any non-space run as one WORD
@@ -22195,17 +23540,22 @@ try{
     let r = row, c = col;
     for(;;){
       if (r >= lines.length) return { r: lines.length-1, c: _lineLen(lines.length-1) };
-      const line = lines[r] || '';
+      const info = _mdWordMotionLineInfo(lines, r|0);
+      const line = info.wordLine || '';
       const n = line.length;
-      if (c > n) c = n;
-      if (c >= n){ r++; c = 0; continue; }
+      let cW = info.srcToWordCaret ? (info.srcToWordCaret(c|0)|0) : (c|0);
+      if (cW > n) cW = n;
+      if (cW >= n){ r++; c = 0; continue; }
       // skip spaces first
-      while (c < n && _wordTypeAtInLine(line, c) === _WT_SPACE){ c = _nextIndex(line, c); }
-      if (c < n){
+      while (cW < n && _wordTypeAtInLine(line, cW) === _WT_SPACE){ cW = _nextIndex(line, cW); }
+      if (cW < n){
         // in a non-space run: leave this run, then skip spaces to the next start
-        while (c < n && _wordTypeAtInLine(line, c) !== _WT_SPACE){ c = _nextIndex(line, c); }
-        while (c < n && _wordTypeAtInLine(line, c) === _WT_SPACE){ c = _nextIndex(line, c); }
-        if (c < n) return { r, c };
+        while (cW < n && _wordTypeAtInLine(line, cW) !== _WT_SPACE){ cW = _nextIndex(line, cW); }
+        while (cW < n && _wordTypeAtInLine(line, cW) === _WT_SPACE){ cW = _nextIndex(line, cW); }
+        if (cW < n){
+          const srcC = info.wordToSrcCaret ? (info.wordToSrcCaret(cW|0)|0) : (cW|0);
+          return { r, c: srcC };
+        }
       }
       r++; c = 0;
     }
@@ -22215,26 +23565,29 @@ try{
     let r = row, c = col;
     for(;;){
       if (r < 0) return { r:0, c:0 };
-      const line = (r>=0 && r<lines.length) ? (lines[r]||'') : '';
+      const info = _mdWordMotionLineInfo(lines, r|0);
+      const line = (r>=0 && r<lines.length) ? (info.wordLine||'') : '';
       const n = line.length;
-      if (c > n) c = n;
-      if (c > 0){
+      let cW = info.srcToWordCaret ? (info.srcToWordCaret(c|0)|0) : (c|0);
+      if (cW > n) cW = n;
+      if (cW > 0){
         // step left one code point first
-        c = _prevIndex(line, c);
+        cW = _prevIndex(line, cW);
         // skip spaces to the left
-        while (c >= 0 && _wordTypeAtInLine(line, c) === _WT_SPACE){
-          if (c === 0){ c = -1; break; }
-          c = _prevIndex(line, c);
+        while (cW >= 0 && _wordTypeAtInLine(line, cW) === _WT_SPACE){
+          if (cW === 0){ cW = -1; break; }
+          cW = _prevIndex(line, cW);
         }
-        if (c < 0){ r--; c = (r>=0 ? (lines[r]||'').length : 0); continue; }
+        if (cW < 0){ r--; c = (r>=0 ? (lines[r]||'').length : 0); continue; }
         // move to start of this non-space run
-        while (c > 0){
-          const prev = _prevIndex(line, c);
+        while (cW > 0){
+          const prev = _prevIndex(line, cW);
           if (prev < 0) break;
           if (_wordTypeAtInLine(line, prev) === _WT_SPACE) break;
-          c = prev;
+          cW = prev;
         }
-        return { r, c };
+        const srcC = info.wordToSrcCaret ? (info.wordToSrcCaret(cW|0)|0) : (cW|0);
+        return { r, c: srcC };
       } else {
         r--; c = (r>=0 ? (lines[r]||'').length : 0);
       }
@@ -28913,6 +30266,27 @@ try{
         }
       }catch{}
 
+      // md draft URL bar: Ctrl+E focuses URL bar (INSERT/NORMAL)
+      try{
+        const isCtrl = !!(e && e.ctrlKey && !e.altKey && !e.metaKey);
+        if (isCtrl){
+          const k = String((e && e.key) || '');
+          const c = String((e && e.code) || '');
+          const isE = (k === 'e' || k === 'E' || c === 'KeyE' || (k === 'Process' && c === 'KeyE'));
+          if (isE){
+            // Only consume Ctrl+E if caret is on an inline-link context.
+            // Use the force-open path so clean-mode hint doesn't immediately revert.
+            let opened = false;
+            try{ _mdClampCaretForCleanInlineLinks && _mdClampCaretForCleanInlineLinks(); }catch{}
+            try{ opened = !!(_mdUrlBarForceOpenEdit && _mdUrlBarForceOpenEdit(null, 'ctrl+e:editor')); }catch{ opened = false; }
+            if (opened){
+              try{ e.preventDefault(); e.stopPropagation(); }catch{}
+              return;
+            }
+          }
+        }
+      }catch{}
+
       // IME composition (INSERT): let the browser/IME handle keys without running editor logic.
       // Put this as early as possible to avoid per-key overhead on multi-line buffers.
       try{
@@ -31729,6 +33103,14 @@ try{
   // #1335: Enter key in NORMAL mode triggers link jump if caret is on a link
   if (e.key === 'Enter' && _mode === 'NORMAL' && !e.ctrlKey && !e.altKey && !e.metaKey){
     try{
+      // Prefer the caret-derived hover link (works for md clean display + md inline links).
+      try{
+        if (_hoverLink && _hoverLink._fromCaret && ((_hoverLink.r|0) === (caretRow|0))){
+          e.preventDefault(); e.stopPropagation();
+          _onEditorClickForLink(e);
+          return;
+        }
+      }catch{}
       const lines = _splitLines();
       const line = lines[caretRow] || '';
       let hit = null;
@@ -31746,11 +33128,14 @@ try{
             const draftMode = !!(_mdDraftEditEnabled && _mdDraftEditEnabled());
             if (draftMode){
               const mdInline = _detectMdInlineLinkAt && _detectMdInlineLinkAt(String(line||''), caretCol|0);
-              if (mdInline) suppressRaw = true;
+              if (mdInline){
+                suppressRaw = true;
+                hit = mdInline;
+              }
             }
           }
         }
-        if (!suppressRaw) hit = _detectUrlAt(line, caretCol, caretRow);
+        if (!hit && !suppressRaw) hit = _detectUrlAt(line, caretCol, caretRow);
       }catch{ hit = _detectUrlAt(line, caretCol, caretRow); }
       if (hit){
         e.preventDefault(); e.stopPropagation();
@@ -33594,6 +34979,19 @@ try{
             if (!e) return;
             // #1327: If a modal is open, do not intercept keys (let modal handle them)
             if ((_modalOverlay && _modalOverlay.style && _modalOverlay.style.display !== 'none') || (window._grepDialogOpen===true)) return;
+
+            // md URL bar: while active/visible, never let scan-hold steal ArrowUp/Down (or j/k)
+            // because URLバー入力中に本文caretが動いてしまう (#1921).
+            try{
+              const ubVis = (typeof _mdUrlBarVisible === 'function') ? !!_mdUrlBarVisible() : !!(_mdUrlBar && _mdUrlBar.style && _mdUrlBar.style.display !== 'none');
+              if (ubVis){
+                const ub = _mdUrlBar;
+                const tgt0 = (e && e.target) ? e.target : null;
+                const isInBar0 = !!(ub && tgt0 && (ub === tgt0 || (ub.contains && ub.contains(tgt0))));
+                const active0 = (ub && ub.dataset && ub.dataset.active === '1') || (typeof _mdUrlBarHasFocus === 'function' && _mdUrlBarHasFocus()) || !!_mdUrlBarComposing;
+                if (isInBar0 || active0) return;
+              }
+            }catch{}
 
             // Some environments can deliver key events with an empty/unstable .code.
             // Normalize to an effective code based on .key so scan-hold can consistently

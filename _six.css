@@ -68,6 +68,137 @@ body { font: var(--fontBase, 18px)/20px Consolas, 'Courier New', monospace; over
 #cmdfloat #cmdinput,
 #cmdfloat #imeinput { flex:1; background: var(--cmdInputBg, transparent); color: var(--cmdInputFg, var(--tabBarFg)); border:0; outline:0; font: inherit; height:100%; }
 
+/* Markdown draft: inline-link URL bar (floating, CMD-bar-like) */
+#mdUrlBar {
+	position: absolute;
+	left: 8px;
+	top: 8px;
+	z-index: 10002;
+	pointer-events: auto;
+	box-sizing: border-box;
+	/* Badge float distance from the bar (tuned to touch the input, not cover it) */
+	--mdUrlBarBadgeFloat: 15px;
+	--mdUrlBarHintBadgeFloat: 18px;
+	background: var(--tabBarBg, #0f1117);
+	color: var(--tabBarFg, #a6accd);
+	border: 1px solid #1c2230;
+	border-radius: 8px;
+	box-shadow: 0 10px 18px rgba(0,0,0,0.55);
+	padding: 6px;
+	gap: 8px;
+	align-items: center;
+	display: flex;
+}
+
+#mdUrlBar .md-urlbar-hotkey {
+	position: absolute;
+	left: 10px;
+	top: calc(-1 * var(--mdUrlBarBadgeFloat));
+	font: 11px/1.2 system-ui,-apple-system,'Segoe UI',sans-serif;
+	padding: 3px 7px;
+	border: 1px solid #2a3244;
+	background: #1a2030;
+	color: #e6e6e6;
+	border-radius: 8px;
+	cursor: pointer;
+	user-select: none;
+	box-shadow: 0 6px 10px rgba(0,0,0,0.40);
+	opacity: 0.98;
+}
+#mdUrlBar .md-urlbar-hotkey:focus {
+	outline: none;
+	border-color: rgba(230,230,230,0.75);
+	box-shadow: 0 0 0 2px rgba(230,230,230,0.18), 0 6px 10px rgba(0,0,0,0.40);
+}
+#mdUrlBar .md-urlbar-hotkey:hover { filter: brightness(1.05); }
+#mdUrlBar .md-urlbar-hotkey:active { filter: brightness(0.98); }
+
+/* When URL bar is below caret, place the overlay button below the bar (overlap top half). */
+#mdUrlBar[data-pos="below"] .md-urlbar-hotkey {
+	top: auto;
+	bottom: calc(-1 * var(--mdUrlBarBadgeFloat));
+}
+
+/* Actions replace Ctrl+E only while active */
+#mdUrlBar .md-urlbar-actions {
+	position: absolute;
+	left: 10px;
+	top: calc(-1 * var(--mdUrlBarBadgeFloat));
+	display: none;
+	gap: 6px;
+	align-items: center;
+	background: transparent;
+	pointer-events: auto;
+}
+#mdUrlBar[data-active="1"] .md-urlbar-hotkey { display: none; }
+#mdUrlBar[data-active="1"] .md-urlbar-actions { display: flex; }
+
+/* Clean mode hint: show only Ctrl+E badge (no bar, no input/actions) */
+#mdUrlBar[data-hint="1"] {
+	background: transparent;
+	border: 0;
+	box-shadow: none;
+	padding: 0;
+	gap: 0;
+	width: 0 !important;
+	height: 0 !important;
+	pointer-events: none;
+}
+#mdUrlBar[data-hint="1"] #mdUrlBarInput { display: none; }
+#mdUrlBar[data-hint="1"] .md-urlbar-actions { display: none !important; }
+#mdUrlBar[data-hint="1"] .md-urlbar-hotkey { display: block; pointer-events: auto; }
+
+/* Hint badge: a bit farther from caret (about 0.3 line) */
+#mdUrlBar[data-hint="1"] .md-urlbar-hotkey { top: calc(-1 * var(--mdUrlBarHintBadgeFloat)); pointer-events: auto; }
+#mdUrlBar[data-hint="1"][data-pos="below"] .md-urlbar-hotkey { top: auto; bottom: calc(-1 * var(--mdUrlBarHintBadgeFloat)); }
+
+#mdUrlBar[data-pos="below"] .md-urlbar-actions {
+	top: auto;
+	bottom: calc(-1 * var(--mdUrlBarBadgeFloat));
+}
+
+#mdUrlBar .md-urlbar-chprobe {
+	position: absolute;
+	left: -9999px;
+	top: -9999px;
+	visibility: hidden;
+	pointer-events: none;
+	white-space: pre;
+}
+#mdUrlBar #mdUrlBarInput {
+	flex: 1 1 auto;
+	min-width: 8ch;
+	background: var(--cmdInputBg, transparent);
+	color: var(--cmdInputFg, var(--tabBarFg, #e6e6e6));
+	border: 1px solid rgba(255,255,255,0.10);
+	border-radius: 6px;
+	outline: 0;
+	padding: 4px 8px;
+	font: inherit;
+	height: 26px;
+	box-sizing: border-box;
+}
+#mdUrlBar #mdUrlBarInput:focus {
+	border-color: rgba(230,230,230,0.55);
+	box-shadow: 0 0 0 2px rgba(230,230,230,0.18);
+}
+#mdUrlBar .md-urlbar-actions { flex: 0 0 auto; }
+#mdUrlBar .md-urlbar-btn {
+	flex: 0 0 auto;
+	font: 11px/1.25 system-ui,-apple-system,'Segoe UI',sans-serif;
+	padding: 3px 8px;
+	border: 1px solid #2a3244;
+	background: #1a2030;
+	color: #e6e6e6;
+	border-radius: 6px;
+	cursor: pointer;
+	user-select: none;
+	white-space: nowrap;
+	pointer-events: auto;
+}
+#mdUrlBar .md-urlbar-btn:hover { filter: brightness(1.05); }
+#mdUrlBar .md-urlbar-btn:active { filter: brightness(0.98); }
+
 /* IME bar: keep it as a tiny, effectively invisible anchor for IME candidate popups. */
 #cmdfloat[data-kind="ime"] {
 	padding: 0 !important;
