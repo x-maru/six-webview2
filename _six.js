@@ -6594,7 +6594,8 @@ try{
           }catch{}
         }
       }catch{}
-      fetch(url, { method:'POST', mode:'no-cors', keepalive:true, headers:{ 'Content-Type':'text/plain' }, body }).catch(()=>{});
+      fetch(url, { method:'POST', mode:'no-cors', keepalive:true, headers:{ 'Content-Type':'text/plain' }, body })
+        .catch((err)=>{ try{ _sixDiagOnce('winstate:fetch', err, { url:String(url||'') }); }catch{} });
       return true;
     }catch{ return false; }
   }
@@ -10204,6 +10205,42 @@ try{
       // イベント境界などは同期 throw すると機能停止につながるため、非同期に投げる。
       try{ setTimeout(()=>{ throw err; }, 0); }catch{}
     }
+  }
+
+  // Throttled variant: useful for promise.catch() and hot paths where errors can repeat.
+  // Logs the first occurrence, then at most once per ~2s per tag.
+  function _sixDiagOnce(tag, err, extra){
+    try{
+      const t = String(tag||'');
+      const now = Date.now();
+      const key = 'six.diag.once';
+      const store = (window && window[key]) ? window[key] : (window ? (window[key] = Object.create(null)) : Object.create(null));
+      const rec = store[t] || (store[t] = { lastAt:0, count:0 });
+      rec.count = (rec.count|0) + 1;
+      if ((rec.lastAt|0) === 0){
+        rec.lastAt = now|0;
+        _sixDiagReport(t, err, { once:true, count:(rec.count|0), extra: (extra==null?null:extra) });
+        return;
+      }
+      if ((now - (rec.lastAt|0)) >= 2000){
+        rec.lastAt = now|0;
+        _sixDiagReport(t, err, { once:true, count:(rec.count|0), extra: (extra==null?null:extra) });
+      }
+    }catch{}
+  }
+
+  // Event handler guard: consolidate to a single boundary catch + report.
+  // 理由: DOMイベントは境界が深く、途中で例外が出ると入力/状態が壊れやすい。
+  // 内側で握り潰すのではなく、外側1箇所で捕捉して早期に気付けるようにする。
+  function _sixEvtGuard(tag, fn, extraFn){
+    return function(e){
+      try{ return fn(e); }
+      catch(err){
+        let extra = null;
+        try{ extra = (typeof extraFn==='function') ? extraFn(e) : null; }catch{}
+        try{ _sixDiagCatch(String(tag||'event'), err, extra); }catch{}
+      }
+    };
   }
   const _debugKeyRing = [];
   const _DEBUG_KEY_MAX = 300;
@@ -30528,7 +30565,12 @@ try{
     // NORMAL only: Ctrl+Shift+Z → minimize window (API first, host message fallback)
     if (e.ctrlKey && e.shiftKey && !e.altKey && !e.metaKey && (e.key==='Z' || e.key==='z')){
       e.preventDefault();
-      try{ if (_apiBase){ fetch(_apiBase + 'win/minimize').catch(()=>{}); } }catch{}
+      try{
+        if (_apiBase){
+          fetch(_apiBase + 'win/minimize')
+            .catch((err)=>{ try{ _sixDiagOnce('win:minimize', err, { base:String(_apiBase||'') }); }catch{} });
+        }
+      }catch(err){ try{ _sixDiagOnce('win:minimize(sync)', err, { base:String(_apiBase||'') }); }catch{} }
       try{ if (_isWebView2 && window && window.chrome && window.chrome.webview && typeof window.chrome.webview.postMessage==='function'){
         window.chrome.webview.postMessage({ type:'six-window-minimize' });
       } }catch{}
@@ -36341,7 +36383,7 @@ try{
                         }
                       }catch{}
                     })
-                    .catch(()=>{})
+                    .catch((err)=>{ try{ _sixDiagOnce('e:listDirEntries(open)', err, { base:String(_fileBaseURL||'') }); }catch{} })
                     .finally(()=>{ _fileLoading=false; _filePopupRender(); });
                 })();
                 return;
@@ -36431,7 +36473,7 @@ try{
           }
         }
       });
-      cmdinput.addEventListener('input', (e)=>{
+      cmdinput.addEventListener('input', _sixEvtGuard('cmdinput.input', (e)=>{
         // IME bar: mirror current input into the document.
         try{
           if (_imeBarActive){
@@ -36605,7 +36647,7 @@ try{
                     }
                   }catch{}
                 })
-                .catch(()=>{})
+                .catch((err)=>{ try{ _sixDiagOnce('e:listDirEntries(open)', err, { base:String(_fileBaseURL||'') }); }catch{} })
                 .finally(()=>{ _fileLoading=false; _filePopupRender(); });
             })();
             return;
@@ -37010,7 +37052,7 @@ try{
         // 非表示
         _bufPopupHide();
         _filePopupHide();
-      });
+      }, (e)=>({ mode:String(_mode||''), vLen:((cmdinput&&cmdinput.value)?(String(cmdinput.value).length|0):0), isComp:!!(e&&e.isComposing===true), target:(e&&e.target&&e.target.id)?String(e.target.id):'' })));
 
       // Close interception setup (bind once at startup, outside CMD flow)
       // WebView2: host sends 'close-request' and expects 'close-result'
@@ -42319,7 +42361,7 @@ try{
         if (res instanceof Promise) {
           res.then(count => {
             if ((count|0) > 0) close();
-          }).catch(()=>{});
+          }).catch((err)=>{ try{ _sixDiagOnce('grep:exec', err, { targetMode:String(_grepTargetMode||''), external:1 }); }catch{} });
         } else {
           if ((res|0) > 0) close();
         }
@@ -44027,7 +44069,7 @@ try{
       try{
         _reloadCustomizeFresh()
           .then(()=>{ try{ _applyTheme(); _repositionCaret(); updateGutter(); }catch{} })
-          .catch(()=>{});
+          .catch((err)=>{ try{ _sixDiagOnce('bootstrap:reloadCustomize', err, null); }catch{} });
       }catch{}
       // Sync metrics (line-height, font-size, measurement span)
       _syncEditorMetrics();
@@ -44147,7 +44189,9 @@ try{
         try{ setTimeout(_postStartStabilize, 650); }catch{}
         try{
           if (document && document.fonts && document.fonts.ready && typeof document.fonts.ready.then === 'function'){
-            document.fonts.ready.then(()=>{ try{ _postStartStabilize(); }catch{} }).catch(()=>{});
+            document.fonts.ready
+              .then(()=>{ try{ _postStartStabilize(); }catch{} })
+              .catch((err)=>{ try{ _sixDiagOnce('bootstrap:fonts.ready', err, null); }catch{} });
           }
         }catch{}
 
