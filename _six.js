@@ -7225,6 +7225,28 @@ try{
       return false;
     }catch{ return false; }
   }
+
+  // Unified Tab detection: some environments report Tab as Unidentified/Process
+  // but still provide code/keyCode. Keep this narrow (no Ctrl+I here).
+  function _isTabKey(e){
+    try{
+      if (!e) return false;
+      if (e.key === 'Tab') return true;
+      if (e.code === 'Tab') return true;
+      if (typeof e.keyCode === 'number' && e.keyCode === 9) return true;
+      return false;
+    }catch{ return false; }
+  }
+
+  // Tab-like for command/popup contexts: accept Ctrl+I as Tab equivalent.
+  function _isTabOrCtrlI(e){
+    try{
+      if (_isTabKey(e)) return true;
+      if (!e) return false;
+      const isCtrlI = (!!e.ctrlKey && !e.altKey && !e.metaKey && (e.key==='i' || e.key==='I'));
+      return !!isCtrlI;
+    }catch{ return false; }
+  }
   function _isKanaKey(e){
     try{
       if (!e) return false;
@@ -7592,9 +7614,105 @@ try{
     try{
       if (window.__sixOverlayPopupKeyboardOnce) return;
       window.__sixOverlayPopupKeyboardOnce = true;
-      window.addEventListener('keydown', (e)=>{
+      const onCap = (e)=>{
+        // NOTE: capture-phase handler is a hard event boundary.
+        // If this throws, keyboard input can become inconsistent; so we catch once and *report*.
         try{
           const key = String((e && e.key) || '');
+          const isTab = (typeof _isTabOrCtrlI === 'function') ? _isTabOrCtrlI(e) : ((key === 'Tab') || (!!(e&&e.ctrlKey) && !e.altKey && !e.metaKey && (key==='i' || key==='I')));
+
+          // debugkeys: capture what the environment reports for Tab-like keys while :e popup is open
+          if (_optDebugKeys){
+            const fileOpenDbg = (typeof _filePopupVisible === 'function' && _filePopupVisible());
+            if (fileOpenDbg && _mode === 'CMD'){
+              const kc = (typeof e.keyCode==='number') ? (e.keyCode|0) : null;
+              const w = (typeof e.which==='number') ? (e.which|0) : null;
+              const code = String((e && e.code) || '');
+              const isComp = !!((e && e.isComposing===true) || (window && window._imeComposing===true));
+              const suspicious = isTab || kc===229 || key==='Process' || key==='Unidentified' || code==='Tab';
+              if (suspicious){
+                _debugPush({ t:Date.now(), type:'filetab-key', mode:_mode, via:'overlayCap', key, code, keyCode:kc, which:w, ctrl:!!e.ctrlKey, alt:!!e.altKey, meta:!!e.metaKey, isComp, popup:true, kind:(bufpopup&&bufpopup.dataset&&bufpopup.dataset.kind)||'', f:(typeof _fileFilter==='string'?_fileFilter:''), td:(typeof _fileTypedDirRaw==='string'?_fileTypedDirRaw:'') });
+              }
+            }
+          }
+
+          // :e file popup (bufpopup kind=file): ensure Tab completion works even if
+          // cmdinput doesn't receive the key due to focus/routing quirks. (#1901)
+          const fileOpen = (typeof _filePopupVisible === 'function' && _filePopupVisible());
+          if (fileOpen && isTab && _mode === 'CMD' && cmdinput){
+            if (e && typeof e.preventDefault==='function') e.preventDefault();
+            if (e && typeof e.stopImmediatePropagation==='function') e.stopImmediatePropagation();
+            if (e && typeof e.stopPropagation==='function') e.stopPropagation();
+
+            const vNow = String(cmdinput.value||'');
+            const parsed = _eParseInput(vNow);
+            const typed = String((_fileTypedDirRaw!=null ? _fileTypedDirRaw : '') || parsed.typedDirRaw || '');
+            const filt = String((_fileFilter!=null ? _fileFilter : '') || parsed.filter || '');
+            if (_optDebugKeys) _debugPush({ t:Date.now(), type:'filetab-run', mode:_mode, via:'overlayCap', key:String((e&&e.key)||''), code:String((e&&e.code)||''), keyCode:(typeof e.keyCode==='number'?(e.keyCode|0):null), isComp:!!((e&&e.isComposing===true)||(window&&window._imeComposing===true)), filt, typed });
+
+            const list = (typeof _filePopupComputeList==='function') ? _filePopupComputeList() : [];
+            const sel = Math.max(0, Math.min((list.length|0)-1, (_fileSel|0)));
+            const it = (list && list.length) ? list[sel] : null;
+            const endsWithSlash = ((filt.length|0) === 0);
+
+            if (endsWithSlash){
+              // '..' 上での Tab は ".." を入力欄に挿入し、ナビゲーションは行わない
+              if (it && it._up){
+                const next = ':e ' + String(typed) + '..';
+                cmdinput.value = next;
+                const pos=(cmdinput.value||'').length; cmdinput.setSelectionRange(pos,pos);
+                if (_optDebugKeys) _debugPush({ t:Date.now(), type:'filetab-applied', mode:_mode, via:'overlayCap', next });
+                cmdinput.dispatchEvent(new Event('input', { bubbles:true }));
+                return;
+              }
+              // 例外: '../' 以外の候補が1つだけのとき、その候補名まで補完
+              const nonUp = Array.isArray(list) ? list.filter(e=> e && !e._up) : [];
+              if (nonUp.length === 1){
+                const only = nonUp[0];
+                const next = ':e ' + _collapseDotDotPath(typed + String(only.name||''));
+                cmdinput.value = next;
+                const pos=(cmdinput.value||'').length; cmdinput.setSelectionRange(pos,pos);
+                if (_optDebugKeys) _debugPush({ t:Date.now(), type:'filetab-applied', mode:_mode, via:'overlayCap', next });
+                cmdinput.dispatchEvent(new Event('input', { bubbles:true }));
+                return;
+              }
+              return;
+            }
+
+            // 末尾が '/' でない → 現在セグメントに対して共通プレフィックス補完
+            let caseSensitive = false;
+            const b = _ensureSlash(_fileBaseURL);
+            if (b && b.protocol==='file:' && b.host && b.host.toLowerCase()==='wsl.localhost') caseSensitive = true;
+            const startsWith = (name, q)=> caseSensitive ? name.startsWith(q) : name.toLowerCase().startsWith(q.toLowerCase());
+            const names = (Array.isArray(_fileEntries)?_fileEntries:[]).map(e=> String(e&&e.name||'')).filter(n=> n && startsWith(n, filt));
+            if (!filt || names.length===0){
+              if (_optDebugKeys) _debugPush({ t:Date.now(), type:'filetab-calc', mode:_mode, via:'overlayCap', filt, typed, namesLen:(names&&names.length)||0, common:'', commonLen:0, why:(!filt?'no-filt':'no-names') });
+              return;
+            }
+            const lcp = (arr)=>{
+              if (arr.length===0) return '';
+              let prefix = arr[0];
+              for (let i=1;i<arr.length;i++){
+                let j=0; const s = arr[i];
+                const a = caseSensitive ? prefix : prefix.toLowerCase();
+                const b = caseSensitive ? s : s.toLowerCase();
+                while (j<Math.min(a.length,b.length) && a[j]===b[j]) j++;
+                prefix = prefix.slice(0, j);
+                if (!prefix) break;
+              }
+              return prefix;
+            };
+            const common = lcp(names);
+            if (_optDebugKeys) _debugPush({ t:Date.now(), type:'filetab-calc', mode:_mode, via:'overlayCap', filt, typed, namesLen:(names&&names.length)||0, common, commonLen:(common?common.length:0), why:((common && common.length>filt.length)?'apply':'noop') });
+            if (common && common.length > filt.length){
+              const next = ':e ' + _collapseDotDotPath(typed + common);
+              cmdinput.value = next;
+              const pos=(cmdinput.value||'').length; cmdinput.setSelectionRange(pos,pos);
+              if (_optDebugKeys) _debugPush({ t:Date.now(), type:'filetab-applied', mode:_mode, via:'overlayCap', next });
+              cmdinput.dispatchEvent(new Event('input', { bubbles:true }));
+            }
+            return;
+          }
 
           // Zoom popup (overlayZoomPopup)
           try{
@@ -7748,8 +7866,15 @@ try{
               return;
             }
           }catch{}
-        }catch{}
-      }, true);
+        }catch(err){
+          _sixDiagCatch('overlayPopupKeyboard.onCap', err, { key:String((e&&e.key)||''), code:String((e&&e.code)||''), mode:String(_mode||'') });
+        }
+      };
+
+      // Must be capture-phase; otherwise key handlers (especially textarea/CMD handlers)
+      // can stop propagation before we get a chance to intercept TAB/arrow keys.
+      try{ window.addEventListener('keydown', onCap, true); }catch{}
+      try{ document.addEventListener('keydown', onCap, true); }catch{}
     }catch{}
   })();
   // editor zoom state (scale only editor/gutter, not global UI)
@@ -8070,9 +8195,18 @@ try{
         item.textContent = _encDisplayLines(meta).line1 || '';
         // ハイライト背景（zoomPopupと統一）
         item.style.background = (hasSel && i===_encSel) ? 'var(--popupActiveLine, #1a2030)' : 'transparent';
-        item.addEventListener('mousedown', ev=>{ try{ ev.preventDefault(); }catch{} });
-        item.addEventListener('mouseenter', ()=>{ try{ _encSel=i; _encPopupRender(); }catch{} });
-        item.addEventListener('click', ()=>{ try{ _encSel=i; _applyEncodeMeta(meta); _encPopupHide(); setTimeout(()=>{ try{ editor && editor.focus && editor.focus(); }catch{} },0); }catch{} });
+        const _apply = (ev)=>{
+          try{ ev.preventDefault(); ev.stopPropagation(); }catch{}
+          try{ _encSel=i; _applyEncodeMeta(meta); }catch{}
+          try{ _encPopupHide(); }catch{}
+          try{ setTimeout(()=>{ try{ editor && editor.focus && editor.focus(); }catch{} },0); }catch{}
+        };
+        item.addEventListener('mousedown', _apply);
+        item.addEventListener('click', _apply);
+        item.addEventListener('mouseenter', ()=>{
+          try{ if (document.body && document.body.classList && document.body.classList.contains('six-mouse-hidden')) return; }catch{}
+          try{ _encSel=i; _encPopupRender(); }catch{}
+        });
         inner.appendChild(item);
       });
     }catch{}
@@ -10027,6 +10161,50 @@ try{
   // --- Debug key logging (ring buffer) ---
   // :set debugkeys / :set nodebugkeys / :set debugkeys! / :set debugkeys?
   let _optDebugKeys = false;
+
+  // --- Strict / diagnostics ---
+  // 方針: 「想定外でも動かす」より「想定外を早く検知」優先。
+  // - 通常は console へ出す
+  // - debugkeys ON のときはリングバッファにも残す
+  // - strict ON のときは非同期に throw して devtools / host 側で検知しやすくする
+  let _optStrict = (function(){
+    try{ const o=(window&&window.SIX_OPTIONS)||{}; if (o && o.strict===true) return true; }catch{}
+    try{ const v = String(localStorage && localStorage.getItem && localStorage.getItem('six.strict') || ''); return (v==='1' || v==='true'); }catch{}
+    return false;
+  })();
+  function _sixStrictEnabled(){
+    return !!(_optStrict || _optDebugKeys);
+  }
+  function _sixDiagReport(tag, err, extra){
+    try{
+      const t = String(tag||'');
+      if (err){
+        const st = (err && err.stack) ? String(err.stack) : String(err);
+        console.error('[six]', t, st, extra||null);
+      } else {
+        console.error('[six]', t, extra||null);
+      }
+    }catch{}
+    try{
+      if (_optDebugKeys){
+        _debugPush({
+          t:Date.now(),
+          type:'diag',
+          tag:String(tag||''),
+          err:(err ? String(err && (err.message||err)) : ''),
+          stack:(err && err.stack ? String(err.stack) : ''),
+          extra: (extra==null ? null : extra)
+        });
+      }
+    }catch{}
+  }
+  function _sixDiagCatch(tag, err, extra){
+    _sixDiagReport(tag, err, extra);
+    if (_sixStrictEnabled() && err){
+      // イベント境界などは同期 throw すると機能停止につながるため、非同期に投げる。
+      try{ setTimeout(()=>{ throw err; }, 0); }catch{}
+    }
+  }
   const _debugKeyRing = [];
   const _DEBUG_KEY_MAX = 300;
   function _dbgSelState(){
@@ -10074,6 +10252,34 @@ try{
       }).join('\n');
     }catch{ return ''; }
   }
+
+  // --- Global error hooks ---
+  // 理由: ブラウザ/ホスト由来の非同期イベントやタイミング差で、
+  // 「バグがなくても」想定外の順序で例外が出ることがある。握り潰さず見える化する。
+  (function(){
+    try{
+      if (window.__sixGlobalErrorHookOnce) return;
+      window.__sixGlobalErrorHookOnce = true;
+      window.addEventListener('error', (ev)=>{
+        try{
+          const err = ev && ev.error;
+          _sixDiagReport('window.error', err || null, {
+            message: (ev && ev.message) ? String(ev.message) : '',
+            filename: (ev && ev.filename) ? String(ev.filename) : '',
+            lineno: (typeof ev.lineno==='number') ? (ev.lineno|0) : null,
+            colno: (typeof ev.colno==='number') ? (ev.colno|0) : null,
+          });
+        }catch(e){ try{ console.error('[six] window.error hook failed', e); }catch{} }
+      });
+      window.addEventListener('unhandledrejection', (ev)=>{
+        try{
+          const r = ev && ev.reason;
+          const err = (r instanceof Error) ? r : null;
+          _sixDiagReport('window.unhandledrejection', err, { reason: (err? '' : String(r)) });
+        }catch(e){ try{ console.error('[six] unhandledrejection hook failed', e); }catch{} }
+      });
+    }catch{}
+  })();
   let _vbLayer = null;               // full-viewport black flash overlay
   // --- Anomaly heuristics (diagnose NORMAL+IME ON acting like constant 'l') ---
   let _anomActive = false;           // between start/end markers
@@ -12054,17 +12260,17 @@ try{
 
       // Inject minimal CSS once.
       try{
-        if (!document.getElementById('six-mouse-hide-css')){
-          const st = document.createElement('style');
+        let st = document.getElementById('six-mouse-hide-css');
+        if (!st){
+          st = document.createElement('style');
           st.id = 'six-mouse-hide-css';
-          st.textContent = [
-            // Hide cursor globally while active.
-            'body.six-mouse-hidden, body.six-mouse-hidden * { cursor: none !important; }',
-            // Disable hover/click on popups while hidden.
-            'body.six-mouse-hidden .six-popup, body.six-mouse-hidden .six-popup * { pointer-events: none !important; }'
-          ].join('\n');
           (document.head || document.documentElement || document.body).appendChild(st);
         }
+        // Always refresh the content so hot-updates don't leave an old rule behind.
+        st.textContent = [
+          // Hide cursor globally while active.
+          'body.six-mouse-hidden, body.six-mouse-hidden * { cursor: none !important; }'
+        ].join('\n');
       }catch{}
 
       const show = ()=>{ try{ _sixMouseHidden = false; document.body && document.body.classList && document.body.classList.remove('six-mouse-hidden'); }catch{} };
@@ -13939,12 +14145,16 @@ try{
   let _eofPadGridLastPbPx = -1;
   let _eofPadGridLastBasePx = -1;
   let _eofPadGridLastLh = -1;
+  let _eofPadGridLastCalcAt = 0;
   // markdown-off + wrap-on: If the textarea value ends with '\n', the browser renders
   // a real final empty line. If we also add eofPadLines lines of padding, the user
   // sees (eofPadLines+1) blank lines at EOF. Compensate by subtracting 1 line of pad
   // when such a trailing empty line is present.
   let _eofPadGridImplicitExtraLine = 0; // 0/1 (derived from editor.value)
   function _syncEofPadGridComp(){
+    const __t0 = (typeof _perfNow === 'function') ? _perfNow() : Date.now();
+    let __wrapNow = false;
+    let __basePadRaw = 0;
     try{
       if (!editor) return;
       // md-rich uses its own pixel-precise padding logic.
@@ -13962,7 +14172,9 @@ try{
       }catch{}
 
       const wrapNow = (function(){ try{ return _wrapEnabled && _wrapEnabled(); }catch{ return false; } })();
+      __wrapNow = !!wrapNow;
       const basePadRaw = (typeof _eofPadLines === 'function') ? (_eofPadLines()|0) : 0;
+      __basePadRaw = (basePadRaw|0);
       // Derive implicit trailing empty line from the actual textarea text.
       // (Logic layer _splitLines() may hide it, but the textarea still renders it.)
       try{
@@ -14034,6 +14246,15 @@ try{
         return;
       }
 
+      // wrap-on: this path reads scrollHeight/clientHeight (layout). Coalesce noisy callers.
+      // If we already have a stable target, skip recalculations within a frame.
+      try{
+        const now = (typeof _perfNow === 'function') ? _perfNow() : Date.now();
+        if ((_eofPadGridLastPbPx|0) !== -1 && (now - (_eofPadGridLastCalcAt||0)) < 16){
+          return;
+        }
+      }catch{}
+
       // Pin base padding to integer px so compensation is stable.
       // IMPORTANT: When paddingBottom already includes a previous compensation, the measured
       // scrollHeight/clientHeight yields an aligned max (rem=0), and naively using that would
@@ -14051,10 +14272,18 @@ try{
 
       const pm0 = Math.max(0, ((editor.scrollHeight||0) - (editor.clientHeight||0))|0);
       let curPb = basePx|0;
+      // Avoid getComputedStyle() here (can force reflow). We control paddingBottom in this mode.
       try{
-        const cs = window.getComputedStyle(editor);
-        const pb = parseFloat(String(cs.getPropertyValue('padding-bottom')||'0'));
-        if (Number.isFinite(pb)) curPb = Math.max(0, Math.round(pb));
+        if ((_eofPadGridLastPbPx|0) !== -1){
+          curPb = (_eofPadGridLastPbPx|0);
+        } else {
+          const s = String((editor.style && editor.style.paddingBottom) ? editor.style.paddingBottom : '');
+          const m = /^(-?\d+(?:\.\d+)?)px$/.exec(s.trim());
+          if (m){
+            const v = parseFloat(m[1]);
+            if (Number.isFinite(v)) curPb = Math.max(0, Math.round(v));
+          }
+        }
       }catch{}
       const extraPb = Math.max(0, (curPb|0) - (basePx|0));
       const pmBase = Math.max(0, (pm0|0) - (extraPb|0));
@@ -14065,6 +14294,7 @@ try{
       if ((_eofPadGridLastPbPx|0) !== (targetPb|0)){
         editor.style.paddingBottom = (targetPb|0) + 'px';
         _eofPadGridLastPbPx = targetPb|0;
+        try{ _eofPadGridLastCalcAt = (typeof _perfNow === 'function') ? _perfNow() : Date.now(); }catch{}
         try{ _cachedVisibleCount = 0; }catch{}
         try{ _dbgEofPad('grid:set', { basePadRaw:(basePadRaw|0), basePad:(basePad|0), implicit:(_eofPadGridImplicitExtraLine|0), basePx:(basePx|0), comp:(comp|0), targetPb:(targetPb|0), pm0:(pm0|0), pmBase:(pmBase|0), rem:(rem|0), lh:(lh|0) }); }catch{}
 
@@ -14079,7 +14309,11 @@ try{
           }
         }catch{}
       }
-    }catch{}
+    }catch(err){
+      try{ _sixDiagCatch('eofpad:grid', err, { wrap:__wrapNow, basePadRaw:(__basePadRaw|0) }); }catch{}
+    }finally{
+      try{ _perfSlow && _perfSlow('eofpad-grid', __t0, { wrap:__wrapNow?1:0, basePadRaw:(__basePadRaw|0) }); }catch{}
+    }
   }
 
   function _mdEffectiveMaxScrollPx(){
@@ -14958,7 +15192,9 @@ try{
   setVar('six-modal-input-tl', _modalGet('inputBoxTL'));
   setVar('six-modal-input-br', _modalGet('inputBoxBR'));
   // Grep inline-code look (history button / F-key tags)
-  setVar('six-modal-icode-fg', _modalGet('inlineCodeFg'));
+  // #1901: grep dialog の [履歴 F4] / F1-F3 ラベルは inlineCodeFg だと浮くため、
+  // ボタン文字色（simpleBtnFg）に寄せる。
+  setVar('six-modal-icode-fg', _modalGet('simpleBtnFg'));
   setVar('six-modal-icode-bg', _modalGet('inlineCodeBg'));
   setVar('six-modal-icode-tl', _modalGet('inlineCodeTL'));
   setVar('six-modal-icode-br', _modalGet('inlineCodeBR'));
@@ -23212,6 +23448,12 @@ try{
             (e.which!=null?` which=${e.which}`:'')+
             (e.via?` via=${e.via}`:'')+
             (e.kind?` kind=${e.kind}`:'')+
+            (e.filt!==undefined?` filt=${JSON.stringify(e.filt)}`:'')+
+            (e.typed!==undefined?` typed=${JSON.stringify(e.typed)}`:'')+
+            (e.namesLen!=null?` namesLen=${e.namesLen}`:'')+
+            (e.common!==undefined?` common=${JSON.stringify(e.common)}`:'')+
+            (e.commonLen!=null?` commonLen=${e.commonLen}`:'')+
+            (e.why?` why=${e.why}`:'')+
             (e.delta!=null?` delta=${e.delta}`:'')+
             (e.fromR!=null?` fromR=${(e.fromR|0)+1}`:'')+
             (e.fromC!=null?` fromC=${(e.fromC|0)}`:'')+
@@ -35955,15 +36197,16 @@ try{
           try{ _hideCursor(); }catch{}
           _bufPopupHide(); _filePopupHide();
           setTimeout(()=>{ try{ editor.focus(); restoreView(); if (window.requestAnimationFrame){ requestAnimationFrame(()=>restoreView()); } setTimeout(restoreView, 120); }catch{} }, 0);
-        } else if (e.key==='Tab'){
+        } else if (_isTabOrCtrlI(e)){
           // :e ファイルポップアップ中の Tab の仕様変更
           if (_filePopupVisible()){
             e.preventDefault(); e.stopPropagation();
             try{
               const vNow = cmdinput.value;
               const parsed = _eParseInput(vNow);
-              const typed = String(parsed.typedDirRaw||'');
-              const filt = String(parsed.filter||'');
+              const typed = String((_fileTypedDirRaw!=null ? _fileTypedDirRaw : '') || parsed.typedDirRaw || '');
+              const filt = String((_fileFilter!=null ? _fileFilter : '') || parsed.filter || '');
+              try{ if (_optDebugKeys) _debugPush({ t:Date.now(), type:'filetab-run', mode:_mode, via:'cmdinput', key:String((e&&e.key)||''), code:String((e&&e.code)||''), keyCode:(typeof e.keyCode==='number'?(e.keyCode|0):null), isComp:!!((e&&e.isComposing===true)||(window&&window._imeComposing===true)), filt, typed }); }catch{}
               const list = _filePopupComputeList();
               const sel = Math.max(0, Math.min(list.length-1, _fileSel));
               const it = list[sel];
@@ -37885,16 +38128,6 @@ try{
         stack.push(seg);
       }
     }
-
-    // While IME is composing, keep scroll handling lightweight but *do* sync the overlay caret.
-    // (Non-md + wrap-on can change wrap metrics/scrollTop during composition; skipping all sync
-    // causes the caret stripe/active-line background to appear to jump.)
-    if (_evtImeComposing){
-      try{ _syncTiledBgRemainder(); }catch{}
-      // Coalesce caret sync via the IME helper (also refreshes caretRow/Col from native selection).
-      try{ _scheduleImeCompCaretSync && _scheduleImeCompCaretSync('scroll'); }catch{}
-      return;
-    }
     let out = prefix + stack.join('/');
     if (hadTrail && out && !out.endsWith('/')) out += '/';
     return out;
@@ -38062,6 +38295,86 @@ try{
         const _fkeyHandler=(e)=>{ try{ if(!e||!/^F[1-8]$/.test(e.key)) return; const visible=(_filePopupVisible&&_filePopupVisible()); if(!visible) return; if(_mode!=='CMD') return; const num=parseInt(e.key.slice(1),10); if(!Number.isFinite(num)||num<1) return; e.preventDefault(); e.stopPropagation(); _navigateUpLevels(num); }catch{} };
         try{ window.removeEventListener('keydown', window.__sixFKeyHandler, true); }catch{}
         window.__sixFKeyHandler=_fkeyHandler; window.addEventListener('keydown', _fkeyHandler, true);
+      }catch{}
+
+      // #1901: :e popup の TAB 補完が cmdinput 側に届かない環境があるため、capture で補完を保証する。
+      try{
+        const _tabHandler = (e)=>{
+          try{
+            if (!e || !(typeof _isTabOrCtrlI === 'function' ? _isTabOrCtrlI(e) : (e.key === 'Tab'))) return;
+            const visible = (_filePopupVisible && _filePopupVisible());
+            if (!visible) return;
+            if (_mode !== 'CMD') return;
+            if (!cmdinput) return;
+            try{ e.preventDefault(); e.stopImmediatePropagation(); e.stopPropagation(); }catch{}
+
+            const vNow = String(cmdinput.value||'');
+            const parsed = _eParseInput(vNow);
+            const typed = String((_fileTypedDirRaw!=null ? _fileTypedDirRaw : '') || parsed.typedDirRaw || '');
+            const filt = String((_fileFilter!=null ? _fileFilter : '') || parsed.filter || '');
+            try{ if (_optDebugKeys) _debugPush({ t:Date.now(), type:'filetab-run', mode:_mode, via:'filePopupCap', key:String((e&&e.key)||''), code:String((e&&e.code)||''), keyCode:(typeof e.keyCode==='number'?(e.keyCode|0):null), isComp:!!((e&&e.isComposing===true)||(window&&window._imeComposing===true)), filt, typed }); }catch{}
+            const list = _filePopupComputeList();
+            const sel = Math.max(0, Math.min(list.length-1, _fileSel|0));
+            const it = list[sel];
+            const endsWithSlash = (filt.length === 0);
+
+            if (endsWithSlash){
+              // '..' 上での Tab は ".." を入力欄に挿入し、ナビゲーションは行わない
+              try{
+                if (it && it._up){
+                  const next = ':e ' + String(typed) + '..';
+                  cmdinput.value = next;
+                  try{ const pos=(cmdinput.value||'').length; cmdinput.setSelectionRange(pos,pos); }catch{}
+                  try { cmdinput.dispatchEvent(new Event('input', { bubbles:true })); } catch {}
+                  return;
+                }
+              }catch{}
+              // 例外: '../' 以外の候補が1つだけのとき、その候補名まで補完
+              try{
+                const nonUp = list.filter(e=> e && !e._up);
+                if (nonUp.length === 1){
+                  const only = nonUp[0];
+                  const next = ':e ' + _collapseDotDotPath(typed + String(only.name||''));
+                  cmdinput.value = next;
+                  try{ const pos=(cmdinput.value||'').length; cmdinput.setSelectionRange(pos,pos); }catch{}
+                  try { cmdinput.dispatchEvent(new Event('input', { bubbles:true })); } catch {}
+                  return;
+                }
+              }catch{}
+              return;
+            }
+
+            // 末尾が '/' でない → 現在セグメントに対して共通プレフィックス補完
+            let caseSensitive = false;
+            try{ const b = _ensureSlash(_fileBaseURL); if (b && b.protocol==='file:' && b.host && b.host.toLowerCase()==='wsl.localhost') caseSensitive = true; }catch{}
+            const startsWith = (name, q)=> caseSensitive ? name.startsWith(q) : name.toLowerCase().startsWith(q.toLowerCase());
+            const names = (_fileEntries||[]).map(e=> String(e&&e.name||'')).filter(n=> n && startsWith(n, filt));
+            if (!filt || names.length===0) return;
+            const lcp = (arr)=>{
+              if (arr.length===0) return '';
+              let prefix = arr[0];
+              for (let i=1;i<arr.length;i++){
+                let j=0; const s = arr[i];
+                const a = caseSensitive ? prefix : prefix.toLowerCase();
+                const b = caseSensitive ? s : s.toLowerCase();
+                while (j<Math.min(a.length,b.length) && a[j]===b[j]) j++;
+                prefix = prefix.slice(0, j);
+                if (!prefix) break;
+              }
+              return prefix;
+            };
+            const common = lcp(names);
+            if (common && common.length > filt.length){
+              const next = ':e ' + _collapseDotDotPath(typed + common);
+              cmdinput.value = next;
+              try{ const pos=(cmdinput.value||'').length; cmdinput.setSelectionRange(pos,pos); }catch{}
+              try { cmdinput.dispatchEvent(new Event('input', { bubbles:true })); } catch {}
+            }
+          }catch{}
+        };
+        try{ window.removeEventListener('keydown', window.__sixFileTabHandler, true); }catch{}
+        window.__sixFileTabHandler = _tabHandler;
+        window.addEventListener('keydown', _tabHandler, true);
       }catch{}
       // レンダ直後: フィルタ未入力時は選択行を反映 (#836)
       try{
