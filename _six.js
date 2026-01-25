@@ -4558,6 +4558,12 @@ try{
 
   function _imeBarApplyCaretAndSync(reason, opt){
     try{
+      // Robust undo segmentation (md-rich IME bar):
+      // If a caret-only navigation happened after prior edits, split undo at the next edit.
+      // Some fast paths defer native selection updates and can break keydown/select-based detection,
+      // so also mark it here where navigation ultimately synchronizes the caret.
+      let __prevSelS = 0, __prevSelE = 0, __prevSelDir = '';
+      try{ __prevSelS = editor.selectionStart|0; __prevSelE = editor.selectionEnd|0; __prevSelDir = String(editor.selectionDirection||''); }catch{}
       // During IME bar, editor is readOnly and many motions update caretRow/caretCol only.
       // Therefore, treat caretRow/caretCol as the source of truth and sync native selection from it.
       const off = (_offsetFromRC(caretRow|0, caretCol|0)|0);
@@ -4604,6 +4610,27 @@ try{
       // Do not collapse the native selection when a range is explicitly requested.
       // Collapsing here makes Shift+Arrow/Home/End appear to do nothing while IME bar is active.
       try{ if (!keepSel) _syncNativeSelectionToCaret && _syncNativeSelectionToCaret(); }catch{}
+
+      // Mark caret-only navigation as a segment boundary candidate.
+      try{
+        const r = String(reason||'');
+        const isNavReason = (
+          r.startsWith('arrow') || r.startsWith('home') || r.startsWith('end')
+          || r.startsWith('cap-arrow') || r.startsWith('cap-home') || r.startsWith('cap-end')
+        );
+        if (isNavReason && !keepSel && _imeBarActive && _mode === 'INSERT' && _imeBarSegDirty){
+          // Only for collapsed->collapsed caret moves.
+          if ((__prevSelS|0) === (__prevSelE|0)){
+            let prevCaretOff = (__prevSelE|0);
+            try{ if (__prevSelDir === 'backward') prevCaretOff = (__prevSelS|0); }catch{}
+            if ((prevCaretOff|0) !== (caretOff|0)){
+              let composing2 = false;
+              try{ composing2 = !!_imeBarComposing || !!(window && window._imeComposing===true); }catch{ composing2 = false; }
+              if (!composing2) _imeBarSegPending = true;
+            }
+          }
+        }
+      }catch{}
       try{ ensureScrolloff && ensureScrolloff({ force:true }); }catch{ try{ ensureScrolloff && ensureScrolloff(); }catch{} }
       try{ _repositionCaret && _repositionCaret({ force:true }); }catch{ try{ _repositionCaret && _repositionCaret(); }catch{} }
       try{ updateGutter && updateGutter({ force:true }); }catch{ try{ updateGutter && updateGutter(); }catch{} }
@@ -26943,7 +26970,11 @@ try{
       try{
         if (_mode === 'INSERT' && _insertSegPending){
           const it0 = String((e && e.inputType) || '');
-          const isEdit = !!(it0 && (it0.startsWith('insert') || it0.startsWith('delete')));
+          // Some environments can omit inputType on beforeinput; treat trusted events as edits.
+          const isEdit = (
+            (!!it0 && (it0.startsWith('insert') || it0.startsWith('delete')))
+            || (!it0 && !!(e && e.isTrusted))
+          );
           if (isEdit){
             _pushUndoSnapshot('insert-seg');
             _insertSegPending = false;
