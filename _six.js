@@ -8223,12 +8223,17 @@ try{
         item.textContent = _encDisplayLines(meta).line1 || '';
         // ハイライト背景（zoomPopupと統一）
         item.style.background = (hasSel && i===_encSel) ? 'var(--popupActiveLine, #1a2030)' : 'transparent';
+        let applied = false;
         const _apply = (ev)=>{
+          try{ if (applied) return; }catch{}
+          applied = true;
+          try{ if (ev && typeof ev.button==='number' && ev.button!==0) return; }catch{}
           try{ ev.preventDefault(); ev.stopPropagation(); }catch{}
           try{ _encSel=i; _applyEncodeMeta(meta); }catch{}
           try{ _encPopupHide(); }catch{}
           try{ setTimeout(()=>{ try{ editor && editor.focus && editor.focus(); }catch{} },0); }catch{}
         };
+        try{ item.addEventListener('pointerdown', _apply); }catch{}
         item.addEventListener('mousedown', _apply);
         item.addEventListener('click', _apply);
         item.addEventListener('mouseenter', ()=>{
@@ -9408,9 +9413,20 @@ try{
         item.style.display='block'; item.style.padding='4px 10px'; item.style.cursor='pointer'; item.style.whiteSpace='nowrap'; item.style.borderRadius='4px'; item.style.textAlign='right';
         item.textContent = label;
         item.style.background = (hasSel && i===_caseSel) ? 'var(--popupActiveLine, #1a2030)' : 'transparent';
-        item.addEventListener('mousedown', (ev)=>{ try{ ev.preventDefault(); ev.stopPropagation(); }catch{}; _caseSel=i; _applyCaseIndex(i); _casePopupHide(); setTimeout(()=>{ try{ editor && editor.focus && editor.focus(); }catch{} },0); });
+        let applied = false;
+        const _apply = (ev)=>{
+          try{ if (applied) return; }catch{}
+          applied = true;
+          try{ if (ev && typeof ev.button==='number' && ev.button!==0) return; }catch{}
+          try{ ev.preventDefault(); ev.stopPropagation(); }catch{}
+          try{ _caseSel=i; _applyCaseIndex(i); }catch{}
+          try{ _casePopupHide(); }catch{}
+          try{ setTimeout(()=>{ try{ editor && editor.focus && editor.focus(); }catch{} },0); }catch{}
+        };
+        try{ item.addEventListener('pointerdown', _apply); }catch{}
+        item.addEventListener('mousedown', _apply);
         item.addEventListener('mouseenter', ()=>{ try{ _caseSel=i; _casePopupRender(); }catch{} });
-        item.addEventListener('click', (ev)=>{ try{ ev.preventDefault(); ev.stopPropagation(); }catch{}; _caseSel=i; _applyCaseIndex(i); _casePopupHide(); setTimeout(()=>{ try{ editor && editor.focus && editor.focus(); }catch{} },0); });
+        item.addEventListener('click', _apply);
         inner.appendChild(item);
       });
     }catch{}
