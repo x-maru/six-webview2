@@ -12463,10 +12463,15 @@ try{
         item.style.background = (i===_cmdHistPopupSel) ? 'var(--popupActiveLine, #1a2030)' : 'transparent';
         if (i===_cmdHistPopupSel) selEl = item;
         item.addEventListener('mouseenter', ()=>{ try{ _cmdHistPopupSel=i; _cmdHistPopupRender(); _cmdHistPopupPreviewSel(); }catch{} });
+        let applied = false;
         const _apply = (ev)=>{
+          try{ if (applied) return; }catch{}
+          applied = true;
+          try{ if (ev && typeof ev.button==='number' && ev.button!==0) return; }catch{}
           try{ ev.preventDefault(); ev.stopPropagation(); }catch{}
           try{ _cmdHistPopupSel = i; _cmdHistPopupCommitSel(); }catch{}
         };
+        try{ item.addEventListener('pointerdown', _apply); }catch{}
         item.addEventListener('mousedown', _apply);
         item.addEventListener('click', _apply);
         inner.appendChild(item);
@@ -12556,7 +12561,7 @@ try{
 
       if (!pop.__outsideClose){
         pop.__outsideClose = true;
-        document.addEventListener('mousedown', (ev)=>{
+        const _onOutside = (ev)=>{
           try{
             const pp = document.getElementById(_cmdHistPopupId);
             if (!pp || pp.style.display==='none') return;
@@ -12565,7 +12570,9 @@ try{
               || (_cmdHistPopupBtn && _cmdHistPopupBtn.contains && _cmdHistPopupBtn.contains(ev.target));
             if (!within) _cmdHistPopupHide(true);
           }catch{}
-        }, true);
+        };
+        document.addEventListener('mousedown', _onOutside, true);
+        try{ document.addEventListener('pointerdown', _onOutside, true); }catch{}
       }
     }catch{}
   }
@@ -12742,10 +12749,15 @@ try{
         item.style.background = (i===_searchHistPopupSel) ? 'var(--popupActiveLine, #1a2030)' : 'transparent';
         if (i===_searchHistPopupSel) selEl = item;
         item.addEventListener('mouseenter', ()=>{ try{ _searchHistPopupSel=i; _searchHistPopupRender(); _searchHistPopupPreviewSel(); }catch{} });
+        let applied = false;
         const _apply = (ev)=>{
+          try{ if (applied) return; }catch{}
+          applied = true;
+          try{ if (ev && typeof ev.button==='number' && ev.button!==0) return; }catch{}
           try{ ev.preventDefault(); ev.stopPropagation(); }catch{}
           try{ _searchHistPopupSel = i; _searchHistPopupCommitSel(); }catch{}
         };
+        try{ item.addEventListener('pointerdown', _apply); }catch{}
         item.addEventListener('mousedown', _apply);
         item.addEventListener('click', _apply);
         inner.appendChild(item);
@@ -12811,7 +12823,7 @@ try{
 
       if (!pop.__outsideClose){
         pop.__outsideClose = true;
-        document.addEventListener('mousedown', (ev)=>{
+        const _onOutside = (ev)=>{
           try{
             const pp = document.getElementById(_searchHistPopupId);
             if (!pp || pp.style.display==='none') return;
@@ -12820,7 +12832,9 @@ try{
               || (_cmdHistPopupBtn && _cmdHistPopupBtn.contains && _cmdHistPopupBtn.contains(ev.target));
             if (!within) _searchHistPopupHide(true);
           }catch{}
-        }, true);
+        };
+        document.addEventListener('mousedown', _onOutside, true);
+        try{ document.addEventListener('pointerdown', _onOutside, true); }catch{}
       }
     }catch{}
   }
@@ -41013,7 +41027,18 @@ try{
       termHistBtn.tabIndex = -1;
       termHistBtn.textContent = '履歴 F4';
       termHistBtn.style.cssText = 'position:absolute; right:4px; top:50%; transform:translateY(-50%); border:0; box-shadow:inset 1px 1px 0 var(--six-modal-icode-tl, #2a3244), inset -1px -1px 0 var(--six-modal-icode-br, #1e2534); background:var(--six-modal-icode-bg, #121826); color:var(--six-modal-icode-fg, #e9ecff); border-radius:6px; padding:3px 8px; cursor:pointer; font-size:11px; line-height:1.2; user-select:none; outline:none;';
-      termHistBtn.addEventListener('mousedown', (e)=>{ try{ e.preventDefault(); e.stopPropagation(); }catch{} });
+      termHistBtn.addEventListener('mousedown', (e)=>{
+        try{ e.preventDefault(); e.stopPropagation(); }catch{}
+        try{ if (typeof termHistBtn.onclick === 'function') termHistBtn.onclick(e); }catch{}
+        try{ termHistBtn.__sixSkipClickUntil = Date.now() + 650; }catch{}
+      });
+      try{
+        termHistBtn.addEventListener('pointerdown', (e)=>{
+          try{ e.preventDefault(); e.stopPropagation(); }catch{}
+          try{ if (typeof termHistBtn.onclick === 'function') termHistBtn.onclick(e); }catch{}
+          try{ termHistBtn.__sixSkipClickUntil = Date.now() + 650; }catch{}
+        });
+      }catch{}
       inputWrap.appendChild(termHistBtn);
 
       // #1446: Prefill with latest search history (if any)
@@ -41243,7 +41268,19 @@ try{
           b.style.cssText = 'border:0; box-shadow:inset 1px 1px 0 var(--six-modal-icode-tl, #2a3244), inset -1px -1px 0 var(--six-modal-icode-br, #1e2534); background:var(--six-modal-icode-bg, #121826); color:var(--six-modal-icode-fg, #e9ecff); border-radius:6px; padding:3px 8px; cursor:pointer; font-size:11px; line-height:1.2; user-select:none; outline:none;';
         }
         // Do not steal focus from the input (clicking the history button should keep focus on the input).
-        b.addEventListener('mousedown', (e)=>{ try{ e.preventDefault(); e.stopPropagation(); }catch{} });
+        // Some environments suppress click when mousedown is preventDefault'ed; trigger onclick here.
+        b.addEventListener('mousedown', (e)=>{
+          try{ e.preventDefault(); e.stopPropagation(); }catch{}
+          try{ if (typeof b.onclick === 'function') b.onclick(e); }catch{}
+          try{ b.__sixSkipClickUntil = Date.now() + 650; }catch{}
+        });
+        try{
+          b.addEventListener('pointerdown', (e)=>{
+            try{ e.preventDefault(); e.stopPropagation(); }catch{}
+            try{ if (typeof b.onclick === 'function') b.onclick(e); }catch{}
+            try{ b.__sixSkipClickUntil = Date.now() + 650; }catch{}
+          });
+        }catch{}
         return b;
       };
 
@@ -41681,7 +41718,11 @@ try{
             item.style.background = (i===_grepTermHistSel) ? 'var(--popupActiveLine, #1a2030)' : 'transparent';
             if (i===_grepTermHistSel) selEl = item;
             item.addEventListener('mouseenter', ()=>{ try{ _grepTermHistSel=i; _grepTermHistPopupRender(); _grepTermHistPopupPreviewSel(); }catch{} });
+            let applied = false;
             const _apply = (ev)=>{
+              try{ if (applied) return; }catch{}
+              applied = true;
+              try{ if (ev && typeof ev.button==='number' && ev.button!==0) return; }catch{}
               try{ ev.preventDefault(); ev.stopPropagation(); }catch{}
               try{ input.value = it.display; _syncExecEnabled(); }catch{}
               try{ _searchHistoryMaybePush(it.raw); }catch{}
@@ -41689,6 +41730,7 @@ try{
               _grepTermHistPopupHide(false);
               try{ input.focus({preventScroll:true}); }catch{ try{ input.focus(); }catch{} }
             };
+            try{ item.addEventListener('pointerdown', _apply); }catch{}
             item.addEventListener('mousedown', _apply);
             item.addEventListener('click', _apply);
             inner.appendChild(item);
@@ -41757,19 +41799,25 @@ try{
           // Outside click closes
           if (!pop.__outsideClose){
             pop.__outsideClose = true;
-            document.addEventListener('mousedown', (ev)=>{
+            const _onOutside = (ev)=>{
               try{
                 const pp = document.getElementById(_grepTermHistPopupId);
                 if (!pp || pp.style.display==='none') return;
                 const within = pp.contains(ev.target) || termHistBtn.contains(ev.target) || inputWrap.contains(ev.target);
                 if (!within) _grepTermHistPopupHide(true);
               }catch{}
-            }, true);
+            };
+            document.addEventListener('mousedown', _onOutside, true);
+            try{ document.addEventListener('pointerdown', _onOutside, true); }catch{}
           }
         }catch{}
       };
 
-      termHistBtn.onclick = (e)=>{ try{ e.preventDefault(); e.stopPropagation(); }catch{}; try{ _grepTermHistPopupShow(); }catch{} };
+      termHistBtn.onclick = (e)=>{
+        try{ if (termHistBtn.__sixSkipClickUntil && Date.now() < termHistBtn.__sixSkipClickUntil){ termHistBtn.__sixSkipClickUntil = 0; return; } }catch{}
+        try{ e.preventDefault(); e.stopPropagation(); }catch{};
+        try{ _grepTermHistPopupShow(); }catch{}
+      };
 
       // Path history popup inside dialog (PATH / -basedir)
       let _grepPathHistSel = 0;
@@ -41851,7 +41899,11 @@ try{
             item.style.background = (i===_grepPathHistSel) ? 'var(--popupActiveLine, #1a2030)' : 'transparent';
             if (i===_grepPathHistSel) selEl = item;
             item.addEventListener('mouseenter', ()=>{ try{ _grepPathHistSel=i; _grepPathHistPopupRender(); _grepPathHistPopupPreviewSel(); }catch{} });
+            let applied = false;
             const _apply = (ev)=>{
+              try{ if (applied) return; }catch{}
+              applied = true;
+              try{ if (ev && typeof ev.button==='number' && ev.button!==0) return; }catch{}
               try{ ev.preventDefault(); ev.stopPropagation(); }catch{}
               try{
                 if (_grepPathHistTarget){
@@ -41873,6 +41925,7 @@ try{
               _grepPathHistPopupHide(false);
               try{ _grepPathHistTarget && _grepPathHistTarget.focus && _grepPathHistTarget.focus({preventScroll:true}); }catch{ try{ _grepPathHistTarget && _grepPathHistTarget.focus && _grepPathHistTarget.focus(); }catch{} }
             };
+            try{ item.addEventListener('pointerdown', _apply); }catch{}
             item.addEventListener('mousedown', _apply);
             item.addEventListener('click', _apply);
             inner.appendChild(item);
@@ -41944,7 +41997,7 @@ try{
           pop.style.top  = top + 'px';
           if (!pop.__outsideClose){
             pop.__outsideClose = true;
-            document.addEventListener('mousedown', (ev)=>{
+            const _onOutside = (ev)=>{
               try{
                 const pp = document.getElementById(_grepPathHistPopupId);
                 if (!pp || pp.style.display==='none') return;
@@ -41953,13 +42006,23 @@ try{
                   || (_grepPathHistAnchor && _grepPathHistAnchor.contains && _grepPathHistAnchor.contains(ev.target));
                 if (!within) _grepPathHistPopupHide(true);
               }catch{}
-            }, true);
+            };
+            document.addEventListener('mousedown', _onOutside, true);
+            try{ document.addEventListener('pointerdown', _onOutside, true); }catch{}
           }
         }catch{}
       };
 
-      pathHistBtn.onclick = (e)=>{ try{ e.preventDefault(); e.stopPropagation(); }catch{}; try{ _grepPathHistPopupShowFor(pathSingle, pathSingleWrap, pathHistBtn); }catch{} };
-      basedirHistBtn.onclick = (e)=>{ try{ e.preventDefault(); e.stopPropagation(); }catch{}; try{ _grepPathHistPopupShowFor(basedirInput, basedirWrap, basedirHistBtn); }catch{} };
+      pathHistBtn.onclick = (e)=>{
+        try{ if (pathHistBtn.__sixSkipClickUntil && Date.now() < pathHistBtn.__sixSkipClickUntil){ pathHistBtn.__sixSkipClickUntil = 0; return; } }catch{}
+        try{ e.preventDefault(); e.stopPropagation(); }catch{};
+        try{ _grepPathHistPopupShowFor(pathSingle, pathSingleWrap, pathHistBtn); }catch{}
+      };
+      basedirHistBtn.onclick = (e)=>{
+        try{ if (basedirHistBtn.__sixSkipClickUntil && Date.now() < basedirHistBtn.__sixSkipClickUntil){ basedirHistBtn.__sixSkipClickUntil = 0; return; } }catch{}
+        try{ e.preventDefault(); e.stopPropagation(); }catch{};
+        try{ _grepPathHistPopupShowFor(basedirInput, basedirWrap, basedirHistBtn); }catch{}
+      };
 
       // Fileglob history popup inside dialog
       let _grepFileglobHistSel = 0;
@@ -42041,7 +42104,11 @@ try{
             item.style.background = (i===_grepFileglobHistSel) ? 'var(--popupActiveLine, #1a2030)' : 'transparent';
             if (i===_grepFileglobHistSel) selEl = item;
             item.addEventListener('mouseenter', ()=>{ try{ _grepFileglobHistSel=i; _grepFileglobHistPopupRender(); _grepFileglobHistPopupPreviewSel(); }catch{} });
+            let applied = false;
             const _apply = (ev)=>{
+              try{ if (applied) return; }catch{}
+              applied = true;
+              try{ if (ev && typeof ev.button==='number' && ev.button!==0) return; }catch{}
               try{ ev.preventDefault(); ev.stopPropagation(); }catch{}
               try{
                 if (_grepFileglobHistTarget){
@@ -42056,6 +42123,7 @@ try{
               _grepFileglobHistPopupHide(false);
               try{ _grepFileglobHistTarget && _grepFileglobHistTarget.focus && _grepFileglobHistTarget.focus({preventScroll:true}); }catch{ try{ _grepFileglobHistTarget && _grepFileglobHistTarget.focus && _grepFileglobHistTarget.focus(); }catch{} }
             };
+            try{ item.addEventListener('pointerdown', _apply); }catch{}
             item.addEventListener('mousedown', _apply);
             item.addEventListener('click', _apply);
             inner.appendChild(item);
@@ -42127,7 +42195,7 @@ try{
           pop.style.top  = top + 'px';
           if (!pop.__outsideClose){
             pop.__outsideClose = true;
-            document.addEventListener('mousedown', (ev)=>{
+            const _onOutside = (ev)=>{
               try{
                 const pp = document.getElementById(_grepFileglobHistPopupId);
                 if (!pp || pp.style.display==='none') return;
@@ -42136,12 +42204,18 @@ try{
                   || (_grepFileglobHistAnchor && _grepFileglobHistAnchor.contains && _grepFileglobHistAnchor.contains(ev.target));
                 if (!within) _grepFileglobHistPopupHide(true);
               }catch{}
-            }, true);
+            };
+            document.addEventListener('mousedown', _onOutside, true);
+            try{ document.addEventListener('pointerdown', _onOutside, true); }catch{}
           }
         }catch{}
       };
 
-      fileglobHistBtn.onclick = (e)=>{ try{ e.preventDefault(); e.stopPropagation(); }catch{}; try{ _grepFileglobHistPopupShowFor(fileglobInput, fileglobWrap, fileglobHistBtn); }catch{} };
+      fileglobHistBtn.onclick = (e)=>{
+        try{ if (fileglobHistBtn.__sixSkipClickUntil && Date.now() < fileglobHistBtn.__sixSkipClickUntil){ fileglobHistBtn.__sixSkipClickUntil = 0; return; } }catch{}
+        try{ e.preventDefault(); e.stopPropagation(); }catch{};
+        try{ _grepFileglobHistPopupShowFor(fileglobInput, fileglobWrap, fileglobHistBtn); }catch{}
+      };
 
       // Path/basedir history browsing state (per-input)
       const _histSrcFor = (el)=>{
