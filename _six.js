@@ -20378,6 +20378,10 @@ try{
       case 'k': moveLines(-times); break;
       case 'w': { let r0=rr,c0=cc; for(let i=0;i<times;i++){ const p=_nextWordStart(r0,c0); r0=p.r; c0=p.c; } rr=r0; cc=c0; break; }
       case 'b': { let r0=rr,c0=cc; for(let i=0;i<times;i++){ const p=_prevWordStart(r0,c0); r0=p.r; c0=p.c; } rr=r0; cc=c0; break; }
+      // Vim-like word-end motions for operators: return an exclusive end position (so the last character is included).
+      // NOTE: direct caret motions for 'e/E' are implemented separately to land on the last character.
+      case 'e': { let r0=rr,c0=cc; for(let i=0;i<times;i++){ const p=_nextWordEndExclusive(r0,c0,false); r0=p.r; c0=p.c; } rr=r0; cc=c0; break; }
+      case 'E': { let r0=rr,c0=cc; for(let i=0;i<times;i++){ const p=_nextWordEndExclusive(r0,c0,true); r0=p.r; c0=p.c; } rr=r0; cc=c0; break; }
       case 'W': { let r0=rr,c0=cc; for(let i=0;i<times;i++){ const p=_nextWORDStart(r0,c0); r0=p.r; c0=p.c; } rr=r0; cc=c0; break; }
       case 'B': { let r0=rr,c0=cc; for(let i=0;i<times;i++){ const p=_prevWORDStart(r0,c0); r0=p.r; c0=p.c; } rr=r0; cc=c0; break; }
       case '^': { rr=rr; cc=_firstNonBlankColOf(lines[rr]||''); break; }
@@ -23360,10 +23364,9 @@ try{
       if (cW > n) cW = n;
       // At end-of-line: treat stepping to start of next line as one 'w' unit (counts each newline) (#701)
       if (cW >= n){
-        // #702: Group consecutive newlines as one whitespace run. Skip all empty lines,
-        // then land on the first non-space column of the next non-empty line.
+        // Treat consecutive blank/whitespace-only lines as whitespace.
         let r2 = r + 1;
-        while (r2 < lines.length && (lines[r2]||'') === ''){ r2++; }
+        while (r2 < lines.length && /^\s*$/.test(String(lines[r2]||''))){ r2++; }
         if (r2 >= lines.length){ return { r, c: n }; }
         const info2 = _mdWordMotionLineInfo(lines, r2|0);
         const line2 = info2.wordLine || '';
@@ -23384,16 +23387,21 @@ try{
         continue;
       }
       // In a non-space run: JP-aware grouping (#888,#889)
+      // #1941: Promote Katakana to Han-equivalent for phrase-like units with trailing Hiragana.
+      // - Han + Hiragana => one word
+      // - Katakana + Hiragana => one word
+      // - Han + Katakana is NOT merged
       const tRun = t;
       if (tRun === _WT_HAN){
-        let seenKana = false;
+        let seenHira = false;
         while (cW < n){
           const tCur = _wordTypeAtInLine(line, cW);
-          if (!seenKana){
+          if (!seenHira){
             if (tCur===_WT_HAN){ cW = _nextIndex(line, cW); continue; }
-            if (tCur===_WT_HIRA || tCur===_WT_KATA){ seenKana=true; cW=_nextIndex(line,cW); continue; }
+            // Only merge trailing Hiragana (incl long-like handled as HIRA) into Han-word.
+            if (tCur===_WT_HIRA){ seenHira=true; cW=_nextIndex(line,cW); continue; }
           } else {
-            if (tCur===_WT_HIRA || tCur===_WT_KATA){ cW=_nextIndex(line,cW); continue; }
+            if (tCur===_WT_HIRA){ cW=_nextIndex(line,cW); continue; }
             if (tCur===_WT_HAN){ break; }
           }
           break;
@@ -23402,6 +23410,13 @@ try{
         while (cW < n){
           const tCur=_wordTypeAtInLine(line,cW);
           if (tCur===_WT_KATA){ cW=_nextIndex(line,cW); continue; }
+          const cpCur=_cpAt(line,cW);
+          if (_isKanaLongLikeCp(cpCur)){ cW=_nextIndex(line,cW); continue; }
+          break;
+        }
+        // Merge trailing Hiragana (phrase-like): Katakana + Hiragana => one word.
+        while (cW < n && _wordTypeAtInLine(line, cW) === _WT_HIRA){ cW = _nextIndex(line, cW); }
+        while (cW < n){
           const cpCur=_cpAt(line,cW);
           if (_isKanaLongLikeCp(cpCur)){ cW=_nextIndex(line,cW); continue; }
           break;
@@ -23417,8 +23432,16 @@ try{
       } else {
         while (cW < n && _wordTypeAtInLine(line, cW) === tRun){ cW = _nextIndex(line, cW); }
       }
-      const srcC = info.wordToSrcCaret ? (info.wordToSrcCaret(cW|0)|0) : (cW|0);
-      return { r, c: srcC };
+      // Vim-like 'w': after leaving the current run, also skip following spaces/newlines
+      // and land on the start of the next word.
+      while (cW < n && _wordTypeAtInLine(line, cW) === _WT_SPACE){ cW = _nextIndex(line, cW); }
+      if (cW < n){
+        const srcC = info.wordToSrcCaret ? (info.wordToSrcCaret(cW|0)|0) : (cW|0);
+        return { r, c: srcC };
+      }
+      // Fell off EOL after skipping spaces; advance to next line in the same 'w' unit.
+      c = info.wordToSrcCaret ? (info.wordToSrcCaret(n|0)|0) : (n|0);
+      continue;
     }
   }
   function _prevWordStart(row, col){
@@ -23459,25 +23482,49 @@ try{
           // Stop before kana (asymmetric)
           break;
         }
-      } else if (tRun === _WT_HIRA || tRun === _WT_KATA || (_isKanaLongLikeCp(startCp) && tRun===_WT_HIRA)){
-        // 後方 kana 語: 現在のかな連続 + 直前の漢字連続 までを 1 語。さらにその前のかなには跨らない。
-        const treatKatakanaAsKana = (tRun===_WT_HIRA && _isKanaLongLikeCp(startCp));
-        let consumedHanBlock = false;
+      } else if (tRun === _WT_HIRA || (_isKanaLongLikeCp(startCp) && tRun===_WT_HIRA)){
+        // Hiragana word: current Hiragana run, plus ONE preceding block of (Han OR Katakana).
+        // #1941: Treat Katakana as Han-equivalent for forming (X + Hiragana) phrase units.
+        // IMPORTANT: do not continue past that block into another script block.
+        let prefixKind = 0; // 0 none, 1 han, 2 kata
         while (cW > 0){
-          const p=_prevIndex(line,cW); if (p<0) break; const tPrev=_wordTypeAtInLine(line,p); const cpPrev=_cpAt(line,p);
-          if (!consumedHanBlock){
-            // まず同種かな/長音類を巻き取る
-            if (tPrev===_WT_HIRA || (tPrev===_WT_KATA && (tRun===_WT_KATA || treatKatakanaAsKana)) || _isKanaLongLikeCp(cpPrev)){
+          const p=_prevIndex(line,cW); if (p<0) break;
+          const tPrev=_wordTypeAtInLine(line,p);
+          const cpPrev=_cpAt(line,p);
+
+          if ((prefixKind|0) === 0){
+            // First consume Hiragana/long-like.
+            if (tPrev===_WT_HIRA || _isKanaLongLikeCp(cpPrev)){
               cW=p; continue;
             }
-            // 次に直前の漢字連続ブロックを 1 度だけ巻き取る
-            if (tPrev===_WT_HAN){ consumedHanBlock=true; cW=p; continue; }
+            // Then take exactly one preceding block: Han OR Katakana.
+            if (tPrev===_WT_HAN){ prefixKind = 1; cW=p; continue; }
+            if (tPrev===_WT_KATA){ prefixKind = 2; cW=p; continue; }
             break;
-          } else {
-            // 漢字ブロック継続中: 連続漢字のみ巻き取る。それ以外(かな/記号等)で停止。
+          }
+
+          if ((prefixKind|0) === 1){
             if (tPrev===_WT_HAN){ cW=p; continue; }
             break;
           }
+          if ((prefixKind|0) === 2){
+            if (tPrev===_WT_KATA || _isKanaLongLikeCp(cpPrev)){
+              cW=p; continue;
+            }
+            break;
+          }
+          break;
+        }
+      } else if (tRun === _WT_KATA){
+        // Katakana word: Katakana run only (incl long-like). Do NOT pull in preceding Han.
+        while (cW > 0){
+          const p=_prevIndex(line,cW); if (p<0) break;
+          const tPrev=_wordTypeAtInLine(line,p);
+          const cpPrev=_cpAt(line,p);
+          if (tPrev===_WT_KATA || _isKanaLongLikeCp(cpPrev)){
+            cW=p; continue;
+          }
+          break;
         }
       } else {
         while (cW > 0){
@@ -23506,14 +23553,15 @@ try{
     }
     const tRun = _wordTypeAtInLine(line, c);
     if (tRun === _WT_HAN){
-      let seenKana = false;
+      let seenHira = false;
       while (c < n){
         const tCur = _wordTypeAtInLine(line, c);
-        if (!seenKana){
+        if (!seenHira){
           if (tCur===_WT_HAN){ c = _nextIndex(line, c); continue; }
-          if (tCur===_WT_HIRA || tCur===_WT_KATA){ seenKana=true; c=_nextIndex(line,c); continue; }
+          // Only merge trailing Hiragana (incl long-like handled as HIRA) into Han-word.
+          if (tCur===_WT_HIRA){ seenHira=true; c=_nextIndex(line,c); continue; }
         } else {
-          if (tCur===_WT_HIRA || tCur===_WT_KATA){ c=_nextIndex(line,c); continue; }
+          if (tCur===_WT_HIRA){ c=_nextIndex(line,c); continue; }
           if (tCur===_WT_HAN){ break; }
         }
         break;
@@ -23522,6 +23570,9 @@ try{
       return { r: row, c: srcC };
     } else if (tRun === _WT_KATA){
       while (c < n){ const tCur=_wordTypeAtInLine(line,c); if (tCur===_WT_KATA){ c=_nextIndex(line,c); continue; } const cpCur=_cpAt(line,c); if (_isKanaLongLikeCp(cpCur)){ c=_nextIndex(line,c); continue; } break; }
+      // Merge trailing Hiragana (phrase-like): Katakana + Hiragana => one word.
+      while (c < n && _wordTypeAtInLine(line, c) === _WT_HIRA){ c = _nextIndex(line, c); }
+      while (c < n){ const cpCur=_cpAt(line,c); if (_isKanaLongLikeCp(cpCur)){ c=_nextIndex(line,c); continue; } break; }
       const srcC = info.wordToSrcCaret ? (info.wordToSrcCaret(c|0)|0) : (c|0);
       return { r: row, c: srcC };
     } else if (tRun === _WT_HIRA){
@@ -23593,6 +23644,330 @@ try{
       }
     }
   }
+
+  // Word-end motions (Vim-style)
+  // - e/E: forward to end-of-word/WORD (caret lands on end-exclusive: "just after" the last character)
+  // - ge/gE: backward to end-of-word/WORD (caret lands on end-exclusive: "just after" the last character)
+  // Operator motions for e/E use _nextWordEndExclusive() so the last character is included in the deleted/yanked range.
+  function _nextWordEndExclusive(row, col, isWORD){
+    const lines = _splitLines();
+    let r = row|0, c = col|0;
+    for(;;){
+      if (!lines || !lines.length){ return { r:0, c:0 }; }
+      if (r >= (lines.length|0)){
+        const last = Math.max(0, (lines.length|0) - 1);
+        return { r: last, c: _lineLen(last) };
+      }
+      const info = _mdWordMotionLineInfo(lines, r|0);
+      const line = String(info.wordLine||'');
+      const n = line.length|0;
+      let cW = info.srcToWordCaret ? (info.srcToWordCaret(c|0)|0) : (c|0);
+      cW = Math.max(0, Math.min(n|0, cW|0));
+
+      // If at EOL: advance to next non-blank line (whitespace-only treated as blank)
+      if (cW >= (n|0)){
+        let r2 = (r + 1)|0;
+        while (r2 < (lines.length|0) && /^\s*$/.test(String(lines[r2]||''))){ r2++; }
+        if (r2 >= (lines.length|0)){
+          const srcEnd = info.wordToSrcCaret ? (info.wordToSrcCaret(n|0)|0) : (n|0);
+          return { r, c: srcEnd };
+        }
+        r = r2|0; c = 0;
+        continue;
+      }
+
+      // Skip spaces
+      while (cW < (n|0) && _wordTypeAtInLine(line, cW|0) === _WT_SPACE){ cW = _nextIndex(line, cW|0); }
+      if (cW >= (n|0)){
+        const srcEnd = info.wordToSrcCaret ? (info.wordToSrcCaret(n|0)|0) : (n|0);
+        c = srcEnd|0;
+        continue;
+      }
+
+      // Scan end-exclusive of the current word/WORD
+      let end = cW|0;
+      if (isWORD){
+        while (end < (n|0) && _wordTypeAtInLine(line, end|0) !== _WT_SPACE){ end = _nextIndex(line, end|0); }
+      } else {
+        const tRun = _wordTypeAtInLine(line, end|0);
+        if (tRun === _WT_HAN){
+          while (end < (n|0) && _wordTypeAtInLine(line, end|0) === _WT_HAN){ end = _nextIndex(line, end|0); }
+          while (end < (n|0) && _wordTypeAtInLine(line, end|0) === _WT_HIRA){ end = _nextIndex(line, end|0); }
+          while (end < (n|0)){
+            const cpCur = _cpAt(line, end|0);
+            if (_isKanaLongLikeCp(cpCur)){ end = _nextIndex(line, end|0); continue; }
+            break;
+          }
+        } else if (tRun === _WT_KATA){
+          while (end < (n|0)){
+            const tCur = _wordTypeAtInLine(line, end|0);
+            if (tCur === _WT_KATA){ end = _nextIndex(line, end|0); continue; }
+            const cpCur = _cpAt(line, end|0);
+            if (_isKanaLongLikeCp(cpCur)){ end = _nextIndex(line, end|0); continue; }
+            break;
+          }
+          while (end < (n|0) && _wordTypeAtInLine(line, end|0) === _WT_HIRA){ end = _nextIndex(line, end|0); }
+          while (end < (n|0)){
+            const cpCur = _cpAt(line, end|0);
+            if (_isKanaLongLikeCp(cpCur)){ end = _nextIndex(line, end|0); continue; }
+            break;
+          }
+        } else if (tRun === _WT_HIRA){
+          while (end < (n|0)){
+            const tCur = _wordTypeAtInLine(line, end|0);
+            if (tCur === _WT_HIRA){ end = _nextIndex(line, end|0); continue; }
+            const cpCur = _cpAt(line, end|0);
+            if (_isKanaLongLikeCp(cpCur)){ end = _nextIndex(line, end|0); continue; }
+            break;
+          }
+        } else {
+          while (end < (n|0) && _wordTypeAtInLine(line, end|0) === tRun){ end = _nextIndex(line, end|0); }
+        }
+      }
+      const srcEnd = info.wordToSrcCaret ? (info.wordToSrcCaret(end|0)|0) : (end|0);
+      return { r, c: srcEnd };
+    }
+  }
+
+  function _nextWordEndCaret(row, col, isWORD){
+    const lines = _splitLines();
+    let r = row|0, c = col|0;
+    for(;;){
+      if (!lines || !lines.length){ return { r:0, c:0 }; }
+      if (r >= (lines.length|0)){
+        const last = Math.max(0, (lines.length|0) - 1);
+        const len = _lineLen(last);
+        return { r:last, c: (len|0) };
+      }
+      const info = _mdWordMotionLineInfo(lines, r|0);
+      const line = String(info.wordLine||'');
+      const n = line.length|0;
+      let cW = info.srcToWordCaret ? (info.srcToWordCaret(c|0)|0) : (c|0);
+      cW = Math.max(0, Math.min(n|0, cW|0));
+
+      // If at EOL: advance to next non-blank line (whitespace-only treated as blank)
+      if (cW >= (n|0)){
+        let r2 = (r + 1)|0;
+        while (r2 < (lines.length|0) && /^\s*$/.test(String(lines[r2]||''))){ r2++; }
+        if (r2 >= (lines.length|0)){
+          return { r, c: (info.wordToSrcCaret ? (info.wordToSrcCaret(n|0)|0) : (n|0)) };
+        }
+        r = r2|0; c = 0;
+        continue;
+      }
+
+      // Skip spaces
+      while (cW < (n|0) && _wordTypeAtInLine(line, cW|0) === _WT_SPACE){ cW = _nextIndex(line, cW|0); }
+      if (cW >= (n|0)){
+        c = (info.wordToSrcCaret ? (info.wordToSrcCaret(n|0)|0) : (n|0));
+        continue;
+      }
+
+      // e/E caret motion lands on end-exclusive (one past the last character),
+      // which can be a space, the next word's first character (no space), or EOL.
+      const startSrc = (info.wordToSrcCaret ? (info.wordToSrcCaret(cW|0)|0) : (cW|0))|0;
+      return _nextWordEndExclusive(r|0, startSrc, !!isWORD);
+    }
+  }
+
+  function _prevWordEndCaret(row, col, isWORD){
+    const lines = _splitLines();
+    let r = row|0, c = col|0;
+    for(;;){
+      if (!lines || !lines.length){ return { r:0, c:0 }; }
+      if (r < 0) return { r:0, c:0 };
+      const info = _mdWordMotionLineInfo(lines, r|0);
+      const line = String(info.wordLine||'');
+      const n = line.length|0;
+      let cW = info.srcToWordCaret ? (info.srcToWordCaret(c|0)|0) : (c|0);
+      cW = Math.max(0, Math.min(n|0, cW|0));
+
+      const rewindWordStartInLine = (idx)=>{
+        let s = idx|0;
+        if (s <= 0) return 0;
+        if (isWORD){
+          while (s > 0){
+            const p = _prevIndex(line, s|0);
+            if (p < 0) break;
+            if (_wordTypeAtInLine(line, p|0) === _WT_SPACE) break;
+            s = p|0;
+          }
+          return s|0;
+        }
+
+        const tRun = _wordTypeAtInLine(line, s|0);
+        const cpCur = _cpAt(line, s|0);
+        if (tRun === _WT_HAN){
+          while (s > 0){
+            const p = _prevIndex(line, s|0);
+            if (p < 0) break;
+            const tPrev = _wordTypeAtInLine(line, p|0);
+            if (tPrev === _WT_HAN){ s = p|0; continue; }
+            break;
+          }
+          return s|0;
+        }
+        if (tRun === _WT_HIRA || (_isKanaLongLikeCp(cpCur) && tRun === _WT_HIRA)){
+          let prefixKind = 0; // 0 none, 1 han, 2 kata
+          while (s > 0){
+            const p = _prevIndex(line, s|0);
+            if (p < 0) break;
+            const tPrev = _wordTypeAtInLine(line, p|0);
+            const cpPrev = _cpAt(line, p|0);
+
+            if ((prefixKind|0) === 0){
+              if (tPrev === _WT_HIRA || _isKanaLongLikeCp(cpPrev)){
+                s = p|0; continue;
+              }
+              if (tPrev === _WT_HAN){ prefixKind = 1; s = p|0; continue; }
+              if (tPrev === _WT_KATA){ prefixKind = 2; s = p|0; continue; }
+              break;
+            }
+            if ((prefixKind|0) === 1){
+              if (tPrev === _WT_HAN){ s = p|0; continue; }
+              break;
+            }
+            if ((prefixKind|0) === 2){
+              if (tPrev === _WT_KATA || _isKanaLongLikeCp(cpPrev)){
+                s = p|0; continue;
+              }
+              break;
+            }
+            break;
+          }
+          return s|0;
+        }
+        if (tRun === _WT_KATA){
+          while (s > 0){
+            const p = _prevIndex(line, s|0);
+            if (p < 0) break;
+            const tPrev = _wordTypeAtInLine(line, p|0);
+            const cpPrev = _cpAt(line, p|0);
+            if (tPrev === _WT_KATA || _isKanaLongLikeCp(cpPrev)){
+              s = p|0; continue;
+            }
+            break;
+          }
+          return s|0;
+        }
+        while (s > 0){
+          const p = _prevIndex(line, s|0);
+          if (p < 0) break;
+          if (_wordTypeAtInLine(line, p|0) !== tRun) break;
+          s = p|0;
+        }
+        return s|0;
+      };
+
+      const scanWordEndExclusiveInLine = (start)=>{
+        let end = start|0;
+        if (end < 0) return 0;
+        if (isWORD){
+          while (end < (n|0) && _wordTypeAtInLine(line, end|0) !== _WT_SPACE){ end = _nextIndex(line, end|0); }
+          return end|0;
+        }
+        const tRun = _wordTypeAtInLine(line, end|0);
+        if (tRun === _WT_HAN){
+          while (end < (n|0) && _wordTypeAtInLine(line, end|0) === _WT_HAN){ end = _nextIndex(line, end|0); }
+          while (end < (n|0) && _wordTypeAtInLine(line, end|0) === _WT_HIRA){ end = _nextIndex(line, end|0); }
+          while (end < (n|0)){
+            const cp = _cpAt(line, end|0);
+            if (_isKanaLongLikeCp(cp)){ end = _nextIndex(line, end|0); continue; }
+            break;
+          }
+          return end|0;
+        }
+        if (tRun === _WT_KATA){
+          while (end < (n|0)){
+            const tCur = _wordTypeAtInLine(line, end|0);
+            if (tCur === _WT_KATA){ end = _nextIndex(line, end|0); continue; }
+            const cp = _cpAt(line, end|0);
+            if (_isKanaLongLikeCp(cp)){ end = _nextIndex(line, end|0); continue; }
+            break;
+          }
+          while (end < (n|0) && _wordTypeAtInLine(line, end|0) === _WT_HIRA){ end = _nextIndex(line, end|0); }
+          while (end < (n|0)){
+            const cp = _cpAt(line, end|0);
+            if (_isKanaLongLikeCp(cp)){ end = _nextIndex(line, end|0); continue; }
+            break;
+          }
+          return end|0;
+        }
+        if (tRun === _WT_HIRA){
+          while (end < (n|0)){
+            const tCur = _wordTypeAtInLine(line, end|0);
+            if (tCur === _WT_HIRA){ end = _nextIndex(line, end|0); continue; }
+            const cp = _cpAt(line, end|0);
+            if (_isKanaLongLikeCp(cp)){ end = _nextIndex(line, end|0); continue; }
+            break;
+          }
+          return end|0;
+        }
+        while (end < (n|0) && _wordTypeAtInLine(line, end|0) === tRun){ end = _nextIndex(line, end|0); }
+        return end|0;
+      };
+
+      // At start-of-line: jump to previous non-blank line end
+      if (cW === 0){
+        let r2 = (r - 1)|0;
+        while (r2 >= 0 && /^\s*$/.test(String(lines[r2]||''))){ r2--; }
+        if (r2 < 0) return { r:0, c:0 };
+        r = r2|0;
+        c = (String(lines[r]||'').length|0);
+        continue;
+      }
+
+      // Vim-like ge/gE: find the end-exclusive of a word/WORD that ends at or before the cursor position.
+      // Ensure it always moves at least one step when starting exactly on a word end-exclusive (e.g. on the space after a word or at EOL).
+      const originW = cW|0;
+      let limitW = cW|0; // exclusive upper bound in wordLine coordinates
+      for(;;){
+        if (limitW <= 0){
+          r = (r - 1)|0;
+          if (r < 0) return { r:0, c:0 };
+          c = (String(lines[r]||'').length|0);
+          break;
+        }
+
+        // Pick a candidate position strictly before limitW
+        let iW = _prevIndex(line, limitW|0);
+        while (iW >= 0 && _wordTypeAtInLine(line, iW|0) === _WT_SPACE){
+          if (iW === 0){ iW = -1; break; }
+          iW = _prevIndex(line, iW|0);
+        }
+        if (iW < 0){
+          // No non-space before limitW on this line; continue with previous line.
+          r = (r - 1)|0;
+          if (r < 0) return { r:0, c:0 };
+          c = (String(lines[r]||'').length|0);
+          break;
+        }
+
+        const startW = rewindWordStartInLine(iW|0);
+        const endEx = scanWordEndExclusiveInLine(startW|0);
+        if ((endEx|0) <= (limitW|0)){
+          if ((endEx|0) <= 0){ return { r, c:0 }; }
+          // If we STARTED exactly at a word end-exclusive, skip that word so ge/gE always moves at least one step.
+          // (But don't skip boundaries reached after skipping an "inside-word" start; that would break ge vs gE behavior.)
+          if ((endEx|0) === (limitW|0) && (limitW|0) === (originW|0)){
+            limitW = startW|0;
+            continue;
+          }
+          const srcEnd = info.wordToSrcCaret ? (info.wordToSrcCaret(endEx|0)|0) : (endEx|0);
+          return { r, c: srcEnd|0 };
+        }
+
+        // The word extends beyond the cursor (cursor is inside this word) -> skip this word and retry.
+        limitW = startW|0;
+        continue;
+      }
+    }
+  }
+
+  function _moveWordE(count){ let r=caretRow, c=caretCol; const times=Math.max(1,count|0); for(let i=0;i<times;i++){ const p=_nextWordEndCaret(r,c,false); r=p.r; c=p.c; } _setCaret(r,c); }
+  function _moveWORDE(count){ let r=caretRow, c=caretCol; const times=Math.max(1,count|0); for(let i=0;i<times;i++){ const p=_nextWordEndCaret(r,c,true); r=p.r; c=p.c; } _setCaret(r,c); }
+  function _moveWordGE(count){ let r=caretRow, c=caretCol; const times=Math.max(1,count|0); for(let i=0;i<times;i++){ const p=_prevWordEndCaret(r,c,false); r=p.r; c=p.c; } _setCaret(r,c); }
+  function _moveWORDGE(count){ let r=caretRow, c=caretCol; const times=Math.max(1,count|0); for(let i=0;i<times;i++){ const p=_prevWordEndCaret(r,c,true); r=p.r; c=p.c; } _setCaret(r,c); }
   function _moveWORDW(count){ let r=caretRow, c=caretCol; const times=Math.max(1,count|0); for(let i=0;i<times;i++){ const p=_nextWORDStart(r,c); r=p.r; c=p.c; } _setCaret(r,c); }
   function _moveWORDB(count){ let r=caretRow, c=caretCol; const times=Math.max(1,count|0); for(let i=0;i<times;i++){ const p=_prevWORDStart(r,c); r=p.r; c=p.c; } _setCaret(r,c); }
   function _moveParagraphNext(count){
@@ -31908,6 +32283,17 @@ try{
     e.preventDefault(); try{ _debugPush({ t:Date.now(), type:'motion-exec', mode:_mode, key:e.key, code:e.code, via:(e.key==='ArrowRight'?'ArrowRight':(e.code==='KeyL'?(e.key==='Process'?'Process/KeyL':'KeyL'):'unknown')) }); }catch{} const n=_consumeCount(); moveAndUpdate(()=>_moveCaretCols(n)); return; }
         if (e.key==='w' && !e.ctrlKey && !e.metaKey && !e.altKey){ e.preventDefault(); const n=_consumeCount(); moveAndUpdate(()=>_moveWordW(n)); return; }
         if (e.key==='b' && !e.ctrlKey && !e.metaKey && !e.altKey){ e.preventDefault(); const n=_consumeCount(); moveAndUpdate(()=>_moveWordB(n)); return; }
+        if ((e.key==='e' || e.key==='E') && !e.ctrlKey && !e.metaKey && !e.altKey && _pendingNormal==='g'){
+          e.preventDefault();
+          const mcount = (_countAcc==null?1:_countAcc); _countAcc=null;
+          _clearPending();
+          const n = Math.max(1, mcount|0);
+          if (e.key==='e') moveAndUpdate(()=>_moveWordGE(n));
+          else moveAndUpdate(()=>_moveWORDGE(n));
+          return;
+        }
+        if (e.key==='e' && !e.ctrlKey && !e.metaKey && !e.altKey){ e.preventDefault(); const n=_consumeCount(); moveAndUpdate(()=>_moveWordE(n)); return; }
+        if (e.key==='E' && !e.ctrlKey && !e.metaKey && !e.altKey){ e.preventDefault(); const n=_consumeCount(); moveAndUpdate(()=>_moveWORDE(n)); return; }
   if (e.key==='W' && !e.ctrlKey && !e.metaKey && !e.altKey){ e.preventDefault(); const n=_consumeCount(); moveAndUpdate(()=>_moveWORDW(n)); return; }
   if (e.key==='B' && !e.ctrlKey && !e.metaKey && !e.altKey){ e.preventDefault(); const n=_consumeCount(); moveAndUpdate(()=>_moveWORDB(n)); return; }
     if (e.key==='^'){ e.preventDefault(); const _n=_consumeCount(); const line=(_splitLines()[caretRow]||''); _setCaret(caretRow, _firstNonBlankColOf(line)); try{ _flagCaretMotion(); }catch{} _repositionCaret(); _updateVisualSelection(); return; }
@@ -32116,6 +32502,21 @@ try{
             _pendingOpSeq = 'g'; _armPendingOpTimeout(); return;
           }
         }
+        // yge / ygE (backward to end of previous word/WORD)
+        if (_pendingOpSeq === 'g' && (e.key==='e' || e.key==='E')){
+          const mcount = (_countAcc==null?1:_countAcc); _countAcc=null;
+          const totalCount = Math.max(1, (_pendingOpCount||1) * mcount);
+          let r0 = caretRow|0, c0 = caretCol|0;
+          for (let i=0;i<totalCount;i++){
+            const p = (e.key==='e') ? _prevWordEndCaret(r0, c0, false) : _prevWordEndCaret(r0, c0, true);
+            r0 = p.r|0; c0 = p.c|0;
+          }
+          const start = { r: caretRow, c: caretCol };
+          const end = { r: r0, c: c0 };
+          if (!(start.r===end.r && start.c===end.c)) _yankRangePos(start, end);
+          _clearPendingOp(); _repositionCaret(); updateGutter();
+          return;
+        }
   // y$ — charwise to end-of-line (or across lines if count>1)
   if (e.key==='$'){
           const mcount = (_countAcc==null?1:_countAcc); _countAcc=null;
@@ -32219,6 +32620,25 @@ try{
           } else {
             _pendingOpSeq = 'g'; _armPendingOpTimeout(); return;
           }
+        }
+        // Yge / YgE (backward to end of previous word/WORD)
+        if (_pendingOpSeq === 'g' && (e.key==='e' || e.key==='E')){
+          const mcount = (_countAcc==null?1:_countAcc); _countAcc=null;
+          const totalCount = Math.max(1, (_pendingOpCount||1) * mcount);
+          let r0 = caretRow|0, c0 = caretCol|0;
+          for (let i=0;i<totalCount;i++){
+            const p = (e.key==='e') ? _prevWordEndCaret(r0, c0, false) : _prevWordEndCaret(r0, c0, true);
+            r0 = p.r|0; c0 = p.c|0;
+          }
+          const start = { r: caretRow, c: caretCol };
+          const end = { r: r0, c: c0 };
+          const text = _extractRangeText(start, end);
+          if ((String(text||'').length) > 0){
+            (async ()=>{ const ok = await _copyToClipboard(text); toast(ok? 'Copied to Windows clipboard.':'Clipboard write failed.', ok? 1000:1500); })();
+            try{ _flashYanked(start, end); }catch{}
+          }
+          _clearPendingOp(); _repositionCaret(); updateGutter();
+          return;
         }
         // Y$ — charwise to end-of-line (or across lines if count>1)
         if (e.key==='$'){
@@ -32364,6 +32784,21 @@ try{
             _pendingOpSeq = 'g'; _armPendingOpTimeout(); return;
           }
         }
+        // dge / dgE (backward to end of previous word/WORD)
+        if (_pendingOpSeq === 'g' && (e.key==='e' || e.key==='E')){
+          const mcount = (_countAcc==null?1:_countAcc); _countAcc=null;
+          const totalCount = Math.max(1, (_pendingOpCount||1) * mcount);
+          let r0 = caretRow|0, c0 = caretCol|0;
+          for (let i=0;i<totalCount;i++){
+            const p = (e.key==='e') ? _prevWordEndCaret(r0, c0, false) : _prevWordEndCaret(r0, c0, true);
+            r0 = p.r|0; c0 = p.c|0;
+          }
+          const start = { r: caretRow, c: caretCol };
+          const end = { r: r0, c: c0 };
+          if (!(start.r===end.r && start.c===end.c)) _deleteRangePos(start, end);
+          _clearPendingOp(); ensureScrolloff(); _repositionCaret(); updateGutter();
+          return;
+        }
   // dG / dNG (N as target line) — linewise (use literal 'G')
   if (e.key==='G'){
           const mcount = (_countAcc==null?0:_countAcc); _countAcc=null;
@@ -32465,6 +32900,22 @@ try{
           } else {
             _pendingOpSeq = 'g'; _armPendingOpTimeout(); return;
           }
+        }
+        // cge / cgE (backward to end of previous word/WORD)
+        if (_pendingOpSeq === 'g' && (e.key==='e' || e.key==='E')){
+          const mcount = (_countAcc==null?1:_countAcc); _countAcc=null;
+          const totalCount = Math.max(1, (_pendingOpCount||1) * mcount);
+          let r0 = caretRow|0, c0 = caretCol|0;
+          for (let i=0;i<totalCount;i++){
+            const p = (e.key==='e') ? _prevWordEndCaret(r0, c0, false) : _prevWordEndCaret(r0, c0, true);
+            r0 = p.r|0; c0 = p.c|0;
+          }
+          const start = { r: caretRow, c: caretCol };
+          const end = { r: r0, c: c0 };
+          if (!(start.r===end.r && start.c===end.c)) _deleteRangePos(start, end);
+          _clearPendingOp(); ensureScrolloff(); _repositionCaret(); updateGutter();
+          _suppressInsertSnapshotOnce = true; _setMode('INSERT');
+          return;
         }
   // cG / cNG (N as target line)
   if (e.key==='G'){
@@ -33692,8 +34143,23 @@ try{
   // change operator: c + motion
   if (e.key==='c' && !e.ctrlKey && !e.metaKey && !e.altKey){ e.preventDefault(); _pendingOp='c'; _pendingOpCount=_consumeCount(); if (!_pendingOpCount || _pendingOpCount<1) _pendingOpCount=1; _pendingOpSeq=null; _armPendingOpTimeout(); return; }
       // word motions (w: next word start, b: prev word start)
+    // g-prefixed word-end motions (ge/gE) must take precedence over plain e/E.
+    if ((e.key==='e' || e.key==='E') && !e.ctrlKey && !e.metaKey && !e.altKey && _pendingNormal === 'g'){
+      e.preventDefault();
+      const mcount = (_countAcc==null?1:_countAcc); _countAcc=null;
+      _clearPending();
+      const n = Math.max(1, mcount|0);
+      if (e.key==='e') _moveWordGE(n);
+      else _moveWORDGE(n);
+      try{ _flagCaretMotion(); }catch{}
+      _ensureAfterMotion();
+      _repositionCaret(); updateGutter();
+      return;
+    }
     if (e.key==='w' && !e.ctrlKey && !e.metaKey && !e.altKey){ e.preventDefault(); const n=_consumeCount(); _moveWordW(n); try{ _flagCaretMotion(); }catch{} _ensureAfterMotion(); _repositionCaret(); updateGutter(); return; }
     if (e.key==='b' && !e.ctrlKey && !e.metaKey && !e.altKey){ e.preventDefault(); const n=_consumeCount(); _moveWordB(n); try{ _flagCaretMotion(); }catch{} _ensureAfterMotion(); _repositionCaret(); updateGutter(); return; }
+    if (e.key==='e' && !e.ctrlKey && !e.metaKey && !e.altKey){ e.preventDefault(); const n=_consumeCount(); _moveWordE(n); try{ _flagCaretMotion(); }catch{} _ensureAfterMotion(); _repositionCaret(); updateGutter(); return; }
+    if (e.key==='E' && !e.ctrlKey && !e.metaKey && !e.altKey){ e.preventDefault(); const n=_consumeCount(); _moveWORDE(n); try{ _flagCaretMotion(); }catch{} _ensureAfterMotion(); _repositionCaret(); updateGutter(); return; }
   if (e.key==='W' && !e.ctrlKey && !e.metaKey && !e.altKey){ e.preventDefault(); const n=_consumeCount(); _moveWORDW(n); try{ _flagCaretMotion(); }catch{} _ensureAfterMotion(); _repositionCaret(); updateGutter(); return; }
   if (e.key==='B' && !e.ctrlKey && !e.metaKey && !e.altKey){ e.preventDefault(); const n=_consumeCount(); _moveWORDB(n); try{ _flagCaretMotion(); }catch{} _ensureAfterMotion(); _repositionCaret(); updateGutter(); return; }
         // line anchors ^, 0, $ （Home/End を 0/$ と同等に）
@@ -33980,6 +34446,19 @@ try{
         e.preventDefault(); _redo(); return;
       }
       // 'gg' (go to first line) / 'G' (go to last line)
+      // ge / gE (end of previous word/WORD)
+      if ((e.key==='e' || e.key==='E') && !e.ctrlKey && !e.metaKey && !e.altKey && _pendingNormal === 'g'){
+        e.preventDefault();
+        const mcount = (_countAcc==null?1:_countAcc); _countAcc=null;
+        _clearPending();
+        const n = Math.max(1, mcount|0);
+        if (e.key==='e') _moveWordGE(n);
+        else _moveWORDGE(n);
+        try{ _flagCaretMotion(); }catch{}
+        _ensureAfterMotion();
+        _repositionCaret(); updateGutter();
+        return;
+      }
       if (e.key === 'g' && !e.ctrlKey && !e.metaKey){
         e.preventDefault();
         if (_pendingNormal === 'g'){
