@@ -1,13 +1,13 @@
 const VERSION = '0.9.1.t';
 // Build stamp (for verifying which _six.js is actually running)
 // NOTE: Intentionally ASCII-only; fullwidth variants should be treated as invalid.
-try{ window.__sixBuildTs = '2026-01-10T03:10:00Z'; }catch{}
+try{ window.__sixBuildTs = '2026-02-01T01:10:00Z'; }catch{}
 const VERSION_STR = 'vi like TextEditor "six" v' + VERSION;
 // Build sentinel (#912) - confirm script actually refreshed & executed
 try{
   const ts = Date.now();
   window.__sixBootTs = ts;
-  console.log('[six] _six.js build#912 loaded ts=' + ts);
+  console.log('[six] _six.js build#917 loaded ts=' + ts);
 }catch{}
 // six migration oriented bootstrap (spec-aligned skeleton with file load)
 (function(){
@@ -353,6 +353,8 @@ try{
         const lb = src.indexOf('[', i|0);
         if (lb < 0) break;
         if (isEsc(lb|0)) { i = (lb+1)|0; continue; }
+        // Images: ![alt](...) are handled by the image scanner; do not treat as links.
+        try{ if ((lb|0) > 0 && src[(lb-1)|0] === '!' && !isEsc((lb-1)|0)) { i = (lb+1)|0; continue; } }catch{}
         // Find matching ]
         let rb = -1;
         for (let k=(lb+1)|0; k < (n|0); k++){
@@ -613,6 +615,8 @@ try{
         const lb = src.indexOf('[', i|0);
         if (lb < 0) break;
         if (isEsc(lb|0)) { i = (lb+1)|0; continue; }
+        // Images: ![alt][id] / ![alt] are handled by the image scanner.
+        try{ if ((lb|0) > 0 && src[(lb-1)|0] === '!' && !isEsc((lb-1)|0)) { i = (lb+1)|0; continue; } }catch{}
 
         // Find first closing ]
         let rb = -1;
@@ -632,6 +636,7 @@ try{
         if (p < (n|0) && src[p] === ':' && !isEsc(p|0)) { i = (lb+1)|0; continue; }
 
         let idRaw = '';
+        let idFromAlt = false;
         let spanEnd = (rb+1)|0;
 
         // Full/collapsed reference: [text][id] / [text][]
@@ -679,6 +684,270 @@ try{
           defSpanB:(def.spanB|0),
         });
         i = (spanEnd|0);
+      }
+      return out;
+    }catch{ return []; }
+  }
+
+  // --- Markdown images (GFM-ish): ![alt](url "title") / ![alt][id] / ![alt][] / ![alt]
+  function _mdInlineImageScan(s){
+    // Returns array of { lb, rb, lp, rp, textStart, textEnd, url, tooltip }
+    // Indices are in the given string s.
+    try{
+      const src = String(s||'');
+      const n = src.length|0;
+      const out = [];
+      if (!src || src.indexOf('![') < 0) return out;
+
+      const isEsc = (idx)=>{
+        try{
+          let k = (idx|0) - 1;
+          let cnt = 0;
+          while (k >= 0 && src[k] === '\\'){ cnt++; k--; }
+          return ((cnt|0) % 2) === 1;
+        }catch{ return false; }
+      };
+      const skipWs = (k)=>{ try{ while (k < (n|0) && (src[k]===' ' || src[k]==='\t')) k++; }catch{} return k|0; };
+      const unesc = (t)=>{
+        try{
+          let r = '';
+          for (let i=0;i<(t.length|0);i++){
+            const ch = t[i];
+            if (ch === '\\' && (i+1) < (t.length|0)) { r += t[i+1]; i++; continue; }
+            r += ch;
+          }
+          return r;
+        }catch{ return String(t||''); }
+      };
+
+      let i = 0;
+      while (i < (n|0)){
+        const ex = src.indexOf('![', i|0);
+        if (ex < 0) break;
+        if (isEsc(ex|0)) { i = (ex+1)|0; continue; }
+        const lb = ex|0;
+        const brOpen = (ex+1)|0;
+        // Find matching ]
+        let rb = -1;
+        for (let k=(brOpen+1)|0; k < (n|0); k++){
+          if (src[k] === ']' && !isEsc(k|0)) { rb = k|0; break; }
+        }
+        if (rb < 0) break;
+        let p = skipWs((rb+1)|0);
+        if (p >= (n|0) || src[p] !== '(' || isEsc(p|0)) { i = (lb+2)|0; continue; }
+        const lp = p|0;
+        p = skipWs((lp+1)|0);
+
+        // destination
+        let urlRaw = '';
+        if (p < (n|0) && src[p] === '<' && !isEsc(p|0)){
+          p++;
+          while (p < (n|0)){
+            const ch = src[p];
+            if (ch === '>' && !isEsc(p|0)) { p++; break; }
+            if (ch === '\\' && (p+1) < (n|0)) { urlRaw += src[p+1]; p += 2; continue; }
+            urlRaw += ch; p++;
+          }
+        } else {
+          while (p < (n|0)){
+            const ch = src[p];
+            if ((ch === ' ' || ch === '\t' || ch === ')') && !isEsc(p|0)) break;
+            if (ch === '\\' && (p+1) < (n|0)) { urlRaw += src[p+1]; p += 2; continue; }
+            urlRaw += ch; p++;
+          }
+        }
+        urlRaw = String(urlRaw||'').trim();
+        if (!urlRaw){ i = (lb+2)|0; continue; }
+        p = skipWs(p|0);
+
+        // optional title
+        let tooltip = '';
+        if (p < (n|0) && src[p] !== ')'){
+          const q = src[p];
+          if (q === '"' || q === "'"){
+            p++;
+            while (p < (n|0)){
+              const ch = src[p];
+              if (ch === q && !isEsc(p|0)) { p++; break; }
+              if (ch === '\\' && (p+1) < (n|0)) { tooltip += src[p+1]; p += 2; continue; }
+              tooltip += ch; p++;
+            }
+            tooltip = String(tooltip||'');
+            p = skipWs(p|0);
+          } else if (q === '(' && !isEsc(p|0)){
+            p++;
+            while (p < (n|0)){
+              const ch = src[p];
+              if (ch === ')' && !isEsc(p|0)) { p++; break; }
+              if (ch === '\\' && (p+1) < (n|0)) { tooltip += src[p+1]; p += 2; continue; }
+              tooltip += ch; p++;
+            }
+            tooltip = String(tooltip||'').trim();
+            p = skipWs(p|0);
+          }
+        }
+
+        if (p >= (n|0) || src[p] !== ')' || isEsc(p|0)) { i = (lb+2)|0; continue; }
+        const rp = p|0;
+
+        const textStart = (brOpen+1)|0;
+        const textEnd = (rb|0);
+        const textLen = Math.max(0, (textEnd - textStart)|0);
+        if ((textLen|0) <= 0){ i = (lb+2)|0; continue; }
+
+        // Do not treat anything inside inline code spans as an image.
+        try{
+          if (src.indexOf('`') >= 0 && typeof _mdInlineCodeOverlaps === 'function'){
+            if (_mdInlineCodeOverlaps(src, lb|0, ((rp+1)|0))) { i = (lb+2)|0; continue; }
+          }
+        }catch{}
+
+        out.push({ lb:(lb|0), rb:(rb|0), lp:(lp|0), rp:(rp|0), textStart, textEnd, url:String(unesc(urlRaw)||''), tooltip:String(tooltip||'') });
+        i = (rp+1)|0;
+      }
+      return out;
+    }catch{ return []; }
+  }
+
+  function _mdRefImageScanResolved(s){
+    // Returns array of link objects compatible with inline-link collapse mapping.
+    // { kind:'img-ref', lb, rb, lp:-1, rp, textStart, textEnd, url, tooltip, idNorm, defRow, defSpanA, defSpanB }
+    try{
+      const src = String(s||'');
+      const n = (src.length|0);
+      if (!src || src.indexOf('![') < 0) return [];
+      // Never treat reference definition lines themselves as images.
+      try{ if (_mdRefDefLineInfo(src)) return []; }catch{}
+
+      const cache = _mdRefDefEnsureCache(false, null, null, null) || _mdRefDefEnsureCache(true, null, null, null);
+      const defs = (cache && cache.map) ? cache.map : null;
+      if (!defs || !(defs.size > 0)) return [];
+
+      const out = [];
+      const isEsc = (idx)=>{
+        try{
+          let k = (idx|0) - 1;
+          let cnt = 0;
+          while (k >= 0 && src[k] === '\\'){ cnt++; k--; }
+          return ((cnt|0) % 2) === 1;
+        }catch{ return false; }
+      };
+      const skipWs = (k)=>{ try{ while (k < (n|0) && (src[k]===' ' || src[k]==='\t')) k++; }catch{} return k|0; };
+
+      let i = 0;
+      while (i < (n|0)){
+        const ex = src.indexOf('![', i|0);
+        if (ex < 0) break;
+        if (isEsc(ex|0)) { i = (ex+1)|0; continue; }
+        const lb = (ex|0);
+        const brOpen = (ex+1)|0;
+
+        // Find first closing ]
+        let rb = -1;
+        for (let k=(brOpen+1)|0; k < (n|0); k++){
+          if (src[k] === ']' && !isEsc(k|0)) { rb = k|0; break; }
+        }
+        if (rb < 0) break;
+        const textStart = (brOpen+1)|0;
+        const textEnd = (rb|0);
+        const textLen = Math.max(0, (textEnd - textStart)|0);
+        if ((textLen|0) <= 0){ i = (lb+2)|0; continue; }
+
+        let p = skipWs((rb+1)|0);
+        // Not a reference image if this is an inline image: ![alt](...)
+        if (p < (n|0) && src[p] === '(' && !isEsc(p|0)) { i = (lb+2)|0; continue; }
+        // Not a reference image if this is a definition marker (shouldn't happen because lb includes '!')
+        if (p < (n|0) && src[p] === ':' && !isEsc(p|0)) { i = (lb+2)|0; continue; }
+
+        let idRaw = '';
+        let spanEnd = (rb+1)|0;
+
+        // Full/collapsed reference: ![alt][id] / ![alt][]
+        if (p < (n|0) && src[p] === '[' && !isEsc(p|0)){
+          const lb2 = p|0;
+          let rb2 = -1;
+          for (let k=(lb2+1)|0; k < (n|0); k++){
+            if (src[k] === ']' && !isEsc(k|0)) { rb2 = k|0; break; }
+          }
+          if (rb2 < 0){ i = (lb+2)|0; continue; }
+          idRaw = src.slice((lb2+1)|0, rb2|0);
+          if (!idRaw){ idRaw = src.slice(textStart|0, textEnd|0); idFromAlt = true; }
+          spanEnd = (rb2+1)|0;
+        } else {
+          // Shortcut reference: ![alt] (only if a definition exists)
+          idRaw = src.slice(textStart|0, textEnd|0);
+          idFromAlt = true;
+          spanEnd = (rb+1)|0;
+        }
+
+        // Image rows spec: allow `![id:2]` to resolve `[id]: ...` by stripping the trailing `:N`.
+        try{ if (idFromAlt && typeof _mdImgAltStripRows === 'function') idRaw = _mdImgAltStripRows(String(idRaw||'')); }catch{}
+        try{ idRaw = String(idRaw||'').trim(); }catch{}
+
+        const idNorm = _mdRefIdNorm(idRaw);
+        if (!idNorm){ i = (lb+2)|0; continue; }
+        const def = defs.get(idNorm);
+        if (!def){ i = (lb+2)|0; continue; }
+
+        // Do not collapse images that overlap inline code spans.
+        try{
+          if (src.indexOf('`') >= 0 && typeof _mdInlineCodeOverlaps === 'function'){
+            if (_mdInlineCodeOverlaps(src, lb|0, spanEnd|0)) { i = (lb+2)|0; continue; }
+          }
+        }catch{}
+
+        out.push({
+          kind:'img-ref',
+          lb:(lb|0),
+          rb:(rb|0),
+          lp:-1,
+          rp:((spanEnd-1)|0),
+          textStart:(textStart|0),
+          textEnd:(textEnd|0),
+          url:String(def.url||''),
+          tooltip:String(def.tooltip||''),
+          idNorm:String(idNorm||''),
+          defRow:(def.row|0),
+          defSpanA:(def.spanA|0),
+          defSpanB:(def.spanB|0),
+        });
+        i = (spanEnd|0);
+      }
+      return out;
+    }catch{ return []; }
+  }
+
+  function _mdImageScanResolvedAll(src){
+    // Unified image spans for clean display: inline + resolved reference images.
+    // Each item has { kind, lb, rb, lp, rp, textStart, textEnd, url, tooltip, ... }
+    try{
+      const s = String(src||'');
+      const n = (s.length|0);
+      if (!s || s.indexOf('![') < 0) return [];
+
+      const inlines0 = _mdInlineImageScan(s);
+      const inlines = [];
+      try{ for (const it of (inlines0||[])){ if (!it) continue; inlines.push(Object.assign({ kind:'img-inline' }, it)); } }catch{}
+      const refs = _mdRefImageScanResolved(s);
+
+      const merged = [];
+      try{ for (const it of inlines) merged.push(it); }catch{}
+      try{ for (const it of refs) merged.push(it); }catch{}
+      if (!merged.length) return [];
+      merged.sort((a,b)=>{ try{ return (a.lb|0) - (b.lb|0); }catch{ return 0; } });
+
+      // Ensure non-overlapping spans (prefer the earlier/leftmost span).
+      const out = [];
+      let lastEnd = -1;
+      for (const it of merged){
+        try{
+          const a = (it.lb|0);
+          const b = ((it.rp|0) + 1)|0;
+          if (b <= a) continue;
+          if ((a|0) < (lastEnd|0)) continue;
+          out.push(it);
+          lastEnd = (b|0);
+        }catch{}
       }
       return out;
     }catch{ return []; }
@@ -740,9 +1009,13 @@ try{
       }catch{}
       const refs = _mdRefLinkScanResolved(s);
 
+      // Images are also treated as link-like spans (for caret mapping + URL bar + hit-testing).
+      const imgs = _mdImageScanResolvedAll(s);
+
       const merged = [];
       try{ for (const it of inlines) merged.push(it); }catch{}
       try{ for (const it of refs) merged.push(it); }catch{}
+      try{ for (const it of imgs) merged.push(it); }catch{}
       if (!merged.length) return [];
       merged.sort((a,b)=>{ try{ return (a.lb|0) - (b.lb|0); }catch{ return 0; } });
 
@@ -763,6 +1036,81 @@ try{
     }catch{ return []; }
   }
 
+  // ---- Markdown image cache/loader (md-rich)
+  let _mdImgCache = null; // Map(url -> { state:'loading'|'ok'|'err', w,h, at, err })
+  function _mdImgCacheEnsure(){ try{ if (!_mdImgCache) _mdImgCache = new Map(); return _mdImgCache; }catch{ _mdImgCache = null; return null; } }
+  function _mdImgEvictIfNeeded(){
+    try{
+      const map = _mdImgCacheEnsure();
+      if (!map || !(map.size > 320)) return;
+      // Evict oldest entries (best-effort)
+      const arr = [];
+      for (const [k,v] of map.entries()){
+        const at = (v && Number.isFinite(v.at)) ? (v.at|0) : 0;
+        arr.push({ k, at });
+      }
+      arr.sort((a,b)=>{ try{ return (a.at|0) - (b.at|0); }catch{ return 0; } });
+      const drop = Math.max(0, (arr.length|0) - 256);
+      for (let i=0;i<drop;i++){
+        try{ map.delete(arr[i].k); }catch{}
+      }
+    }catch{}
+  }
+  function _mdImgRequest(url){
+    try{
+      const u = String(url||'').trim();
+      if (!u) return null;
+      const map = _mdImgCacheEnsure();
+      if (!map) return null;
+      let e = map.get(u);
+      if (e){ try{ e.at = Date.now()|0; }catch{} return e; }
+      e = { state:'loading', w:0, h:0, at:(Date.now()|0), err:'' };
+      map.set(u, e);
+      _mdImgEvictIfNeeded();
+      let img = null;
+      try{ img = new Image(); }catch{ img = null; }
+      if (!img){ e.state = 'err'; e.err = 'no-image'; return e; }
+
+      const schedule = ()=>{
+        try{
+          if (_mdRichActive && _mdRichActive()){
+            requestAnimationFrame(()=>{ try{ _mdRenderTextLayer && _mdRenderTextLayer(); }catch{} });
+          }
+        }catch{}
+      };
+      img.onload = ()=>{
+        try{
+          e.state = 'ok';
+          e.w = ((img.naturalWidth||img.width||0)|0);
+          e.h = ((img.naturalHeight||img.height||0)|0);
+          e.err = '';
+          e.at = Date.now()|0;
+        }catch{ try{ e.state = 'ok'; }catch{} }
+        schedule();
+      };
+      img.onerror = ()=>{
+        try{ e.state = 'err'; e.err = 'load'; e.at = Date.now()|0; }catch{}
+        schedule();
+      };
+      try{ img.decoding = 'async'; }catch{}
+      try{ img.loading = 'eager'; }catch{}
+      try{ img.src = u; }catch{ try{ e.state = 'err'; e.err = 'src'; }catch{} }
+      return e;
+    }catch{ return null; }
+  }
+  function _mdImgAltRows(alt){
+    try{
+      const s = String(alt||'');
+      const m = s.match(/:(\d+)\s*$/);
+      if (!m) return 0;
+      const n = parseInt(m[1], 10);
+      return (Number.isFinite(n) && n > 0) ? (n|0) : 0;
+    }catch{ return 0; }
+  }
+  function _mdImgAltStripRows(alt){
+    try{ return String(alt||'').replace(/:(\d+)\s*$/,''); }catch{ return String(alt||''); }
+  }
+
   function _mdLinkCollapseInfo(s){
     // Collapse inline + resolved reference links:
     // - [text](...) -> text
@@ -781,12 +1129,14 @@ try{
       for (let i=0;i<links0.length;i++){
         const it = links0[i];
         if (!it) continue;
+        const isImg = (function(){ try{ return /^img-/.test(String(it.kind||'')); }catch{ return false; } })();
+        const imgToken = '★';
         const spanLen = (((it.rp|0) + 1) - (it.lb|0))|0;
-        const textLen = ((it.textEnd|0) - (it.textStart|0))|0;
+        const textLen = isImg ? 1 : (((it.textEnd|0) - (it.textStart|0))|0);
         const dispStart = (it.lb|0) - (removed|0);
         const dispEnd = (dispStart + (textLen|0))|0;
         const removedLen = Math.max(0, (spanLen|0) - (textLen|0))|0;
-        links.push(Object.assign({ dispStart:(dispStart|0), dispEnd:(dispEnd|0), removedLen:(removedLen|0) }, it));
+        links.push(Object.assign({ dispStart:(dispStart|0), dispEnd:(dispEnd|0), removedLen:(removedLen|0), _imgToken:(isImg?imgToken:'') }, it));
         removed = (removed + (removedLen|0))|0;
       }
 
@@ -799,7 +1149,11 @@ try{
         const ts = it.textStart|0;
         const te = it.textEnd|0;
         if ((lb|0) > (pos|0)) out += src.slice(pos|0, lb|0);
-        out += src.slice(ts|0, te|0);
+        try{
+          const isImg = /^img-/.test(String(it.kind||''));
+          if (isImg) out += String(it._imgToken||'★');
+          else out += src.slice(ts|0, te|0);
+        }catch{ out += src.slice(ts|0, te|0); }
         pos = rp1|0;
       }
       if ((pos|0) < (n|0)) out += src.slice(pos|0);
@@ -814,9 +1168,14 @@ try{
             const te = it.textEnd|0;
             const rp1 = ((it.rp|0) + 1)|0;
             if ((col|0) <= (lb|0)) break;
-            if ((col|0) < (ts|0)) return (it.dispStart|0);
-            if ((col|0) < (te|0)) return (it.dispStart|0) + ((col|0) - (ts|0));
-            if ((col|0) <= (rp1|0)) return (it.dispEnd|0);
+            const isImg = (function(){ try{ return /^img-/.test(String(it.kind||'')); }catch{ return false; } })();
+            if (isImg){
+              if ((col|0) <= (rp1|0)) return (it.dispEnd|0);
+            } else {
+              if ((col|0) < (ts|0)) return (it.dispStart|0);
+              if ((col|0) < (te|0)) return (it.dispStart|0) + ((col|0) - (ts|0));
+              if ((col|0) <= (rp1|0)) return (it.dispEnd|0);
+            }
             rem = (rem + (it.removedLen|0))|0;
           }
           return (col - (rem|0))|0;
@@ -832,7 +1191,11 @@ try{
             const de = it.dispEnd|0;
             const ts = it.textStart|0;
             if ((dc|0) < (ds|0)) break;
-            if ((dc|0) < (de|0)) return (ts|0) + ((dc|0) - (ds|0));
+            if ((dc|0) < (de|0)){
+              const isImg = (function(){ try{ return /^img-/.test(String(it.kind||'')); }catch{ return false; } })();
+              if (isImg) return (it.lb|0);
+              return (ts|0) + ((dc|0) - (ds|0));
+            }
             rem = (rem + (it.removedLen|0))|0;
           }
           return (dc + (rem|0))|0;
@@ -1112,9 +1475,14 @@ try{
             const ds = it.dispStart|0;
             const de = it.dispEnd|0;
             if ((c|0) <= (lb|0)) break;
-            if ((c|0) < (ts|0)) return ds|0;
-            if ((c|0) <= (te|0)) return (ds + (c - ts))|0;
-            if ((c|0) <= (rp1|0)) return de|0;
+            const isImg = (function(){ try{ return /^img-/.test(String(it.kind||'')); }catch{ return false; } })();
+            if (isImg){
+              if ((c|0) <= (rp1|0)) return de|0;
+            } else {
+              if ((c|0) < (ts|0)) return ds|0;
+              if ((c|0) <= (te|0)) return (ds + (c - ts))|0;
+              if ((c|0) <= (rp1|0)) return de|0;
+            }
             rem = (rem + (it.removedLen|0))|0;
           }
           return (c - (rem|0))|0;
@@ -1135,8 +1503,10 @@ try{
               const lb = it.lb|0;
               const ts = it.textStart|0;
               const rp1 = ((it.rp|0) + 1)|0;
+              const isImg = (function(){ try{ return /^img-/.test(String(it.kind||'')); }catch{ return false; } })();
               if ((dc|0) === (ds|0)) return Math.max(0, Math.min(n|0, lb|0));
               if ((dc|0) === (de|0)) return Math.max(0, Math.min(n|0, rp1|0));
+              if (isImg) return Math.max(0, Math.min(n|0, lb|0));
               return Math.max(0, Math.min(n|0, (ts + (dc - ds))|0));
             }
             rem = (rem + (it.removedLen|0))|0;
@@ -1158,6 +1528,14 @@ try{
       if (src.indexOf('[') < 0 || src.indexOf(']') < 0) return null;
       let links0 = _mdLinkScanResolvedAll(src);
       if (!links0 || !links0.length) return null;
+
+      const _imgGapPx = ()=>{
+        // Use the same integer gap as standalone image blocks so rows:N scaling matches
+        // between image-only lines and inline images.
+        try{
+          return Math.max(1, Math.round((+LINE_HEIGHT||0) * 0.125));
+        }catch{ return 1; }
+      };
 
       // #1919: Disable inline-link collapsing inside inline code spans.
       // If a link overlaps any inline code span, ignore that link so inline code renderer can handle it.
@@ -1231,11 +1609,108 @@ try{
           const subRe = hasRange ? Math.max(0, Math.min((seg.length|0), (selE - (pos|0))|0)) : 0;
           out += emitSub(seg, subRs|0, subRe|0, null);
         }
-        // Link text only
-        const linkText = src.slice(ts|0, te|0);
-        const subRs = hasRange ? Math.max(0, Math.min((linkText.length|0), (selS - (ts|0))|0)) : 0;
-        const subRe = hasRange ? Math.max(0, Math.min((linkText.length|0), (selE - (ts|0))|0)) : 0;
-        out += emitSub(linkText, subRs|0, subRe|0, 'md-link');
+
+        const isImg = (function(){ try{ return /^img-/.test(String(it.kind||'')); }catch{ return false; } })();
+        if (isImg){
+          // Inline image: render as an inline-block image with explicit width/height.
+          // Keep 0.125ch gaps top/bottom by shrinking the image itself.
+          const altRaw = src.slice((it.textStart|0), (it.textEnd|0));
+          const rows = (_mdImgAltRows ? (_mdImgAltRows(altRaw)|0) : 0)|0;
+          const alt = (_mdImgAltStripRows ? _mdImgAltStripRows(altRaw) : String(altRaw||''));
+          const url = String(it.url||'');
+          const tip = String(it.tooltip||'');
+          const ent = _mdImgRequest && _mdImgRequest(url);
+
+          // Available window size (best-effort) for no-rows fit.
+          let availW = 0;
+          let availH = 0;
+          try{
+            const wrapOnNow = (function(){ try{ return !!(_wrapEnabled && _wrapEnabled()); }catch{ return false; } })();
+            if (wrapOnNow && typeof _wrapAvailWidthPx === 'function') availW = Math.max(40, (+_wrapAvailWidthPx()||0) - 2);
+          }catch{}
+          try{
+            if (!availW){
+              const w0 = (_mdBgLayer && (_mdBgLayer.clientWidth|0) > 0) ? (_mdBgLayer.clientWidth|0) : 0;
+              if (w0 > 0) availW = Math.max(40, (w0|0) - 2);
+            }
+          }catch{}
+          try{
+            const vr = viewport && viewport.getBoundingClientRect ? viewport.getBoundingClientRect() : null;
+            const vh = vr ? (vr.height||0) : 0;
+            const vw = vr ? (vr.width||0) : 0;
+            availH = Math.max(40, Math.round((vh||0) - 16));
+            if (!availW) availW = Math.max(40, Math.round((vw||0) - 2));
+          }catch{}
+
+          // 0.125ch gap (px). Keep fractional px (do not truncate to int),
+          // otherwise the image can end up at full rows:N height (no visible gap).
+          const gapPx = Math.max(1, Math.round(+_imgGapPx() || 0));
+
+          let rowH = (LINE_HEIGHT|0);
+          let imgW = (LINE_HEIGHT|0);
+          let imgH = (LINE_HEIGHT|0);
+          try{
+            const iw = (ent && ent.state==='ok' && (ent.w|0) > 0) ? (ent.w|0) : 0;
+            const ih = (ent && ent.state==='ok' && (ent.h|0) > 0) ? (ent.h|0) : 0;
+            if ((rows|0) > 0){
+              rowH = Math.max(1, (rows|0) * (LINE_HEIGHT|0));
+              imgH = Math.max(1, (+rowH||0) - (2 * (+gapPx||0)));
+              if (iw > 0 && ih > 0) imgW = Math.max(1, Math.round(iw * ((+imgH||0) / ih)));
+              else imgW = imgH;
+            } else {
+              // No rows specified: fit image into the window (width/height), then add top/bottom gap.
+              if (iw > 0 && ih > 0){
+                const scW = (availW > 0) ? (availW / iw) : 1;
+                const scH = (availH > 0) ? (availH / ih) : 1;
+                const sc = Math.min(1, scW, scH);
+                imgW = Math.max(1, Math.round(iw * sc));
+                imgH = Math.max(1, Math.round(ih * sc));
+                rowH = Math.max(1, (+imgH||0) + (2 * (+gapPx||0)));
+              } else {
+                imgH = Math.max(1, 2 * (LINE_HEIGHT|0));
+                imgW = Math.max(1, Math.min((availW|0) || 400, 400));
+                rowH = Math.max(1, (+imgH||0) + (2 * (+gapPx||0)));
+              }
+            }
+          }catch{}
+
+          const escAttr = (v)=>{
+            try{
+              return String(v||'')
+                .replace(/&/g,'&amp;')
+                .replace(/</g,'&lt;')
+                .replace(/>/g,'&gt;')
+                .replace(/"/g,'&quot;');
+            }catch{ return ''; }
+          };
+          const titleAttr = tip ? (' title="' + escAttr(tip) + '"') : '';
+          const altAttr = alt ? (' alt="' + escAttr(alt) + '"') : ' alt=""';
+          const cls = (ent && ent.state==='err')
+            ? 'md-img md-img-inline md-img-err'
+            : ((ent && ent.state==='ok') ? 'md-img md-img-inline md-img-ok' : 'md-img md-img-inline md-img-loading');
+
+          const imgStyle = 'display:block;object-fit:contain;image-rendering:auto;'
+            + 'width:' + Math.max(1, (imgW|0)) + 'px;'
+            + 'height:' + (Math.max(1, (+imgH||0)).toFixed(3)) + 'px;'
+            + 'user-select:none;';
+          const html = '<img class="' + cls + '" src="' + escAttr(url) + '"' + altAttr + titleAttr + ' draggable="false" style="' + imgStyle + '">';
+
+          const selOn = hasRange ? ((selE|0) > (lb|0) && (selS|0) < (rp1|0)) : false;
+          const wrapCls = selOn ? (String(rangeClass||'') + ' md-img-wrap') : 'md-img-wrap';
+          const wrapStyle = 'display:inline-flex;align-items:center;justify-content:center;vertical-align:middle;'
+            + 'height:' + Math.max(1, Math.round(+rowH||0)) + 'px;'
+            + 'padding-top:' + (Math.max(0, +gapPx||0).toFixed(3)) + 'px;'
+            + 'padding-bottom:' + (Math.max(0, +gapPx||0).toFixed(3)) + 'px;'
+            + 'box-sizing:border-box;'
+            + ((rows|0) > 0 ? '' : ('max-width:' + Math.max(1, availW|0) + 'px;'));
+          out += '<span class="' + wrapCls + '" style="' + wrapStyle + '">' + html + '</span>';
+        } else {
+          // Link text only
+          const linkText = src.slice(ts|0, te|0);
+          const subRs = hasRange ? Math.max(0, Math.min((linkText.length|0), (selS - (ts|0))|0)) : 0;
+          const subRe = hasRange ? Math.max(0, Math.min((linkText.length|0), (selE - (ts|0))|0)) : 0;
+          out += emitSub(linkText, subRs|0, subRe|0, 'md-link');
+        }
         pos = rp1|0;
       }
       if ((pos|0) < (src.length|0)){
@@ -1946,8 +2421,16 @@ try{
       // Populate input when entering edit mode.
       try{ _mdUrlBarInput.value = String(c.span||''); }catch{}
 
+      // Default caret position: start of the bar (not EOL).
+      try{
+        _mdUrlBarLastSelS = 0;
+        _mdUrlBarLastSelE = 0;
+        _mdUrlBarKeepSelUntil = (Date.now() + 250)|0;
+        _mdUrlBarSnapToEndOnFocus = false;
+        _mdUrlBarInput && _mdUrlBarInput.setSelectionRange && _mdUrlBarInput.setSelectionRange(0, 0);
+      }catch{}
+
       try{ _mdUrlBarReposition && _mdUrlBarReposition(); }catch{}
-      try{ _mdUrlBarSnapToEndOnFocus = true; }catch{}
       try{ _mdUrlBarFocus && _mdUrlBarFocus(); }catch{}
       try{ _mdUrlBarInput && _mdUrlBarInput.focus && _mdUrlBarInput.focus(); }catch{}
       return true;
@@ -2686,6 +3169,11 @@ try{
           // Accept caret anywhere inside the whole construct.
           try{ if ((ccSrcForChecks|0) < (spanA0|0) || (ccSrcForChecks|0) > (spanB0|0)) return null; }catch{}
 
+          if (hitKind === 'img-inline' || hitKind === 'img-ref'){
+            const span = src.slice(spanA0|0, spanB0|0);
+            return { kind:'img-full', row:(row|0), lp:(spanA0|0), rp1:(spanB0|0), span:String(span||''), caretRow0:(rowCur|0), caretCol0:(colCur|0) };
+          }
+
           if (hitKind === 'ref'){
             const defRow0 = (hit.defRow|0);
             if (!(defRow0 >= 0 && defRow0 < (lines.length|0))) return null;
@@ -2798,12 +3286,10 @@ try{
   function _mdUrlBarFocus(){
     try{
       if (!_mdUrlBarVisible()) return false;
-      try{ _mdUrlBarSnapToEndOnFocus = true; }catch{}
       _mdUrlBarInput && _mdUrlBarInput.focus && _mdUrlBarInput.focus();
       try{
-        const v = String((_mdUrlBarInput && _mdUrlBarInput.value) || '');
-        const p = (v.length|0);
-        _mdUrlBarInput && _mdUrlBarInput.setSelectionRange && _mdUrlBarInput.setSelectionRange(p, p);
+        // Default caret at BOF for edit UX (matches request #1953).
+        _mdUrlBarInput && _mdUrlBarInput.setSelectionRange && _mdUrlBarInput.setSelectionRange(0, 0);
         try{ _mdUrlBarRememberSel && _mdUrlBarRememberSel(); }catch{}
         try{ _mdUrlBarSnapToEndOnFocus = false; }catch{}
       }catch{}
@@ -2822,6 +3308,17 @@ try{
       const caretColPre = (caretCol|0);
       let newSpan = String(_mdUrlBarInput.value||'');
       const k0 = String(ctx.kind||'inline');
+      if (k0 === 'img-full'){
+        try{
+          const t = String(newSpan||'');
+          if (!t.trim()){
+            try{ toast && toast('URLバー: 空です (中断)', 900); }catch{}
+            try{ editor && editor.focus && editor.focus(); }catch{}
+            return;
+          }
+          newSpan = t;
+        }catch{ newSpan = String(_mdUrlBarInput.value||''); }
+      } else
       if (k0 === 'refdef'){
         try{
           let t = String(newSpan||'').trim();
@@ -3928,6 +4425,36 @@ try{
             const eOff = _offsetFromRC(caretRow|0, caretCol|0)|0;
             _selStart = Math.min(sOff, eOff)|0;
             _selEnd = Math.max(sOff, eOff)|0;
+
+            // md-rich: standalone image-only lines can have no usable visual columns.
+            // In that case, caretCol movement may not change offsets, yielding an empty range.
+            // Treat the image block as a single selectable unit so `0vl` shows a highlight.
+            try{
+              if (!(_selEnd > _selStart) && ((_visualAnchorR|0) === (caretRow|0))){
+                const r0 = (caretRow|0);
+                if (r0 >= 0 && r0 < (lines.length|0)){
+                  const src0 = String(lines[r0]||'');
+                  if (src0 && src0.indexOf('![') >= 0){
+                    const imgs = _mdImageScanResolvedAll && _mdImageScanResolvedAll(src0);
+                    if (imgs && imgs.length === 1){
+                      const it = imgs[0];
+                      const lb = (it.lb|0);
+                      const rp1 = ((it.rp|0) + 1)|0;
+                      if (rp1 > lb){
+                        const pre = src0.slice(0, lb|0);
+                        const post = src0.slice(rp1|0);
+                        if (/^[\t ]*$/.test(pre) && /^[\t ]*$/.test(post)){
+                          const off0 = _offsetFromRC(r0, 0)|0;
+                          const off1 = (off0 + (src0.length|0))|0;
+                          _selStart = (off0|0);
+                          _selEnd = Math.min((off1|0), (off0 + 1)|0);
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }catch{}
           }
           if (!(_selEnd > _selStart)){ _selStart = null; _selEnd = null; }
         }
@@ -4070,6 +4597,8 @@ try{
       const rowIsCode = new Array(want);
       const rowCodeFirst = new Array(want);
       const rowCodeLast = new Array(want);
+      const rowImg = new Array(want); // null | { x,w,h,url,tooltip }
+      const rowInlineImgRowsMax = new Array(want); // 0 | max rows:N on this row (inline images)
       let y = 0;
       for (let i=0; i<want; i++){
         const row = start + i;
@@ -4352,42 +4881,243 @@ try{
         // IME/heading rendering may set innerHTML; keep a shared flag to avoid overwriting HR.
         let usedHtml = false;
 
+        // Inline images: track max rows:N so we can override row height and vertically center text.
+        let inlineImgRowsMax = 0;
+        let inlineImgRowHDesiredMax = 0;
+        try{
+          if (!isCodeRow && !isFenceRow && !isIndentCodeRow && srcText && srcText.indexOf('![') >= 0){
+            const imgs = _mdImageScanResolvedAll(srcText);
+            if (imgs && imgs.length){
+              for (const it of imgs){
+                if (!it) continue;
+                const altRaw = String(srcText||'').slice((it.textStart|0), (it.textEnd|0));
+                const r0 = (_mdImgAltRows ? (_mdImgAltRows(altRaw)|0) : 0)|0;
+                if ((r0|0) > (inlineImgRowsMax|0)) inlineImgRowsMax = (r0|0);
+
+                // Desired row height (px) for this image.
+                try{
+                  const gapPx = Math.max(1, Math.round((LINE_HEIGHT||0) * 0.125));
+                  let desired = 0;
+                  if ((r0|0) > 0){
+                    desired = Math.max(1, (r0|0) * (LINE_HEIGHT|0));
+                  } else {
+                    // No rows specified: fit image into window (width/height) then add top/bottom gap.
+                    let availW = 0;
+                    let availH = 0;
+                    try{
+                      if (wrapOn){
+                        availW = Math.max(40, (+wPx||0) - 2);
+                      } else {
+                        const w0 = (_mdBgLayer && (_mdBgLayer.clientWidth|0) > 0) ? (_mdBgLayer.clientWidth|0) : 0;
+                        if (w0 > 0) availW = Math.max(40, (w0|0) - 2);
+                      }
+                    }catch{}
+                    try{
+                      const vr = viewport && viewport.getBoundingClientRect ? viewport.getBoundingClientRect() : null;
+                      const vh = vr ? (vr.height||0) : 0;
+                      const vw = vr ? (vr.width||0) : 0;
+                      availH = Math.max(0, Math.round((vh||0) - 16));
+                      if (!availW) availW = Math.max(40, Math.round((vw||0) - 2));
+                    }catch{}
+                    const ent = _mdImgRequest && _mdImgRequest(String(it.url||''));
+                    const iw = (ent && ent.state==='ok' && (ent.w|0) > 0) ? (ent.w|0) : 0;
+                    const ih = (ent && ent.state==='ok' && (ent.h|0) > 0) ? (ent.h|0) : 0;
+                    if (iw > 0 && ih > 0){
+                      const scW = (availW > 0) ? (availW / iw) : 1;
+                      const scH = (availH > 0) ? (availH / ih) : 1;
+                      const sc = Math.min(1, scW, scH);
+                      const dispH = Math.max(1, Math.round(ih * sc));
+                      desired = Math.max(1, (dispH|0) + (2 * (gapPx|0)));
+                    } else {
+                      desired = Math.max(1, (2 * (LINE_HEIGHT|0)) + (2 * (gapPx|0)));
+                    }
+                  }
+                  if ((desired|0) > (inlineImgRowHDesiredMax|0)) inlineImgRowHDesiredMax = (desired|0);
+                }catch{}
+              }
+            }
+          }
+        }catch{ inlineImgRowsMax = 0; }
+        rowInlineImgRowsMax[i] = (inlineImgRowsMax|0);
+
+        // Markdown images (standalone line): render as an actual image block with variable row height.
+        // #1949: show images in draft mode too.
+        let imgBlock = null; // { x,w,h,url,tooltip }
+        if (!usedHtml && !isCodeRow && !isFenceRow && !isIndentCodeRow && !looseGap && !renderHr && !renderSetextUnderlineRow){
+          try{
+            const src0 = String(srcText||'');
+            if (src0 && src0.indexOf('![') >= 0){
+              const imgs = _mdImageScanResolvedAll(src0);
+              if (imgs && imgs.length === 1){
+                const it = imgs[0];
+                const lb = (it.lb|0);
+                const rp1 = ((it.rp|0) + 1)|0;
+                if (rp1 > lb){
+                  const pre = src0.slice(0, lb|0);
+                  const post = src0.slice(rp1|0);
+                  if (/^[\t ]*$/.test(pre) && /^[\t ]*$/.test(post)){
+                    const altRaw = src0.slice((it.textStart|0), (it.textEnd|0));
+                    const alt = _mdImgAltStripRows(altRaw);
+                    const rows = _mdImgAltRows(altRaw)|0;
+                    const url = String(it.url||'');
+                    const tooltip = String(it.tooltip||'');
+
+                    // 0.125ch top/bottom gap (px). Use the same base ch estimate as code-block insets.
+                    // Keep it as an integer pixel for stable row sizing.
+                    const gapPx = Math.max(1, Math.round((LINE_HEIGHT||0) * 0.125));
+
+                    let availW = 0;
+                    try{
+                      if (wrapOn){
+                        availW = Math.max(40, (+wPx||0) - 2);
+                      } else {
+                        const w0 = (_mdBgLayer && (_mdBgLayer.clientWidth|0) > 0) ? (_mdBgLayer.clientWidth|0) : 0;
+                        if (w0 > 0) availW = Math.max(40, (w0|0) - 2);
+                        else {
+                          const rr = viewport && viewport.getBoundingClientRect ? viewport.getBoundingClientRect() : null;
+                          const w1 = rr ? (rr.width||0) : 0;
+                          availW = Math.max(40, (w1|0) - 2);
+                        }
+                      }
+                    }catch{ availW = Math.max(40, (+wPx||0) - 2); }
+
+                    const ent = _mdImgRequest && _mdImgRequest(url);
+                    let dispW = 0, dispH = 0;
+                    let rowHOverride = 0;
+                    try{
+                      const iw = (ent && ent.state==='ok' && (ent.w|0) > 0) ? (ent.w|0) : 0;
+                      const ih = (ent && ent.state==='ok' && (ent.h|0) > 0) ? (ent.h|0) : 0;
+                      if (iw > 0 && ih > 0){
+                        if ((rows|0) > 0){
+                          const targetRowH = Math.max(1, (rows|0) * (LINE_HEIGHT|0));
+                          // IMPORTANT: rowHOverride represents *content* height excluding padding.
+                          // Final element height is (rowHOverride + padTop + padBottom) due to border-box.
+                          const targetImgH = Math.max(1, Math.round((targetRowH|0) - (2 * (gapPx|0))));
+                          const sc = targetImgH / ih;
+                          dispH = Math.max(1, Math.round(ih * sc));
+                          dispW = Math.max(1, Math.round(iw * sc));
+                          rowHOverride = (dispH|0);
+                        } else {
+                          // Fit into window (width/height)
+                          let maxH = 0;
+                          try{ const vr = viewport && viewport.getBoundingClientRect ? viewport.getBoundingClientRect() : null; maxH = vr ? (vr.height||0) : 0; }catch{ maxH = 0; }
+                          if (!(maxH > 0)) maxH = 0;
+                          const scW = (availW > 0) ? (availW / iw) : 1;
+                          const scH = (maxH > 0) ? (maxH / ih) : 1;
+                          const sc = Math.min(1, scW, scH);
+                          dispW = Math.max(1, Math.round(iw * sc));
+                          dispH = Math.max(1, Math.round(ih * sc));
+                          // Reserve gaps as row padding, not extra row height.
+                          rowHOverride = (dispH|0);
+                        }
+                      } else {
+                        // Unknown size (still loading): reserve some space.
+                        if ((rows|0) > 0){
+                          const targetRowH = Math.max(1, (rows|0) * (LINE_HEIGHT|0));
+                          dispH = Math.max(1, Math.round((targetRowH|0) - (2 * (gapPx|0))));
+                          rowHOverride = (dispH|0);
+                        } else {
+                          dispH = Math.max(1, 4 * (LINE_HEIGHT|0));
+                          rowHOverride = (dispH|0);
+                        }
+                        dispW = Math.max(1, Math.min((availW|0) || 400, 400));
+                      }
+                    }catch{ dispW = Math.max(1, Math.min((availW|0) || 400, 400)); dispH = Math.max(1, 4*(LINE_HEIGHT|0)); }
+
+                    const escAttr = (v)=>{
+                      try{
+                        return String(v||'')
+                          .replace(/&/g,'&amp;')
+                          .replace(/</g,'&lt;')
+                          .replace(/>/g,'&gt;')
+                          .replace(/"/g,'&quot;');
+                      }catch{ return ''; }
+                    };
+                    const titleAttr = tooltip ? (' title="' + escAttr(tooltip) + '"') : '';
+                    const altAttr = alt ? (' alt="' + escAttr(alt) + '"') : ' alt=""';
+                    const cls = (ent && ent.state==='err') ? 'md-img md-img-err' : ((ent && ent.state==='ok') ? 'md-img md-img-ok' : 'md-img md-img-loading');
+
+                    // Standalone image blocks: render with a wrapper span like inline images.
+                    // This allows selection highlight to be applied with the same `.md-sel` mechanism.
+                    const maxW = ((rows|0) > 0) ? '' : ('max-width:' + Math.max(1, availW|0) + 'px;');
+                    const imgStyle = 'display:block;' + maxW + 'width:' + Math.max(1, dispW|0) + 'px;height:' + Math.max(1, dispH|0) + 'px;object-fit:contain;image-rendering:auto;user-select:none;';
+                    const imgHtml = '<img class="' + cls + '" src="' + escAttr(url) + '"' + altAttr + titleAttr + ' draggable="false" style="' + imgStyle + '">';
+
+                    // Compute selection intersection for this row (offset-based).
+                    let selOn = false;
+                    try{
+                      if (_selStart != null && _selEnd != null && row>=0 && row<total){
+                        const off0 = _offsetFromRC(row|0, 0)|0;
+                        const off1 = (off0 + (String(srcText||'').length|0))|0; // exclude newline
+                        const segS = Math.max(_selStart|0, off0|0);
+                        const segE = Math.min(_selEnd|0, off1|0);
+                        selOn = ((segE|0) > (segS|0));
+                      }
+                    }catch{ selOn = false; }
+
+                    // Wrapper includes the 0.125ch gaps so selection covers the same box as the image block.
+                    const wrapH = Math.max(1, Math.round((dispH|0) + (2 * (gapPx|0))));
+                    const wrapCls = (selOn ? 'md-sel ' : '') + 'md-img-wrap md-img-wrap-standalone';
+                    const wrapStyle = 'display:inline-flex;align-items:center;justify-content:center;vertical-align:middle;'
+                      + 'height:' + Math.max(1, (wrapH|0)) + 'px;'
+                      + 'padding-top:' + Math.max(0, (gapPx|0)) + 'px;'
+                      + 'padding-bottom:' + Math.max(0, (gapPx|0)) + 'px;'
+                      + 'box-sizing:border-box;'
+                      + (((rows|0) > 0) ? '' : ('max-width:' + Math.max(1, availW|0) + 'px;'));
+                    const html = '<span class="' + wrapCls + '" style="' + wrapStyle + '">' + imgHtml + '</span>';
+
+                    try{ el.innerHTML = html; }catch{ try{ el.textContent = ''; }catch{} }
+                    usedHtml = true;
+
+                    // Keep gaps inside the wrapper; do not add row padding.
+                    try{ padTopPx = 0; padBottomPx = 0; }catch{}
+
+                    imgBlock = { x:0, w:Math.max(1, dispW|0), h:Math.max(1, dispH|0), rowH:Math.max(1, (wrapH|0)), url:String(url||''), tooltip:String(tooltip||'') };
+                    rowImg[i] = imgBlock;
+                  }
+                }
+              }
+            }
+          }catch{ imgBlock = null; }
+        }
+
         // VISUAL selection: render selection highlight inside the text layer (selectionBg/selectionFg).
         // This avoids textarea selection drift under variable per-line heights.
+        // NOTE: Standalone image rows render as HTML (<img>) and can't inject span-based ranges;
+        // apply selection as a class on the row element instead.
         try{
-          if (!usedHtml && _selStart != null && _selEnd != null && row>=0 && row<total){
+          if (_selStart != null && _selEnd != null && row>=0 && row<total){
             const off0 = _offsetFromRC(row|0, 0)|0;
             const off1 = (off0 + (String(srcText||'').length|0))|0; // exclude newline
             const segS = Math.max(_selStart|0, off0|0);
             const segE = Math.min(_selEnd|0, off1|0);
             if (segE > segS && !renderHr && !renderSetextUnderlineRow){
-              // Map selection columns to displayed text (prefix hidden in clean display).
-              let c1 = (segS - off0)|0;
-              let c2 = (segE - off0)|0;
-              if ((dispPrefixLen|0) > 0){ c1 = Math.max(0, c1 - (dispPrefixLen|0)); c2 = Math.max(0, c2 - (dispPrefixLen|0)); }
-              c1 = Math.max(0, Math.min((text.length|0), c1|0));
-              c2 = Math.max(c1, Math.min((text.length|0), c2|0));
-              if (c2 > c1){
-                const pre = text.slice(0, c1);
-                const mid = text.slice(c1, c2);
-                const post = text.slice(c2);
-                if (isCodeRow || isFenceRow || isIndentCodeRow){
-                  el.innerHTML = _mdPlainHtmlWithRange(text, 'md-sel', c1|0, c2|0);
-                } else if (listItemDisp){
-                  el.innerHTML = _mdUListHtmlWithRange(text, listItemDisp, 'md-sel', c1|0, c2|0);
-                } else {
-                  // Inline links are collapsed in md-rich display (also in draft active row).
-                  if (hideSymbols){
-                    const clean = _mdInlineLinkCleanHtmlWithRange(text, 'md-sel', c1|0, c2|0);
-                    if (clean) el.innerHTML = clean;
-                    else el.innerHTML = _mdInlineCodeHtmlWithRange(text, 'md-sel', c1|0, c2|0);
+              if (!usedHtml){
+                // Map selection columns to displayed text (prefix hidden in clean display).
+                let c1 = (segS - off0)|0;
+                let c2 = (segE - off0)|0;
+                if ((dispPrefixLen|0) > 0){ c1 = Math.max(0, c1 - (dispPrefixLen|0)); c2 = Math.max(0, c2 - (dispPrefixLen|0)); }
+                c1 = Math.max(0, Math.min((text.length|0), c1|0));
+                c2 = Math.max(c1, Math.min((text.length|0), c2|0));
+                if (c2 > c1){
+                  if (isCodeRow || isFenceRow || isIndentCodeRow){
+                    el.innerHTML = _mdPlainHtmlWithRange(text, 'md-sel', c1|0, c2|0);
+                  } else if (listItemDisp){
+                    el.innerHTML = _mdUListHtmlWithRange(text, listItemDisp, 'md-sel', c1|0, c2|0);
                   } else {
-                    const clean = _mdInlineLinkCleanHtmlWithRange(text, 'md-sel', c1|0, c2|0);
-                    if (clean) el.innerHTML = clean;
-                    else el.innerHTML = _mdInlineCodeHtmlWithRange(text, 'md-sel', c1|0, c2|0);
+                    // Inline links are collapsed in md-rich display (also in draft active row).
+                    if (hideSymbols){
+                      const clean = _mdInlineLinkCleanHtmlWithRange(text, 'md-sel', c1|0, c2|0);
+                      if (clean) el.innerHTML = clean;
+                      else el.innerHTML = _mdInlineCodeHtmlWithRange(text, 'md-sel', c1|0, c2|0);
+                    } else {
+                      const clean = _mdInlineLinkCleanHtmlWithRange(text, 'md-sel', c1|0, c2|0);
+                      if (clean) el.innerHTML = clean;
+                      else el.innerHTML = _mdInlineCodeHtmlWithRange(text, 'md-sel', c1|0, c2|0);
+                    }
                   }
+                  usedHtml = true;
                 }
-                usedHtml = true;
               }
             }
           }
@@ -4565,13 +5295,58 @@ try{
         if (wrapOn){
           try{
             // Use the displayed text (after symbol hiding) for wrap measurement.
-            let disp = String(text||'');
+            const dispSrc = String(text||'');
+            let disp = dispSrc;
+            let col = null;
+            let imgWidths = null;
             try{
-              if (!isCodeRow && !isFenceRow && !isIndentCodeRow && disp && disp.indexOf('[') >= 0 && disp.indexOf(']') >= 0){
-                const col = (_mdCleanDisplayCollapseInfo && typeof _mdCleanDisplayCollapseInfo === 'function') ? _mdCleanDisplayCollapseInfo(disp) : null;
+              if (!isCodeRow && !isFenceRow && !isIndentCodeRow && dispSrc && dispSrc.indexOf('[') >= 0 && dispSrc.indexOf(']') >= 0){
+                col = (_mdCleanDisplayCollapseInfo && typeof _mdCleanDisplayCollapseInfo === 'function') ? _mdCleanDisplayCollapseInfo(dispSrc) : null;
                 if (col && typeof col.dispText === 'string') disp = String(col.dispText||'');
               }
-            }catch{}
+            }catch{ col = null; disp = dispSrc; }
+
+            // Inline image width awareness for wrap probes: treat ★ as a fixed-width token.
+            try{
+              if (col && col.links && disp && disp.indexOf('★') >= 0){
+                const gapPx = Math.max(1, Math.round((LINE_HEIGHT||0) * 0.125));
+                const availW = Math.max(20, (+wPx||0));
+                let availH = 0;
+                try{ const vr = viewport && viewport.getBoundingClientRect ? viewport.getBoundingClientRect() : null; availH = vr ? (vr.height||0) : 0; }catch{ availH = 0; }
+                const map = {};
+                for (const lk of (col.links||[])){
+                  if (!lk) continue;
+                  const isImg = (function(){ try{ return /^img-/.test(String(lk.kind||'')); }catch{ return false; } })();
+                  if (!isImg) continue;
+                  const ds = (lk.dispStart|0);
+                  if (!(ds >= 0)) continue;
+                  const altRaw = dispSrc.slice((lk.textStart|0), (lk.textEnd|0));
+                  const rows = (_mdImgAltRows ? (_mdImgAltRows(altRaw)|0) : 0)|0;
+                  const ent = _mdImgRequest && _mdImgRequest(String(lk.url||''));
+                  let wImg = 0;
+                  try{
+                    const iw = (ent && ent.state==='ok' && (ent.w|0) > 0) ? (ent.w|0) : 0;
+                    const ih = (ent && ent.state==='ok' && (ent.h|0) > 0) ? (ent.h|0) : 0;
+                    if (iw > 0 && ih > 0){
+                      if ((rows|0) > 0){
+                        const rowH = Math.max(1, (rows|0) * (LINE_HEIGHT|0));
+                        const imgH = Math.max(1, (rowH|0) - (2 * (gapPx|0)));
+                        wImg = Math.max(1, Math.round(iw * (imgH / ih)));
+                      } else {
+                        const scW = (availW > 0) ? (availW / iw) : 1;
+                        const scH = (availH > 0) ? (availH / ih) : 1;
+                        const sc = Math.min(1, scW, scH);
+                        wImg = Math.max(1, Math.round(iw * sc));
+                      }
+                    } else {
+                      wImg = Math.max(1, Math.round((LINE_HEIGHT|0) * 2));
+                    }
+                  }catch{ wImg = Math.max(1, Math.round((LINE_HEIGHT|0) * 2)); }
+                  map[ds|0] = (wImg|0);
+                }
+                if (Object.keys(map).length) imgWidths = map;
+              }
+            }catch{ imgWidths = null; }
             if (imeComp){
               // Cheap approximation in monospace columns.
               const visCols = (imeVisCols != null) ? (imeVisCols|0) : (_visualWidthUpToLine(disp, (disp.length|0))|0);
@@ -4589,12 +5364,42 @@ try{
                 ww = Math.max(20, (+ww||0) - (_cbTextPadRightPx|0));
                 io = _cbIndentOpts;
               }
-              const n0 = _wrapProbeLineCountStyled(disp, ww, lh|0, fs|0, io);
+              const io2 = (imgWidths ? Object.assign({}, (io||{}), { imgWidths }) : io);
+              const n0 = _wrapProbeLineCountStyled(disp, ww, lh|0, fs|0, io2);
               const n = (Number.isFinite(n0) && (n0|0) > 0) ? (n0|0) : 1;
               hPx = Math.max(1, n|0) * (lh|0);
             }
           }catch{ hPx = lh; }
         }
+
+        // Inline image rows:N override: raise total row height and vertically center text.
+        // Skip when this row is a standalone image block (imgBlock handles row height/gaps).
+        try{
+          if (!imgBlock){
+            const desired0 = (inlineImgRowHDesiredMax|0);
+            const desired1 = ((inlineImgRowsMax|0) > 0) ? Math.max(1, (inlineImgRowsMax|0) * (LINE_HEIGHT|0)) : 0;
+            const desired = Math.max(desired0|0, desired1|0);
+            if ((desired|0) > 0){
+              // Compare against current total (content + current padding).
+              const curTotal = Math.max(0, (hPx|0) + (padTopPx|0) + (padBottomPx|0));
+              if ((desired|0) > (curTotal|0)){
+                const extra = (desired|0) - (curTotal|0);
+                const topAdd = Math.floor((extra|0) / 2);
+                const botAdd = (extra|0) - (topAdd|0);
+                padTopPx = (padTopPx|0) + (topAdd|0);
+                padBottomPx = (padBottomPx|0) + (botAdd|0);
+              }
+            }
+          }
+        }catch{}
+
+        // Image block height override (independent from wrap probes).
+        try{
+          if (imgBlock && Number.isFinite(imgBlock.h) && (imgBlock.h|0) > 0){
+            if (Number.isFinite(imgBlock.rowH) && (imgBlock.rowH|0) > 0) hPx = (imgBlock.rowH|0);
+            else hPx = (imgBlock.h|0);
+          }
+        }catch{}
 
         // Add block padding (kept within the element height via border-box).
         try{ hPx = (hPx|0) + (padTopPx|0) + (padBottomPx|0); }catch{}
@@ -4620,7 +5425,7 @@ try{
         // Record for code block rectangle drawing.
         rowY[i] = (y|0);
         rowH[i] = (hPx|0);
-        rowLh[i] = (lh|0);
+        rowLh[i] = (imgBlock && Number.isFinite(imgBlock.h) && (imgBlock.h|0) > 0) ? (imgBlock.h|0) : (lh|0);
         rowPadTop[i] = (padTopPx|0);
         rowPadBottom[i] = (padBottomPx|0);
         rowFs[i] = (fs|0);
@@ -4759,10 +5564,29 @@ try{
           rowPadBottom:rowPadBottom,
           rowFs:rowFs,
           rowIsCode:rowIsCode,
+          rowImg:rowImg,
           cbRectLeftPx:(_cbRectLeftPx|0),
           cbRectRightPx:(_cbRectRightPx|0),
         };
       }catch{ _mdRenderGeom = null; }
+
+      // If the current hover is an image block, refresh its geometry so the highlight tracks
+      // async image load (size known after decode) without requiring a mouse move.
+      try{
+        if (_hoverLink && _hoverLink._img && Number.isFinite(_hoverLink.r)){
+          const r = (_hoverLink.r|0);
+          if ((r|0) >= (start|0) && (r|0) < ((start|0) + (want|0))){
+            const idx = ((r|0) - (start|0))|0;
+            const img = rowImg[idx];
+            if (img && Number.isFinite(img.w) && (img.w||0) > 0){
+              _hoverLink._img = { x:(+img.x||0), w:(+img.w||0), h:(+img.h||0) };
+              try{ if (String(img.tooltip||'') !== String(_hoverLink.tooltip||'')) _hoverLink.tooltip = String(img.tooltip||''); }catch{}
+              try{ if (String(img.url||'') && String(img.url||'') !== String(_hoverLink.url||'')) _hoverLink.url = String(img.url||''); }catch{}
+              _renderLinkHover();
+            }
+          }
+        }
+      }catch{}
     }catch{}
   }
   function _mdApplyVisualState(){
@@ -10212,6 +11036,39 @@ try{
         }
       }catch{ yTop = ((row1 - topLine) * LINE_HEIGHT); rowHeightPx = LINE_HEIGHT; dispLine = line; prefixLen = 0; dispC1 = c1; dispC2 = c2; }
 
+      // Image block hover highlight: use explicit px geometry (no text measurement).
+      try{
+        if (_hoverLink && _hoverLink._img && Number.isFinite(_hoverLink._img.w) && (_hoverLink._img.w||0) > 0){
+          const img = _hoverLink._img;
+          const x1 = Number.isFinite(img.x) ? (+img.x||0) : 0;
+          const x2 = x1 + (+img.w||0);
+          const h0 = Number.isFinite(img.h) && (img.h||0) > 0 ? (+img.h||0) : (rowHeightPx|0);
+
+          const el = document.createElement('div');
+          let _hs=0; try{ _hs=(editor.scrollLeft||0); }catch{}
+          try{ if (mdRich && _wrapEnabled && _wrapEnabled()) _hs = 0; }catch{}
+          el.style.position='absolute';
+          el.style.left=(x1-_hs)+'px';
+          el.style.top=yTop+'px';
+          el.style.width=Math.max(1, Math.round(x2-x1))+'px';
+          el.style.height=Math.max(1, Math.round(mdRich ? h0 : LINE_HEIGHT))+'px';
+          let col='yellow';
+          try{
+            if (window && window.THEME && (('linkHoverBg' in window.THEME))){
+              col = String(window.THEME.linkHoverBg);
+            }
+          }catch{}
+          el.style.background=col; el.style.outline='1px solid '+col; el.style.outlineOffset='-1px';
+          _linkLayer.appendChild(el);
+          try{ if (editor) editor.style.cursor='pointer'; }catch{}
+
+          const anchor = { left:(x1-_hs), top:yTop, width:Math.max(1, Math.round(x2-x1)), height:Math.max(1, Math.round(mdRich ? h0 : LINE_HEIGHT)) };
+          try{ if (_hoverLink) _hoverLink._anchor = anchor; }catch{}
+          try{ _renderLinkTooltip(anchor); }catch{}
+          return;
+        }
+      }catch{}
+
       // Wrap mode: map logical rows to visual Y.
       try{
         // md-rich uses variable per-row heights; do NOT remap to fixed visual grid here.
@@ -10380,6 +11237,16 @@ try{
 
         // Ensure col is inside the whole construct
         if ((col|0) >= (lb|0) && (col|0) <= (rp|0)){
+          // Image syntax: ![alt](url "title") should always open externally.
+          const isImg = (function(){
+            try{
+              if (!((lb|0) > 0)) return false;
+              if (line[(lb|0) - 1] !== '!') return false;
+              // Treat \![ as escaped
+              if (((lb|0) - 2) >= 0 && line[(lb|0) - 2] === '\\') return false;
+              return true;
+            }catch{ return false; }
+          })();
           // Infer kind
           let kind = 'external';
           let finalUrl = String(url||'');
@@ -10396,6 +11263,15 @@ try{
             }
             try{ if (kind==='six-open') finalUrl = finalUrl.replace(/\\/g,'/'); }catch{}
           }catch{}
+          // Force browser open for images (including relative paths).
+          if (isImg){
+            kind = 'external';
+            try{
+              let base = null;
+              try{ const cur = (currentBuffer && currentBuffer()); if (cur && cur.path) base = _dirnameURL(cur.path); }catch{}
+              finalUrl = _normalizeToURLString(String(finalUrl||''), base||_htmlBaseURL());
+            }catch{}
+          }
           return { c1:lb, c2:rb+1, url:finalUrl, kind, tooltip:String(tooltip||'') };
         }
         lb = findUnescBwd('[', lb-1);
@@ -10428,6 +11304,15 @@ try{
         const rp = (it.rp|0);
         if ((i|0) < (lb|0) || (i|0) > (rp|0)) continue;
 
+        const isImg = (function(){
+          try{
+            if (!((lb|0) > 0)) return false;
+            if (s[(lb|0) - 1] !== '!') return false;
+            if (((lb|0) - 2) >= 0 && s[(lb|0) - 2] === '\\') return false;
+            return true;
+          }catch{ return false; }
+        })();
+
         // Infer kind (same rules as inline)
         let kind = 'external';
         let finalUrl = String(it.url||'');
@@ -10444,6 +11329,14 @@ try{
           }
           try{ if (kind==='six-open') finalUrl = finalUrl.replace(/\\/g,'/'); }catch{}
         }catch{}
+        if (isImg){
+          kind = 'external';
+          try{
+            let base = null;
+            try{ const cur = (currentBuffer && currentBuffer()); if (cur && cur.path) base = _dirnameURL(cur.path); }catch{}
+            finalUrl = _normalizeToURLString(String(finalUrl||''), base||_htmlBaseURL());
+          }catch{}
+        }
         return { c1:(lb|0), c2:((rb+1)|0), url:finalUrl, kind, tooltip:String(it.tooltip||'') };
       }
     }catch{}
@@ -10673,6 +11566,10 @@ try{
       // Mousemove is bound to textarea; use textarea-local X so gutter width doesn't skew hit-testing.
       const xInViewEd = (e.clientX - rectEd.left);
       let xAbs = (xInViewEd||0) + (editor.scrollLeft||0);
+
+      const wrapOnNow = (function(){ try{ return !!(_wrapEnabled && _wrapEnabled()); }catch{ return false; } })();
+      // md-rich+wrap renderer keeps horizontal shift (hs) at 0; match it here.
+      try{ if (mdRich && wrapOnNow) xAbs = (xInViewEd||0); }catch{}
       // Draft caret line should behave like markdown-off: only raw URL part is clickable.
       let hideSymbols = false;
       try{
@@ -10693,6 +11590,40 @@ try{
         }
       }catch{ collapse = null; dispMeasure = dispLine; }
 
+      // Markdown image block (standalone line): use renderer geometry for direct hit-test.
+      // This is needed because the displayed overlay is an <img> (not text), so X->col mapping is not meaningful.
+      let hit = null;
+      try{
+        if (mdRich && hideSymbols && !_mdIsCodeRow){
+          const g = _mdRenderGeom;
+          if (g && Array.isArray(g.rowImg) && (row|0) >= (g.start|0) && (row|0) < ((g.start|0) + (g.want|0))){
+            const idx = ((row|0) - (g.start|0))|0;
+            const img = g.rowImg[idx];
+            if (img && Number.isFinite(img.w) && (img.w||0) > 0 && Number.isFinite(img.h) && (img.h||0) > 0){
+              const x0 = Number.isFinite(img.x) ? (+img.x||0) : 0;
+              const x1 = x0 + (+img.w||0);
+              if ((xAbs >= (x0 - 0.5)) && (xAbs <= (x1 + 0.5))){
+                const resolved = (function(){
+                  try{
+                    let base = null;
+                    try{ const cur = (currentBuffer && currentBuffer()); if (cur && cur.path) base = _dirnameURL(cur.path); }catch{}
+                    return _normalizeToURLString(String(img.url||''), base||_htmlBaseURL());
+                  }catch{ return String(img.url||''); }
+                })();
+                hit = {
+                  c1:0,
+                  c2:0,
+                  url: resolved,
+                  kind: 'external',
+                  tooltip: String(img.tooltip||''),
+                  _img: { x:x0, w:(+img.w||0), h:(+img.h||0) },
+                };
+              }
+            }
+          }
+        }
+      }catch{ hit = null; }
+
       // X -> displayed column mapping.
       // md-rich + wrap-on requires intra-line wrap awareness; otherwise we mis-map X on wrapped segments
       // and can incorrectly treat the newline/listchars area as part of the last link.
@@ -10700,9 +11631,21 @@ try{
       if (lenDisp <= 0){ if (_hoverLink){ _clearLinkHover(); } return; }
       const EPS = 0.01;
 
-      const wrapOnNow = (function(){ try{ return !!(_wrapEnabled && _wrapEnabled()); }catch{ return false; } })();
-      // md-rich+wrap renderer keeps horizontal shift (hs) at 0; match it here.
-      try{ if (mdRich && wrapOnNow) xAbs = (xInViewEd||0); }catch{}
+      // If this row is an image block and we already hit it, skip the text-based mapping.
+      if (hit){
+        const same = _hoverLink && _hoverLink.r===row && _hoverLink.url===hit.url && _hoverLink.kind===hit.kind && String(_hoverLink.tooltip||'')===String(hit.tooltip||'')
+          && _hoverLink._img && hit._img
+          && (+_hoverLink._img.w||0) === (+hit._img.w||0)
+          && (+_hoverLink._img.h||0) === (+hit._img.h||0)
+          && (+_hoverLink._img.x||0) === (+hit._img.x||0);
+        _hoverLink = Object.assign({ r:row }, hit);
+        try{ if (e){ _hoverLink._mx = (e.clientX||0); _hoverLink._my = (e.clientY||0); } }catch{}
+        if (!same) _renderLinkHover();
+        else {
+          try{ if (_hoverLink && _hoverLink.tooltip){ _renderLinkTooltip(_hoverLink._anchor || null); } }catch{}
+        }
+        return;
+      }
       const wAt = (col)=>{
         try{
           const cc = Math.max(0, Math.min(lenDisp|0, col|0));
@@ -10767,17 +11710,61 @@ try{
           if (ul) indentOpts = _mdIndentOptsForListLine(dispMeasure, ul, wPx|0, fs0|0, lh0|0);
         }catch{ indentOpts = null; }
 
+        // Inline image width awareness for wrap probes.
+        let indentOpts2 = indentOpts;
+        try{
+          if (collapse && collapse.links && dispMeasure && dispMeasure.indexOf('★') >= 0){
+            let ch = 10;
+            try{ if (_measureSpan && _measureSpan.getBoundingClientRect){ _measureSpan.textContent = '0'; const w = (_measureSpan.getBoundingClientRect().width||0); if (Number.isFinite(w) && w > 0.5) ch = w; } }catch{}
+            const gapPx = Math.max(1, Math.round((LINE_HEIGHT||0) * 0.125));
+            let availH = 0;
+            try{ const vr = viewport && viewport.getBoundingClientRect ? viewport.getBoundingClientRect() : null; availH = vr ? (vr.height||0) : 0; }catch{ availH = 0; }
+            const map = {};
+            for (const lk of (collapse.links||[])){
+              if (!lk) continue;
+              const isImg = (function(){ try{ return /^img-/.test(String(lk.kind||'')); }catch{ return false; } })();
+              if (!isImg) continue;
+              const ds = (lk.dispStart|0);
+              if (!(ds >= 0)) continue;
+              const altRaw = dispLine.slice((lk.textStart|0), (lk.textEnd|0));
+              const rows = (_mdImgAltRows ? (_mdImgAltRows(altRaw)|0) : 0)|0;
+              const ent = _mdImgRequest && _mdImgRequest(String(lk.url||''));
+              let wImg = 0;
+              try{
+                const iw = (ent && ent.state==='ok' && (ent.w|0) > 0) ? (ent.w|0) : 0;
+                const ih = (ent && ent.state==='ok' && (ent.h|0) > 0) ? (ent.h|0) : 0;
+                if (iw > 0 && ih > 0){
+                  if ((rows|0) > 0){
+                    const rowH = Math.max(1, (rows|0) * (LINE_HEIGHT|0));
+                    const imgH = Math.max(1, (rowH|0) - (2 * (gapPx|0)));
+                    wImg = Math.max(1, Math.round(iw * (imgH / ih)));
+                  } else {
+                    const scW = (wPx > 0) ? ((wPx|0) / iw) : 1;
+                    const scH = (availH > 0) ? (availH / ih) : 1;
+                    const sc = Math.min(1, scW, scH);
+                    wImg = Math.max(1, Math.round(iw * sc));
+                  }
+                } else {
+                  wImg = Math.max(1, Math.round((LINE_HEIGHT|0) * 2));
+                }
+              }catch{ wImg = Math.max(1, Math.round((LINE_HEIGHT|0) * 2)); }
+              map[ds|0] = (wImg|0);
+            }
+            if (Object.keys(map).length) indentOpts2 = Object.assign({}, (indentOpts||{}), { imgWidths: map });
+          }
+        }catch{ indentOpts2 = indentOpts; }
+
         // EOL blank-area guard on the *last* wrapped segment.
         try{
-          const intraEol = _wrapProbeIntraFromColStyled(dispMeasure, lenDisp|0, wPx|0, lh0|0, fs0|0, indentOpts) | 0;
-          const xEol = _wrapProbeXFromColStyled(dispMeasure, lenDisp|0, wPx|0, fs0|0, lh0|0, indentOpts);
+          const intraEol = _wrapProbeIntraFromColStyled(dispMeasure, lenDisp|0, wPx|0, lh0|0, fs0|0, indentOpts2) | 0;
+          const xEol = _wrapProbeXFromColStyled(dispMeasure, lenDisp|0, wPx|0, fs0|0, lh0|0, indentOpts2);
           if ((intra|0) === (intraEol|0) && Number.isFinite(xEol) && (xAbs > (xEol + EPS))){
             if (_hoverLink){ _clearLinkHover(); }
             return;
           }
         }catch{}
 
-        const colIntra = _mdWrapColForIntraXStyled(dispMeasure, intra|0, xAbs, wPx|0, lh0|0, fs0|0, indentOpts) | 0;
+        const colIntra = _mdWrapColForIntraXStyled(dispMeasure, intra|0, xAbs, wPx|0, lh0|0, fs0|0, indentOpts2) | 0;
         cDisp = Math.max(0, Math.min((lenDisp-1)|0, colIntra|0));
       } else {
         // Wrap-off (or non-clean): floor-style mapping by prefix widths to avoid boundary off-by-one.
@@ -10821,20 +11808,28 @@ try{
         }catch{ return { kind:'external', url:String(u||'') }; }
       };
 
-      let hit = null;
       if (mdRich && hideSymbols && collapse){
         // 1) Inline markdown link: clickable/highlight on display text only.
         try{
           for (const it of (collapse.links||[])){
             if (!it) continue;
             if ((cDisp|0) >= (it.dispStart|0) && (cDisp|0) < (it.dispEnd|0)){
+              const isImg = (function(){ try{ return /^img-/.test(String(it.kind||'')); }catch{ return false; } })();
               const inf = inferKind(it.url);
+              const urlFinal = (function(){
+                try{
+                  if (!isImg) return inf.url;
+                  let base = null;
+                  try{ const cur = (currentBuffer && currentBuffer()); if (cur && cur.path) base = _dirnameURL(cur.path); }catch{}
+                  return _normalizeToURLString(String(it.url||inf.url||''), base||_htmlBaseURL());
+                }catch{ return inf.url; }
+              })();
               hit = {
                 // source-ish range (not used for highlight in mdRich when disp* exists)
                 c1: (prefixLen|0) + (it.textStart|0),
                 c2: (prefixLen|0) + (it.textEnd|0),
-                url: inf.url,
-                kind: inf.kind,
+                url: urlFinal,
+                kind: isImg ? 'external' : inf.kind,
                 tooltip: String(it.tooltip||''),
                 dispLine: String(collapse.dispText||''),
                 dispC1: (it.dispStart|0),
@@ -10932,10 +11927,9 @@ try{
       if (!_hoverLink){
         try{
           const mdRich = (function(){ try{ return _mdRichActive && _mdRichActive(); }catch{ return false; } })();
-          const draft = (function(){ try{ return _mdDraftEditEnabled && _mdDraftEditEnabled(); }catch{ return false; } })();
           const ubVis = (typeof _mdUrlBarVisible==='function') ? !!_mdUrlBarVisible() : false;
           const ubActive = !!(_mdUrlBar && _mdUrlBar.dataset && _mdUrlBar.dataset.active === '1');
-          if (mdRich && draft && ubVis && !ubActive){
+          if (mdRich && ubVis && !ubActive){
             const line = String((_splitLines()[caretRow] || '')||'');
             const hit = (
               (typeof _detectMdInlineLinkAt === 'function' ? _detectMdInlineLinkAt(line, caretCol|0) : null)
@@ -12881,6 +13875,7 @@ try{
           const lh = (rowInfo.lh|0) || LINE_HEIGHT;
           const fs = (rowInfo.fs|0) || Math.max(6, Math.round(baseFontPx));
           const srcLine = String(lines[r]||'');
+          const _isWholeLine = ((seg.c1|0) <= 0) && ((seg.c2|0) >= (srcLine.length|0));
           let c1 = Math.max(0, Math.min((srcLine.length|0), seg.c1|0));
           let c2 = Math.max(c1, Math.min((srcLine.length|0), seg.c2|0));
           if (rowInfo.hideSymbols && (rowInfo.prefixLen|0) > 0){
@@ -12893,10 +13888,19 @@ try{
 
           // Y offset: use renderer-computed rowY when available.
           let yAcc = 0;
+          let rowTopPx = 0;
+          let rowHPx = 0;
+          let rowPadTopPx = (rowInfo.padTopPx|0);
+          let rowPadBottomPx = (rowInfo.padBottomPx|0);
+          let idx = -1;
           if (useGeom){
-            const idx = ((r|0) - (g.start|0))|0;
+            idx = ((r|0) - (g.start|0))|0;
             if (idx >= 0 && idx < (g.rowY.length|0)){
               yAcc = (g.rowY[idx]|0);
+              rowTopPx = (g.rowY[idx]|0);
+              try{ rowHPx = (g.rowH[idx]|0); }catch{ rowHPx = 0; }
+              try{ if (Array.isArray(g.rowPadTop)) rowPadTopPx = (g.rowPadTop[idx]|0); }catch{}
+              try{ if (Array.isArray(g.rowPadBottom)) rowPadBottomPx = (g.rowPadBottom[idx]|0); }catch{}
               // If row is fully collapsed (e.g., loose-gap in clean mode), skip.
               try{ if ((g.rowH[idx]|0) <= 0) continue; }catch{}
             }
@@ -12926,6 +13930,21 @@ try{
               try{ hPx = (hPx|0) + ((inf.padTopPx|0) + (inf.padBottomPx|0)); }catch{}
               yAcc += hPx;
             }
+          }
+
+          // Linewise yank (e.g., yy): flash the full rendered row height.
+          // This is required for md-rich variable row heights (images, loose spacing, block padding).
+          if (_isWholeLine && useGeom && (rowHPx|0) > 0){
+            const el = document.createElement('div');
+            el.className='yank-flash';
+            const fullW = Math.max(20, (editor && (editor.clientWidth|0) ? (editor.clientWidth|0) : (wPx|0))|0);
+            el.style.left=(0 - _hs) + 'px';
+            el.style.top=(rowTopPx|0) + 'px';
+            el.style.width= (fullW|0) + 'px';
+            el.style.height= Math.max(1, (rowHPx|0)) + 'px';
+            try{ el.style.background = col; el.style.opacity = '0.35'; el.style.outline = '1px solid ' + col; el.style.outlineOffset='-1px'; }catch{}
+            _yankFlashLayer.appendChild(el);
+            continue;
           }
 
           // Fenced code blocks: account for block margin/padding so flash aligns with rendered code text.
@@ -12973,8 +13992,8 @@ try{
             const el = document.createElement('div');
             el.className='yank-flash';
             el.style.left=((x1 + (codePadLeftPx|0)) - _hs) + 'px';
-            // Align to text area within the row (account for top padding like loose-gap/blocks).
-            el.style.top= (yAcc + (rowInfo.padTopPx|0)) + 'px';
+            // Align to the rendered content area within the row.
+            el.style.top= (yAcc + (rowPadTopPx|0)) + 'px';
             el.style.width= Math.max(1, Math.round(x2 - x1)) + 'px';
             el.style.height= Math.max(1, Math.round(lh)) + 'px';
             try{ el.style.background = col; el.style.opacity = '0.35'; el.style.outline = '1px solid ' + col; el.style.outlineOffset='-1px'; }catch{}
@@ -12998,7 +14017,7 @@ try{
               const el = document.createElement('div');
               el.className='yank-flash';
               el.style.left=(x1 - _hs) + 'px';
-              el.style.top= (yAcc + (rowInfo.padTopPx|0) + (intra|0) * (lh|0)) + 'px';
+              el.style.top= (yAcc + (rowPadTopPx|0) + (intra|0) * (lh|0)) + 'px';
               el.style.width= Math.max(1, Math.round(x2 - x1)) + 'px';
               el.style.height= Math.max(1, Math.round(lh)) + 'px';
               try{ el.style.background = col; el.style.opacity = '0.35'; el.style.outline = '1px solid ' + col; el.style.outlineOffset='-1px'; }catch{}
@@ -13230,6 +14249,22 @@ try{
             // NOTE: md-rich remainder compensation is applied at the container level (caretLayer).
             // Avoid subtracting rem here, otherwise listchars will be shifted twice.
             yTop = t;
+
+            // Prefer exact padTop/padBottom from the last md renderer geometry (includes image-based height overrides).
+            try{
+              const g = _mdRenderGeom;
+              if (g && Number.isFinite(g.start) && Number.isFinite(g.want) && g.rowPadTop && g.rowPadBottom){
+                const s0 = (g.start|0);
+                const w0 = (g.want|0);
+                if ((idx|0) >= (s0|0) && (idx|0) < ((s0|0) + (w0|0))){
+                  const gi = ((idx|0) - (s0|0))|0;
+                  const pt = (g.rowPadTop && Number.isFinite(g.rowPadTop[gi])) ? (g.rowPadTop[gi]|0) : 0;
+                  const pb = (g.rowPadBottom && Number.isFinite(g.rowPadBottom[gi])) ? (g.rowPadBottom[gi]|0) : 0;
+                  _mdPadTopPx = Math.max(0, pt|0);
+                  _mdPadBottomPx = Math.max(0, pb|0);
+                }
+              }
+            }catch{}
           }
         }catch{}
       } else {
@@ -13374,12 +14409,64 @@ try{
       const yBase = mdRich ? ((yTop|0) + (_mdPadTopPx|0)) : (yTop|0);
 
       // md-rich clean display: collapse inline links so EOL/listchars align with visible text.
+      // Keep collapse info so we can account for inline image widths (★) during measurement.
+      let _mdDispCollapse = null;
+      let _mdDispSrcForCollapse = null;
       try{
         if (mdRich && hide && !_mdIsCodeRow){
-          const col = _mdCleanDisplayCollapseInfo ? _mdCleanDisplayCollapseInfo(dispLine) : null;
-          if (col && typeof col.dispText === 'string') dispLine = String(col.dispText||'');
+          _mdDispSrcForCollapse = String(dispLine||'');
+          const col = _mdCleanDisplayCollapseInfo ? _mdCleanDisplayCollapseInfo(_mdDispSrcForCollapse) : null;
+          if (col && typeof col.dispText === 'string'){
+            _mdDispCollapse = col;
+            dispLine = String(col.dispText||'');
+          }
         }
       }catch{}
+
+      // Inline image width awareness (★ token) for listchars measurement.
+      let _mdImgWidthsForList = null;
+      try{
+        if (mdRich && _mdDispCollapse && _mdDispCollapse.links && dispLine && dispLine.indexOf('★') >= 0){
+          let ch = 10;
+          try{ if (_measureSpan && _measureSpan.getBoundingClientRect){ _measureSpan.textContent = '0'; const w = (_measureSpan.getBoundingClientRect().width||0); if (Number.isFinite(w) && w > 0.5) ch = w; } }catch{}
+          const gapPx = Math.max(1, Math.round((LINE_HEIGHT||0) * 0.125));
+          let availH = 0;
+          try{ const vr = viewport && viewport.getBoundingClientRect ? viewport.getBoundingClientRect() : null; availH = vr ? (vr.height||0) : 0; }catch{ availH = 0; }
+          const map = {};
+          const srcForAlt = String(_mdDispSrcForCollapse||'');
+          for (const lk of (_mdDispCollapse.links||[])){
+            if (!lk) continue;
+            const isImg = (function(){ try{ return /^img-/.test(String(lk.kind||'')); }catch{ return false; } })();
+            if (!isImg) continue;
+            const ds = (lk.dispStart|0);
+            if (!(ds >= 0)) continue;
+            const altRaw = srcForAlt.slice((lk.textStart|0), (lk.textEnd|0));
+            const rows = (_mdImgAltRows ? (_mdImgAltRows(altRaw)|0) : 0)|0;
+            const ent = _mdImgRequest && _mdImgRequest(String(lk.url||''));
+            let wImg = 0;
+            try{
+              const iw = (ent && ent.state==='ok' && (ent.w|0) > 0) ? (ent.w|0) : 0;
+              const ih = (ent && ent.state==='ok' && (ent.h|0) > 0) ? (ent.h|0) : 0;
+              if (iw > 0 && ih > 0){
+                if ((rows|0) > 0){
+                  const rowH = Math.max(1, (rows|0) * (LINE_HEIGHT|0));
+                  const imgH = Math.max(1, (rowH|0) - (2 * (gapPx|0)));
+                  wImg = Math.max(1, Math.round(iw * (imgH / ih)));
+                } else {
+                  const scW = (wPx > 0) ? ((+wPx||0) / iw) : 1;
+                  const scH = (availH > 0) ? (availH / ih) : 1;
+                  const sc = Math.min(1, scW, scH);
+                  wImg = Math.max(1, Math.round(iw * sc));
+                }
+              } else {
+                wImg = Math.max(1, Math.round((LINE_HEIGHT|0) * 2));
+              }
+            }catch{ wImg = Math.max(1, Math.round((LINE_HEIGHT|0) * 2)); }
+            map[ds|0] = (wImg|0);
+          }
+          if (Object.keys(map).length) _mdImgWidthsForList = map;
+        }
+      }catch{ _mdImgWidthsForList = null; }
 
       const _wrapPosForCol = (cc)=>{
         try{
@@ -13404,10 +14491,14 @@ try{
               ww = Math.max(20, (+ww||0) - (_mdCodePadRightPx|0));
               indentOpts = { padLeftPx: (_mdCodePadLeftPx|0), textIndentPx: 0 };
             }
+
+            // Inline image width awareness: treat ★ as a fixed-width token.
+            let indentOpts2 = indentOpts;
+            try{ if (_mdImgWidthsForList) indentOpts2 = Object.assign({}, (indentOpts||{}), { imgWidths: _mdImgWidthsForList }); }catch{ indentOpts2 = indentOpts; }
             let intra = 0;
             let x = null;
-            try{ intra = _wrapProbeIntraFromColStyled(dispLine, col, ww||0, rowHeightPx|0, fs|0, indentOpts) | 0; }catch{ intra = 0; }
-            try{ x = _wrapProbeXFromColStyled(dispLine, col, ww||0, fs|0, rowHeightPx|0, indentOpts); }catch{ x = null; }
+            try{ intra = _wrapProbeIntraFromColStyled(dispLine, col, ww||0, rowHeightPx|0, fs|0, indentOpts2) | 0; }catch{ intra = 0; }
+            try{ x = _wrapProbeXFromColStyled(dispLine, col, ww||0, fs|0, rowHeightPx|0, indentOpts2); }catch{ x = null; }
             return { intra: Math.max(0, intra|0), x };
           }
           let intra = 0;
@@ -13512,6 +14603,21 @@ try{
             _measureSpan.textContent = _exp(dispLine.slice(0,c));
             const x1b = _measureSpan.getBoundingClientRect().width;
             x1 = mdRich ? (x1b * scale) : x1b;
+
+            // Inline image width correction (wrap-off): replace ★ glyph width with image width.
+            try{
+              if (mdRich && _mdImgWidthsForList){
+                _measureSpan.textContent = '★';
+                const wStar = (_measureSpan.getBoundingClientRect().width||0) * (scale||1);
+                for (const k in _mdImgWidthsForList){
+                  const idx2 = (k|0);
+                  if ((idx2|0) < (c|0)){
+                    const w = +_mdImgWidthsForList[k];
+                    if (Number.isFinite(w) && (w||0) > 0) x1 += (w - (wStar||0));
+                  }
+                }
+              }
+            }catch{}
             try{ x1 += _mdOlExtraXpxList(c|0); }catch{}
             try{ if (mdRich && _mdIsCodeRow && (_mdCodePadLeftPx|0) > 0) x1 += (_mdCodePadLeftPx|0); }catch{}
           }
@@ -13527,6 +14633,13 @@ try{
           el.style.position='absolute'; el.style.left=(x1-_hs)+'px'; el.style.top=y1+'px';
           el.style.height=(mdRich ? rowHeightPx : LINE_HEIGHT)+'px'; el.style.lineHeight=(mdRich ? rowHeightPx : LINE_HEIGHT)+'px';
           if (mdRich){ el.style.fontSize = Math.max(6, Math.round(baseFontPx * scale)) + 'px'; } else { el.style.fontSize='inherit'; }
+          // Center glyph vertically even when the line box is very tall (e.g. image rows).
+          // Using line-height alone can pin the baseline near the top on some engines.
+          if (mdRich){
+            try{ el.style.display = 'flex'; }catch{}
+            try{ el.style.alignItems = 'center'; }catch{}
+            try{ el.style.lineHeight = '1'; }catch{}
+          }
           el.style.fontFamily='var(--controlCharFont, "Segoe UI Symbol","Noto Sans Symbols 2","Cascadia Mono","Consolas",monospace)'; el.style.padding='0'; el.style.margin='0'; el.style.color='var(--controlCharColor, yellow)';
           _listLayer.appendChild(el);
         }
@@ -13617,6 +14730,21 @@ try{
             _measureSpan.textContent = _exp(dispLine);
             const xEndb = _measureSpan.getBoundingClientRect().width;
             xEnd = mdRich ? (xEndb * scale) : xEndb;
+
+            // Inline image width correction (wrap-off EOL).
+            try{
+              if (mdRich && _mdImgWidthsForList){
+                _measureSpan.textContent = '★';
+                const wStar = (_measureSpan.getBoundingClientRect().width||0) * (scale||1);
+                for (const k in _mdImgWidthsForList){
+                  const idx2 = (k|0);
+                  if ((idx2|0) < (dispLine.length|0)){
+                    const w = +_mdImgWidthsForList[k];
+                    if (Number.isFinite(w) && (w||0) > 0) xEnd += (w - (wStar||0));
+                  }
+                }
+              }
+            }catch{}
             try{ xEnd += _mdOlExtraXpxList(dispLine.length|0); }catch{}
             try{ if (mdRich && _mdIsCodeRow && (_mdCodePadLeftPx|0) > 0) xEnd += (_mdCodePadLeftPx|0); }catch{}
           }
@@ -13645,6 +14773,11 @@ try{
         elE.style.position='absolute'; elE.style.left=(xEnd-_hs)+'px'; elE.style.top=yEnd+'px';
         elE.style.height=(mdRich ? rowHeightPx : LINE_HEIGHT)+'px'; elE.style.lineHeight=(mdRich ? rowHeightPx : LINE_HEIGHT)+'px';
         if (mdRich){ elE.style.fontSize = Math.max(6, Math.round(baseFontPx * scale)) + 'px'; } else { elE.style.fontSize='inherit'; }
+        if (mdRich){
+          try{ elE.style.display = 'flex'; }catch{}
+          try{ elE.style.alignItems = 'center'; }catch{}
+          try{ elE.style.lineHeight = '1'; }catch{}
+        }
         elE.style.fontFamily='var(--controlCharFont, "Segoe UI Symbol","Noto Sans Symbols 2","Cascadia Mono","Consolas",monospace)'; elE.style.color=ffColor; elE.style.margin='0'; elE.style.padding='0';
         _listLayer.appendChild(elE);
       }
@@ -15151,7 +16284,83 @@ try{
         try{ p.style.textIndent = '0px'; }catch{}
       }
       p.style.width = Math.max(20, (widthPx||80)) + 'px';
-      p.textContent = s;
+
+      const _probeSetWithImgs = (fullText, prefixLen, markerCol)=>{
+        try{
+          const imgW = (opts && opts.imgWidths) ? (opts.imgWidths) : null;
+          if (!imgW || fullText.indexOf('★') < 0) return null;
+          const len = (prefixLen != null) ? Math.max(0, Math.min((fullText.length|0), (prefixLen|0))) : (fullText.length|0);
+          const fs0 = (Number.isFinite(fontSizePx) && (fontSizePx||0) > 0) ? (+fontSizePx||16) : 16;
+          const fallbackW = Math.max(1, Math.round(fs0 * 0.60));
+          const wAt = (idx)=>{
+            try{
+              let w = null;
+              if (imgW && typeof imgW.get === 'function') w = imgW.get(idx);
+              else if (imgW && Object.prototype.hasOwnProperty.call(imgW, idx)) w = imgW[idx];
+              else if (imgW && Object.prototype.hasOwnProperty.call(imgW, String(idx))) w = imgW[String(idx)];
+              w = +w;
+              if (!Number.isFinite(w) || w <= 0) w = fallbackW;
+              return Math.max(1, Math.round(w));
+            }catch{ return fallbackW; }
+          };
+
+          try{ while (p.firstChild) p.removeChild(p.firstChild); }catch{}
+          let markerEl = null;
+          let segStart = 0;
+          const flushText = (a,b)=>{ try{ if (b>a) p.appendChild(document.createTextNode(fullText.slice(a,b))); }catch{} };
+          const addMarker = ()=>{
+            try{
+              const m = document.createElement('span');
+              m.style.display = 'inline-block';
+              m.style.width = '0px';
+              m.style.height = '1px';
+              m.style.overflow = 'hidden';
+              m.style.padding = '0';
+              m.style.margin = '0';
+              m.style.border = '0';
+              m.textContent = '\u200b';
+              p.appendChild(m);
+              markerEl = m;
+            }catch{}
+          };
+          const addImg = (w)=>{
+            try{
+              const sp = document.createElement('span');
+              sp.style.display = 'inline-block';
+              sp.style.width = (w|0) + 'px';
+              sp.style.height = '1px';
+              sp.style.overflow = 'hidden';
+              sp.style.padding = '0';
+              sp.style.margin = '0';
+              sp.style.border = '0';
+              sp.textContent = '\u200b';
+              p.appendChild(sp);
+            }catch{}
+          };
+
+          const mc = (markerCol != null) ? Math.max(0, Math.min(len, markerCol|0)) : null;
+          for (let i=0; i<=len; i++){
+            if (mc != null && i === mc){
+              flushText(segStart|0, i|0);
+              addMarker();
+              segStart = i|0;
+            }
+            if (i === len) break;
+            if (fullText[i] === '★'){
+              flushText(segStart|0, i|0);
+              addImg(wAt(i|0));
+              segStart = (i+1)|0;
+            }
+          }
+          flushText(segStart|0, len|0);
+          return markerEl;
+        }catch{ return null; }
+      };
+
+      // If inline images are present, render them as fixed-width spans for wrap measurement.
+      if (_probeSetWithImgs(s, null, null) == null){
+        p.textContent = s;
+      }
       const h = p.getBoundingClientRect().height;
       const lh = (Number.isFinite(lineHeightPx) && (lineHeightPx||0) > 0) ? (lineHeightPx||LINE_HEIGHT||1) : (LINE_HEIGHT||1);
       if (!Number.isFinite(h) || h <= 0) return 1;
@@ -15222,7 +16431,53 @@ try{
         try{ p.style.textIndent = '0px'; }catch{}
       }
       p.style.width = Math.max(20, (widthPx||80)) + 'px';
-      p.textContent = s.slice(0, cc);
+
+      // If inline images are present, render them as fixed-width spans for wrap measurement.
+      try{
+        const imgW = (opts && opts.imgWidths) ? (opts.imgWidths) : null;
+        if (imgW && s.indexOf('★') >= 0){
+          const fs0 = (Number.isFinite(fontSizePx) && (fontSizePx||0) > 0) ? (+fontSizePx||16) : 16;
+          const fallbackW = Math.max(1, Math.round(fs0 * 0.60));
+          const wAt = (idx)=>{
+            try{
+              let w = null;
+              if (imgW && typeof imgW.get === 'function') w = imgW.get(idx);
+              else if (imgW && Object.prototype.hasOwnProperty.call(imgW, idx)) w = imgW[idx];
+              else if (imgW && Object.prototype.hasOwnProperty.call(imgW, String(idx))) w = imgW[String(idx)];
+              w = +w;
+              if (!Number.isFinite(w) || w <= 0) w = fallbackW;
+              return Math.max(1, Math.round(w));
+            }catch{ return fallbackW; }
+          };
+          try{ while (p.firstChild) p.removeChild(p.firstChild); }catch{}
+          let segStart = 0;
+          const flushText = (a,b)=>{ try{ if (b>a) p.appendChild(document.createTextNode(s.slice(a,b))); }catch{} };
+          const addImg = (w)=>{
+            try{
+              const sp = document.createElement('span');
+              sp.style.display = 'inline-block';
+              sp.style.width = (w|0) + 'px';
+              sp.style.height = '1px';
+              sp.style.overflow = 'hidden';
+              sp.style.padding = '0';
+              sp.style.margin = '0';
+              sp.style.border = '0';
+              sp.textContent = '\u200b';
+              p.appendChild(sp);
+            }catch{}
+          };
+          for (let i=0;i<(cc|0);i++){
+            if (s[i] === '★'){
+              flushText(segStart|0, i|0);
+              addImg(wAt(i|0));
+              segStart = (i+1)|0;
+            }
+          }
+          flushText(segStart|0, cc|0);
+        } else {
+          p.textContent = s.slice(0, cc);
+        }
+      }catch{ p.textContent = s.slice(0, cc); }
       const h = p.getBoundingClientRect().height;
       const lh = (Number.isFinite(lineHeightPx) && (lineHeightPx||0) > 0) ? (lineHeightPx||LINE_HEIGHT||1) : (LINE_HEIGHT||1);
       if (!Number.isFinite(h) || h <= 0) return 0;
@@ -15256,6 +16511,79 @@ try{
         try{ p.style.textIndent = '0px'; }catch{}
       }
       p.style.width = Math.max(20, (widthPx||80)) + 'px';
+
+      // If inline images are present, render them as fixed-width spans and insert marker at cc.
+      try{
+        const imgW = (opts && opts.imgWidths) ? (opts.imgWidths) : null;
+        if (imgW && s.indexOf('★') >= 0){
+          const fs0 = (Number.isFinite(fontSizePx) && (fontSizePx||0) > 0) ? (+fontSizePx||16) : 16;
+          const fallbackW = Math.max(1, Math.round(fs0 * 0.60));
+          const wAt = (idx)=>{
+            try{
+              let w = null;
+              if (imgW && typeof imgW.get === 'function') w = imgW.get(idx);
+              else if (imgW && Object.prototype.hasOwnProperty.call(imgW, idx)) w = imgW[idx];
+              else if (imgW && Object.prototype.hasOwnProperty.call(imgW, String(idx))) w = imgW[String(idx)];
+              w = +w;
+              if (!Number.isFinite(w) || w <= 0) w = fallbackW;
+              return Math.max(1, Math.round(w));
+            }catch{ return fallbackW; }
+          };
+          try{ while (p.firstChild) p.removeChild(p.firstChild); }catch{}
+          let marker = null;
+          let segStart = 0;
+          const flushText = (a,b)=>{ try{ if (b>a) p.appendChild(document.createTextNode(s.slice(a,b))); }catch{} };
+          const addMarker = ()=>{
+            try{
+              const m = document.createElement('span');
+              m.style.display = 'inline-block';
+              m.style.width = '0px';
+              m.style.height = '1px';
+              m.style.overflow = 'hidden';
+              m.style.padding = '0';
+              m.style.margin = '0';
+              m.style.border = '0';
+              m.textContent = '\u200b';
+              p.appendChild(m);
+              marker = m;
+            }catch{}
+          };
+          const addImg = (w)=>{
+            try{
+              const sp = document.createElement('span');
+              sp.style.display = 'inline-block';
+              sp.style.width = (w|0) + 'px';
+              sp.style.height = '1px';
+              sp.style.overflow = 'hidden';
+              sp.style.padding = '0';
+              sp.style.margin = '0';
+              sp.style.border = '0';
+              sp.textContent = '\u200b';
+              p.appendChild(sp);
+            }catch{}
+          };
+
+          for (let i=0; i<=(s.length|0); i++){
+            if (i === (cc|0)){
+              flushText(segStart|0, i|0);
+              addMarker();
+              segStart = i|0;
+            }
+            if (i === (s.length|0)) break;
+            if (s[i] === '★'){
+              flushText(segStart|0, i|0);
+              addImg(wAt(i|0));
+              segStart = (i+1)|0;
+            }
+          }
+          flushText(segStart|0, (s.length|0));
+          const pr = p.getBoundingClientRect();
+          const mr = marker ? marker.getBoundingClientRect() : null;
+          const x = (mr && pr) ? (mr.left - pr.left) : null;
+          return Number.isFinite(x) ? Math.max(0, x) : null;
+        }
+      }catch{}
+
       // Build marker nodes once.
       if (!_wrapProbeMarker || !_wrapProbeTextA || !_wrapProbeTextB || _wrapProbeMarker.parentNode !== p){
         try{ while (p.firstChild) p.removeChild(p.firstChild); }catch{}
@@ -15600,12 +16928,60 @@ try{
         }catch{ disp = src; }
 
         // Links are visually collapsed in md-rich display; keep wrap counts stable.
+        // Also attach imgWidths so the ★ token occupies the rendered image width.
+        let collapse = null;
+        let imgWidths = null;
+        let collapseSrc = null;
         try{
           if (!isCodeRow && disp && disp.indexOf('[') >= 0 && disp.indexOf(']') >= 0){
-            const col = (_mdCleanDisplayCollapseInfo && typeof _mdCleanDisplayCollapseInfo === 'function') ? _mdCleanDisplayCollapseInfo(disp) : null;
-            if (col && typeof col.dispText === 'string') disp = String(col.dispText||'');
+            collapseSrc = String(disp||'');
+            const col = (_mdCleanDisplayCollapseInfo && typeof _mdCleanDisplayCollapseInfo === 'function') ? _mdCleanDisplayCollapseInfo(collapseSrc) : null;
+            if (col && typeof col.dispText === 'string'){
+              collapse = col;
+              disp = String(col.dispText||'');
+            }
           }
-        }catch{}
+        }catch{ collapse = null; }
+        try{
+          if (collapse && collapse.links && disp && disp.indexOf('★') >= 0){
+            const gapPx = Math.max(1, Math.round((LINE_HEIGHT||0) * 0.125));
+            let availH = 0;
+            try{ const vr = viewport && viewport.getBoundingClientRect ? viewport.getBoundingClientRect() : null; availH = vr ? (vr.height||0) : 0; }catch{ availH = 0; }
+            const map = {};
+            const srcForAlt = String(collapseSrc || '');
+            for (const lk of (collapse.links||[])){
+              if (!lk) continue;
+              const isImg = (function(){ try{ return /^img-/.test(String(lk.kind||'')); }catch{ return false; } })();
+              if (!isImg) continue;
+              const ds = (lk.dispStart|0);
+              if (!(ds >= 0)) continue;
+              const altRaw = srcForAlt.slice((lk.textStart|0), (lk.textEnd|0));
+              const rows = (_mdImgAltRows ? (_mdImgAltRows(altRaw)|0) : 0)|0;
+              const ent = _mdImgRequest && _mdImgRequest(String(lk.url||''));
+              let wImg = 0;
+              try{
+                const iw = (ent && ent.state==='ok' && (ent.w|0) > 0) ? (ent.w|0) : 0;
+                const ih = (ent && ent.state==='ok' && (ent.h|0) > 0) ? (ent.h|0) : 0;
+                if (iw > 0 && ih > 0){
+                  if ((rows|0) > 0){
+                    const rowH = Math.max(1, (rows|0) * (LINE_HEIGHT|0));
+                    const imgH = Math.max(1, (rowH|0) - (2 * (gapPx|0)));
+                    wImg = Math.max(1, Math.round(iw * (imgH / ih)));
+                  } else {
+                    const scW = (wPx > 0) ? ((+wPx||0) / iw) : 1;
+                    const scH = (availH > 0) ? (availH / ih) : 1;
+                    const sc = Math.min(1, scW, scH);
+                    wImg = Math.max(1, Math.round(iw * sc));
+                  }
+                } else {
+                  wImg = Math.max(1, Math.round((LINE_HEIGHT|0) * 2));
+                }
+              }catch{ wImg = Math.max(1, Math.round((LINE_HEIGHT|0) * 2)); }
+              map[ds|0] = (wImg|0);
+            }
+            if (Object.keys(map).length) imgWidths = map;
+          }
+        }catch{ imgWidths = null; }
 
         const info = (function(){ try{ return _mdLineLayoutInfoAtRow(lines, i, false); }catch{ return null; } })();
         const lh = isCodeRow ? (LINE_HEIGHT|0) : ((info && info.lineHeightPx) ? (info.lineHeightPx|0) : (LINE_HEIGHT|0));
@@ -15630,7 +17006,8 @@ try{
             const n0 = _wrapProbeLineCountStyled(disp, cbProbeWidthPx, lh|0, fs|0, cbIndentOpts);
             if (Number.isFinite(n0) && (n0|0) > 0) n = (n0|0);
           } else {
-            const n0 = _wrapProbeLineCountStyled(disp, wPx, lh|0, fs|0, indentOpts);
+            const indentOpts2 = (imgWidths ? Object.assign({}, (indentOpts||{}), { imgWidths }) : indentOpts);
+            const n0 = _wrapProbeLineCountStyled(disp, wPx, lh|0, fs|0, indentOpts2);
             if (Number.isFinite(n0) && (n0|0) > 0) n = (n0|0);
           }
         } else {
@@ -15646,6 +17023,51 @@ try{
             hPx = (Math.max(1, (n|0)) * Math.max(1, (lh|0)))|0;
           }
           hPx = (hPx|0) + ((padTopPx|0) + (padBottomPx|0));
+
+          // Images can create variable-height rows (rows:N or fit-to-viewport) that are NOT reflected
+          // in the textarea's native wrapping. Include that height here so totalPx matches the overlay.
+          try{
+            if (!heavy && !isCodeRow && !isFenceRow && src && src.indexOf('![') >= 0 && typeof _mdImageScanResolvedAll === 'function'){
+              const imgs = _mdImageScanResolvedAll(src);
+              if (imgs && imgs.length){
+                const gapPx = Math.max(1, Math.round((LINE_HEIGHT||0) * 0.125));
+                let availW = Math.max(40, (+wPx||0) - 2);
+                let availH = 0;
+                try{ const vr = viewport && viewport.getBoundingClientRect ? viewport.getBoundingClientRect() : null; availH = vr ? (vr.height||0) : 0; }catch{ availH = 0; }
+                const desiredFor = (it)=>{
+                  try{
+                    const altRaw = String(src||'').slice((it.textStart|0), (it.textEnd|0));
+                    const rows = (_mdImgAltRows ? (_mdImgAltRows(altRaw)|0) : 0)|0;
+                    if ((rows|0) > 0) return Math.max(1, (rows|0) * (LINE_HEIGHT|0));
+                    const ent = _mdImgRequest && _mdImgRequest(String(it.url||''));
+                    const iw = (ent && ent.state==='ok' && (ent.w|0) > 0) ? (ent.w|0) : 0;
+                    const ih = (ent && ent.state==='ok' && (ent.h|0) > 0) ? (ent.h|0) : 0;
+                    if (iw > 0 && ih > 0){
+                      const scW = (availW > 0) ? (availW / iw) : 1;
+                      const scH = (availH > 0) ? (availH / ih) : 1;
+                      const sc = Math.min(1, scW, scH);
+                      const dispH = Math.max(1, Math.round(ih * sc));
+                      return Math.max(1, (dispH|0) + (2 * (gapPx|0)));
+                    }
+                    return Math.max(1, (2 * (LINE_HEIGHT|0)) + (2 * (gapPx|0)));
+                  }catch{ return 0; }
+                };
+
+                // Inline images: row height must be at least the max desired among images.
+                let desired = 0;
+                for (const it of imgs){
+                  const d = desiredFor(it);
+                  if ((d|0) > (desired|0)) desired = (d|0);
+                }
+
+                // Standalone image line: same desired height rule applies.
+                // (This path matters because textarea still treats it as 1 line.)
+                if (desired > 0){
+                  hPx = Math.max(hPx|0, desired|0);
+                }
+              }
+            }
+          }catch{}
           totalPx += (hPx|0);
         }catch{}
       }
@@ -19502,6 +20924,11 @@ try{
     let line = lineRawForCaret;
     let caretColVis = caretColRawForCaret;
 
+    // md-rich: keep collapse info for caret measurement (inline images need visual width).
+    let _mdCollapseInfoForCaret = null;
+    let _mdDispSrcForCaret = null;
+    let _mdImgWidthsForCaret = undefined; // undefined: not computed, null: none
+
     // md-rich fenced code blocks are displayed as raw text even in clean mode.
     // For those rows, do NOT apply clean-display collapsing (it would shorten the measured line
     // and clamp caret movement to the collapsed length).
@@ -19534,13 +20961,92 @@ try{
       const draft = !!(_mdDraftEditEnabled && _mdDraftEditEnabled());
       const collapse = (mdRich && !_mdIsCodeRow) ? (!!draft || !!hide) : false;
       if (mdRich && collapse && !_mdIsCodeRow){
-        const col = (_mdCleanDisplayCollapseInfo && typeof _mdCleanDisplayCollapseInfo === 'function') ? _mdCleanDisplayCollapseInfo(line) : null;
+        const dispSrc = String(line||'');
+        const col = (_mdCleanDisplayCollapseInfo && typeof _mdCleanDisplayCollapseInfo === 'function') ? _mdCleanDisplayCollapseInfo(dispSrc) : null;
         if (col && typeof col.dispText === 'string' && typeof col.srcToDispCaret === 'function'){
           caretColVis = (col.srcToDispCaret(caretColVis|0)|0);
           line = String(col.dispText||'');
+          _mdCollapseInfoForCaret = col;
+          _mdDispSrcForCaret = dispSrc;
         }
       }
     }catch{}
+
+    // md-rich: compute inline-image visual widths in px (for ★ tokens in collapsed display).
+    const _mdEnsureImgWidthsForCaret = (availWOverridePx)=>{
+      try{
+        if (_mdImgWidthsForCaret !== undefined) return _mdImgWidthsForCaret;
+        _mdImgWidthsForCaret = null;
+        if (!(_mdCollapseInfoForCaret && _mdCollapseInfoForCaret.links)) return _mdImgWidthsForCaret;
+        if (!(_mdDispSrcForCaret && String(line||'').indexOf('★') >= 0)) return _mdImgWidthsForCaret;
+
+        let ch = 10;
+        try{
+          if (_measureSpan && _measureSpan.getBoundingClientRect){
+            _measureSpan.textContent = '0';
+            const w = (_measureSpan.getBoundingClientRect().width||0);
+            if (Number.isFinite(w) && w > 0.5) ch = w;
+          }
+        }catch{}
+        const gapPx = Math.max(1, Math.round((LINE_HEIGHT||0) * 0.125));
+
+        // Available window size (best-effort) for no-rows fit.
+        let availW = 0;
+        let availH = 0;
+        try{ if (Number.isFinite(availWOverridePx) && (availWOverridePx||0) > 0) availW = Math.max(40, (availWOverridePx|0)); }catch{}
+        try{
+          const wrapOnNow = (function(){ try{ return !!(_wrapEnabled && _wrapEnabled()); }catch{ return false; } })();
+          if (!availW && wrapOnNow && typeof _wrapAvailWidthPx === 'function') availW = Math.max(40, (+_wrapAvailWidthPx()||0) - 2);
+        }catch{}
+        try{
+          if (!availW){
+            const w0 = (_mdBgLayer && (_mdBgLayer.clientWidth|0) > 0) ? (_mdBgLayer.clientWidth|0) : 0;
+            if (w0 > 0) availW = Math.max(40, (w0|0) - 2);
+          }
+        }catch{}
+        try{
+          const vr = viewport && viewport.getBoundingClientRect ? viewport.getBoundingClientRect() : null;
+          const vh = vr ? (vr.height||0) : 0;
+          const vw = vr ? (vr.width||0) : 0;
+          availH = Math.max(40, Math.round((vh||0) - 16));
+          if (!availW) availW = Math.max(40, Math.round((vw||0) - 2));
+        }catch{}
+
+        const map = {};
+        for (const lk of (_mdCollapseInfoForCaret.links||[])){
+          if (!lk) continue;
+          const isImg = (function(){ try{ return /^img-/.test(String(lk.kind||'')); }catch{ return false; } })();
+          if (!isImg) continue;
+          const ds = (lk.dispStart|0);
+          if (!(ds >= 0)) continue;
+          const altRaw = String(_mdDispSrcForCaret||'').slice((lk.textStart|0), (lk.textEnd|0));
+          const rows = (_mdImgAltRows ? (_mdImgAltRows(altRaw)|0) : 0)|0;
+          const ent = _mdImgRequest && _mdImgRequest(String(lk.url||''));
+          let wImg = 0;
+          try{
+            const iw = (ent && ent.state==='ok' && (ent.w|0) > 0) ? (ent.w|0) : 0;
+            const ih = (ent && ent.state==='ok' && (ent.h|0) > 0) ? (ent.h|0) : 0;
+            if (iw > 0 && ih > 0){
+              if ((rows|0) > 0){
+                const rowH = Math.max(1, (rows|0) * (LINE_HEIGHT|0));
+                const imgH = Math.max(1, (rowH|0) - (2 * (gapPx|0)));
+                wImg = Math.max(1, Math.round(iw * (imgH / ih)));
+              } else {
+                const scW = (availW > 0) ? (availW / iw) : 1;
+                const scH = (availH > 0) ? (availH / ih) : 1;
+                const sc = Math.min(1, scW, scH);
+                wImg = Math.max(1, Math.round(iw * sc));
+              }
+            } else {
+              wImg = Math.max(1, Math.round((LINE_HEIGHT|0) * 2));
+            }
+          }catch{ wImg = Math.max(1, Math.round((LINE_HEIGHT|0) * 2)); }
+          map[ds|0] = (wImg|0);
+        }
+        if (Object.keys(map).length) _mdImgWidthsForCaret = map;
+        return _mdImgWidthsForCaret;
+      }catch{ _mdImgWidthsForCaret = null; return _mdImgWidthsForCaret; }
+    };
 
     // markdown-rich: caret X/width should follow per-line font scale
     // (approximate by scaling base measurements; textarea itself cannot vary per-line font size).
@@ -19636,6 +21142,21 @@ try{
               sum += wChar;
             }
             xAbs = baseX + sum;
+          }
+        }catch{}
+
+        // Inline image: replace ★ glyph width with the rendered image width.
+        try{
+          const imgW = _mdEnsureImgWidthsForCaret();
+          if (imgW && line.indexOf('★') >= 0){
+            const wStar = _charWidth('★');
+            for (const k in imgW){
+              const idx = (k|0);
+              if ((idx|0) < (cN|0)){
+                const w = +imgW[k];
+                if (Number.isFinite(w) && (w||0) > 0) xAbs += (w - (wStar||0));
+              }
+            }
           }
         }catch{}
         return xAbs;
@@ -19820,10 +21341,19 @@ try{
           }
         }catch{}
 
+        // Inline image width awareness for wrap-probe caret measurement.
+        let indentOpts2 = indentOpts;
+        try{
+          if (_mdRichActive && _mdRichActive()){
+            const imgW = _mdEnsureImgWidthsForCaret(wPx|0);
+            if (imgW) indentOpts2 = Object.assign({}, (indentOpts||{}), { imgWidths: imgW });
+          }
+        }catch{ indentOpts2 = indentOpts; }
+
         _wrapWpxForCaret = (wPx|0);
-        _wrapIndentOptsForCaret = indentOpts;
+        _wrapIndentOptsForCaret = indentOpts2;
         const xp = _mdRichActive()
-          ? _wrapProbeXFromColStyled(line, caretColVis|0, wPx, (_mdCaretFontSizePx||Math.max(6, Math.round(FONT_SIZE)))|0, (_mdCaretLineHeightPx||LINE_HEIGHT)|0, indentOpts)
+          ? _wrapProbeXFromColStyled(line, caretColVis|0, wPx, (_mdCaretFontSizePx||Math.max(6, Math.round(FONT_SIZE)))|0, (_mdCaretLineHeightPx||LINE_HEIGHT)|0, indentOpts2)
           : _wrapProbeXFromCol(line, caretColVis|0, wPx);
         if (Number.isFinite(xp)) x = xp;
         try{ x += _mdOlExtraXpx(caretCol|0); }catch{}
@@ -20009,6 +21539,7 @@ try{
                     for (const it of col.links){
                       if (!it) continue;
                       if ((dispCol|0) >= (it.dispStart|0) && (dispCol|0) < (it.dispEnd|0)){
+                        const isImg = (function(){ try{ return /^img-/.test(String(it.kind||'')); }catch{ return false; } })();
                         let kind = 'external';
                         let finalUrl = String(it.url||'');
                         try{
@@ -20023,6 +21554,16 @@ try{
                             kind = 'six-open';
                           }
                           try{ if (kind==='six-open') finalUrl = finalUrl.replace(/\\/g,'/'); }catch{}
+                        }catch{}
+
+                        // Images must always open in browser; resolve relative path to an absolute URL.
+                        try{
+                          if (isImg){
+                            kind = 'external';
+                            let base = null;
+                            try{ const cur = (currentBuffer && currentBuffer()); if (cur && cur.path) base = _dirnameURL(cur.path); }catch{}
+                            try{ finalUrl = _normalizeToURLString(String(it.url||finalUrl||''), base||_htmlBaseURL()); }catch{}
+                          }
                         }catch{}
                         link = {
                           c1: (it.textStart|0),
@@ -30191,35 +31732,126 @@ try{
             }
           }catch{ indentOpts = null; }
 
+          // Clean display: collapse inline links/images so X->col hit-testing matches what is rendered.
+          // Also attach imgWidths so the ★ token occupies the rendered image width.
+          let collapse = null;
+          let imgWidths = null;
+          let collapseSrc = null;
+          try{
+            if (hideSymbols && !isCodeRow && dispText && dispText.indexOf('[') >= 0 && dispText.indexOf(']') >= 0 && typeof _mdCleanDisplayCollapseInfo === 'function'){
+              collapseSrc = String(dispText||'');
+              const col = _mdCleanDisplayCollapseInfo(collapseSrc);
+              if (col && typeof col.dispText === 'string'){
+                collapse = col;
+                dispText = String(col.dispText||'');
+              }
+            }
+          }catch{ collapse = null; }
+          try{
+            if (collapse && collapse.links && dispText && dispText.indexOf('★') >= 0){
+              const gapPx = Math.max(1, Math.round((+LINE_HEIGHT||0) * 0.125));
+              let availH = 0;
+              try{ const vr = viewport && viewport.getBoundingClientRect ? viewport.getBoundingClientRect() : null; availH = vr ? (vr.height||0) : 0; }catch{ availH = 0; }
+              const map = {};
+              const srcForAlt = String(collapseSrc || dispText || '');
+              for (const lk of (collapse.links||[])){
+                if (!lk) continue;
+                const isImg = (function(){ try{ return /^img-/.test(String(lk.kind||'')); }catch{ return false; } })();
+                if (!isImg) continue;
+                const ds = (lk.dispStart|0);
+                if (!(ds >= 0)) continue;
+                const altRaw = srcForAlt.slice((lk.textStart|0), (lk.textEnd|0));
+                const rows = (_mdImgAltRows ? (_mdImgAltRows(altRaw)|0) : 0)|0;
+                const ent = _mdImgRequest && _mdImgRequest(String(lk.url||''));
+                let wImg = 0;
+                try{
+                  const iw = (ent && ent.state==='ok' && (ent.w|0) > 0) ? (ent.w|0) : 0;
+                  const ih = (ent && ent.state==='ok' && (ent.h|0) > 0) ? (ent.h|0) : 0;
+                  if (iw > 0 && ih > 0){
+                    if ((rows|0) > 0){
+                      const rowH = Math.max(1, (rows|0) * (LINE_HEIGHT|0));
+                      const imgH = Math.max(1, (+rowH||0) - (2 * (+gapPx||0)));
+                      wImg = Math.max(1, Math.round(iw * (imgH / ih)));
+                    } else {
+                      const scW = (wPx > 0) ? ((+wPx||0) / iw) : 1;
+                      const scH = (availH > 0) ? (availH / ih) : 1;
+                      const sc = Math.min(1, scW, scH);
+                      wImg = Math.max(1, Math.round(iw * sc));
+                    }
+                  } else {
+                    wImg = Math.max(1, Math.round((LINE_HEIGHT|0) * 2));
+                  }
+                }catch{ wImg = Math.max(1, Math.round((LINE_HEIGHT|0) * 2)); }
+                map[ds|0] = (wImg|0);
+              }
+              if (Object.keys(map).length) imgWidths = map;
+            }
+          }catch{ imgWidths = null; }
+          let indentOpts2 = indentOpts;
+          try{ if (imgWidths) indentOpts2 = Object.assign({}, (indentOpts||{}), { imgWidths }); }catch{ indentOpts2 = indentOpts; }
+
           // Block height in px.
           let hBlock = lh|0;
           if (Number.isFinite(bhOverride)){
             hBlock = (bhOverride|0);
           } else if (wrapOn){
             let n0 = 1;
-            try{ n0 = _wrapProbeLineCountStyled(String(dispText||''), wPx|0, lh|0, fs|0, indentOpts) | 0; }catch{ n0 = 1; }
+            try{ n0 = _wrapProbeLineCountStyled(String(dispText||''), wPx|0, lh|0, fs|0, indentOpts2) | 0; }catch{ n0 = 1; }
             const n = (n0 && (n0|0) > 0) ? (n0|0) : 1;
             hBlock = (Math.max(1, n|0) * (lh|0))|0;
           }
           try{ hBlock = (hBlock|0) + (padTopPx|0) + (padBottomPx|0); }catch{}
           const hideSymbolsEff = isCodeRow ? false : !!hideSymbols;
-          return { srcText, dispText, prefixLen:(prefixLen|0), lh:(lh|0), fs:(fs|0), hideSymbols:!!hideSymbolsEff, bhOverride, padTopPx:(padTopPx|0), padBottomPx:(padBottomPx|0), indentOpts, hBlock:(hBlock|0), ulSrc, ulDisp };
+          return { srcText, dispText, prefixLen:(prefixLen|0), lh:(lh|0), fs:(fs|0), hideSymbols:!!hideSymbolsEff, bhOverride, padTopPx:(padTopPx|0), padBottomPx:(padBottomPx|0), indentOpts:indentOpts2, hBlock:(hBlock|0), ulSrc, ulDisp, collapse };
         };
 
-        // Find row by accumulating per-row block heights from current topLine.
+        // Find row from mouse Y.
+        // Prefer last md render geometry: it reflects variable heights (including image rows) and collapsed 0-height rows.
         const topLine = _topLine()|0;
         const startIdx = Math.max(0, (topLine|0) - 1);
-        const maxScan = Math.min(total, startIdx + Math.max(200, (_visibleLinesExact()|0) * 6));
         let r = startIdx|0;
-        let accY = 0;
         let infoR = null;
-        for (let i=startIdx; i<maxScan; i++){
-          const inf = _dispInfoAtRow(i|0, false);
-          const h = (inf && Number.isFinite(inf.hBlock)) ? (inf.hBlock|0) : (LINE_HEIGHT|0);
-          if (yTarget < (accY + (h|0))){ r = i|0; infoR = inf; break; }
-          accY += (h|0);
-          r = i|0;
-          infoR = inf;
+        let accY = 0; // top Y (px) of the chosen row in md-rich coordinates
+        let usedGeom = false;
+        try{
+          const g = _mdRenderGeom;
+          if (g && Array.isArray(g.rowY) && Array.isArray(g.rowH) && (g.want|0) > 0){
+            const start = (g.start|0);
+            const want = (g.want|0);
+            for (let i=0;i<want;i++){
+              const t = (g.rowY[i]|0);
+              const h = (g.rowH[i]|0);
+              if ((h|0) <= 0) continue;
+              if ((yTarget|0) >= (t|0) && (yTarget|0) < ((t+h)|0)){
+                r = (start + i)|0;
+                accY = (t|0);
+                usedGeom = true;
+                break;
+              }
+            }
+            if (!usedGeom){
+              if (want > 0){
+                if ((yTarget|0) < (g.rowY[0]|0)) r = start|0;
+                else r = (start + want - 1)|0;
+                try{ accY = (g.rowY[Math.max(0, Math.min((want-1)|0, ((r - start)|0))) ]|0); }catch{ accY = 0; }
+                usedGeom = true;
+              }
+            }
+          }
+        }catch{ usedGeom = false; }
+
+        if (!usedGeom){
+          // Fallback: approximate by accumulating computed per-row block heights.
+          const maxScan = Math.min(total, startIdx + Math.max(200, (_visibleLinesExact()|0) * 6));
+          accY = 0;
+          for (let i=startIdx; i<maxScan; i++){
+            const inf = _dispInfoAtRow(i|0, false);
+            const h = (inf && Number.isFinite(inf.hBlock)) ? (inf.hBlock|0) : (LINE_HEIGHT|0);
+            if (yTarget < (accY + (h|0))){ r = i|0; infoR = inf; break; }
+            accY += (h|0);
+            r = i|0;
+            infoR = inf;
+          }
         }
         if (r < 0) r = 0;
         if (r >= total) r = Math.max(0, total-1);
@@ -30306,12 +31938,20 @@ try{
           } else {
             // Use a very large width and intra=0 to map X in an unwrapped line.
             colDisp = (forceCol != null) ? (forceCol|0)
-              : (_mdWrapColForIntraXStyled(String(infoR.dispText||''), 0, (desiredX||0), 1000000, (infoR.lh|0), (infoR.fs|0), null) | 0);
+              : (_mdWrapColForIntraXStyled(String(infoR.dispText||''), 0, (desiredX||0), 1000000, (infoR.lh|0), (infoR.fs|0), infoR.indentOpts) | 0);
           }
         }catch{ colDisp = 0; }
         colDisp = Math.max(0, Math.min((String(infoR.dispText||'').length|0), colDisp|0));
 
-        const c = Math.max(0, Math.min((String(infoR.srcText||'').length|0), ((infoR.prefixLen|0) + (colDisp|0))|0));
+        // Map display column back to source column (clean-display collapse aware).
+        let srcInnerCol = (colDisp|0);
+        try{
+          if (infoR && infoR.collapse && typeof infoR.collapse.dispToSrcCaret === 'function'){
+            srcInnerCol = (infoR.collapse.dispToSrcCaret(colDisp|0)|0);
+          }
+        }catch{ srcInnerCol = (colDisp|0); }
+
+        const c = Math.max(0, Math.min((String(infoR.srcText||'').length|0), ((infoR.prefixLen|0) + (srcInnerCol|0))|0));
         const off = _offsetFromRC(r|0, c|0) | 0;
         // Optional: return hit without applying selection (for dblclick custom selection).
         try{ if (opt && opt.returnHit){ return { ok:true, r:(r|0), c:(c|0), off:(off|0) }; } }catch{}

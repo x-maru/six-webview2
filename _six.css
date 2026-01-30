@@ -601,6 +601,13 @@ body.md-rich #editor::selection {
 	box-decoration-break: clone;
 }
 
+/* Markdown-rich images: selection is applied to the wrapper span (md-img-wrap) the same way
+   as inline images, so standalone image blocks use the same highlight logic. */
+#textLayer .md-img-wrap.md-sel {
+	border-radius: 2px;
+	box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--selBg, cyan) 75%, transparent);
+}
+
 /* Markdown-rich inline link ([text](url ...)) */
 #textLayer .md-link {
 	color: var(--mdLinkColor, #4ea1ff);
