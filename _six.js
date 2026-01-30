@@ -429,6 +429,429 @@ try{
     }catch{ return []; }
   }
 
+  // --- Markdown reference links (GFM-ish): [text][id] / [text][] / [text]
+  // Reference definitions: [id]: URL "title"
+  // NOTE (per request):
+  // - id normalization: trim + collapse spaces/TABs to a single ASCII space + case-insensitive
+  // - ids do NOT include newlines (we only accept single-line ids)
+  let _mdRefDefCache = null;
+  function _mdRefIdNorm(id){
+    try{
+      let s = String(id||'');
+      // Exclude newlines (six rule): treat as whitespace
+      try{ s = s.replace(/[\r\n]+/g, ' '); }catch{}
+      s = String(s||'').trim();
+      try{ s = s.replace(/[\t ]+/g, ' '); }catch{}
+      // CommonMark/GFM-ish: reference labels are case-insensitive.
+      try{ s = String(s||'').toLowerCase(); }catch{}
+      return String(s||'');
+    }catch{
+      try{ return String(id||'').trim().toLowerCase(); }catch{ return String(id||'').trim(); }
+    }
+  }
+  function _mdRefDefLineInfo(line){
+    // Returns { idRaw, idNorm, url, tooltip, spanA, spanB }
+    try{
+      const s = String(line||'');
+      if (!s) return null;
+      if (s.indexOf(']:') < 0 || s.indexOf('[') < 0) return null;
+      const m = s.match(/^[\t ]{0,3}\[([^\]\r\n]+)\]:/);
+      if (!m) return null;
+      const idRaw = String(m[1]||'');
+      const idNorm = _mdRefIdNorm(idRaw);
+      if (!idNorm) return null;
+
+      let p = (m[0].length|0);
+      while (p < (s.length|0) && (s[p]===' ' || s[p]==='\t')) p++;
+      const spanA = (p|0);
+      const spanB = (s.length|0);
+
+      const isEsc = (idx)=>{
+        try{
+          let k = (idx|0) - 1;
+          let cnt = 0;
+          while (k >= 0 && s[k] === '\\'){ cnt++; k--; }
+          return ((cnt|0) % 2) === 1;
+        }catch{ return false; }
+      };
+      const skipWs = (k)=>{ try{ while (k < (s.length|0) && (s[k]===' ' || s[k]==='\t')) k++; }catch{} return k|0; };
+
+      // destination
+      let urlRaw = '';
+      p = skipWs(p|0);
+      if (p >= (s.length|0)) return null;
+      if (s[p] === '<' && !isEsc(p|0)){
+        p++;
+        while (p < (s.length|0)){
+          const ch = s[p];
+          if (ch === '>' && !isEsc(p|0)) { p++; break; }
+          if (ch === '\\' && (p+1) < (s.length|0)) { urlRaw += s[p+1]; p += 2; continue; }
+          urlRaw += ch; p++;
+        }
+      } else {
+        while (p < (s.length|0)){
+          const ch = s[p];
+          if ((ch === ' ' || ch === '\t') && !isEsc(p|0)) break;
+          if (ch === '\\' && (p+1) < (s.length|0)) { urlRaw += s[p+1]; p += 2; continue; }
+          urlRaw += ch; p++;
+        }
+      }
+      urlRaw = String(urlRaw||'').trim();
+      if (!urlRaw) return null;
+      p = skipWs(p|0);
+
+      // optional title
+      let tooltip = '';
+      if (p < (s.length|0)){
+        const q = s[p];
+        if (q === '"' || q === "'"){
+          p++;
+          while (p < (s.length|0)){
+            const ch = s[p];
+            if (ch === q && !isEsc(p|0)) { p++; break; }
+            if (ch === '\\' && (p+1) < (s.length|0)) { tooltip += s[p+1]; p += 2; continue; }
+            tooltip += ch; p++;
+          }
+        } else if (q === '(' && !isEsc(p|0)){
+          p++;
+          while (p < (s.length|0)){
+            const ch = s[p];
+            if (ch === ')' && !isEsc(p|0)) { p++; break; }
+            if (ch === '\\' && (p+1) < (s.length|0)) { tooltip += s[p+1]; p += 2; continue; }
+            tooltip += ch; p++;
+          }
+          tooltip = String(tooltip||'').trim();
+        }
+      }
+
+      return { idRaw, idNorm, url:String(urlRaw||''), tooltip:String(tooltip||''), spanA:(spanA|0), spanB:(spanB|0) };
+    }catch{ return null; }
+  }
+  function _mdRefDefInvalidateCache(_reason){
+    try{ if (_mdRefDefCache) _mdRefDefCache.dirty = true; }catch{}
+  }
+  function _mdRefDefEnsureCache(force, lines, fenceCache, indentCache){
+    try{
+      if (!(_mdRichEnabled && _mdRichEnabled())) { _mdRefDefCache = null; return null; }
+      const arr = Array.isArray(lines) ? lines : _splitLinesRaw();
+      const total = (arr && arr.length) ? (arr.length|0) : 0;
+
+      // If caches are not provided (common for per-line helpers), build them here so we can
+      // reliably ignore definitions inside fenced/indented code blocks.
+      let fc0 = fenceCache || null;
+      let ic0 = indentCache || null;
+      try{ if (!fc0 && _mdCodeFenceEnsureCache) fc0 = _mdCodeFenceEnsureCache(false, arr); }catch{ fc0 = fenceCache || null; }
+      try{ if (!ic0 && _mdIndentCodeEnsureCache) ic0 = _mdIndentCodeEnsureCache(false, arr, fc0); }catch{ ic0 = indentCache || null; }
+      const b = currentBuffer && currentBuffer();
+      const tick = (b && Number.isFinite(b._changeTick)) ? (b._changeTick|0) : 0;
+      const prev = _mdRefDefCache;
+      const need = !!(force || !prev || prev.dirty || (prev.tick|0)!==(tick|0) || (prev.total|0)!==(total|0));
+      if (!need) return prev;
+
+      const map = new Map();
+      const isDef = new Uint8Array(total);
+      for (let r=0; r<total; r++){
+        const line = String(arr[r]||'');
+        if (!line) continue;
+
+        // Ignore definitions inside fenced/indented code blocks.
+        try{
+          const fk = (fc0 && fc0.kind) ? (fc0.kind[r]|0) : 0;
+          const ik = (ic0 && ic0.kind) ? (ic0.kind[r]|0) : 0;
+          if ((fk|0) === 2 || (ik|0) === 2) continue;
+        }catch{}
+
+        const info = _mdRefDefLineInfo(line);
+        if (!info) continue;
+        isDef[r] = 1;
+        // First definition wins (CommonMark-ish); keep existing.
+        if (!map.has(info.idNorm)){
+          map.set(info.idNorm, {
+            row:(r|0),
+            url:String(info.url||''),
+            tooltip:String(info.tooltip||''),
+            spanA:(info.spanA|0),
+            spanB:(info.spanB|0),
+            idNorm:String(info.idNorm||''),
+            idRaw:String(info.idRaw||''),
+          });
+        }
+      }
+
+      _mdRefDefCache = { tick:(tick|0), total:(total|0), dirty:false, map, isDef };
+      return _mdRefDefCache;
+    }catch{ return _mdRefDefCache; }
+  }
+
+  function _mdRefLinkScanResolved(s){
+    // Returns array of link objects compatible with inline-link collapse mapping.
+    // { kind:'ref', lb, rb, lp:-1, rp, textStart, textEnd, url, tooltip, idNorm, defRow, defSpanA, defSpanB }
+    try{
+      const src = String(s||'');
+      const n = (src.length|0);
+      if (!src || src.indexOf('[') < 0 || src.indexOf(']') < 0) return [];
+      // Never treat reference definition lines themselves as links.
+      try{ if (_mdRefDefLineInfo(src)) return []; }catch{}
+
+      const cache = _mdRefDefEnsureCache(false, null, null, null) || _mdRefDefEnsureCache(true, null, null, null);
+      const defs = (cache && cache.map) ? cache.map : null;
+      if (!defs || !(defs.size > 0)) return [];
+
+      const out = [];
+      const isEsc = (idx)=>{
+        try{
+          let k = (idx|0) - 1;
+          let cnt = 0;
+          while (k >= 0 && src[k] === '\\'){ cnt++; k--; }
+          return ((cnt|0) % 2) === 1;
+        }catch{ return false; }
+      };
+      const skipWs = (k)=>{ try{ while (k < (n|0) && (src[k]===' ' || src[k]==='\t')) k++; }catch{} return k|0; };
+
+      let i = 0;
+      while (i < (n|0)){
+        const lb = src.indexOf('[', i|0);
+        if (lb < 0) break;
+        if (isEsc(lb|0)) { i = (lb+1)|0; continue; }
+
+        // Find first closing ]
+        let rb = -1;
+        for (let k=(lb+1)|0; k < (n|0); k++){
+          if (src[k] === ']' && !isEsc(k|0)) { rb = k|0; break; }
+        }
+        if (rb < 0) break;
+        const textStart = (lb+1)|0;
+        const textEnd = (rb|0);
+        const textLen = Math.max(0, (textEnd - textStart)|0);
+        if ((textLen|0) <= 0){ i = (lb+1)|0; continue; }
+
+        let p = skipWs((rb+1)|0);
+        // Not a reference link if this is an inline link: [text](...)
+        if (p < (n|0) && src[p] === '(' && !isEsc(p|0)) { i = (lb+1)|0; continue; }
+        // Not a reference link if this is a definition marker: [id]:
+        if (p < (n|0) && src[p] === ':' && !isEsc(p|0)) { i = (lb+1)|0; continue; }
+
+        let idRaw = '';
+        let spanEnd = (rb+1)|0;
+
+        // Full/collapsed reference: [text][id] / [text][]
+        if (p < (n|0) && src[p] === '[' && !isEsc(p|0)){
+          const lb2 = p|0;
+          let rb2 = -1;
+          for (let k=(lb2+1)|0; k < (n|0); k++){
+            if (src[k] === ']' && !isEsc(k|0)) { rb2 = k|0; break; }
+          }
+          if (rb2 < 0){ i = (lb+1)|0; continue; }
+          idRaw = src.slice((lb2+1)|0, rb2|0);
+          if (!idRaw) idRaw = src.slice(textStart|0, textEnd|0);
+          spanEnd = (rb2+1)|0;
+        } else {
+          // Shortcut reference: [text] (only if a definition exists)
+          idRaw = src.slice(textStart|0, textEnd|0);
+          spanEnd = (rb+1)|0;
+        }
+
+        const idNorm = _mdRefIdNorm(idRaw);
+        if (!idNorm){ i = (lb+1)|0; continue; }
+        const def = defs.get(idNorm);
+        if (!def){ i = (lb+1)|0; continue; }
+
+        // Do not collapse links that overlap inline code spans.
+        try{
+          if (src.indexOf('`') >= 0 && typeof _mdInlineCodeOverlaps === 'function'){
+            if (_mdInlineCodeOverlaps(src, lb|0, spanEnd|0)) { i = (lb+1)|0; continue; }
+          }
+        }catch{}
+
+        out.push({
+          kind:'ref',
+          lb:(lb|0),
+          rb:(rb|0),
+          lp:-1,
+          rp:((spanEnd-1)|0),
+          textStart:(textStart|0),
+          textEnd:(textEnd|0),
+          url:String(def.url||''),
+          tooltip:String(def.tooltip||''),
+          idNorm:String(idNorm||''),
+          defRow:(def.row|0),
+          defSpanA:(def.spanA|0),
+          defSpanB:(def.spanB|0),
+        });
+        i = (spanEnd|0);
+      }
+      return out;
+    }catch{ return []; }
+  }
+
+  function _mdLinkScanResolvedAll(src){
+    // Unified link spans for clean display: inline + resolved reference links.
+    // Each item has { kind, lb, rb, lp, rp, textStart, textEnd, url, tooltip, ... }
+    try{
+      const s = String(src||'');
+      const n = (s.length|0);
+      if (!s || s.indexOf('[') < 0 || s.indexOf(']') < 0) return [];
+
+      let inline0 = _mdInlineLinkScan(s);
+      // Same inline-code overlap rule as inline-link collapse.
+      try{
+        if (inline0 && inline0.length && s.indexOf('`') >= 0 && typeof _mdInlineCodeParse === 'function'){
+          const segs = _mdInlineCodeParse(s);
+          if (segs && segs.length){
+            const codeSpans = [];
+            for (const it of segs){
+              if (it && it.t === 'code' && Number.isFinite(it.a) && Number.isFinite(it.b)){
+                const a = Math.max(0, Math.min(n|0, it.a|0));
+                const b = Math.max(a, Math.min(n|0, it.b|0));
+                if (b > a) codeSpans.push({ a, b });
+              }
+            }
+            if (codeSpans.length){
+              const overlaps = (a0, b0)=>{
+                try{
+                  const a = Math.max(0, a0|0);
+                  const b = Math.max(a, b0|0);
+                  for (const sp of codeSpans){
+                    const sa = sp.a|0, sb = sp.b|0;
+                    if (a < sb && b > sa) return true;
+                  }
+                }catch{}
+                return false;
+              };
+              inline0 = inline0.filter((lk)=>{
+                try{
+                  if (!lk) return false;
+                  const lb = (lk.lb|0);
+                  const rp1 = ((lk.rp|0) + 1)|0;
+                  if (rp1 <= lb) return false;
+                  return !overlaps(lb|0, rp1|0);
+                }catch{ return true; }
+              });
+            }
+          }
+        }
+      }catch{}
+      const inlines = [];
+      try{
+        for (const it of (inline0||[])){
+          if (!it) continue;
+          inlines.push(Object.assign({ kind:'inline' }, it));
+        }
+      }catch{}
+      const refs = _mdRefLinkScanResolved(s);
+
+      const merged = [];
+      try{ for (const it of inlines) merged.push(it); }catch{}
+      try{ for (const it of refs) merged.push(it); }catch{}
+      if (!merged.length) return [];
+      merged.sort((a,b)=>{ try{ return (a.lb|0) - (b.lb|0); }catch{ return 0; } });
+
+      // Ensure non-overlapping spans (prefer the earlier/leftmost span).
+      const out = [];
+      let lastEnd = -1;
+      for (const it of merged){
+        try{
+          const a = (it.lb|0);
+          const b = ((it.rp|0) + 1)|0;
+          if (b <= a) continue;
+          if ((a|0) < (lastEnd|0)) continue;
+          out.push(it);
+          lastEnd = (b|0);
+        }catch{}
+      }
+      return out;
+    }catch{ return []; }
+  }
+
+  function _mdLinkCollapseInfo(s){
+    // Collapse inline + resolved reference links:
+    // - [text](...) -> text
+    // - [text][id] / [text][] / [text] -> text (only when def exists)
+    // Returns { dispText, links, srcToDisp(col), dispToSrc(col) }
+    try{
+      const src = String(s||'');
+      const n = src.length|0;
+      const links0 = _mdLinkScanResolvedAll(src);
+      if (!links0 || !links0.length){
+        return { dispText: src, links: [], srcToDisp:(c)=>Math.max(0, Math.min(n|0, c|0)), dispToSrc:(c)=>Math.max(0, Math.min(n|0, c|0)) };
+      }
+
+      let removed = 0;
+      const links = [];
+      for (let i=0;i<links0.length;i++){
+        const it = links0[i];
+        if (!it) continue;
+        const spanLen = (((it.rp|0) + 1) - (it.lb|0))|0;
+        const textLen = ((it.textEnd|0) - (it.textStart|0))|0;
+        const dispStart = (it.lb|0) - (removed|0);
+        const dispEnd = (dispStart + (textLen|0))|0;
+        const removedLen = Math.max(0, (spanLen|0) - (textLen|0))|0;
+        links.push(Object.assign({ dispStart:(dispStart|0), dispEnd:(dispEnd|0), removedLen:(removedLen|0) }, it));
+        removed = (removed + (removedLen|0))|0;
+      }
+
+      // Build collapsed text
+      let out = '';
+      let pos = 0;
+      for (const it of links){
+        const lb = it.lb|0;
+        const rp1 = ((it.rp|0) + 1)|0;
+        const ts = it.textStart|0;
+        const te = it.textEnd|0;
+        if ((lb|0) > (pos|0)) out += src.slice(pos|0, lb|0);
+        out += src.slice(ts|0, te|0);
+        pos = rp1|0;
+      }
+      if ((pos|0) < (n|0)) out += src.slice(pos|0);
+
+      const srcToDisp = (col0)=>{
+        try{
+          let col = Math.max(0, Math.min(n|0, col0|0));
+          let rem = 0;
+          for (const it of links){
+            const lb = it.lb|0;
+            const ts = it.textStart|0;
+            const te = it.textEnd|0;
+            const rp1 = ((it.rp|0) + 1)|0;
+            if ((col|0) <= (lb|0)) break;
+            if ((col|0) < (ts|0)) return (it.dispStart|0);
+            if ((col|0) < (te|0)) return (it.dispStart|0) + ((col|0) - (ts|0));
+            if ((col|0) <= (rp1|0)) return (it.dispEnd|0);
+            rem = (rem + (it.removedLen|0))|0;
+          }
+          return (col - (rem|0))|0;
+        }catch{ return Math.max(0, Math.min(n|0, col0|0)); }
+      };
+      const dispToSrc = (dispCol0)=>{
+        try{
+          const dn = (out.length|0);
+          let dc = Math.max(0, Math.min(dn|0, dispCol0|0));
+          let rem = 0;
+          for (const it of links){
+            const ds = it.dispStart|0;
+            const de = it.dispEnd|0;
+            const ts = it.textStart|0;
+            if ((dc|0) < (ds|0)) break;
+            if ((dc|0) < (de|0)) return (ts|0) + ((dc|0) - (ds|0));
+            rem = (rem + (it.removedLen|0))|0;
+          }
+          return (dc + (rem|0))|0;
+        }catch{ return Math.max(0, dispCol0|0); }
+      };
+
+      return { dispText: String(out||''), links, srcToDisp, dispToSrc };
+    }catch{
+      return {
+        dispText:String(s||''),
+        links:[],
+        srcToDisp:(c)=>c|0,
+        dispToSrc:(c)=>c|0,
+        srcToDispCaret:(c)=>c|0,
+        dispToSrcCaret:(c)=>c|0,
+      };
+    }
+  }
+
   function _mdInlineLinkCollapseInfo(s){
     // Collapse [text](...) -> text (drop brackets + destination + optional title)
     // Returns { dispText, links, srcToDisp(col), dispToSrc(col) }
@@ -656,7 +1079,7 @@ try{
     try{
       const src = String(s||'');
       const n = src.length|0;
-      const linkCol = _mdInlineLinkCollapseInfo(src);
+      const linkCol = _mdLinkCollapseInfo(src);
       const disp = String((linkCol && linkCol.dispText) || src);
       const links1 = (linkCol && linkCol.links) ? (linkCol.links||[]) : [];
       const links = links1;
@@ -732,8 +1155,8 @@ try{
       const src = String(s||'');
       if (!src) return '';
       // Fast check
-      if (src.indexOf('](') < 0 || src.indexOf('[') < 0) return null;
-      let links0 = _mdInlineLinkScan(src);
+      if (src.indexOf('[') < 0 || src.indexOf(']') < 0) return null;
+      let links0 = _mdLinkScanResolvedAll(src);
       if (!links0 || !links0.length) return null;
 
       // #1919: Disable inline-link collapsing inside inline code spans.
@@ -1241,9 +1664,16 @@ try{
       }catch{ indentKind = 0; indentFirst = false; indentLast = false; }
       const isCodeRow = ((fenceKind|0) === 2) || ((indentKind|0) === 2);
 
+      // #1946: Reference definition rows are always rendered as raw text.
+      // (This is a cheap per-line check; _mdRenderTextLayer uses the cached map for resolution.)
+      let isRefDefRow = false;
+      try{ if (!isCodeRow) isRefDefRow = !!(_mdRefDefLineInfo && _mdRefDefLineInfo(srcText)); }catch{ isRefDefRow = false; }
+
       let lv0 = _mdHeadingLevel(srcText);
       let setextOn = _mdSetextEnabled();
       let hideSymbols = !!_mdHideSymbolsForRow(!!isActiveRow);
+
+      if (isRefDefRow) hideSymbols = false;
 
       if (isCodeRow){
         // Keep LINE_HEIGHT grid; code is plain text.
@@ -1431,8 +1861,16 @@ try{
     }catch{ return false; }
   }
 
+  function _mdClampCaretForHiddenRefDefLines(){
+    // #1946: Reference definition lines are no longer hidden.
+    try{
+      return false;
+    }catch{ return false; }
+  }
+
   function _mdClampCaretForCleanInlineLinks(){
     // In md-rich display, inline links are visually collapsed: [text](url "title") -> text.
+    // Reference links are also visually collapsed when resolved.
     // Ensure the caret never rests in a removed (hidden) span (e.g., brackets/URL/title), by snapping
     // caretCol to a *visible* source column (inside the link text region).
     try{
@@ -1455,7 +1893,7 @@ try{
       }catch{}
 
       // Fast check: avoid overhead for non-link lines.
-      if (src.indexOf('](') < 0 || src.indexOf('[') < 0) return false;
+      if (src.indexOf('[') < 0 || src.indexOf(']') < 0) return false;
       const n = (src.length|0);
       const col0 = Math.max(0, Math.min(n|0, caretCol|0));
       const col = (_mdCleanDisplayCollapseInfo && typeof _mdCleanDisplayCollapseInfo === 'function') ? _mdCleanDisplayCollapseInfo(src) : null;
@@ -1478,7 +1916,7 @@ try{
   let _mdUrlBarFocused = false;
   let _mdUrlBarComposing = false;
   let _mdUrlBarGlobalGuardInstalled = false;
-  let _mdUrlBarCtx = null; // { row, lp, rp1, span, caretRow0, caretCol0 }
+  let _mdUrlBarCtx = null; // { kind:'inline'|'refdef', row, lp, rp1, span, caretRow0, caretCol0, refId? }
   let _mdUrlBarKeepSelUntil = 0;
   let _mdUrlBarSnapToEndOnFocus = false;
   let _mdUrlBarLastSelS = -1;
@@ -2196,7 +2634,7 @@ try{
             }
           }catch{}
 
-          if (dispBase.indexOf('](') < 0 || dispBase.indexOf('[') < 0) return null;
+          if (dispBase.indexOf('[') < 0 || dispBase.indexOf(']') < 0) return null;
 
           const col = (_mdCleanDisplayCollapseInfo && typeof _mdCleanDisplayCollapseInfo === 'function') ? _mdCleanDisplayCollapseInfo(dispBase) : null;
           if (!col || !Array.isArray(col.links) || typeof col.srcToDispCaret !== 'function') return null;
@@ -2240,18 +2678,29 @@ try{
           }
           if (!hit) return null;
 
-          const lb0 = ((hit.lb|0) + (leftCut|0))|0;
+          const hitKind = String(hit.kind||'inline');
+          const spanA0 = ((hit.lb|0) + (leftCut|0))|0;
+          const spanB0 = (((hit.rp|0) + 1) + (leftCut|0))|0;
+          if (!((spanB0|0) > (spanA0|0))) return null;
+
+          // Accept caret anywhere inside the whole construct.
+          try{ if ((ccSrcForChecks|0) < (spanA0|0) || (ccSrcForChecks|0) > (spanB0|0)) return null; }catch{}
+
+          if (hitKind === 'ref'){
+            const defRow0 = (hit.defRow|0);
+            if (!(defRow0 >= 0 && defRow0 < (lines.length|0))) return null;
+            const defLine = String(lines[defRow0]||'');
+            const lp0 = Math.max(0, Math.min((defLine.length|0), (hit.defSpanA|0)));
+            const rp10 = Math.max(lp0|0, Math.min((defLine.length|0), (hit.defSpanB|0)));
+            const span = defLine.slice(lp0|0, rp10|0);
+            return { kind:'refdef', row:(defRow0|0), lp:(lp0|0), rp1:(rp10|0), span:String(span||''), caretRow0:(rowCur|0), caretCol0:(colCur|0), refId:String(hit.idNorm||'') };
+          }
+
           const lp = ((hit.lp|0) + (leftCut|0))|0;
           const rp1 = (((hit.rp|0) + 1) + (leftCut|0))|0;
           if (!(rp1 > lp) || lp < 0) return null;
-
-          // Accept caret anywhere inside the inline-link span.
-          // This enables Ctrl+E / badge to open URL bar even when caret is on destination/title.
-          // (Auto hint in clean mode is still gated by hint-only policy; see maybeUpdate.)
-          try{ if ((ccSrcForChecks|0) < (lb0|0) || (ccSrcForChecks|0) > (rp1|0)) return null; }catch{}
-
           const span = src.slice(lp|0, rp1|0);
-          return { row:(row|0), lp:(lp|0), rp1:(rp1|0), span:String(span||''), caretRow0:(rowCur|0), caretCol0:(colCur|0) };
+          return { kind:'inline', row:(row|0), lp:(lp|0), rp1:(rp1|0), span:String(span||''), caretRow0:(rowCur|0), caretCol0:(colCur|0) };
         }catch{ return null; }
       };
 
@@ -2372,35 +2821,52 @@ try{
       const caretRowPre = (caretRow|0);
       const caretColPre = (caretCol|0);
       let newSpan = String(_mdUrlBarInput.value||'');
-      try{
-        const t = String(newSpan||'').trim();
-        if (!t){
-          try{ toast && toast('URLバー: 空です (中断)', 900); }catch{}
-          try{ editor && editor.focus && editor.focus(); }catch{}
-          return;
-        }
-        // #1922: If user typed outside the closing ')', fold the suffix back inside
-        // so we never generate a double ')' like '(URL)abc)'.
-        let tt = t;
+      const k0 = String(ctx.kind||'inline');
+      if (k0 === 'refdef'){
         try{
-          if (tt[0] === '('){
-            const lastClose = tt.lastIndexOf(')');
-            if (lastClose >= 0 && lastClose < (tt.length-1)){
-              const inside0 = tt.slice(1, lastClose);
-              const suffix = String(tt.slice(lastClose+1)||'').trim();
-              const inside = suffix ? (String(inside0||'') + ' ' + suffix) : String(inside0||'');
-              tt = '(' + String(inside||'').trim() + ')';
-            }
+          let t = String(newSpan||'').trim();
+          if (!t){
+            try{ toast && toast('URLバー: 空です (中断)', 900); }catch{}
+            try{ editor && editor.focus && editor.focus(); }catch{}
+            return;
           }
-        }catch{}
+          // Allow users to paste an inline-link style "(URL \"title\")"; strip one pair of parens.
+          try{
+            if (t[0] === '(' && t[(t.length-1)|0] === ')') t = String(t.slice(1, -1)||'').trim();
+          }catch{}
+          newSpan = String(t||'');
+        }catch{ newSpan = String(_mdUrlBarInput.value||''); }
+      } else {
+        try{
+          const t = String(newSpan||'').trim();
+          if (!t){
+            try{ toast && toast('URLバー: 空です (中断)', 900); }catch{}
+            try{ editor && editor.focus && editor.focus(); }catch{}
+            return;
+          }
+          // #1922: If user typed outside the closing ')', fold the suffix back inside
+          // so we never generate a double ')' like '(URL)abc)'.
+          let tt = t;
+          try{
+            if (tt[0] === '('){
+              const lastClose = tt.lastIndexOf(')');
+              if (lastClose >= 0 && lastClose < (tt.length-1)){
+                const inside0 = tt.slice(1, lastClose);
+                const suffix = String(tt.slice(lastClose+1)||'').trim();
+                const inside = suffix ? (String(inside0||'') + ' ' + suffix) : String(inside0||'');
+                tt = '(' + String(inside||'').trim() + ')';
+              }
+            }
+          }catch{}
 
-        if (!(tt[0]==='(' && tt[(tt.length-1)|0]===')')){
-          const core = tt.replace(/^\(+/,'').replace(/\)+$/,'').trim();
-          newSpan = '(' + core + ')';
-        } else {
-          newSpan = tt;
-        }
-      }catch{ newSpan = String(_mdUrlBarInput.value||''); }
+          if (!(tt[0]==='(' && tt[(tt.length-1)|0]===')')){
+            const core = tt.replace(/^\(+/,'').replace(/\)+$/,'').trim();
+            newSpan = '(' + core + ')';
+          } else {
+            newSpan = tt;
+          }
+        }catch{ newSpan = String(_mdUrlBarInput.value||''); }
+      }
       const lines = _splitLinesRaw();
       if (!Array.isArray(lines) || row<0 || row>=(lines.length|0)) { _mdUrlBarHide('row-oob'); return; }
       const srcLine = String(lines[row]||'');
@@ -3537,6 +4003,10 @@ try{
       let _icode = null;
       try{ _icode = _mdIndentCodeEnsureCache && _mdIndentCodeEnsureCache(false, lines, _fence); }catch{ _icode = null; }
 
+      // Ensure reference definition cache is ready (resolve reference links).
+      let _ref = null;
+      try{ _ref = _mdRefDefEnsureCache && _mdRefDefEnsureCache(false, lines, _fence, _icode); }catch{ _ref = null; }
+
       // 1ch width in px (base font). Used for codeblock margin/padding (0.5ch).
       let chPxBase = 0;
       try{
@@ -3613,6 +4083,8 @@ try{
         const isCodeFirst = !!(((fenceKind|0)===2) && _fence && _fence.first && _fence.first[row|0]) || !!(isIndentCodeRow && _icode && _icode.first && _icode.first[row|0]);
         const isCodeLast = !!(((fenceKind|0)===2) && _fence && _fence.last && _fence.last[row|0]) || !!(isIndentCodeRow && _icode && _icode.last && _icode.last[row|0]);
 
+        const isRefDefRow = !!(_ref && _ref.isDef && (row|0) >= 0 && (row|0) < (_ref.isDef.length|0) && _ref.isDef[row|0]);
+
         const lv0 = (isCodeRow ? 0 : _mdHeadingLevel(srcText));
         const isActiveRow = (row === (caretRow|0));
         const tb = (isCodeRow ? null : _mdThematicBreakInfo(srcText));
@@ -3624,6 +4096,9 @@ try{
         // - draft mode: hide on non-caret lines only (#1489)
         let hideSymbols = false;
         try{ hideSymbols = !!(_mdHideSymbolsForRow && _mdHideSymbolsForRow(!!isActiveRow)); }catch{ hideSymbols = false; }
+
+        // #1946: Reference definition lines are always rendered as raw text.
+        if (isRefDefRow) hideSymbols = false;
 
         // Loose list blank-line spacer rendering (#1730/#1731)
         // - clean: collapse ALL blank lines in the run (height=0)
@@ -3721,6 +4196,8 @@ try{
 
         let text = srcText;
         let prefixLen = 0;
+
+        // #1946: Reference definition rows are not hidden here.
 
         // #1882: Indented code blocks are rendered without the indentation prefix (GFM-like).
         // Only affects the rendered layer; the underlying text remains unchanged.
@@ -4090,7 +4567,7 @@ try{
             // Use the displayed text (after symbol hiding) for wrap measurement.
             let disp = String(text||'');
             try{
-              if (!isCodeRow && !isFenceRow && !isIndentCodeRow && disp && disp.indexOf('](') >= 0 && disp.indexOf('[') >= 0){
+              if (!isCodeRow && !isFenceRow && !isIndentCodeRow && disp && disp.indexOf('[') >= 0 && disp.indexOf(']') >= 0){
                 const col = (_mdCleanDisplayCollapseInfo && typeof _mdCleanDisplayCollapseInfo === 'function') ? _mdCleanDisplayCollapseInfo(disp) : null;
                 if (col && typeof col.dispText === 'string') disp = String(col.dispText||'');
               }
@@ -4129,6 +4606,8 @@ try{
           const b0 = (looseGap.end|0);
           if ((row|0) >= a0 && (row|0) <= b0) hPx = 0;
         }
+
+        // NOTE (#1946): Reference definition rows are no longer collapsed (height=0).
         el.style.top = y + 'px';
         el.style.height = hPx + 'px';
         el.style.lineHeight = lh + 'px';
@@ -9925,6 +10404,52 @@ try{
     return null;
   }
 
+  function _detectMdRefLinkAt(line, col){
+    try{
+      const s = String(line||'');
+      if (!s) return null;
+      const i = Math.max(0, Math.min((s.length|0), (col|0)));
+
+      // Do not treat anything inside inline code spans as a reference link.
+      try{
+        if (_mdRichActive && _mdRichActive()){
+          if (s.indexOf('`') >= 0 && typeof _mdInlineCodeOverlaps === 'function'){
+            if (_mdInlineCodeOverlaps(s, i|0, (i+1)|0)) return null;
+          }
+        }
+      }catch{}
+
+      const refs = _mdRefLinkScanResolved(s);
+      if (!refs || !refs.length) return null;
+      for (const it of refs){
+        if (!it) continue;
+        const lb = (it.lb|0);
+        const rb = (it.rb|0);
+        const rp = (it.rp|0);
+        if ((i|0) < (lb|0) || (i|0) > (rp|0)) continue;
+
+        // Infer kind (same rules as inline)
+        let kind = 'external';
+        let finalUrl = String(it.url||'');
+        try{
+          if (/^file:\/\/wsl\$\//.test(finalUrl) || /^file:\/\/wsl\.localhost\//.test(finalUrl)){
+            finalUrl = finalUrl.slice(7);
+            kind = 'six-open';
+          } else if (/^[A-Za-z]:[\\/]/.test(finalUrl)){
+            kind = 'six-open';
+          } else if (/^[a-zA-Z][a-zA-Z0-9+.-]*:/.test(finalUrl) && !/^[A-Za-z]:/.test(finalUrl)){
+            kind = 'external';
+          } else {
+            kind = 'six-open';
+          }
+          try{ if (kind==='six-open') finalUrl = finalUrl.replace(/\\/g,'/'); }catch{}
+        }catch{}
+        return { c1:(lb|0), c2:((rb+1)|0), url:finalUrl, kind, tooltip:String(it.tooltip||'') };
+      }
+    }catch{}
+    return null;
+  }
+
   function _detectUrlAt(line, col, row){
     try{
       if (!line) return null;
@@ -10355,10 +10880,11 @@ try{
               const isActiveRow = (row === (caretRow|0));
               if (draftMode && isActiveRow){
                 const mdInline = _detectMdInlineLinkAt && _detectMdInlineLinkAt(line, c|0);
-                if (mdInline){
+                const mdRef = (!mdInline) ? (_detectMdRefLinkAt && _detectMdRefLinkAt(line, c|0)) : null;
+                if (mdInline || mdRef){
                   suppressRaw = true;
-                  // Also use md-inline hit so tooltip/title is available on hover in INSERT.
-                  hit = mdInline;
+                  // Prefer md-inline hit so destination/title is available; otherwise use ref hit.
+                  hit = mdInline || mdRef;
                 }
               }
             }
@@ -10375,7 +10901,8 @@ try{
           if (mdRich && _mdIsCodeRow){
             const cRaw = Math.max(0, Math.min(line.length|0, (prefixLen|0) + (cDisp|0)));
             const mdInline = _detectMdInlineLinkAt && _detectMdInlineLinkAt(line, cRaw|0);
-            if (mdInline){
+            const mdRef = (!mdInline) ? (_detectMdRefLinkAt && _detectMdRefLinkAt(line, cRaw|0)) : null;
+            if (mdInline || mdRef){
               hit = null;
             }
           }
@@ -10408,9 +10935,12 @@ try{
           const draft = (function(){ try{ return _mdDraftEditEnabled && _mdDraftEditEnabled(); }catch{ return false; } })();
           const ubVis = (typeof _mdUrlBarVisible==='function') ? !!_mdUrlBarVisible() : false;
           const ubActive = !!(_mdUrlBar && _mdUrlBar.dataset && _mdUrlBar.dataset.active === '1');
-          if (mdRich && draft && ubVis && !ubActive && typeof _detectMdInlineLinkAt === 'function'){
+          if (mdRich && draft && ubVis && !ubActive){
             const line = String((_splitLines()[caretRow] || '')||'');
-            const hit = _detectMdInlineLinkAt(line, caretCol|0);
+            const hit = (
+              (typeof _detectMdInlineLinkAt === 'function' ? _detectMdInlineLinkAt(line, caretCol|0) : null)
+              || (typeof _detectMdRefLinkAt === 'function' ? _detectMdRefLinkAt(line, caretCol|0) : null)
+            );
             if (hit && hit.url){
               _hoverLink = Object.assign({ r: (caretRow|0) }, hit);
             }
@@ -14947,9 +15477,9 @@ try{
           }
         }catch{ disp = src; }
 
-        // Inline links are visually collapsed in md-rich display; keep wrap counts stable.
+        // Links are visually collapsed in md-rich display; keep wrap counts stable.
         try{
-          if (!isCodeRow && disp && disp.indexOf('](') >= 0 && disp.indexOf('[') >= 0){
+          if (!isCodeRow && disp && disp.indexOf('[') >= 0 && disp.indexOf(']') >= 0){
             const col = (_mdCleanDisplayCollapseInfo && typeof _mdCleanDisplayCollapseInfo === 'function') ? _mdCleanDisplayCollapseInfo(disp) : null;
             if (col && typeof col.dispText === 'string') disp = String(col.dispText||'');
           }
@@ -15069,9 +15599,9 @@ try{
           }
         }catch{ disp = src; }
 
-        // Inline links are visually collapsed in md-rich display; keep wrap counts stable.
+        // Links are visually collapsed in md-rich display; keep wrap counts stable.
         try{
-          if (!isCodeRow && disp && disp.indexOf('](') >= 0 && disp.indexOf('[') >= 0){
+          if (!isCodeRow && disp && disp.indexOf('[') >= 0 && disp.indexOf(']') >= 0){
             const col = (_mdCleanDisplayCollapseInfo && typeof _mdCleanDisplayCollapseInfo === 'function') ? _mdCleanDisplayCollapseInfo(disp) : null;
             if (col && typeof col.dispText === 'string') disp = String(col.dispText||'');
           }
@@ -19515,11 +20045,12 @@ try{
               const draftMode = !!(_mdDraftEditEnabled && _mdDraftEditEnabled());
               if (draftMode){
                 const mdInline = _detectMdInlineLinkAt && _detectMdInlineLinkAt(String(line||''), caretCol|0);
-                if (mdInline){
+                const mdRef = (!mdInline) ? (_detectMdRefLinkAt && _detectMdRefLinkAt(String(line||''), caretCol|0)) : null;
+                if (mdInline || mdRef){
                   suppressRaw = true;
                   // draft: link text is displayed without surrounding brackets in md-rich.
                   // Use the same display-space ranges as mouse hover to avoid 1ch right-shift.
-                  link = mdInline;
+                  link = mdInline || mdRef;
                   try{
                     if (_mdCleanDisplayCollapseInfo && typeof _mdCleanDisplayCollapseInfo === 'function'){
                       const col = _mdCleanDisplayCollapseInfo(String(line||''));
@@ -19528,7 +20059,7 @@ try{
                         for (const it of col.links){
                           if (!it) continue;
                           if ((dispCol|0) >= (it.dispStart|0) && (dispCol|0) < (it.dispEnd|0)){
-                            link = Object.assign({}, mdInline, {
+                            link = Object.assign({}, (mdInline || mdRef), {
                               c1: (it.textStart|0),
                               c2: (it.textEnd|0),
                               dispLine: String(col.dispText||''),
@@ -19951,6 +20482,8 @@ try{
       const maxCol=(raw[caretRow]||'').length;
       if (caretCol<0) caretCol=0; if (caretCol>maxCol) caretCol=maxCol;
 
+      // #1946: Reference definition lines are not hidden.
+
       // #1494: markdown clean display - HR/setext underline lines clamp to column 0.
       try{ _mdClampCaretForSpecialCleanLines(); }catch{}
 
@@ -19962,6 +20495,7 @@ try{
     // 強制同期順序: CaseA/B の EOF 削除/undo 直後に表示が旧状態で残る問題 (#614)
     try{ _mdWrapInvalidateCache('text-mutation'); _mdWrapEnsureCache(false); }catch{}
     try{ _mdListInvalidateCache && _mdListInvalidateCache('text-mutation'); }catch{}
+    try{ _mdRefDefInvalidateCache && _mdRefDefInvalidateCache('text-mutation'); }catch{}
     try{ _mdSyncEofPadComp(); }catch{}
     try{ _syncEofPadGridComp && _syncEofPadGridComp(); }catch{}
     // 1) caret を raw でクランプ
@@ -20050,6 +20584,7 @@ try{
     try{ _wrapInvalidateCache && _wrapInvalidateCache('undo-redo'); }catch{}
     try{ _mdWrapInvalidateCache && _mdWrapInvalidateCache('undo-redo'); }catch{}
     try{ _mdListInvalidateCache && _mdListInvalidateCache('undo-redo'); }catch{}
+    try{ _mdRefDefInvalidateCache && _mdRefDefInvalidateCache('undo-redo'); }catch{}
     try{ if (_wrapEnabled && _wrapEnabled() && _wrapEnsureCache) _wrapEnsureCache(true); }catch{}
     try{ if (_mdRichActive && _mdRichActive() && _wrapEnabled && _wrapEnabled() && _mdWrapEnsureCache) _mdWrapEnsureCache(true); }catch{}
 
@@ -23068,19 +23603,33 @@ try{
         if (mdRich && (draft || clean)){
           const linesRaw = _splitLinesRaw();
           const src = String((linesRaw && linesRaw.length) ? (linesRaw[caretRow]||'') : line);
-          if (src && src.indexOf('](') >= 0 && src.indexOf('[') >= 0){
-            const col = (_mdCleanDisplayCollapseInfo && typeof _mdCleanDisplayCollapseInfo === 'function') ? _mdCleanDisplayCollapseInfo(src) : null;
-            if (col && typeof col.srcToDispCaret === 'function' && typeof col.dispToSrcCaret === 'function' && typeof col.dispText === 'string'){
-              const disp = String(col.dispText||'');
-              let dc = (col.srcToDispCaret(Math.max(0, Math.min((src.length|0), nc|0)) )|0);
-              if (delta > 0){
-                for (let i=0; i<(delta|0); i++) dc = _nextIndex(disp, dc);
-              } else if (delta < 0){
-                const count = (-delta)|0;
-                for (let i=0; i<count; i++) dc = _prevIndex(disp, dc);
+
+          // #1947: Code blocks render inline links as raw text (inert). Horizontal motion must be raw too.
+          let mdCodeRow = false;
+          try{
+            const r0 = (caretRow|0);
+            const fc = _mdCodeFenceEnsureCache && _mdCodeFenceEnsureCache(false, linesRaw);
+            const ic = _mdIndentCodeEnsureCache && _mdIndentCodeEnsureCache(false, linesRaw, fc);
+            const fk = (fc && fc.kind && r0>=0 && r0<(linesRaw.length|0)) ? (fc.kind[r0]|0) : 0;
+            const ik = (ic && ic.kind && r0>=0 && r0<(linesRaw.length|0)) ? (ic.kind[r0]|0) : 0;
+            mdCodeRow = ((fk|0) === 2) || ((ik|0) === 2);
+          }catch{ mdCodeRow = false; }
+
+          if (!mdCodeRow){
+            if (src && src.indexOf('[') >= 0 && src.indexOf(']') >= 0){
+              const col = (_mdCleanDisplayCollapseInfo && typeof _mdCleanDisplayCollapseInfo === 'function') ? _mdCleanDisplayCollapseInfo(src) : null;
+              if (col && typeof col.srcToDispCaret === 'function' && typeof col.dispToSrcCaret === 'function' && typeof col.dispText === 'string'){
+                const disp = String(col.dispText||'');
+                let dc = (col.srcToDispCaret(Math.max(0, Math.min((src.length|0), nc|0)) )|0);
+                if (delta > 0){
+                  for (let i=0; i<(delta|0); i++) dc = _nextIndex(disp, dc);
+                } else if (delta < 0){
+                  const count = (-delta)|0;
+                  for (let i=0; i<count; i++) dc = _prevIndex(disp, dc);
+                }
+                nc = (col.dispToSrcCaret(dc|0)|0);
+                movedInDisp = true;
               }
-              nc = (col.dispToSrcCaret(dc|0)|0);
-              movedInDisp = true;
             }
           }
         }
@@ -23323,7 +23872,7 @@ try{
       // - clean: always collapsed
       // - draft: also collapsed on the active row (even though other markdown symbols are shown raw)
       // So we apply link collapsing regardless of hide, matching the rendered layer.
-      if (srcLine.indexOf('](') < 0 || srcLine.indexOf('[') < 0) return identity;
+      if (srcLine.indexOf('[') < 0 || srcLine.indexOf(']') < 0) return identity;
       const col = (_mdCleanDisplayCollapseInfo && typeof _mdCleanDisplayCollapseInfo === 'function') ? _mdCleanDisplayCollapseInfo(srcLine) : null;
       if (!col || typeof col.dispText !== 'string') return identity;
 

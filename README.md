@@ -56,7 +56,6 @@
   - フリーのフォント「SarasaMonoJ(更紗ゴシック)」を前提にしている。[GitHub](https://github.com/be5invis/Sarasa-Gothic)
     - SarasaMonoJ-TTF-1.0.35.7zをダウンロードして中のTTFファイルをインストールする必要がある。
 
-
 ## ヘルプ(外部Markdown)
 - `_six.js`と同じフォルダに`任意名.NN.md`(NN=01..99) を置くと、ヘルプダイアログの各タブを外部Markdownから読み込む。
   - NNの昇順でタブに割り当て。
