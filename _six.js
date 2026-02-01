@@ -28661,15 +28661,32 @@ try{
       let i = 0;
       while (i < src.length){
         const ch = src[i];
-        // inline code -> kbd
+        // inline code -> kbd (support multi-backtick fences: `` a `` etc.)
         if (ch === '`'){
-          const j = src.indexOf('`', i+1);
-          if (j >= 0){
-            const code = src.slice(i+1, j);
+          let n = 1;
+          try{ while ((i+n) < src.length && src[i+n] === '`') n++; }catch{ n = 1; }
+          let j = i + n;
+          let closeAt = -1;
+          while (j < src.length){
+            const k = src.indexOf('`', j);
+            if (k < 0) break;
+            let m = 1;
+            try{ while ((k+m) < src.length && src[k+m] === '`') m++; }catch{ m = 1; }
+            if ((m|0) === (n|0)){ closeAt = k|0; break; }
+            j = (k + m)|0;
+          }
+          if (closeAt >= 0){
+            let code = src.slice((i+n)|0, closeAt|0);
+            // CommonMark-like trim: if both ends are a single space, strip one.
+            try{ if (code.length >= 2 && code[0] === ' ' && code[code.length-1] === ' ' && /[^ ]/.test(code)) code = code.slice(1, -1); }catch{}
             out += '<kbd class="six-help-kbd">' + _helpMdEscHtml(code || ' ') + '</kbd>';
-            i = j + 1;
+            i = (closeAt + n)|0;
             continue;
           }
+          // No closing fence: treat backticks as literal.
+          out += _helpMdEscHtml(src.slice(i, (i+n)|0));
+          i = (i + n)|0;
+          continue;
         }
         // link: [text](url)
         if (ch === '['){
@@ -28701,8 +28718,8 @@ try{
       let inCode = false;
       let codeBuf = [];
       let paraBuf = [];
-      let listMode = null; // 'ul' | 'ol'
-      let listItems = [];
+      // nested list stack: { type:'ul'|'ol', indent, openLi }
+      let listStack = [];
 
       const flushPara = ()=>{
         if (!paraBuf.length) return;
@@ -28710,15 +28727,18 @@ try{
         html += '<p class="six-help-p">' + body + '</p>';
         paraBuf = [];
       };
-      const flushList = ()=>{
-        if (!listMode || !listItems.length) { listMode = null; listItems = []; return; }
-        html += (listMode==='ol') ? '<ol class="six-help-ol">' : '<ul class="six-help-ul">';
-        for (const it of listItems){
-          html += '<li>' + _helpMdInlineToHtml(it) + '</li>';
-        }
-        html += (listMode==='ol') ? '</ol>' : '</ul>';
-        listMode = null; listItems = [];
+      const _openList = (type, indent)=>{
+        html += (type==='ol') ? '<ol class="six-help-ol">' : '<ul class="six-help-ul">';
+        listStack.push({ type, indent:(indent|0), openLi:false });
       };
+      const _closeList = ()=>{
+        if (!listStack.length) return;
+        const top = listStack[listStack.length-1];
+        try{ if (top.openLi){ html += '</li>'; top.openLi = false; } }catch{}
+        html += (top.type==='ol') ? '</ol>' : '</ul>';
+        listStack.pop();
+      };
+      const flushLists = ()=>{ while (listStack.length) _closeList(); };
 
       while (i < lines.length){
         const raw = lines[i];
@@ -28726,7 +28746,7 @@ try{
         // fenced code
         if (/^```/.test(line)){
           if (!inCode){
-            flushPara(); flushList();
+            flushPara(); flushLists();
             inCode = true; codeBuf = [];
           } else {
             const code = codeBuf.join('\n');
@@ -28738,35 +28758,83 @@ try{
         if (inCode){ codeBuf.push(line); i++; continue; }
 
         // blank line
-        if (line.trim()===''){ flushPara(); flushList(); i++; continue; }
+        if (line.trim()===''){ flushPara(); flushLists(); i++; continue; }
+
+        // horizontal rule
+        if (/^\s{0,3}([-*_])(?:\s*\1){2,}\s*$/.test(line)){
+          flushPara(); flushLists();
+          html += '<hr class="six-help-hr">';
+          i++; continue;
+        }
 
         // heading
         const mh = line.match(/^(#{1,6})\s+(.*)$/);
         if (mh){
-          flushPara(); flushList();
+          flushPara(); flushLists();
           const lvl = Math.max(1, Math.min(6, (mh[1]||'').length|0));
           html += '<h' + lvl + ' class="six-help-h">' + _helpMdInlineToHtml(mh[2]||'') + '</h' + lvl + '>';
           i++; continue;
         }
 
         // list item
-        const mul = line.match(/^\s*[-*+]\s+(.*)$/);
-        const mol = line.match(/^\s*(\d+)\.\s+(.*)$/);
+        const mul = line.match(/^(\s*)[-*+]\s+(.*)$/);
+        const mol = line.match(/^(\s*)(\d+)\.\s+(.*)$/);
         if (mul || mol){
           flushPara();
-          const want = mol ? 'ol' : 'ul';
-          if (listMode && listMode !== want){ flushList(); }
-          listMode = want;
-          listItems.push(String(mol ? (mol[2]||'') : (mul[1]||'')));
+          const ws = String((mul ? mul[1] : mol[1])||'');
+          const content = String(mol ? (mol[3]||'') : (mul[2]||''));
+          const type = mol ? 'ol' : 'ul';
+          // Indent: count spaces, treat tab as 4 spaces.
+          let indent = 0;
+          try{ for (const c of ws){ indent += (c === '\t') ? 4 : 1; } }catch{ indent = (ws.length|0); }
+
+          // Close deeper lists if indent decreased.
+          while (listStack.length && (indent|0) < (listStack[listStack.length-1].indent|0)) _closeList();
+
+          // Same indent but different list type -> restart this level.
+          if (listStack.length && (indent|0) === (listStack[listStack.length-1].indent|0) && type !== listStack[listStack.length-1].type){
+            _closeList();
+          }
+
+          // Open list if needed (first or nested).
+          if (!listStack.length){
+            _openList(type, indent|0);
+          } else if ((indent|0) > (listStack[listStack.length-1].indent|0)){
+            // Nested list: must be inside the previous item's <li>.
+            try{
+              const top = listStack[listStack.length-1];
+              if (!top.openLi){ html += '<li>'; top.openLi = true; }
+            }catch{}
+            _openList(type, indent|0);
+          }
+
+          // New item at current level: close previous <li> if still open.
+          try{
+            const top = listStack[listStack.length-1];
+            if (top.openLi){ html += '</li>'; top.openLi = false; }
+            html += '<li>' + _helpMdInlineToHtml(content);
+            top.openLi = true;
+          }catch{}
+
           i++; continue;
         }
 
         // paragraph (accumulate)
-        flushList();
+        // If we're inside a list item, treat this as a continuation line.
+        if (listStack.length){
+          try{
+            const top = listStack[listStack.length-1];
+            if (top && top.openLi){
+              html += '<br>' + _helpMdInlineToHtml(line.trim());
+              i++; continue;
+            }
+          }catch{}
+        }
+        flushLists();
         paraBuf.push(line);
         i++;
       }
-      flushPara(); flushList();
+      flushPara(); flushLists();
       if (inCode){
         const code = codeBuf.join('\n');
         html += '<pre class="six-help-pre"><code>' + _helpMdEscHtml(code) + '</code></pre>';
