@@ -282,6 +282,350 @@ try{
     try{ return _mdInlineCodeHtmlWithRange(s, null, 0, 0); }catch{ return _mdEscHtml(String(s||'')); }
   }
 
+  // --- Markdown inline decorations (em/strong/del) for md-rich clean display (#1963)
+  // Supported:
+  // - Italic: *text*, _text_
+  // - Bold: **text**, __text__
+  // - Bold+Italic: ***text***, ___text___
+  // - Strike: ~~text~~
+  // Notes:
+  // - Decorations are disabled inside inline code spans.
+  // - Underscore decorations are suppressed inside word-like runs (snake_case).
+  function _mdInlineDecorHtmlWithRange(s, rangeClass, rangeStart, rangeEnd){
+    try{
+      const src = String(s||'');
+      if (!src) return '';
+      const n = (src.length|0);
+      const hasRange = !!(rangeClass && Number.isFinite(rangeStart) && Number.isFinite(rangeEnd));
+      const rs = hasRange ? Math.max(0, Math.min(n|0, rangeStart|0)) : 0;
+      const re = hasRange ? Math.max(0, Math.min(n|0, rangeEnd|0)) : 0;
+      const selS = Math.min(rs|0, re|0);
+      const selE = Math.max(rs|0, re|0);
+      const wrap = (cls, inner)=>{ try{ return '<span class="' + String(cls||'') + '">' + inner + '</span>'; }catch{ return inner; } };
+
+      const isEscaped = (idx)=>{
+        try{
+          let k = (idx|0) - 1;
+          let cnt = 0;
+          while (k >= 0 && src[k] === '\\'){ cnt++; k--; }
+          return ((cnt|0) % 2) === 1;
+        }catch{ return false; }
+      };
+      const isWs = (c)=>{ try{ return c === ' ' || c === '\t' || c === '\n' || c === '\r'; }catch{ return false; } };
+      const isWord = (c)=>{
+        try{
+          if (!c) return false;
+          const cp = c.codePointAt ? (c.codePointAt(0)|0) : (c.charCodeAt(0)|0);
+          if ((cp>=48&&cp<=57)||(cp>=65&&cp<=90)||(cp>=97&&cp<=122)) return true;
+          try{ return /[\p{L}\p{N}]/u.test(c); }catch{ return false; }
+        }catch{ return false; }
+      };
+      const canUnderscore = (pos, len)=>{
+        try{
+          const prev = (pos > 0) ? src[(pos-1)|0] : '';
+          const next = ((pos + (len|0)) < (n|0)) ? src[(pos + (len|0))|0] : '';
+          if (isWord(prev) && isWord(next)) return false;
+          return true;
+        }catch{ return true; }
+      };
+      const findClose = (ch, run, from, limit)=>{
+        try{
+          let j = from|0;
+          const lim = (limit|0);
+          while (j < lim){
+            const k = src.indexOf(ch, j);
+            if (k < 0 || (k|0) >= lim) return -1;
+            if (isEscaped(k|0)) { j = (k+1)|0; continue; }
+            let m = 1;
+            while ((k + m) < lim && src[k + m] === ch && (m|0) < 3) m++;
+            if ((m|0) >= (run|0)) return k|0;
+            j = (k + m)|0;
+          }
+          return -1;
+        }catch{ return -1; }
+      };
+
+      const emitPlain = (a0, b0)=>{
+        try{
+          const a = Math.max(0, Math.min(n|0, a0|0));
+          const b = Math.max(a|0, Math.min(n|0, b0|0));
+          if (!hasRange || (selE|0) <= (a|0) || (selS|0) >= (b|0)) return _mdEscHtml(src.slice(a|0, b|0));
+          const x0 = Math.max(a|0, Math.min(b|0, selS|0));
+          const x1 = Math.max(a|0, Math.min(b|0, selE|0));
+          let out = '';
+          if ((x0|0) > (a|0)) out += _mdEscHtml(src.slice(a|0, x0|0));
+          if ((x1|0) > (x0|0)) out += wrap(rangeClass, _mdEscHtml(src.slice(x0|0, x1|0)));
+          if ((b|0) > (x1|0)) out += _mdEscHtml(src.slice(x1|0, b|0));
+          return out;
+        }catch{ return _mdEscHtml(String(src||'')); }
+      };
+
+      // Render a plain (non-code) substring [a,b) with decorations.
+      const renderPlain = (a0, b0)=>{
+        try{
+          const a = Math.max(0, Math.min(n|0, a0|0));
+          const b = Math.max(a|0, Math.min(n|0, b0|0));
+          let out = '';
+          let segStart = a|0;
+          let i = a|0;
+          while (i < (b|0)){
+            const ch = src[i];
+
+            // strike: ~~text~~
+            if (ch === '~' && (i+1) < (b|0) && src[(i+1)|0] === '~' && !isEscaped(i|0)){
+              let closeAt = -1;
+              try{
+                let j = (i+2)|0;
+                while (j < (b|0)){
+                  const k = src.indexOf('~~', j);
+                  if (k < 0 || (k|0) >= (b|0)) break;
+                  if (isEscaped(k|0)) { j = (k+2)|0; continue; }
+                  if ((k|0) > (i+2)) { closeAt = k|0; break; }
+                  j = (k+2)|0;
+                }
+              }catch{ closeAt = -1; }
+              if (closeAt >= 0){
+                out += emitPlain(segStart|0, i|0);
+                out += '<span class="md-del">' + emitPlain((i+2)|0, closeAt|0) + '</span>';
+                i = (closeAt + 2)|0;
+                segStart = i|0;
+                continue;
+              }
+            }
+
+            // emphasis/strong: *, **, *** and _, __, ___
+            if ((ch === '*' || ch === '_') && !isEscaped(i|0)){
+              let run = 1;
+              try{ while ((i+run) < (b|0) && src[(i+run)|0] === ch && (run|0) < 3) run++; }catch{ run = 1; }
+              run = Math.max(1, Math.min(3, run|0))|0;
+              if (ch === '_' && !canUnderscore(i|0, run|0)) { i = (i + run)|0; continue; }
+              // opener must not be followed by whitespace
+              try{ if (isWs(src[(i+run)|0]||'')) { i = (i + run)|0; continue; } }catch{}
+
+              const closeAt = findClose(ch, run|0, (i+run)|0, b|0);
+              if (closeAt >= 0 && (closeAt|0) > ((i+run)|0)){
+                // closer must not be preceded by whitespace
+                try{ if (isWs(src[(closeAt-1)|0]||'')) { i = (i + run)|0; continue; } }catch{}
+                if (ch === '_' && !canUnderscore(closeAt|0, run|0)) { i = (i + run)|0; continue; }
+
+                out += emitPlain(segStart|0, i|0);
+                const inner = emitPlain((i+run)|0, closeAt|0);
+                if ((run|0) === 3){
+                  out += '<span class="md-strong"><span class="md-em">' + inner + '</span></span>';
+                } else if ((run|0) === 2){
+                  out += '<span class="md-strong">' + inner + '</span>';
+                } else {
+                  out += '<span class="md-em">' + inner + '</span>';
+                }
+                i = (closeAt + run)|0;
+                segStart = i|0;
+                continue;
+              }
+            }
+
+            i++;
+          }
+          out += emitPlain(segStart|0, b|0);
+          return out;
+        }catch{ return _mdEscHtml(src.slice(a0|0, b0|0)); }
+      };
+
+      // Split by inline code spans (which must not be decorated).
+      const segs = (src.indexOf('`') >= 0 && typeof _mdInlineCodeParse === 'function') ? _mdInlineCodeParse(src) : [{ t:'text', s:src, a:0, b:n }];
+      let out = '';
+      for (const it of (segs||[])){
+        if (!it) continue;
+        if (it.t === 'text'){
+          out += renderPlain(it.a|0, it.b|0);
+        } else if (it.t === 'code'){
+          const a = it.a|0, b = it.b|0;
+          const sub = src.slice(a|0, b|0);
+          const subRs = hasRange ? Math.max(0, Math.min((sub.length|0), (selS - (a|0))|0)) : 0;
+          const subRe = hasRange ? Math.max(0, Math.min((sub.length|0), (selE - (a|0))|0)) : 0;
+          out += _mdInlineCodeHtmlWithRange(sub, hasRange ? rangeClass : null, subRs|0, subRe|0);
+        }
+      }
+      return out;
+    }catch{ return _mdEscHtml(String(s||'')); }
+  }
+
+  function _mdInlineDecorCollapseInfo(s){
+    // Collapse inline decorations for clean-display hit-testing/caret mapping.
+    // This is intentionally conservative (no nested parsing); it matches _mdInlineDecorHtmlWithRange.
+    try{
+      const src = String(s||'');
+      const n = (src.length|0);
+      if (!src || (src.indexOf('*') < 0 && src.indexOf('_') < 0 && src.indexOf('~') < 0)){
+        return { dispText: src, srcToDisp:(c)=>Math.max(0, Math.min(n|0, c|0)), dispToSrc:(c)=>Math.max(0, Math.min(n|0, c|0)), srcToDispCaret:(c)=>Math.max(0, Math.min(n|0, c|0)), dispToSrcCaret:(c)=>Math.max(0, Math.min(n|0, c|0)) };
+      }
+
+      const isEscaped = (idx)=>{
+        try{
+          let k = (idx|0) - 1;
+          let cnt = 0;
+          while (k >= 0 && src[k] === '\\'){ cnt++; k--; }
+          return ((cnt|0) % 2) === 1;
+        }catch{ return false; }
+      };
+      const isWs = (c)=>{ try{ return c === ' ' || c === '\t' || c === '\n' || c === '\r'; }catch{ return false; } };
+      const isWord = (c)=>{
+        try{
+          if (!c) return false;
+          const cp = c.codePointAt ? (c.codePointAt(0)|0) : (c.charCodeAt(0)|0);
+          if ((cp>=48&&cp<=57)||(cp>=65&&cp<=90)||(cp>=97&&cp<=122)) return true;
+          try{ return /[\p{L}\p{N}]/u.test(c); }catch{ return false; }
+        }catch{ return false; }
+      };
+      const canUnderscore = (pos, len)=>{
+        try{
+          const prev = (pos > 0) ? src[(pos-1)|0] : '';
+          const next = ((pos + (len|0)) < (n|0)) ? src[(pos + (len|0))|0] : '';
+          if (isWord(prev) && isWord(next)) return false;
+          return true;
+        }catch{ return true; }
+      };
+
+      // Inline code spans: do not collapse decorations inside.
+      let codeSpans = null;
+      try{ codeSpans = (src.indexOf('`') >= 0 && typeof _mdInlineCodeSpansForLine === 'function') ? _mdInlineCodeSpansForLine(src) : null; }catch{ codeSpans = null; }
+      const overlapsCode = (a0, b0)=>{
+        try{
+          if (!codeSpans || !codeSpans.length) return false;
+          const a = Math.max(0, a0|0);
+          const b = Math.max(a|0, b0|0);
+          for (const sp of codeSpans){
+            const sa = sp.a|0, sb = sp.b|0;
+            if ((a|0) < (sb|0) && (b|0) > (sa|0)) return true;
+          }
+        }catch{}
+        return false;
+      };
+
+      // Build disp text and caret mappings.
+      const srcToDispCaret = new Int32Array((n|0) + 1);
+      const dispToSrcCaret = [];
+      let disp = '';
+      let dispPos = 0;
+      dispToSrcCaret[0] = 0;
+
+      const emitChar = (ch, srcIdx)=>{
+        try{
+          disp += ch;
+          dispPos = (dispPos + 1)|0;
+          dispToSrcCaret[dispPos|0] = ((srcIdx|0) + 1)|0;
+        }catch{}
+      };
+
+      const findClose = (pat, from, limit)=>{
+        try{
+          let j = from|0;
+          const lim = limit|0;
+          while (j < lim){
+            const k = src.indexOf(pat, j);
+            if (k < 0 || (k|0) >= lim) return -1;
+            if (isEscaped(k|0)) { j = (k + (pat.length|0))|0; continue; }
+            return k|0;
+          }
+        }catch{}
+        return -1;
+      };
+
+      let i = 0;
+      while (i < (n|0)){
+        srcToDispCaret[i|0] = dispPos|0;
+        const ch = src[i];
+
+        // strike: ~~text~~
+        if (ch === '~' && (i+1) < (n|0) && src[(i+1)|0] === '~' && !isEscaped(i|0)){
+          const closeAt = findClose('~~', (i+2)|0, n|0);
+          if (closeAt >= 0 && (closeAt|0) > ((i+2)|0) && !overlapsCode(i|0, (closeAt + 2)|0)){
+            // Skip opening
+            srcToDispCaret[(i+1)|0] = dispPos|0;
+            srcToDispCaret[(i+2)|0] = dispPos|0;
+            // Emit inner literally (no nested parsing)
+            for (let j=(i+2)|0; j < (closeAt|0); j++){
+              srcToDispCaret[j|0] = dispPos|0;
+              emitChar(src[j], j|0);
+              srcToDispCaret[(j+1)|0] = dispPos|0;
+            }
+            // Skip closing
+            srcToDispCaret[(closeAt|0)] = dispPos|0;
+            srcToDispCaret[(closeAt+1)|0] = dispPos|0;
+            srcToDispCaret[(closeAt+2)|0] = dispPos|0;
+            i = (closeAt + 2)|0;
+            continue;
+          }
+        }
+
+        // emphasis/strong: *, **, *** and _, __, ___
+        if ((ch === '*' || ch === '_') && !isEscaped(i|0)){
+          let run = 1;
+          try{ while ((i+run) < (n|0) && src[(i+run)|0] === ch && (run|0) < 3) run++; }catch{ run = 1; }
+          run = Math.max(1, Math.min(3, run|0))|0;
+          if (ch === '_' && !canUnderscore(i|0, run|0)){
+            emitChar(ch, i|0);
+            i = (i + 1)|0;
+            continue;
+          }
+          try{ if (isWs(src[(i+run)|0]||'')) { emitChar(ch, i|0); i = (i+1)|0; continue; } }catch{}
+
+          // Find close run (same count)
+          let closeAt = -1;
+          try{
+            let j = (i+run)|0;
+            while (j < (n|0)){
+              const k = src.indexOf(ch, j);
+              if (k < 0) break;
+              if (isEscaped(k|0)) { j = (k+1)|0; continue; }
+              let m = 1;
+              while ((k+m) < (n|0) && src[k+m] === ch && (m|0) < 3) m++;
+              if ((m|0) >= (run|0)) { closeAt = k|0; break; }
+              j = (k + m)|0;
+            }
+          }catch{ closeAt = -1; }
+
+          if (closeAt >= 0 && (closeAt|0) > ((i+run)|0)){
+            try{ if (isWs(src[(closeAt-1)|0]||'')) { closeAt = -1; } }catch{}
+            if (closeAt >= 0 && ch === '_' && !canUnderscore(closeAt|0, run|0)) closeAt = -1;
+          }
+
+          if (closeAt >= 0 && !overlapsCode(i|0, (closeAt + run)|0)){
+            // Skip opening run
+            for (let k=0;k<(run|0);k++) srcToDispCaret[(i+k)|0] = dispPos|0;
+            srcToDispCaret[(i+run)|0] = dispPos|0;
+            // Emit inner literally (no nested parsing)
+            for (let j=(i+run)|0; j < (closeAt|0); j++){
+              srcToDispCaret[j|0] = dispPos|0;
+              emitChar(src[j], j|0);
+              srcToDispCaret[(j+1)|0] = dispPos|0;
+            }
+            // Skip closing run
+            for (let k=0;k<=(run|0);k++) srcToDispCaret[(closeAt+k)|0] = dispPos|0;
+            i = (closeAt + run)|0;
+            continue;
+          }
+        }
+
+        // default: emit literal char
+        emitChar(ch, i|0);
+        i = (i + 1)|0;
+      }
+      srcToDispCaret[n|0] = dispPos|0;
+      if (dispToSrcCaret[(dispPos|0)] == null) dispToSrcCaret[(dispPos|0)] = n|0;
+      const dn = (disp.length|0);
+
+      const srcToDisp = (col0)=>{
+        try{ const c = Math.max(0, Math.min(n|0, col0|0)); return srcToDispCaret[c|0]|0; }catch{ return Math.max(0, Math.min(n|0, col0|0)); }
+      };
+      const dispToSrc = (dispCol0)=>{
+        try{ const dc = Math.max(0, Math.min(dn|0, dispCol0|0)); return (dispToSrcCaret[dc|0]|0); }catch{ return Math.max(0, dispCol0|0); }
+      };
+      const srcToDispCaretFn = (col0)=>{ try{ const c = Math.max(0, Math.min(n|0, col0|0)); return srcToDispCaret[c|0]|0; }catch{ return Math.max(0, Math.min(n|0, col0|0)); } };
+      const dispToSrcCaretFn = (dispCol0)=>{ try{ const dc = Math.max(0, Math.min(dn|0, dispCol0|0)); return (dispToSrcCaret[dc|0]|0); }catch{ return Math.max(0, dispCol0|0); } };
+      return { dispText: disp, srcToDisp, dispToSrc, srcToDispCaret: srcToDispCaretFn, dispToSrcCaret: dispToSrcCaretFn };
+    }catch{ return { dispText:String(s||''), srcToDisp:(c)=>c|0, dispToSrc:(c)=>c|0, srcToDispCaret:(c)=>c|0, dispToSrcCaret:(c)=>c|0 }; }
+  }
+
   // Inline-code span helper for link hit-testing suppression (#1936)
   let _mdInlineCodeSpanCacheLine = null;
   let _mdInlineCodeSpanCacheSpans = null;
@@ -1443,30 +1787,50 @@ try{
       const src = String(s||'');
       const n = src.length|0;
       const linkCol = _mdLinkCollapseInfo(src);
-      const disp = String((linkCol && linkCol.dispText) || src);
-      const links1 = (linkCol && linkCol.links) ? (linkCol.links||[]) : [];
-      const links = links1;
+      const dispBase = String((linkCol && linkCol.dispText) || src);
+      const linksBase = (linkCol && linkCol.links) ? (linkCol.links||[]) : [];
+      const decoCol = _mdInlineDecorCollapseInfo ? _mdInlineDecorCollapseInfo(dispBase) : null;
+      const disp = String((decoCol && typeof decoCol.dispText === 'string') ? (decoCol.dispText||'') : dispBase);
+      const links = (function(){
+        try{
+          if (!decoCol || typeof decoCol.srcToDispCaret !== 'function' || !Array.isArray(linksBase)) return linksBase;
+          const out = [];
+          for (const lk of linksBase){
+            if (!lk) continue;
+            const ds0 = (lk.dispStart|0);
+            const de0 = (lk.dispEnd|0);
+            const ds1 = (decoCol.srcToDispCaret(ds0|0)|0);
+            const de1 = (decoCol.srcToDispCaret(de0|0)|0);
+            out.push(Object.assign({}, lk, { dispStart:(ds1|0), dispEnd:(de1|0) }));
+          }
+          return out;
+        }catch{ return linksBase; }
+      })();
+
       const srcToDisp = (col0)=>{
         try{
           const c = Math.max(0, Math.min(n|0, col0|0));
-          return (linkCol && typeof linkCol.srcToDisp === 'function') ? (linkCol.srcToDisp(c|0)|0) : (c|0);
+          const d0 = (linkCol && typeof linkCol.srcToDisp === 'function') ? (linkCol.srcToDisp(c|0)|0) : (c|0);
+          return (decoCol && typeof decoCol.srcToDisp === 'function') ? (decoCol.srcToDisp(d0|0)|0) : (d0|0);
         }catch{ return Math.max(0, Math.min(n|0, col0|0)); }
       };
       const dispToSrc = (dispCol0)=>{
         try{
-          const dc0 = Math.max(0, Math.min((disp.length|0), dispCol0|0));
-          return (linkCol && typeof linkCol.dispToSrc === 'function') ? (linkCol.dispToSrc(dc0|0)|0) : (dc0|0);
+          const dn = (disp.length|0);
+          const dc0 = Math.max(0, Math.min(dn|0, dispCol0|0));
+          const d0 = (decoCol && typeof decoCol.dispToSrc === 'function') ? (decoCol.dispToSrc(dc0|0)|0) : (dc0|0);
+          return (linkCol && typeof linkCol.dispToSrc === 'function') ? (linkCol.dispToSrc(d0|0)|0) : (d0|0);
         }catch{ return Math.max(0, dispCol0|0); }
       };
 
       // Caret-position mapping (between characters) for md clean display.
       // This is distinct from char-index mapping used by hover hit-testing.
-      const srcToDispCaret = (col0)=>{
+      const srcToDispCaretBase = (col0)=>{
         try{
           const c = Math.max(0, Math.min(n|0, col0|0));
-          if (!links || !links.length) return c|0;
+          if (!linksBase || !linksBase.length) return c|0;
           let rem = 0;
-          for (const it of links){
+          for (const it of linksBase){
             if (!it) continue;
             const lb = it.lb|0;
             const ts = it.textStart|0;
@@ -1488,13 +1852,13 @@ try{
           return (c - (rem|0))|0;
         }catch{ return Math.max(0, Math.min(n|0, col0|0)); }
       };
-      const dispToSrcCaret = (dispCol0)=>{
+      const dispToSrcCaretBase = (dispCol0)=>{
         try{
-          const dn = (disp.length|0);
+          const dn = (dispBase.length|0);
           const dc = Math.max(0, Math.min(dn|0, dispCol0|0));
-          if (!links || !links.length) return dc|0;
+          if (!linksBase || !linksBase.length) return dc|0;
           let rem = 0;
-          for (const it of links){
+          for (const it of linksBase){
             if (!it) continue;
             const ds = it.dispStart|0;
             const de = it.dispEnd|0;
@@ -1513,6 +1877,21 @@ try{
           }
           return Math.max(0, Math.min(n|0, (dc + (rem|0))|0));
         }catch{ return Math.max(0, dispCol0|0); }
+      };
+
+      const srcToDispCaret = (col0)=>{
+        try{
+          const d0 = srcToDispCaretBase(col0|0)|0;
+          return (decoCol && typeof decoCol.srcToDispCaret === 'function') ? (decoCol.srcToDispCaret(d0|0)|0) : (d0|0);
+        }catch{ return srcToDispCaretBase(col0|0)|0; }
+      };
+      const dispToSrcCaret = (dispCol0)=>{
+        try{
+          const dn = (disp.length|0);
+          const dc0 = Math.max(0, Math.min(dn|0, dispCol0|0));
+          const d0 = (decoCol && typeof decoCol.dispToSrcCaret === 'function') ? (decoCol.dispToSrcCaret(dc0|0)|0) : (dc0|0);
+          return dispToSrcCaretBase(d0|0)|0;
+        }catch{ return dispToSrcCaretBase(dispCol0|0)|0; }
       };
 
       return { dispText: disp, links, srcToDisp, dispToSrc, srcToDispCaret, dispToSrcCaret };
@@ -1590,7 +1969,7 @@ try{
           const b = Math.max(0, Math.min((sub.length|0), b0|0));
           const x0 = Math.min(a|0, b|0);
           const x1 = Math.max(a|0, b|0);
-          const inner = _mdInlineCodeHtmlWithRange(sub, hasRange ? rangeClass : null, x0|0, x1|0);
+          const inner = _mdInlineDecorHtmlWithRange(sub, hasRange ? rangeClass : null, x0|0, x1|0);
           if (!extraWrapCls) return inner;
           return '<span class="' + String(extraWrapCls||'') + '">' + inner + '</span>';
         }catch{ return _mdEscHtml(String(sub||'')); }
@@ -4271,7 +4650,7 @@ try{
           const clean = _mdInlineLinkCleanHtmlWithRange(sub, hasRange ? rangeClass : null, subRs|0, subRe|0);
           if (clean) return clean;
         }catch{}
-        try{ return _mdInlineCodeHtmlWithRange(sub, hasRange ? rangeClass : null, subRs|0, subRe|0); }catch{ return esc(sub); }
+        try{ return _mdInlineDecorHtmlWithRange(sub, hasRange ? rangeClass : null, subRs|0, subRe|0); }catch{ return esc(sub); }
       };
 
       if (type === 'ol'){
@@ -5109,11 +5488,11 @@ try{
                     if (hideSymbols){
                       const clean = _mdInlineLinkCleanHtmlWithRange(text, 'md-sel', c1|0, c2|0);
                       if (clean) el.innerHTML = clean;
-                      else el.innerHTML = _mdInlineCodeHtmlWithRange(text, 'md-sel', c1|0, c2|0);
+                      else el.innerHTML = _mdInlineDecorHtmlWithRange(text, 'md-sel', c1|0, c2|0);
                     } else {
                       const clean = _mdInlineLinkCleanHtmlWithRange(text, 'md-sel', c1|0, c2|0);
                       if (clean) el.innerHTML = clean;
-                      else el.innerHTML = _mdInlineCodeHtmlWithRange(text, 'md-sel', c1|0, c2|0);
+                      else el.innerHTML = _mdInlineDecorHtmlWithRange(text, 'md-sel', c1|0, c2|0);
                     }
                   }
                   usedHtml = true;
@@ -5165,11 +5544,11 @@ try{
                   if (hideSymbols){
                     const clean = _mdInlineLinkCleanHtmlWithRange(text, 'md-ime-uline', a|0, b|0);
                     if (clean) el.innerHTML = clean;
-                    else el.innerHTML = _mdInlineCodeHtmlWithRange(text, 'md-ime-uline', a|0, b|0);
+                    else el.innerHTML = _mdInlineDecorHtmlWithRange(text, 'md-ime-uline', a|0, b|0);
                   } else {
                     const clean = _mdInlineLinkCleanHtmlWithRange(text, 'md-ime-uline', a|0, b|0);
                     if (clean) el.innerHTML = clean;
-                    else el.innerHTML = _mdInlineCodeHtmlWithRange(text, 'md-ime-uline', a|0, b|0);
+                    else el.innerHTML = _mdInlineDecorHtmlWithRange(text, 'md-ime-uline', a|0, b|0);
                   }
                 }
                 usedHtml = true;
@@ -28657,6 +29036,36 @@ try{
   function _helpMdInlineToHtml(s){
     try{
       const src = String(s||'');
+      const _isWs = (c)=>{ try{ return c === ' ' || c === '\t' || c === '\n' || c === '\r'; }catch{ return false; } };
+      const _isWord = (c)=>{
+        try{
+          if (!c) return false;
+          const cp = c.codePointAt ? (c.codePointAt(0)|0) : (c.charCodeAt(0)|0);
+          if ((cp>=48&&cp<=57)||(cp>=65&&cp<=90)||(cp>=97&&cp<=122)) return true;
+          try{ return /[\p{L}\p{N}]/u.test(c); }catch{ return false; }
+        }catch{ return false; }
+      };
+      const _canOpenCloseUnderscore = (pos, len)=>{
+        // Avoid treating snake_case as emphasis.
+        try{
+          const prev = (pos > 0) ? src[pos-1] : '';
+          const next = ((pos+len) < src.length) ? src[pos+len] : '';
+          if (_isWord(prev) && _isWord(next)) return false;
+          return true;
+        }catch{ return true; }
+      };
+      const _findClosingDelim = (ch, len, from)=>{
+        let j = from|0;
+        while (j < src.length){
+          const k = src.indexOf(ch, j);
+          if (k < 0) return -1;
+          let run = 1;
+          try{ while ((k+run) < src.length && src[k+run] === ch) run++; }catch{ run = 1; }
+          if ((run|0) >= (len|0)) return k|0;
+          j = (k + run)|0;
+        }
+        return -1;
+      };
       let out = '';
       let i = 0;
       while (i < src.length){
@@ -28703,6 +29112,71 @@ try{
             continue;
           }
         }
+
+        // strikethrough: ~~text~~
+        if (ch === '~' && src[i+1] === '~'){
+          const closeAt = _findClosingDelim('~', 2, (i+2)|0);
+          if (closeAt >= 0 && closeAt > (i+2)){
+            const inner = src.slice((i+2)|0, closeAt|0);
+            out += '<del>' + _helpMdInlineToHtml(inner) + '</del>';
+            i = (closeAt + 2)|0;
+            continue;
+          }
+          out += _helpMdEscHtml('~~');
+          i = (i + 2)|0;
+          continue;
+        }
+
+        // emphasis/strong: *, **, ***, and _, __, ___
+        if (ch === '*' || ch === '_'){
+          let run = 1;
+          try{ while ((i+run) < src.length && src[i+run] === ch && run < 3) run++; }catch{ run = 1; }
+          // Only handle 1..3
+          run = Math.max(1, Math.min(3, run|0))|0;
+
+          if (ch === '_' && !_canOpenCloseUnderscore(i|0, run|0)){
+            out += _helpMdEscHtml(src.slice(i, (i+run)|0));
+            i = (i + run)|0;
+            continue;
+          }
+          // opener: next char must not be whitespace
+          try{ if (_isWs(src[i+run]||'')){
+            out += _helpMdEscHtml(src.slice(i, (i+run)|0));
+            i = (i + run)|0;
+            continue;
+          } }catch{}
+
+          const closeAt = _findClosingDelim(ch, run, (i+run)|0);
+          if (closeAt >= 0 && closeAt > (i+run)){
+            // closer: previous char must not be whitespace
+            try{ if (_isWs(src[closeAt-1]||'')){
+              out += _helpMdEscHtml(src.slice(i, (i+run)|0));
+              i = (i + run)|0;
+              continue;
+            } }catch{}
+            if (ch === '_' && !_canOpenCloseUnderscore(closeAt|0, run|0)){
+              out += _helpMdEscHtml(src.slice(i, (i+run)|0));
+              i = (i + run)|0;
+              continue;
+            }
+
+            const inner = src.slice((i+run)|0, closeAt|0);
+            const innerHtml = _helpMdInlineToHtml(inner);
+            if ((run|0) === 3){
+              out += '<strong><em>' + innerHtml + '</em></strong>';
+            } else if ((run|0) === 2){
+              out += '<strong>' + innerHtml + '</strong>';
+            } else {
+              out += '<em>' + innerHtml + '</em>';
+            }
+            i = (closeAt + run)|0;
+            continue;
+          }
+          out += _helpMdEscHtml(src.slice(i, (i+run)|0));
+          i = (i + run)|0;
+          continue;
+        }
+
         out += _helpMdEscHtml(ch);
         i++;
       }

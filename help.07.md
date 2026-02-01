@@ -1,5 +1,5 @@
 # Markdown
-GFM(GitHub Flavored Markdown)にほぼ準拠（予定。未実装は強調、打消し、イタリック、引用、画像リンク、テーブル、Task List）
+GFM(GitHub Flavored Markdown)にほぼ準拠（予定。未実装は引用、テーブル、Task List）
 ただし基本的にHTMLではなく行単位で管理するテキストエディタなので、markdown記法ではない生のテキスト部分に関しては改行や空白文字が1つにまとめられたりすることはない。
 
 ## 見出し
@@ -44,6 +44,19 @@ HTMLで言うところの`<hr>`
       - `8. `, `1. `, `1. `なら` 8. `, ` 9. `, `10. `となる。
 - loose list
   - orderedでもunorderedでも、同階層内に空行が来て、かつそのlistが終わらないとき、空行のある階層の行はすべて行間隔が広くなる。
+
+---
+## インライン装飾
+  - Italic　`*text*`, `_text_`
+    - *text*, _text_
+  - Bold　`**text**`, `__text__`
+    - **text**, __text__
+  - Bold Italic　`***text***`, `___text___`
+    - ***text***, ___text___
+  - Strike　`~~text~~`
+    - ~~text~~
+
+※`_`,`__`,`___`は単語の一部になる場合は装飾扱いにならないなど細かいルールがあるので`*`を使う方が無難
 
 ---
 ## インラインコード

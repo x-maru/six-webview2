@@ -617,6 +617,11 @@ body.md-rich #editor::selection {
 	text-decoration-color: color-mix(in srgb, currentColor 85%, transparent);
 }
 
+/* Markdown-rich inline emphasis/strong/strike (clean display) */
+#textLayer .md-em { font-style: italic; }
+#textLayer .md-strong { font-weight: 700; }
+#textLayer .md-del { text-decoration: line-through; opacity: 0.92; }
+
 /* Markdown-rich inline code span (`code`) (#1772/#1773)
    - Box is filled with current text color (currentColor)
    - Text is drawn with background gradient start color (inverted look)
@@ -1030,6 +1035,9 @@ body.is-scrolling:not(.keep-caret) .caret { display: none !important; }
 .six-help-md h2.six-help-h { font-size: 1.18em; }
 .six-help-md h3.six-help-h { font-size: 1.06em; }
 .six-help-md .six-help-p { margin: 0.35em 0; }
+.six-help-md strong { font-weight: 850; }
+.six-help-md em { font-style: italic; }
+.six-help-md del { text-decoration: line-through; opacity: 0.92; }
 .six-help-md .six-help-ul,
 .six-help-md .six-help-ol { margin: 0.35em 0 0.55em 1.2em; padding: 0; }
 .six-help-md li { margin: 0.15em 0; }
