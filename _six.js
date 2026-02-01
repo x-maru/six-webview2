@@ -1784,12 +1784,14 @@ try{
     // NOTE: inline-code rendering uses padding/margins that approximate delimiter width;
     // for hover hit-testing, collapsing inline code can skew X mapping. Only collapse links here.
     try{
+      const opt = (arguments && arguments.length >= 2) ? arguments[1] : null;
+      const collapseDecor = !(opt && opt.collapseDecor === false);
       const src = String(s||'');
       const n = src.length|0;
       const linkCol = _mdLinkCollapseInfo(src);
       const dispBase = String((linkCol && linkCol.dispText) || src);
       const linksBase = (linkCol && linkCol.links) ? (linkCol.links||[]) : [];
-      const decoCol = _mdInlineDecorCollapseInfo ? _mdInlineDecorCollapseInfo(dispBase) : null;
+      const decoCol = (collapseDecor && _mdInlineDecorCollapseInfo) ? _mdInlineDecorCollapseInfo(dispBase) : null;
       const disp = String((decoCol && typeof decoCol.dispText === 'string') ? (decoCol.dispText||'') : dispBase);
       const links = (function(){
         try{
@@ -1896,6 +1898,20 @@ try{
 
       return { dispText: disp, links, srcToDisp, dispToSrc, srcToDispCaret, dispToSrcCaret };
     }catch{ return { dispText:String(s||''), links:[], srcToDisp:(c)=>c|0, dispToSrc:(c)=>c|0 }; }
+  }
+
+  function _mdIndentCodePrefixLenInBlockQuoteContent(line){
+    // #1967: Inside blockquotes, the optional post-'>' space may be absorbed,
+    // so indented code can be formed with 3 spaces in the stripped content.
+    try{
+      const t = String(line||'');
+      if (!t) return 0;
+      if (t.length >= 4 && t[0]===' ' && t[1]===' ' && t[2]===' ' && t[3]===' ') return 4;
+      if (t.length >= 3 && t[0]===' ' && t[1]===' ' && t[2]===' ') return 3;
+      let i = 0;
+      while (i < 2 && t[i] === ' ') i++;
+      return (t[i] === '\t') ? ((i + 1)|0) : 0;
+    }catch{ return 0; }
   }
 
   function _mdInlineLinkCleanHtmlWithRange(s, rangeClass, rangeStart, rangeEnd){
@@ -2180,11 +2196,21 @@ try{
     try{
       if (!_mdWysiwygActive()) return { line:String(line||''), col:(col|0), prefix:0 };
       const s = String(line||'');
-      const p = _mdHeadingPrefixLen(s);
-      if (!(p>0)) return { line:s, col:(col|0), prefix:0 };
       const c0 = (col|0);
-      const c1 = Math.max(0, c0 - p);
-      return { line: s.slice(p), col: c1, prefix: p };
+      let prefix = 0;
+      let t = s;
+      // Strip blockquote prefix first.
+      try{
+        const q = _mdBlockQuotePrefixInfo ? _mdBlockQuotePrefixInfo(t) : null;
+        const qp = (q && Number.isFinite(q.prefixLen)) ? (q.prefixLen|0) : 0;
+        if (qp > 0){ prefix = ((prefix|0) + (qp|0))|0; t = t.slice(qp|0); }
+      }catch{}
+      // Then strip heading prefix.
+      const p = _mdHeadingPrefixLen(t);
+      if (p>0){ prefix = ((prefix|0) + (p|0))|0; t = t.slice(p|0); }
+      if (!(prefix>0)) return { line:s, col:c0, prefix:0 };
+      const c1 = Math.max(0, c0 - (prefix|0));
+      return { line: t, col: c1, prefix: prefix|0 };
     }catch{ return { line:String(line||''), col:(col|0), prefix:0 }; }
   }
   function _visualWidthUpToLineWys(line, endCol){
@@ -3810,6 +3836,24 @@ try{
     }catch{ return null; }
   }
 
+  // Markdown blockquote (minimal; #1965)
+  // - Up to 3 leading spaces, then '>' => quote marker
+  // - Optional single space after each '>'
+  // - Multiple markers represent nested levels (e.g. "> > text")
+  function _mdBlockQuotePrefixInfo(line){
+    try{
+      const s = String(line||'');
+      if (!s) return null;
+      const m = s.match(/^([ ]{0,3})((?:> ?)+)/);
+      if (!m) return null;
+      const mk = String(m[2]||'');
+      const level = (mk.match(/>/g) || []).length|0;
+      if ((level|0) <= 0) return null;
+      const prefixLen = (String(m[1]||'').length|0) + (mk.length|0);
+      return { level:(level|0), prefixLen:(prefixLen|0) };
+    }catch{ return null; }
+  }
+
   // GFM/CommonMark list item (basic)
   // Per request (#1712/#1739):
   // - unordered marker: '-', '*', '+'
@@ -3841,11 +3885,38 @@ try{
       const first = new Uint8Array(total);
       const last = new Uint8Array(total);
 
+      // Blockquote context (for rendering + for fence parsing within blockquotes)
+      const bqLevel = new Uint8Array(total);
+      const bqPrefixLen = new Uint16Array(total);
+
       let inFence = false;
       let fenceLen = 0;
       let contentStart = -1;
+      let fenceInBq = false;
       for (let r=0; r<total; r++){
-        const s = String(arr[r]||'');
+        const raw = String(arr[r]||'');
+        const rawBlank = (!raw || raw.trim()==='');
+
+        // Quote marker on this row.
+        // Inside a fence that is NOT within a blockquote, treat '>' as literal.
+        let qInfo = null;
+        try{ if (!(inFence && !fenceInBq)) qInfo = _mdBlockQuotePrefixInfo(raw); }catch{ qInfo = null; }
+
+        // #1966: blockquote has NO lazy continuation; each row must have an explicit quote marker.
+        let rowBqLv = 0;
+        let rowBqPre = 0;
+        if (qInfo){
+          rowBqLv = Math.max(1, Math.min(255, qInfo.level|0))|0;
+          rowBqPre = Math.max(0, qInfo.prefixLen|0)|0;
+        }
+
+        try{ bqLevel[r|0] = (rowBqLv|0); }catch{}
+        try{ bqPrefixLen[r|0] = (rowBqPre|0); }catch{}
+
+        // Effective line for fence parsing (strip quote marker prefix when present).
+        let s = raw;
+        if ((rowBqPre|0) > 0) s = raw.slice(rowBqPre|0);
+
         if (!inFence){
           const m = s.match(/^[ ]{0,3}(`{3,})([^`]*)$/);
           if (m){
@@ -3853,6 +3924,7 @@ try{
             fenceLen = (m[1] ? (m[1].length|0) : 3);
             contentStart = (r+1)|0;
             kind[r] = 1;
+            fenceInBq = !!((rowBqLv|0) > 0);
           }
         } else {
           const re = new RegExp('^[ ]{0,3}`{' + (fenceLen|0) + ',}[\\t ]*$');
@@ -3867,6 +3939,7 @@ try{
             inFence = false;
             fenceLen = 0;
             contentStart = -1;
+            fenceInBq = false;
           }
         }
       }
@@ -3877,7 +3950,7 @@ try{
         for (let k=(contentStart|0); k<total; k++) kind[k] = 2;
       }
 
-      _mdCodeFenceCache = { tick, total, dirty:false, kind, first, last };
+      _mdCodeFenceCache = { tick, total, dirty:false, kind, first, last, bqLevel, bqPrefixLen };
       return _mdCodeFenceCache;
     }catch{ return _mdCodeFenceCache; }
   }
@@ -3916,8 +3989,31 @@ try{
       let inBlock = false;
       let blockStart = -1;
 
-      const _isIndentedCodeLine = (s)=>{
-        try{ return ((_mdIndentCodePrefixLen ? (_mdIndentCodePrefixLen(s)|0) : 0)|0) > 0; }catch{ return false; }
+      const _isIndentedCodeLine = (r, s)=>{
+        try{
+          const rr = (r|0);
+          let t = String(s||'');
+          let bqPre = 0;
+          try{ bqPre = (fc && fc.bqPrefixLen && rr>=0 && rr<(fc.bqPrefixLen.length|0)) ? (fc.bqPrefixLen[rr]|0) : 0; }catch{ bqPre = 0; }
+          if ((bqPre|0) > 0) t = String(t||'').slice(bqPre|0);
+          let cut = 0;
+          try{ cut = (_mdIndentCodePrefixLen ? (_mdIndentCodePrefixLen(t)|0) : 0)|0; }catch{ cut = 0; }
+          if ((cut|0) > 0) return true;
+          if ((bqPre|0) > 0){
+            try{
+              const cutBq = (_mdIndentCodePrefixLenInBlockQuoteContent ? (_mdIndentCodePrefixLenInBlockQuoteContent(t)|0) : 0)|0;
+              if ((cutBq|0) <= 0) return false;
+              // CommonMark: list items take precedence over indented code.
+              // Only the 3-space rule is ambiguous with lists; 4-space remains code.
+              if ((cutBq|0) === 3){
+                const tt = String(t||'');
+                if (/^[ ]{0,3}[*+-][ ]{1,4}/.test(tt) || /^[ ]{0,3}\d+[.)][ ]{1,4}/.test(tt)) return false;
+              }
+              return true;
+            }catch{ return false; }
+          }
+          return false;
+        }catch{ return false; }
       };
       const _isDepth2ListLine = (r, s)=>{
         // #1883: list depth>=2 takes precedence over indented code blocks.
@@ -3958,7 +4054,7 @@ try{
         const isBlank = (!s || s.trim()==='');
         let isCode = false;
         if (!isBlank){
-          const looksIndented = _isIndentedCodeLine(s);
+          const looksIndented = _isIndentedCodeLine(r|0, s);
           if (looksIndented){
             if (!_isDepth2ListLine(r|0, s)) isCode = true;
           }
@@ -4164,6 +4260,24 @@ try{
     try{
       if (!(_mdRichEnabled && _mdRichEnabled())) { _mdListCache = null; return null; }
       const lines = _splitLines();
+
+      // Blockquote-aware list parsing (#1969): parse on quote-stripped text.
+      // Store indices/columns aligned to source text by adding the stripped prefix back.
+      const _bqPre = new Uint16Array(lines.length|0);
+      const _norm = new Array(lines.length|0);
+      try{
+        for (let i=0;i<(lines.length|0);i++){
+          const raw = String(lines[i]||'');
+          let pre = 0;
+          try{
+            const q = (_mdBlockQuotePrefixInfo && _mdBlockQuotePrefixInfo(raw));
+            if (q && Number.isFinite(q.prefixLen)) pre = Math.max(0, q.prefixLen|0);
+          }catch{ pre = 0; }
+          try{ _bqPre[i|0] = (pre|0); }catch{}
+          try{ _norm[i|0] = ((pre|0) > 0) ? raw.slice(pre|0) : raw; }catch{ _norm[i|0] = raw; }
+        }
+      }catch{}
+
       const b = currentBuffer && currentBuffer();
       const tick = (b && Number.isFinite(b._changeTick)) ? (b._changeTick|0) : 0;
       const need = !!(force || !_mdListCache || _mdListCache.dirty || _mdListCache.tick !== tick || _mdListCache.lineCount !== (lines.length|0));
@@ -4187,7 +4301,9 @@ try{
       };
 
       for (let row=0; row<(lines.length|0); row++){
-        const s = String(lines[row]||'');
+        const raw = String(lines[row]||'');
+        const pre = (_bqPre && (row|0) >= 0 && (row|0) < (_bqPre.length|0)) ? (_bqPre[row|0]|0) : 0;
+        const s = (_norm && _norm[row] != null) ? String(_norm[row]||'') : raw;
         if (!s || s.trim()===''){
           items[row] = null;
           continue;
@@ -4277,7 +4393,7 @@ try{
             const top = stack[stack.length-1] || {};
             // Preserve depth for continuation lines so list-depth rules can apply consistently.
             // (Used by indented-code precedence checks: depth>=2 list wins.)
-            items[row] = { kind:'cont', listType: (top.listType||''), contentIndentCol: (top.contentIndentCol|0), depth: (stack.length|0) };
+            items[row] = { kind:'cont', listType: (top.listType||''), contentIndentCol: ((top.contentIndentCol|0) + (pre|0))|0, depth: (stack.length|0) };
           } else {
             items[row] = null;
           }
@@ -4289,13 +4405,13 @@ try{
           kind: 'item',
           listType,
           depth,
-          indentCol: cols0,
-          markerIdx: idx0,
+          indentCol: ((cols0|0) + (pre|0))|0,
+          markerIdx: ((idx0|0) + (pre|0))|0,
           markerLen: (markerLen|0),
           markerText,
           spaceCount: sp,
-          contentIndentCol,
-          contentStartIdx: (contentStartIdx|0),
+          contentIndentCol: ((contentIndentCol|0) + (pre|0))|0,
+          contentStartIdx: ((contentStartIdx|0) + (pre|0))|0,
           glyph,
           bulletKind,
           leadSlackCols: (leadSlackCols|0),
@@ -4338,7 +4454,7 @@ try{
 
         for (let row=0; row<(items.length|0); row++){
           const it = items[row];
-          const line = String(lines[row]||'');
+          const line = String(((_norm && _norm[row] != null) ? _norm[row] : lines[row])||'');
           if (it && it.kind==='item'){
             const d = Math.max(1, it.depth|0);
             flushDeeperThan(d|0);
@@ -4425,7 +4541,7 @@ try{
 
         for (let row=0; row<total; row++){
           const it = items[row|0];
-          const line = String(lines[row|0]||'');
+          const line = String(((_norm && _norm[row|0] != null) ? _norm[row|0] : lines[row|0])||'');
           if (it && it.kind==='item'){
             const d = Math.max(1, it.depth|0);
             flushDeeperThan2(d|0);
@@ -4450,21 +4566,27 @@ try{
 
         // 2) Detect loose-gaps via blank runs and mark the involved blocks as loose.
         const blockLoose = Object.create(null); // id -> 1
+        const _lineAt = (r)=>{
+          try{
+            const rr = (r|0);
+            return String(((_norm && _norm[rr] != null) ? _norm[rr] : lines[rr])||'');
+          }catch{ return ''; }
+        };
         let row = 0;
         while (row < total){
-          const s = String(lines[row]||'');
+          const s = _lineAt(row|0);
           if (s.trim() !== ''){ row++; continue; }
 
           // Blank run [a..b]
           let a = row;
-          while (a > 0 && String(lines[(a-1)|0]||'').trim() === '') a--;
+          while (a > 0 && _lineAt((a-1)|0).trim() === '') a--;
           let b = row;
-          while (((b+1)|0) < total && String(lines[(b+1)|0]||'').trim() === '') b++;
+          while (((b+1)|0) < total && _lineAt((b+1)|0).trim() === '') b++;
 
           // Find preceding list item marker row (skip blank and cont lines).
           let prev = (a - 1)|0;
           while (prev >= 0){
-            const t = String(lines[prev]||'');
+            const t = _lineAt(prev|0);
             if (t.trim() === ''){ prev--; continue; }
             const itP = items[prev];
             if (itP && itP.kind==='cont'){ prev--; continue; }
@@ -4476,7 +4598,7 @@ try{
           if (prev >= 0){
             // Find next nonblank row.
             let next = (b + 1)|0;
-            while (next < total && String(lines[next]||'').trim() === '') next++;
+            while (next < total && _lineAt(next|0).trim() === '') next++;
             if (next < total){
               const itP = items[prev];
               const itN = items[next];
@@ -4525,7 +4647,7 @@ try{
 
         for (let row=0; row<total; row++){
           const it = items[row|0];
-          const line = String(lines[row|0]||'');
+          const line = String(((_norm && _norm[row|0] != null) ? _norm[row|0] : lines[row|0])||'');
           if (it && (it.kind==='item' || it.kind==='cont')){
             if ((rootId|0) === 0){ rootId = (nextRootId++|0); }
             try{ it.listRootId = (rootId|0); }catch{}
@@ -4976,6 +5098,7 @@ try{
       const rowIsCode = new Array(want);
       const rowCodeFirst = new Array(want);
       const rowCodeLast = new Array(want);
+      const rowBqLanePx = new Array(want);
       const rowImg = new Array(want); // null | { x,w,h,url,tooltip }
       const rowInlineImgRowsMax = new Array(want); // 0 | max rows:N on this row (inline images)
       let y = 0;
@@ -4993,9 +5116,14 @@ try{
 
         const isRefDefRow = !!(_ref && _ref.isDef && (row|0) >= 0 && (row|0) < (_ref.isDef.length|0) && _ref.isDef[row|0]);
 
-        const lv0 = (isCodeRow ? 0 : _mdHeadingLevel(srcText));
+        // Blockquote context (#1965): cached during fence pass (also used to parse headings/HR inside quotes).
+        const bqLevel = (_fence && _fence.bqLevel && row>=0 && row<total) ? (_fence.bqLevel[row|0]|0) : 0;
+        const bqPre = (_fence && _fence.bqPrefixLen && row>=0 && row<total) ? (_fence.bqPrefixLen[row|0]|0) : 0;
+        const srcTextMd = (((bqPre|0) > 0) ? String(srcText||'').slice(bqPre|0) : srcText);
+
+        const lv0 = (isCodeRow ? 0 : _mdHeadingLevel(srcTextMd));
         const isActiveRow = (row === (caretRow|0));
-        const tb = (isCodeRow ? null : _mdThematicBreakInfo(srcText));
+        const tb = (isCodeRow ? null : _mdThematicBreakInfo(srcTextMd));
         const setextOn = (isCodeRow ? false : _mdSetextEnabled());
         const draftMode0 = (function(){ try{ return !!(_mdDraftEditEnabled && _mdDraftEditEnabled()); }catch{ return false; } })();
 
@@ -5007,6 +5135,17 @@ try{
 
         // #1946: Reference definition lines are always rendered as raw text.
         if (isRefDefRow) hideSymbols = false;
+
+        // Blockquote lane (px): Nch by nesting level.
+        // - clean display (hideSymbols): applied to reserve space for bars (and hidden '>')
+        // - draft display: do NOT apply extra lane on code blocks (#1971)
+        let bqLanePx = 0;
+        try{
+          const lvBq = Math.max(0, (bqLevel|0));
+          const chPx = Math.max(0, Math.round(chPxBase||10));
+          if ((lvBq|0) > 0 && hideSymbols) bqLanePx = (chPx|0) * (lvBq|0);
+        }catch{ bqLanePx = 0; }
+        try{ rowBqLanePx[i] = (bqLanePx|0); }catch{}
 
         // Loose list blank-line spacer rendering (#1730/#1731)
         // - clean: collapse ALL blank lines in the run (height=0)
@@ -5022,17 +5161,19 @@ try{
         let setextLv = 0;
         try{
           if (setextOn && hideSymbols && (row+1) < total){
-            const next = String(lines[row+1]||'');
+            const nextRaw = String(lines[row+1]||'');
+            const nextBqPre = (_fence && _fence.bqPrefixLen && (row+1) >= 0 && (row+1) < total) ? (_fence.bqPrefixLen[(row+1)|0]|0) : 0;
+            const next = (((nextBqPre|0) > 0) ? nextRaw.slice(nextBqPre|0) : nextRaw);
             const infoN = _mdSetextUnderlineInfo(next);
-            if (infoN && (String(srcText||'').trim() !== '')){
+            if (infoN && (String(srcTextMd||'').trim() !== '')){
               setextLv = infoN.level|0;
             }
           }
         }catch{ setextLv = 0; }
 
         const lv = (setextLv>0 ? setextLv : lv0);
-        let scale = (setextLv>0 ? _mdHeadingScale(lv) : _mdLineScale(srcText));
-        let lh = (setextLv>0 ? _mdHeadingLineHeightPxFromLevel(lv) : _mdLineHeightPx(srcText));
+        let scale = (setextLv>0 ? _mdHeadingScale(lv) : _mdLineScale(srcTextMd));
+        let lh = (setextLv>0 ? _mdHeadingLineHeightPxFromLevel(lv) : _mdLineHeightPx(srcTextMd));
         let fs = Math.max(6, Math.round(baseFontPx * scale));
         let padTopPx = 0;
         let padBottomPx = 0;
@@ -5105,17 +5246,30 @@ try{
         let text = srcText;
         let prefixLen = 0;
 
+        // Blockquote marker: in clean display, hide the explicit quote prefix on this row.
+        // #1970: also hide it on code block rows (fence content / indented code), same as normal lines.
+        // (Fence marker rows are already hidden in clean display.)
+        if (!isFenceRow && hideSymbols && ((bqPre|0) > 0)){
+          try{
+            prefixLen = (bqPre|0);
+            text = String(srcText||'').slice(bqPre|0);
+          }catch{}
+        }
+
         // #1946: Reference definition rows are not hidden here.
 
         // #1882: Indented code blocks are rendered without the indentation prefix (GFM-like).
         // Only affects the rendered layer; the underlying text remains unchanged.
         if (isIndentCodeRow && !isFenceRow){
           try{
-            const t0 = String(srcText||'');
-            const cut = (_mdIndentCodePrefixLen ? (_mdIndentCodePrefixLen(t0)|0) : 0)|0;
+            const t0 = String(text||'');
+            let cut = (_mdIndentCodePrefixLen ? (_mdIndentCodePrefixLen(t0)|0) : 0)|0;
+            if ((cut|0) <= 0 && (bqPre|0) > 0){
+              try{ if (_mdIndentCodePrefixLenInBlockQuoteContent) cut = (_mdIndentCodePrefixLenInBlockQuoteContent(t0)|0); }catch{}
+            }
             if ((cut|0) > 0){
-              prefixLen = (cut|0);
-              text = t0.slice(cut|0);
+              prefixLen = ((prefixLen|0) + (cut|0))|0;
+              text = String(srcText||'').slice(prefixLen|0);
             }
           }catch{}
         }
@@ -5137,7 +5291,7 @@ try{
         let renderSetextUnderlineRow = false;
         try{
           if (setextOn && hideSymbols){
-            const infoU = _mdSetextUnderlineInfo(srcText);
+            const infoU = _mdSetextUnderlineInfo(srcTextMd);
             if (infoU){
               const prev = (row>0) ? String(lines[row-1]||'') : '';
               if (prev.trim() !== '') renderSetextUnderlineRow = true;
@@ -5156,7 +5310,9 @@ try{
             if (!setextOn){
               renderHr = true;
             } else {
-              const prev = (row>0) ? String(lines[row-1]||'') : '';
+              const prevRaw = (row>0) ? String(lines[row-1]||'') : '';
+              const prevBqPre = (_fence && _fence.bqPrefixLen && (row-1) >= 0 && (row-1) < total) ? (_fence.bqPrefixLen[(row-1)|0]|0) : 0;
+              const prev = (((prevBqPre|0) > 0) ? prevRaw.slice(prevBqPre|0) : prevRaw);
               if (!prev || prev.trim()==='') renderHr = true;
             }
           }
@@ -5166,8 +5322,11 @@ try{
         if (renderSetextUnderlineRow) renderHr = false;
 
         if (!isCodeRow && !isFenceRow && !renderHr && !renderSetextUnderlineRow && hideSymbols && lv0>=1 && lv0<=6){
-          prefixLen = _mdHeadingPrefixLen(srcText)|0;
-          if (prefixLen>0) text = srcText.slice(prefixLen);
+          const hPre = _mdHeadingPrefixLen(srcTextMd)|0;
+          if ((hPre|0) > 0){
+            prefixLen = ((prefixLen|0) + (hPre|0))|0;
+            try{ text = String(srcText||'').slice(prefixLen|0); }catch{ text = srcText; }
+          }
         }
 
         // List item marker rendering (GFM-ish, #1712/#1713/#1739):
@@ -5175,7 +5334,7 @@ try{
         // We do NOT change the underlying string, so caret mapping stays based on the source text.
         let listInfo = null;
         let listItem = null;
-        if (!isCodeRow && !isFenceRow && !looseGap && !renderHr && !renderSetextUnderlineRow && !(prefixLen>0)){
+        if (!isCodeRow && !isFenceRow && !looseGap && !renderHr && !renderSetextUnderlineRow){
           try{ listInfo = _mdUListInfo && _mdUListInfo(srcText, row, lines); }catch{ listInfo = null; }
           // Show disc/circle/square on:
           // - clean mode (always)
@@ -5193,25 +5352,43 @@ try{
         let dispPrefixLen = (prefixLen|0);
         let listInfoDisp = listInfo;
         let listItemDisp = listItem;
-        if (!isCodeRow && !isFenceRow && hideSymbols && (dispPrefixLen|0) === 0 && listInfo && (listInfo.kind==='item' || listInfo.kind==='cont')){
+        if (!isCodeRow && !isFenceRow && hideSymbols && listInfo && (listInfo.kind==='item' || listInfo.kind==='cont')){
+          // Blockquote clean display: displayed `text` may hide the quote prefix; adjust list indices for rendering.
+          if ((bqPre|0) > 0 && (prefixLen|0) >= (bqPre|0)){
+            try{
+              const pre = (bqPre|0);
+              const adjBq = {
+                indentCol: Number.isFinite(listInfo.indentCol) ? Math.max(0, (listInfo.indentCol|0) - (pre|0)) : undefined,
+                markerIdx: Number.isFinite(listInfo.markerIdx) ? Math.max(0, (listInfo.markerIdx|0) - (pre|0)) : undefined,
+                contentIndentCol: Number.isFinite(listInfo.contentIndentCol) ? Math.max(0, (listInfo.contentIndentCol|0) - (pre|0)) : undefined,
+                contentStartIdx: Number.isFinite(listInfo.contentStartIdx) ? Math.max(0, (listInfo.contentStartIdx|0) - (pre|0)) : undefined,
+              };
+              listInfoDisp = Object.assign({}, listInfo, adjBq);
+              if (listItem) listItemDisp = listInfoDisp;
+            }catch{ listInfoDisp = listInfo; listItemDisp = listItem; }
+          }
+
+          // #1767: remove root depth-1 slack (<=3) from the currently displayed prefix.
           let baseSlack = 0;
-          try{ baseSlack = Math.max(0, Math.min(3, (listInfo.rootLeadSlackCols|0) || 0)); }catch{ baseSlack = 0; }
+          try{ baseSlack = Math.max(0, Math.min(3, (listInfoDisp.rootLeadSlackCols|0) || 0)); }catch{ baseSlack = 0; }
           if ((baseSlack|0) > 0){
-            // Remove only leading spaces (not tabs) and only up to baseSlack.
             let removed = 0;
-            try{ while ((removed|0) < (baseSlack|0) && srcText && srcText[removed|0] === ' ') removed++; }catch{ removed = 0; }
+            try{
+              const t0 = String(text||'');
+              while ((removed|0) < (baseSlack|0) && t0[removed|0] === ' ') removed++;
+            }catch{ removed = 0; }
             if ((removed|0) > 0){
-              dispPrefixLen = (removed|0);
-              try{ text = String(srcText||'').slice(removed|0); }catch{ text = srcText; }
+              dispPrefixLen = ((prefixLen|0) + (removed|0))|0;
+              try{ text = String(srcText||'').slice(dispPrefixLen|0); }catch{ /* keep */ }
               try{
                 const adj = {
-                  indentCol: Math.max(0, (listInfo.indentCol|0) - (removed|0)),
-                  markerIdx: Number.isFinite(listInfo.markerIdx) ? Math.max(0, (listInfo.markerIdx|0) - (removed|0)) : undefined,
-                  contentIndentCol: Number.isFinite(listInfo.contentIndentCol) ? Math.max(0, (listInfo.contentIndentCol|0) - (removed|0)) : undefined,
-                  contentStartIdx: Number.isFinite(listInfo.contentStartIdx) ? Math.max(0, (listInfo.contentStartIdx|0) - (removed|0)) : undefined,
+                  indentCol: Number.isFinite(listInfoDisp.indentCol) ? Math.max(0, (listInfoDisp.indentCol|0) - (removed|0)) : undefined,
+                  markerIdx: Number.isFinite(listInfoDisp.markerIdx) ? Math.max(0, (listInfoDisp.markerIdx|0) - (removed|0)) : undefined,
+                  contentIndentCol: Number.isFinite(listInfoDisp.contentIndentCol) ? Math.max(0, (listInfoDisp.contentIndentCol|0) - (removed|0)) : undefined,
+                  contentStartIdx: Number.isFinite(listInfoDisp.contentStartIdx) ? Math.max(0, (listInfoDisp.contentStartIdx|0) - (removed|0)) : undefined,
                 };
-                listInfoDisp = Object.assign({}, listInfo, adj);
-                if (listItem) listItemDisp = listInfoDisp;
+                listInfoDisp = Object.assign({}, listInfoDisp, adj);
+                if (listItemDisp) listItemDisp = listInfoDisp;
               }catch{}
             }
           }
@@ -5251,7 +5428,12 @@ try{
         try{ el.classList.toggle('md-setext', (setextLv>0 && hideSymbols)); }catch{}
         try{ el.classList.toggle('md-h1', (lv===1)); }catch{}
         try{ el.classList.toggle('md-h2', (lv===2)); }catch{}
+        // #1968/#1970: In clean display, reserve Nch lanes for the hidden blockquote markers.
+        try{ el.classList.toggle('md-bq-pad', (hideSymbols && !isFenceRow && ((bqLevel|0) > 0))); }catch{}
+        try{ if (hideSymbols && !isFenceRow && ((bqLevel|0) > 0)) el.style.setProperty('--bqpadch', String(Math.max(1, (bqLevel|0)))); else el.style.removeProperty('--bqpadch'); }catch{}
         try{ bg.classList.toggle('md-clean', hideSymbols); }catch{}
+        try{ bg.classList.toggle('md-bq', ((bqLevel|0) > 0)); }catch{}
+        try{ if (((bqLevel|0) > 0)) bg.style.setProperty('--bqlv', String(Math.max(1, (bqLevel|0)))); else bg.style.removeProperty('--bqlv'); }catch{}
 
         // Fenced code block visuals
         try{ el.classList.toggle('md-codeblock', isCodeRow); }catch{}
@@ -5574,7 +5756,7 @@ try{
           if (!isCodeRow && !isFenceRow && listItemDisp){
             try{ el.innerHTML = _mdUListHtmlWithRange(text, listItemDisp, null, 0, 0); usedHtml = true; }catch{ usedHtml = false; }
           }
-          // Inline code spans (`code`) in clean display (#1772)
+          // Inline decorations (em/strong/del) + inline code in clean display (#1963/#1966)
           if (!usedHtml && !isCodeRow && !isFenceRow && !isIndentCodeRow && hideSymbols){
             try{
               const clean = _mdInlineLinkCleanHtmlWithRange(text, null, 0, 0);
@@ -5582,10 +5764,21 @@ try{
                 el.innerHTML = clean;
                 usedHtml = true;
               } else {
-                const html = _mdInlineCodeHtml(text);
-                if (html && html !== _mdEscHtml(text)){
-                  el.innerHTML = html;
-                  usedHtml = true;
+                const s0 = String(text||'');
+                const hasDecor = (s0.indexOf('*') >= 0 || s0.indexOf('_') >= 0 || s0.indexOf('~') >= 0);
+                if (hasDecor){
+                  const html = _mdInlineDecorHtmlWithRange(s0, null, 0, 0);
+                  if (html && html !== _mdEscHtml(s0)){
+                    el.innerHTML = html;
+                    usedHtml = true;
+                  }
+                }
+                if (!usedHtml && s0.indexOf('`') >= 0){
+                  const html = _mdInlineCodeHtml(s0);
+                  if (html && html !== _mdEscHtml(s0)){
+                    el.innerHTML = html;
+                    usedHtml = true;
+                  }
                 }
               }
             }catch{ /* fall through */ }
@@ -5623,6 +5816,12 @@ try{
             try{ indentOpts = _mdIndentOptsForListLine(text, listInfoDisp, (+wPx||0), fs|0, lh|0); }catch{ indentOpts = null; }
           }
         }
+        // Blockquote clean display: list indentation must include the quote lane.
+        try{
+          if (indentOpts && hideSymbols && (bqLanePx|0) > 0){
+            indentOpts = { padLeftPx: ((+indentOpts.padLeftPx||0) + (bqLanePx|0)), textIndentPx: (+indentOpts.textIndentPx||0) };
+          }
+        }catch{}
         // NOTE: WebView2 can visually clip/overlap the first few characters when using
         // padding-left + negative text-indent together with inline-flex list markers.
         // Emulate hanging-indent without text-indent by inserting a 0-width negative-margin span at line start.
@@ -5631,14 +5830,18 @@ try{
         try{
           const lt2 = (listInfoDisp && listInfoDisp.listType) ? String(listInfoDisp.listType||'') : '';
           if (indentOpts && (lt2 === 'ul' || lt2 === 'ol') && listItemDisp && Number.isFinite(indentOpts.padLeftPx) && (indentOpts.padLeftPx||0) > 0.5){
-            ulHangHackPx = (+indentOpts.padLeftPx||0);
+            // IMPORTANT: If this row is in a blockquote, padding-left includes the quote lane (bqLanePx).
+            // The hanging-indent hack must NOT cancel that lane; only cancel the list-specific padding.
+            const fullPad = (+indentOpts.padLeftPx||0);
+            const listPadOnly = Math.max(0, fullPad - (bqLanePx|0));
+            ulHangHackPx = listPadOnly;
           }
         }catch{ ulHangHackPx = 0; }
         try{ el.style.paddingLeft = (indentOpts ? ((indentOpts.padLeftPx||0) + 'px') : ''); }catch{}
         try{ el.style.textIndent = (indentOpts ? (((ulHangHackPx>0)? 0 : (indentOpts.textIndentPx||0)) + 'px') : ''); }catch{}
         // Code block: enforce inner padding so text stays inside the code block rectangle.
         if (isCodeRow){
-          try{ el.style.paddingLeft = (_cbTextPadLeftPx|0) + 'px'; }catch{}
+          try{ el.style.paddingLeft = ((_cbTextPadLeftPx|0) + (bqLanePx|0)) + 'px'; }catch{}
           try{ el.style.paddingRight = (_cbTextPadRightPx|0) + 'px'; }catch{}
           try{ el.style.textIndent = '0px'; }catch{}
         } else {
@@ -5732,7 +5935,7 @@ try{
               const sc = (baseFontPx>0) ? (fs / baseFontPx) : 1;
               const chPx = Math.max(1, (imeChPxBase||10) * (Number.isFinite(sc) ? sc : 1));
               let wEffPx = (+wPx||0);
-              if (isCodeRow) wEffPx = Math.max(20, (wEffPx|0) - (_cbTextPadLeftPx|0) - (_cbTextPadRightPx|0));
+              if (isCodeRow) wEffPx = Math.max(20, (wEffPx|0) - (_cbTextPadLeftPx|0) - (bqLanePx|0) - (_cbTextPadRightPx|0));
               const colsPerLine = Math.max(1, Math.floor((wEffPx|0) / chPx));
               const n = Math.max(1, Math.ceil((visCols||0) / (colsPerLine||1))|0);
               hPx = Math.max(1, n|0) * (lh|0);
@@ -5741,7 +5944,7 @@ try{
               let io = indentOpts;
               if (isCodeRow){
                 ww = Math.max(20, (+ww||0) - (_cbTextPadRightPx|0));
-                io = _cbIndentOpts;
+                io = ((bqLanePx|0) > 0) ? { padLeftPx: (((_cbTextPadLeftPx|0) + (bqLanePx|0))|0), textIndentPx: 0 } : _cbIndentOpts;
               }
               const io2 = (imgWidths ? Object.assign({}, (io||{}), { imgWidths }) : io);
               const n0 = _wrapProbeLineCountStyled(disp, ww, lh|0, fs|0, io2);
@@ -5875,7 +6078,8 @@ try{
             rEl.className = 'md-codeblock-rect' + (isFirst ? ' md-codeblock-first' : '') + (isLast ? ' md-codeblock-last' : '');
             try{ rEl.style.top = (top|0) + 'px'; }catch{}
             try{ rEl.style.height = (height|0) + 'px'; }catch{}
-            try{ rEl.style.left = (_cbRectLeftPx|0) + 'px'; }catch{}
+            const lanePx = (rowBqLanePx && Number.isFinite(rowBqLanePx[s])) ? (rowBqLanePx[s]|0) : 0;
+            try{ rEl.style.left = ((_cbRectLeftPx|0) + (lanePx|0)) + 'px'; }catch{}
             try{ rEl.style.right = (_cbRectRightPx|0) + 'px'; }catch{}
             rectN++;
             i = (e+1)|0;
@@ -5912,7 +6116,8 @@ try{
               try{ sEl.style.top = (rowY[activeIdx]|0) + 'px'; }catch{}
               try{ sEl.style.height = (rowH[activeIdx]|0) + 'px'; }catch{}
             }
-            try{ sEl.style.left = (_cbRectLeftPx|0) + 'px'; }catch{}
+            const lanePx = (rowBqLanePx && Number.isFinite(rowBqLanePx[activeIdx])) ? (rowBqLanePx[activeIdx]|0) : 0;
+            try{ sEl.style.left = ((_cbRectLeftPx|0) + (lanePx|0)) + 'px'; }catch{}
             try{ sEl.style.right = (_cbRectRightPx|0) + 'px'; }catch{}
             try{
               const hideActiveLine = !!(document && document.body && document.body.classList && document.body.classList.contains('alt-scrolling'));
@@ -6586,7 +6791,14 @@ try{
             _mdIsIndentCodeRow = ((ik|0) === 2);
             _mdIsCodeRow = ((fk|0) === 2) || _mdIsIndentCodeRow;
             if (_mdIsIndentCodeRow){
-              try{ _mdIndentCut = (_mdIndentCodePrefixLen ? (_mdIndentCodePrefixLen(line0)|0) : 0)|0; }catch{ _mdIndentCut = 0; }
+              try{
+                let t0 = String(line0||'');
+                try{ const q = _mdBlockQuotePrefixInfo ? _mdBlockQuotePrefixInfo(t0) : null; const qp = (q && Number.isFinite(q.prefixLen)) ? (q.prefixLen|0) : 0; if (qp > 0) t0 = t0.slice(qp|0); }catch{}
+                let cut = 0;
+                try{ cut = (_mdIndentCodePrefixLen ? (_mdIndentCodePrefixLen(t0)|0) : 0)|0; }catch{ cut = 0; }
+                if ((cut|0) <= 0 && _mdIndentCodePrefixLenInBlockQuoteContent) cut = (_mdIndentCodePrefixLenInBlockQuoteContent(t0)|0);
+                _mdIndentCut = Math.max(0, cut|0);
+              }catch{ _mdIndentCut = 0; }
             }
           }catch{ _mdIsCodeRow = false; }
           const adj0 = _mdWysiwygAdjust ? _mdWysiwygAdjust(line0, c|0) : { line:line0, col:c|0 };
@@ -6762,6 +6974,35 @@ try{
       if (!text) return;
       // Normalize CRLF/CR -> LF
       try{ text = text.replace(/\r\n?/g, '\n'); }catch{}
+
+      // #1966: If caret is on an explicit blockquote line, keep pasted multi-line text inside quotes.
+      // Replace all '\n' with '\n>' (no whitespace collapsing; no extra space).
+      try{
+        if (text.indexOf('\n') >= 0){
+          const mdEnabled = (function(){
+            try{ if (typeof _mdRichEnabled === 'function') return !!_mdRichEnabled(); }catch{}
+            try{ const b0 = currentBuffer && currentBuffer(); return !!(b0 && b0.markdown); }catch{}
+            return false;
+          })();
+          if (mdEnabled){
+            let inBq = false;
+            try{
+              let ss0 = 0, se0 = 0;
+              try{ ss0 = (editor.selectionStart|0); se0 = (editor.selectionEnd|0); }catch{ ss0 = se0 = (_offsetFromRC(caretRow|0, caretCol|0)|0); }
+              const off0 = Math.max(0, Math.min((String(editor.value||'').length|0), Math.min(ss0|0, se0|0)));
+              const rc0 = _rcFromOffset(off0|0);
+              const r0 = rc0 ? (rc0.r|0) : (caretRow|0);
+              const lines0 = _splitLines();
+              const line0 = String((lines0 && r0>=0 && r0<(lines0.length|0)) ? (lines0[r0]||'') : '');
+              const q0 = _mdBlockQuotePrefixInfo && _mdBlockQuotePrefixInfo(line0);
+              inBq = !!(q0 && (q0.prefixLen|0) > 0);
+            }catch{ inBq = false; }
+            if (inBq){
+              try{ text = text.replace(/\n/g, '\n>'); }catch{}
+            }
+          }
+        }
+      }catch{}
       try{ e.preventDefault(); e.stopPropagation(); }catch{}
 
       // Anchor to current editor selection (replace selection if any)
@@ -14589,9 +14830,23 @@ try{
       const isReal = idx >= 0 && idx < (realTotal|0);
       if (!isReal) return;
 
+      const mdRich = !!(function(){ try{ return _mdRichActive(); }catch{ return false; } })();
+
       const line = String(lines[idx]||'');
 
-      const mdRich = !!(function(){ try{ return _mdRichActive(); }catch{ return false; } })();
+      // Blockquote context (md-rich): use fence cache so we match renderer behavior within quotes.
+      let _mdBqPre = 0;
+      let _mdBqLv = 0;
+      try{
+        if (mdRich){
+          const fc = _mdCodeFenceEnsureCache && _mdCodeFenceEnsureCache(false, lines);
+          if (fc){
+            try{ if (fc.bqPrefixLen && (idx|0) >= 0 && (idx|0) < (fc.bqPrefixLen.length|0)) _mdBqPre = (fc.bqPrefixLen[idx|0]|0); }catch{}
+            try{ if (fc.bqLevel && (idx|0) >= 0 && (idx|0) < (fc.bqLevel.length|0)) _mdBqLv = (fc.bqLevel[idx|0]|0); }catch{}
+          }
+        }
+      }catch{ _mdBqPre = 0; _mdBqLv = 0; }
+
       let _mdIsCodeRow = false;
       let _mdPadTopPx = 0;
       let _mdPadBottomPx = 0;
@@ -14688,11 +14943,30 @@ try{
             hide = false;
             dispLine = line;
             dispPrefix = 0;
+
+            // #1970: In clean display, hide the explicit blockquote marker even on code rows.
+            // In draft mode we keep it, but still reserve the lane for code blocks.
+            try{
+              const hideBq = !!(_mdHideSymbolsForRow && _mdHideSymbolsForRow(!!isActiveRow));
+              if (hideBq && (_mdBqPre|0) > 0){
+                dispPrefix = (dispPrefix|0) + (_mdBqPre|0);
+                dispLine = String(line||'').slice(dispPrefix|0);
+              }
+            }catch{}
+
             // #1884: Indented code blocks are displayed without the indentation prefix.
             try{
               if (_mdIsIndentCodeRow){
-                const cut = (_mdIndentCodePrefixLen ? (_mdIndentCodePrefixLen(line)|0) : 0)|0;
-                if ((cut|0) > 0){ dispPrefix = (cut|0); dispLine = String(line||'').slice(cut|0); }
+                const t0 = String(dispLine||'');
+                let cut = 0;
+                try{ cut = (_mdIndentCodePrefixLen ? (_mdIndentCodePrefixLen(t0)|0) : 0)|0; }catch{ cut = 0; }
+                if ((cut|0) <= 0 && (_mdBqPre|0) > 0){
+                  try{ if (_mdIndentCodePrefixLenInBlockQuoteContent) cut = (_mdIndentCodePrefixLenInBlockQuoteContent(t0)|0); }catch{}
+                }
+                if ((cut|0) > 0){
+                  dispPrefix = ((dispPrefix|0) + (cut|0))|0;
+                  dispLine = String(line||'').slice(dispPrefix|0);
+                }
               }
             }catch{}
             _mdUlSkipSpaceCol = -1;
@@ -14701,24 +14975,26 @@ try{
           } else {
             hide = !!(_mdHideSymbolsForRow && _mdHideSymbolsForRow(!!isActiveRow));
             if (hide){
-              const p = _mdHeadingPrefixLen(line)|0;
-              if (p>0){ dispPrefix = p; dispLine = line.slice(p); }
+              // Blockquote prefix (must be stripped before heading/list checks).
+              if ((_mdBqPre|0) > 0){ dispPrefix = (_mdBqPre|0); dispLine = String(line||'').slice(_mdBqPre|0); }
+              const p = _mdHeadingPrefixLen(dispLine)|0;
+              if (p>0){ dispPrefix = (dispPrefix|0) + (p|0); dispLine = String(line||'').slice(dispPrefix|0); }
             }
 
           // #1767: subtract depth-1 slack (<=3) from the root list for display,
           // preserving indentation for deeper levels.
           try{
-            if (hide && (dispPrefix|0) === 0){
+            if (hide){
               _mdListEnsureCache && _mdListEnsureCache(false);
               ulSrc = _mdUListInfo && _mdUListInfo(line, idx|0, lines);
               if (ulSrc && (ulSrc.kind==='item' || ulSrc.kind==='cont')){
                 let baseSlack = 0;
                 try{ baseSlack = Math.max(0, Math.min(3, (ulSrc.rootLeadSlackCols|0) || 0)); }catch{ baseSlack = 0; }
                 let removed = 0;
-                try{ while ((removed|0) < (baseSlack|0) && line[removed|0] === ' ') removed++; }catch{ removed = 0; }
+                try{ while ((removed|0) < (baseSlack|0) && dispLine[removed|0] === ' ') removed++; }catch{ removed = 0; }
                 if ((removed|0) > 0){
-                  dispPrefix = (removed|0);
-                  dispLine = line.slice(removed|0);
+                  dispPrefix = (dispPrefix|0) + (removed|0);
+                  dispLine = String(line||'').slice(dispPrefix|0);
                 }
                 try{
                   ulDisp = Object.assign({}, ulSrc, {
@@ -14782,6 +15058,31 @@ try{
           _mdCodePadRightPx = ((cbRectRightEffPx|0) + (cbPadPx|0))|0;
         }
       }catch{ _mdCodePadLeftPx = 0; _mdCodePadRightPx = 0; }
+
+      // md-rich: blockquote lanes reserve Nch on the left.
+      // - clean display: applies to quoted rows where '>' is hidden
+      // - draft display: do NOT apply to code blocks (#1971)
+      let _mdBqLanePx = 0;
+      try{
+        if (mdRich && ((_mdBqLv|0) > 0)){
+          const isActiveRow = (row1 === ((caretRow|0) + 1));
+          const hideSymbolsRow = !!(_mdHideSymbolsForRow && _mdHideSymbolsForRow(!!isActiveRow));
+          if (hideSymbolsRow){
+            let chPx = 0;
+            if (wrapOn){
+              try{
+                const fs = Math.max(6, Math.round((baseFontPx||16) * (scale||1)));
+                const x1 = _wrapProbeXFromColStyled('0', 1, 1000000, fs|0, rowHeightPx|0, null);
+                if (Number.isFinite(x1) && (+x1||0) > 0) chPx = (+x1||0);
+              }catch{ chPx = 0; }
+            } else {
+              try{ _measureSpan.textContent = '0'; chPx = (+(_measureSpan.getBoundingClientRect().width||0)) * (scale||1); }catch{ chPx = 0; }
+            }
+            if (!(chPx > 0)) chPx = Math.max(1, (baseFontPx||16) * 0.60 * (scale||1));
+            _mdBqLanePx = (Math.max(0, Math.round(chPx||10)) * (_mdBqLv|0))|0;
+          }
+        }
+      }catch{ _mdBqLanePx = 0; }
 
       // md-rich: respect block padding (2x-height first/last rows) so markers render in the correct half.
       // NOTE: yTop is the row box top; glyphs are rendered at yTop + padTop.
@@ -14864,11 +15165,23 @@ try{
               }
             }catch{ indentOpts = null; }
 
+            // Blockquote lane padding: shift overlay measurement to match rendered glyphs.
+            try{
+              if ((_mdBqLanePx|0) > 0){
+                if (indentOpts){
+                  const pl = (indentOpts && Number.isFinite(indentOpts.padLeftPx)) ? (indentOpts.padLeftPx|0) : 0;
+                  indentOpts = Object.assign({}, indentOpts, { padLeftPx: (pl|0) + (_mdBqLanePx|0) });
+                } else {
+                  indentOpts = { padLeftPx: (_mdBqLanePx|0), textIndentPx: 0 };
+                }
+              }
+            }catch{}
+
             // Code block padding: align probe x/intra with the renderer's inner padding.
             let ww = (+wPx||0);
             if (_mdIsCodeRow){
               ww = Math.max(20, (+ww||0) - (_mdCodePadRightPx|0));
-              indentOpts = { padLeftPx: (_mdCodePadLeftPx|0), textIndentPx: 0 };
+              indentOpts = { padLeftPx: ((_mdCodePadLeftPx|0) + (_mdBqLanePx|0))|0, textIndentPx: 0 };
             }
 
             // Inline image width awareness: treat ★ as a fixed-width token.
@@ -14999,6 +15312,7 @@ try{
             }catch{}
             try{ x1 += _mdOlExtraXpxList(c|0); }catch{}
             try{ if (mdRich && _mdIsCodeRow && (_mdCodePadLeftPx|0) > 0) x1 += (_mdCodePadLeftPx|0); }catch{}
+            try{ if (mdRich && (_mdBqLanePx|0) > 0) x1 += (_mdBqLanePx|0); }catch{}
           }
           const el = document.createElement('div');
           el.className='listchar';
@@ -15126,6 +15440,7 @@ try{
             }catch{}
             try{ xEnd += _mdOlExtraXpxList(dispLine.length|0); }catch{}
             try{ if (mdRich && _mdIsCodeRow && (_mdCodePadLeftPx|0) > 0) xEnd += (_mdCodePadLeftPx|0); }catch{}
+            try{ if (mdRich && (_mdBqLanePx|0) > 0) xEnd += (_mdBqLanePx|0); }catch{}
           }
         }
         const elE = document.createElement('div');
@@ -21337,8 +21652,9 @@ try{
     try{
       const mdRich = !!(_mdRichActive && _mdRichActive());
       const hide = (mdRich && !_mdIsCodeRow) ? !!(_mdHideSymbolsForRow && _mdHideSymbolsForRow(true)) : false;
-      const draft = !!(_mdDraftEditEnabled && _mdDraftEditEnabled());
-      const collapse = (mdRich && !_mdIsCodeRow) ? (!!draft || !!hide) : false;
+      // #1967: Draft mode shows the caret row as raw text (no symbol hiding),
+      // so collapsing must follow the actual per-row hide policy.
+      const collapse = (mdRich && !_mdIsCodeRow) ? (!!hide) : false;
       if (mdRich && collapse && !_mdIsCodeRow){
         const dispSrc = String(line||'');
         const col = (_mdCleanDisplayCollapseInfo && typeof _mdCleanDisplayCollapseInfo === 'function') ? _mdCleanDisplayCollapseInfo(dispSrc) : null;
@@ -21662,8 +21978,33 @@ try{
         return (count|0) * borderPx;
       }catch{ return 0; }
     };
+
+    // #1968/#1971: md-rich blockquote clean display reserves Nch for hidden quote markers.
+    // Add the same delta to caret X so the overlay caret matches the shifted text.
+    const _mdBqPadExtraXpx = ()=>{
+      try{
+        if (!(_mdRichActive && _mdRichActive())) return 0;
+        const hide = !!(_mdHideSymbolsForRow && _mdHideSymbolsForRow(true));
+        const lines2 = _splitLinesRaw();
+        const r = Math.max(0, Math.min((lines2.length|0)-1, caretRow|0));
+        const src = String(lines2[r]||'');
+        const q = (_mdBlockQuotePrefixInfo && _mdBlockQuotePrefixInfo(src));
+        const lv = (q && Number.isFinite(q.level)) ? (q.level|0) : 0;
+        if (!((lv|0) > 0)) return 0;
+        // #1971: do not apply in draft mode (draft no longer pads code blocks by quote lane).
+        if (!hide) return 0;
+        // 1ch width (scaled)
+        let ch = 0;
+        try{ _measureSpan.textContent = '0'; ch = +(_measureSpan.getBoundingClientRect().width||0); }catch{ ch = 0; }
+        if (!(ch > 0)){
+          try{ ch = Math.max(1, (_mdCaretFontSizePx||16) * 0.60); }catch{ ch = 10; }
+        }
+        return ((ch * (lv|0)) * (_mdScaleX||1)) || 0;
+      }catch{ return 0; }
+    };
     try{ x += _mdOlExtraXpx(caretCol|0); }catch{}
     try{ x += _mdIcodeExtraXpx(caretColVis|0); }catch{}
+    try{ x += _mdBqPadExtraXpx(); }catch{}
 
     // Code block left padding (wrap-off only; wrap path uses indent opts below).
     try{ if (_mdIsCodeRow && !(_wrapEnabled && _wrapEnabled()) && (_mdCodePadLeftPx|0) > 0) x += (_mdCodePadLeftPx|0); }catch{}
@@ -21700,6 +22041,9 @@ try{
             try{ const fc = _mdCodeFenceEnsureCache && _mdCodeFenceEnsureCache(false, lines2); if (fc && fc.kind && (caretRow|0) >= 0 && (caretRow|0) < (lines2.length|0)) fk = (fc.kind[caretRow|0]|0); }catch{ fk = 0; }
             try{ const fc2 = _mdCodeFenceEnsureCache && _mdCodeFenceEnsureCache(false, lines2); const ic2 = _mdIndentCodeEnsureCache && _mdIndentCodeEnsureCache(false, lines2, fc2); if (ic2 && ic2.kind && (caretRow|0) >= 0 && (caretRow|0) < (lines2.length|0)) ik = (ic2.kind[caretRow|0]|0); }catch{ ik = 0; }
             if ((fk|0) === 2 || (ik|0) === 2){
+              // Blockquote nesting level for this row (used to reserve Nch lanes in code blocks).
+              let bqLv = 0;
+              try{ const q = (_mdBlockQuotePrefixInfo && _mdBlockQuotePrefixInfo(String(lines2[caretRow|0]||''))); if (q && Number.isFinite(q.level)) bqLv = (q.level|0); }catch{ bqLv = 0; }
               let chPxBase = 0;
               try{ if (typeof _measureSpan !== 'undefined' && _measureSpan){ _measureSpan.textContent = '0'; chPxBase = +(_measureSpan.getBoundingClientRect().width||0); } }catch{ chPxBase = 0; }
               if (!(chPxBase > 0)){
@@ -21715,7 +22059,13 @@ try{
               const cbTextPadLeftPx = ((cbRectLeftPx|0) + (cbPadPx|0))|0;
               const cbTextPadRightPx = ((cbRectRightEffPx|0) + (cbPadPx|0))|0;
               wPx = Math.max(20, (wPx|0) - (cbTextPadRightPx|0));
-              indentOpts = { padLeftPx:(cbTextPadLeftPx|0), textIndentPx:0 };
+              // #1971: apply blockquote lane only when the caret row is in clean display.
+              let bqLanePx = 0;
+              try{
+                const hide0 = !!(_mdHideSymbolsForRow && _mdHideSymbolsForRow(true));
+                if (hide0 && (bqLv|0) > 0) bqLanePx = (Math.max(0, Math.round(chPxBase||10)) * (bqLv|0))|0;
+              }catch{ bqLanePx = 0; }
+              indentOpts = { padLeftPx:((cbTextPadLeftPx|0) + (bqLanePx|0))|0, textIndentPx:0 };
             }
           }
         }catch{}
@@ -21737,6 +22087,7 @@ try{
         if (Number.isFinite(xp)) x = xp;
         try{ x += _mdOlExtraXpx(caretCol|0); }catch{}
         try{ x += _mdIcodeExtraXpx(caretColVis|0); }catch{}
+        try{ x += _mdBqPadExtraXpx(); }catch{}
       }
     }catch{}
   // Make caret height match the full line box
@@ -21753,6 +22104,7 @@ try{
       let x2 = _measureXAbsToCol((caretColVis+1)|0);
       try{ x2 += _mdOlExtraXpx((caretCol|0) + 1); }catch{}
       try{ x2 += _mdIcodeExtraXpx((caretColVis+1)|0); }catch{}
+      try{ x2 += _mdBqPadExtraXpx(); }catch{}
       try{ if (_mdIsCodeRow && !(_wrapEnabled && _wrapEnabled()) && (_mdCodePadLeftPx|0) > 0) x2 += (_mdCodePadLeftPx|0); }catch{}
       try{
         if (_wrapEnabled()){
@@ -21765,6 +22117,7 @@ try{
           if (Number.isFinite(xp2)) x2 = xp2;
           try{ x2 += _mdOlExtraXpx((caretCol|0) + 1); }catch{}
           try{ x2 += _mdIcodeExtraXpx((caretColVis+1)|0); }catch{}
+          try{ x2 += _mdBqPadExtraXpx(); }catch{}
         }
       }catch{}
       chW = Math.max(0, x2 - x);
@@ -22744,8 +23097,20 @@ try{
   }
   function _pasteCharwise(after, count){
     const n = Math.max(1, count|0);
-    const clip = _regUnnamed && !_regUnnamed.linewise ? _normalizeRegText(_regUnnamed.text) : '';
+    let clip = _regUnnamed && !_regUnnamed.linewise ? _normalizeRegText(_regUnnamed.text) : '';
     if (!clip) return;
+    // #1967: In NORMAL mode, when pasting multiline text on an explicit blockquote row,
+    // inject quote markers for the newly created lines.
+    try{
+      if (clip && clip.indexOf('\n') >= 0 && (_mdRichEnabled && _mdRichEnabled())){
+        const line0 = String((_splitLines()[caretRow]||''));
+        const q = (_mdBlockQuotePrefixInfo && _mdBlockQuotePrefixInfo(line0));
+        const qp = (q && Number.isFinite(q.prefixLen)) ? (q.prefixLen|0) : 0;
+        if ((qp|0) > 0){
+          clip = String(clip).replace(/\n/g, '\n>');
+        }
+      }
+    }catch{}
     _pushUndoSnapshot('paste');
     let pos;
     const line = (_splitLines()[caretRow]||'');
@@ -22766,8 +23131,20 @@ try{
   }
   function _pasteLinewise(below, count){
     const n = Math.max(1, count|0);
-    const clip = _regUnnamed && _regUnnamed.linewise ? _normalizeRegText(_regUnnamed.text) : '';
+    let clip = _regUnnamed && _regUnnamed.linewise ? _normalizeRegText(_regUnnamed.text) : '';
     if (!clip) return;
+    // #1967: In NORMAL mode, when pasting multiline text on an explicit blockquote row,
+    // inject quote markers for each inserted line (linewise paste starts at line head).
+    try{
+      if (clip && clip.indexOf('\n') >= 0 && (_mdRichEnabled && _mdRichEnabled())){
+        const line0 = String((_splitLines()[caretRow]||''));
+        const q = (_mdBlockQuotePrefixInfo && _mdBlockQuotePrefixInfo(line0));
+        const qp = (q && Number.isFinite(q.prefixLen)) ? (q.prefixLen|0) : 0;
+        if ((qp|0) > 0){
+          clip = '>' + String(clip).replace(/\n/g, '\n>');
+        }
+      }
+    }catch{}
     _pushUndoSnapshot('paste');
     const beforeAll = String(editor.value||'');
     const lines = _splitLines();
@@ -25518,9 +25895,8 @@ try{
     try{
       if (delta){
         const mdRich = (function(){ try{ return !!(_mdRichActive && _mdRichActive()); }catch{ return false; } })();
-        const draft = (function(){ try{ return !!(_mdDraftEditEnabled && _mdDraftEditEnabled()); }catch{ return false; } })();
-        const clean = (function(){ try{ return !!(_mdWysiwygActive && _mdWysiwygActive()) && !!(_mdHideSymbolsForRow && _mdHideSymbolsForRow(true)); }catch{ return false; } })();
-        if (mdRich && (draft || clean)){
+        const hide = (function(){ try{ return !!(_mdHideSymbolsForRow && _mdHideSymbolsForRow(true)); }catch{ return false; } })();
+        if (mdRich && hide){
           const linesRaw = _splitLinesRaw();
           const src = String((linesRaw && linesRaw.length) ? (linesRaw[caretRow]||'') : line);
 
@@ -31295,6 +31671,77 @@ try{
     // re-pin to physical bottom after the mutation so the thumb stays at the end.
     // (Works for markdown-off + wrap on/off when EOF pad is enabled.)
     let _pendingEofEnterPhysPin = null;
+
+    // #1966: blockquote line + multiline paste => prefix each pasted newline with '>'
+    // Implemented via 'paste' (clipboardData) for reliability; beforeinput dataTransfer is not always present for paste.
+    editor.addEventListener('paste', (e)=>{
+      try{
+        if (_mode !== 'INSERT') return;
+        if (window && window._imeComposing===true) return;
+
+        const mdEnabled = (function(){
+          try{ if (typeof _mdRichEnabled === 'function') return !!_mdRichEnabled(); }catch{}
+          try{ const b0 = currentBuffer && currentBuffer(); return !!(b0 && b0.markdown); }catch{}
+          return false;
+        })();
+        if (!mdEnabled || !editor) return;
+
+        let text = '';
+        try{
+          const cd = (e && e.clipboardData) ? e.clipboardData : null;
+          if (cd && typeof cd.getData === 'function') text = String(cd.getData('text/plain') || '');
+        }catch{ text = ''; }
+        if (!text) return;
+
+        try{ text = text.replace(/\r\n?/g, '\n'); }catch{}
+        if (text.indexOf('\n') < 0) return;
+
+        let ss = 0, se = 0;
+        try{ ss = editor.selectionStart|0; se = editor.selectionEnd|0; }catch{ ss = se = (_offsetFromRC(caretRow|0, caretCol|0)|0); }
+        const v = (function(){
+          try{ const b = currentBuffer && currentBuffer(); if (b && typeof b.text === 'string') return b.text; }catch{}
+          return String(editor.value||'');
+        })();
+        const a = Math.max(0, Math.min((v.length|0), Math.min(ss|0, se|0)));
+        const b = Math.max(0, Math.min((v.length|0), Math.max(ss|0, se|0)));
+
+        // Check the current line for an explicit quote marker.
+        let inBq = false;
+        try{
+          const rc0 = _rcFromOffset(a|0);
+          const r0 = rc0 ? (rc0.r|0) : (caretRow|0);
+          const lines0 = _splitLines();
+          const line0 = String((lines0 && r0>=0 && r0<(lines0.length|0)) ? (lines0[r0]||'') : '');
+          const q0 = _mdBlockQuotePrefixInfo && _mdBlockQuotePrefixInfo(line0);
+          inBq = !!(q0 && (q0.prefixLen|0) > 0);
+        }catch{ inBq = false; }
+        if (!inBq) return;
+
+        // Transform + insert manually.
+        try{ text = text.replace(/\n/g, '\n>'); }catch{}
+        try{ e.preventDefault(); e.stopPropagation(); }catch{}
+
+        // Paste should always be its own undo boundary (#1771)
+        try{ _insertSegPending = false; _insertSegDirty = false; }catch{}
+        try{ _pushUndoSnapshot && _pushUndoSnapshot('paste'); }catch{}
+        try{ _insertSegIgnoreSelectUntil = Date.now() + 120; }catch{}
+
+        const newV = String(v||'').slice(0, a|0) + text + String(v||'').slice(b|0);
+        editor.value = newV;
+        const newOff = (a|0) + (String(text||'').length|0);
+        try{ editor.selectionStart = editor.selectionEnd = newOff; }catch{}
+        try{ const rc1 = _rcFromOffset(newOff|0); if (rc1){ caretRow = rc1.r|0; caretCol = rc1.c|0; } }catch{}
+        try{ _touchBufferModified && _touchBufferModified(); }catch{}
+        try{ _wrapInvalidateCache && _wrapInvalidateCache('md-bq-paste'); }catch{}
+        try{ _insertSegDirty = true; }catch{}
+        try{ ensureScrolloff && ensureScrolloff(); }catch{}
+        try{ if (_mdRenderTextLayer) _mdRenderTextLayer(); }catch{}
+        try{ _repositionCaret && _repositionCaret(); }catch{}
+        try{ updateGutter && updateGutter(); }catch{}
+        try{ _scheduleListCharsRender && _scheduleListCharsRender('md-bq-paste'); }catch{}
+      }catch{}
+    });
+
     editor.addEventListener('beforeinput', (e)=>{
       try{ const M = window.SIX_IME_METRICS; if (M && window._imeComposing===true){ M.events.beforeinput++; } }catch{}
 
@@ -31457,6 +31904,73 @@ try{
         }
       }catch{}
 
+      // #1966: blockquote line + multiline paste => prefix each pasted newline with '>'
+      // Replace all '\n' in the pasted string with '\n>' (no space added).
+      try{
+        if (_mode === 'INSERT'){
+          const itP = String((e && e.inputType) || '');
+          const isPaste = (itP === 'insertFromPaste' || itP === 'insertFromDrop');
+          if (isPaste && !(window && window._imeComposing===true)){
+            const mdEnabled = (function(){
+              try{ if (typeof _mdRichEnabled === 'function') return !!_mdRichEnabled(); }catch{}
+              try{ const b0 = currentBuffer && currentBuffer(); return !!(b0 && b0.markdown); }catch{}
+              return false;
+            })();
+            if (mdEnabled && editor){
+              let text = '';
+              try{
+                const dt = (e && e.dataTransfer) ? e.dataTransfer : null;
+                if (dt && typeof dt.getData === 'function') text = String(dt.getData('text/plain') || '');
+              }catch{ text = ''; }
+              if (text){
+                try{ text = text.replace(/\r\n?/g, '\n'); }catch{}
+                if (text.indexOf('\n') >= 0){
+                  let ss = 0, se = 0;
+                  try{ ss = editor.selectionStart|0; se = editor.selectionEnd|0; }catch{ ss = se = (_offsetFromRC(caretRow|0, caretCol|0)|0); }
+                  const v = (function(){
+                    try{ const b = currentBuffer && currentBuffer(); if (b && typeof b.text === 'string') return b.text; }catch{}
+                    return String(editor.value||'');
+                  })();
+                  const a = Math.max(0, Math.min((v.length|0), Math.min(ss|0, se|0)));
+                  const b = Math.max(0, Math.min((v.length|0), Math.max(ss|0, se|0)));
+
+                  // Check the current line for an explicit quote marker.
+                  let inBq = false;
+                  try{
+                    const rc0 = _rcFromOffset(a|0);
+                    const r0 = rc0 ? (rc0.r|0) : (caretRow|0);
+                    const lines0 = _splitLines();
+                    const line0 = String((lines0 && r0>=0 && r0<(lines0.length|0)) ? (lines0[r0]||'') : '');
+                    const q0 = _mdBlockQuotePrefixInfo && _mdBlockQuotePrefixInfo(line0);
+                    inBq = !!(q0 && (q0.prefixLen|0) > 0);
+                  }catch{ inBq = false; }
+
+                  if (inBq){
+                    try{ text = text.replace(/\n/g, '\n>'); }catch{}
+
+                    try{ e.preventDefault(); e.stopPropagation(); }catch{}
+                    const newV = String(v||'').slice(0, a|0) + text + String(v||'').slice(b|0);
+                    editor.value = newV;
+                    const newOff = (a|0) + (String(text||'').length|0);
+                    try{ editor.selectionStart = editor.selectionEnd = newOff; }catch{}
+                    try{ const rc1 = _rcFromOffset(newOff|0); if (rc1){ caretRow = rc1.r|0; caretCol = rc1.c|0; } }catch{}
+                    try{ _touchBufferModified && _touchBufferModified(); }catch{}
+                    try{ _wrapInvalidateCache && _wrapInvalidateCache('md-bq-paste'); }catch{}
+                    try{ _insertSegDirty = true; }catch{}
+                    try{ ensureScrolloff && ensureScrolloff(); }catch{}
+                    try{ if (_mdRenderTextLayer) _mdRenderTextLayer(); }catch{}
+                    try{ _repositionCaret && _repositionCaret(); }catch{}
+                    try{ updateGutter && updateGutter(); }catch{}
+                    try{ _scheduleListCharsRender && _scheduleListCharsRender('md-bq-paste'); }catch{}
+                    return;
+                  }
+                }
+              }
+            }
+          }
+        }
+      }catch{}
+
       // #624: INSERTモードで削除/改行操作前のテキストを保持（直後差分判定用）
       try{
         const itCap = String(e.inputType||'');
@@ -31533,6 +32047,7 @@ try{
                 }
               }
             }catch{}
+
             // 既定の改行挿入を抑止し、末尾に'\n'だけ追加。caretは改行直前へ戻すことで末尾空行を表示しない
             try{ e.preventDefault(); }catch{}
             const newV = v + '\n';
@@ -39842,6 +40357,7 @@ try{
                     try{ _positionImeBar && _positionImeBar(); }catch{}
                     return;
                   }
+
                   // Match markdown-off INSERT behavior (#600): if caret is at dummy EOF newline position
                   // (no final LF and caret at EOF), promote dummy -> real '\n' without creating a visible blank line.
                   let didDummy = false;
@@ -39900,7 +40416,6 @@ try{
               // conversion (causing duplicated roman letters, dropped chars, and insertion jumps).
               let composing = false;
               try{ composing = !!(e && e.isComposing===true) || !!_imeBarComposing || !!(window && window._imeComposing===true); }catch{ composing = !!_imeBarComposing; }
-
               // Some environments keep isComposing=true even for non-IME input.
               // Only apply the "stale" override when the bar is empty and we have no active preedit.
               try{
@@ -40126,6 +40641,7 @@ try{
                   try{ _positionImeBar && _positionImeBar(); }catch{}
                   return;
                 }
+
                 // Empty bar + Enter: match markdown-off INSERT dummy EOF promotion (#600).
                 let didDummy = false;
                 try{

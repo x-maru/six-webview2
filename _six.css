@@ -415,6 +415,49 @@ body.typing-reduced-text #editor::-webkit-scrollbar-corner,
 		var(--lineBaseFill, #0f1117);
 }
 
+/* Markdown blockquote (md-rich): subtle left bar via background layer. */
+#textBgLayer .md-bgline.md-bq {
+	/* Nch lane; draw 1 bar centered within each 1ch */
+}
+
+#textBgLayer .md-bgline.md-bq::before {
+	content: '';
+	position: absolute;
+	top: 0;
+	bottom: 0;
+	left: 0;
+	width: calc(var(--bqlv, 1) * 1ch);
+	/* 3px bar centered in each 1ch lane */
+	background: repeating-linear-gradient(
+		to right,
+		transparent 0,
+		transparent calc(0.5ch - 1.5px),
+		var(--mdInlineCodeBG, rgb(180, 200, 255)) calc(0.5ch - 1.5px),
+		var(--mdInlineCodeBG, rgb(180, 200, 255)) calc(0.5ch + 1.5px),
+		transparent calc(0.5ch + 1.5px),
+		transparent 1ch
+	);
+	opacity: 0.35;
+	pointer-events: none;
+}
+#textBgLayer .md-bgline.md-bq.md-clean::before {
+	background: repeating-linear-gradient(
+		to right,
+		transparent 0,
+		transparent calc(0.5ch - 1.5px),
+		var(--mdInlineCodeBG, rgb(120, 160, 255)) calc(0.5ch - 1.5px),
+		var(--mdInlineCodeBG, rgb(120, 160, 255)) calc(0.5ch + 1.5px),
+		transparent calc(0.5ch + 1.5px),
+		transparent 1ch
+	);
+	opacity: 0.45;
+}
+
+/* #1968/#1970: Reserve Nch for blockquote bars in clean display (when '>' is hidden). */
+#textLayer .md-line.md-bq-pad {
+	padding-left: calc(var(--bqpadch, 1) * 1ch);
+}
+
 #textLayer {
 	position: absolute;
 	top: 0;

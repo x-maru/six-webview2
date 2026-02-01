@@ -1,6 +1,6 @@
-﻿# vi like text editor "six"　![pg:3](256x256.png "アイコン")
+﻿# vi like text editor "***six***"　![pg:3](256x256.png "アイコン")
 標準のWindows11環境で動作するvi風テキストエディタ。
-スクリプトで書かれており、他にEXEやDLLは不要です。
+スクリプトで書かれており、他に**EXEやDLLは不要**です。
 (WebView2 runtimeというものを使いますが、Edgeの一部として標準でdownloadされているはず)
 
 ---
