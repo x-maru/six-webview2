@@ -3973,7 +3973,7 @@ try{
   // - A nonblank line is code when it starts with:
   //   - 4 ASCII spaces, OR
   //   - 0..3 ASCII spaces then a TAB
-  // - A blank line is code if the previous line is in an indented code block.
+  // - A blank line is code only when it is also indented (otherwise the block ends).
   // - The block closes when a nonblank line that doesn't match the rules appears.
   // NOTE: Applied only outside fenced code blocks.
   // Cache per-row kind:
@@ -4072,7 +4072,10 @@ try{
             if (!_isDepth2ListLine(r|0, s)) isCode = true;
           }
         } else {
-          isCode = !!inBlock;
+          // #1976: Do NOT extend indented code blocks through fully blank lines.
+          // Only keep a blank line in the block if the line still has the indentation prefix.
+          // (e.g. "    " is part of the block; "" ends the block)
+          isCode = !!(inBlock && _isIndentedCodeLine(r|0, s));
         }
 
         if (isCode){
