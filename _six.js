@@ -3854,6 +3854,19 @@ try{
     }catch{ return null; }
   }
 
+  // #1972/#1974: Lightweight list-marker detector used for rendering margins.
+  // Supports blockquote prefixes like ">1. abc" (no space after '>').
+  function _mdLooksLikeListMarkerLine(rawLine){
+    try{
+      const s = String(rawLine||'');
+      if (!s) return false;
+      // Allow: up to 3 leading spaces, then 0+ quote markers (">" optionally followed by one space),
+      // then any indentation, then list marker, then 1..4 ASCII spaces.
+      // Note: this intentionally rejects tab immediately after marker.
+      return !!(/^(?: {0,3})(?:> ?)*[\t ]*([-*+]|\d+[.)])[ ]{1,4}/.test(s));
+    }catch{ return false; }
+  }
+
   // GFM/CommonMark list item (basic)
   // Per request (#1712/#1739):
   // - unordered marker: '-', '*', '+'
@@ -5074,6 +5087,10 @@ try{
       const _cbTextPadLeftPx = ((_cbRectLeftPx|0) + (_cbPadPx|0))|0;
       const _cbTextPadRightPx = ((_cbRectRightEffPx|0) + (_cbPadPx|0))|0;
       const _cbIndentOpts = { padLeftPx: (_cbTextPadLeftPx|0), textIndentPx: 0 };
+
+      // #1972/#1973: list base left margin (1ch) for md-rich rendering.
+      // Interpreted as: the parent indent baseline is increased by 1ch, so all list depths shift by 1ch.
+      const _mdListLv1PadPxBase = Math.max(0, Math.round(chPxBase||10))|0;
       const children = Array.from(_mdTextInner.children);
       // Only md-bgline children; _mdBgInner also contains .md-codebg.
       const bgChildren = (function(){
@@ -5822,6 +5839,38 @@ try{
             indentOpts = { padLeftPx: ((+indentOpts.padLeftPx||0) + (bqLanePx|0)), textIndentPx: (+indentOpts.textIndentPx||0) };
           }
         }catch{}
+        // #1972/#1973: list base left margin (1ch) must be preserved as a visible margin.
+        // Implement as extra padding-left that is NOT canceled by textIndent / hang hack.
+        let lv1PadPx = 0;
+        try{
+          if (listInfoDisp && (listInfoDisp.kind==='item' || listInfoDisp.kind==='cont') && ((listInfoDisp.depth|0) >= 1)){
+            lv1PadPx = (_mdListLv1PadPxBase|0);
+          } else {
+            // #1974: Fallback detection (IME composition / deferred cache updates).
+            // Must also handle quote list lines like ">1. abc".
+            if (_mdLooksLikeListMarkerLine && _mdLooksLikeListMarkerLine(srcText)) lv1PadPx = (_mdListLv1PadPxBase|0);
+          }
+        }catch{ lv1PadPx = 0; }
+        try{
+          if (indentOpts && (lv1PadPx|0) > 0){
+            indentOpts = { padLeftPx: ((+indentOpts.padLeftPx||0) + (lv1PadPx|0)), textIndentPx: (+indentOpts.textIndentPx||0) };
+          }
+        }catch{}
+
+        // #1973: When IME composing, indentOpts may be null if the line doesn't wrap.
+        // Still apply the visible list margin so it never disappears.
+        let _padOnlyPx = 0;
+        try{
+          if (!indentOpts){
+            // #1975: In IME composing fast path, indentOpts can be null for non-wrapping short lines.
+            // Still preserve visible margins:
+            // - blockquote lane padding (bqLanePx) in clean display
+            // - list base 1ch margin (lv1PadPx)
+            const bq = (hideSymbols ? (bqLanePx|0) : 0)|0;
+            const lv = (lv1PadPx|0);
+            if (((bq|0) > 0) || ((lv|0) > 0)) _padOnlyPx = ((bq|0) + (lv|0))|0;
+          }
+        }catch{ _padOnlyPx = 0; }
         // NOTE: WebView2 can visually clip/overlap the first few characters when using
         // padding-left + negative text-indent together with inline-flex list markers.
         // Emulate hanging-indent without text-indent by inserting a 0-width negative-margin span at line start.
@@ -5833,12 +5882,20 @@ try{
             // IMPORTANT: If this row is in a blockquote, padding-left includes the quote lane (bqLanePx).
             // The hanging-indent hack must NOT cancel that lane; only cancel the list-specific padding.
             const fullPad = (+indentOpts.padLeftPx||0);
-            const listPadOnly = Math.max(0, fullPad - (bqLanePx|0));
+            const listPadOnly = Math.max(0, fullPad - (bqLanePx|0) - (lv1PadPx|0));
             ulHangHackPx = listPadOnly;
           }
         }catch{ ulHangHackPx = 0; }
-        try{ el.style.paddingLeft = (indentOpts ? ((indentOpts.padLeftPx||0) + 'px') : ''); }catch{}
+        try{ el.style.paddingLeft = (indentOpts ? ((indentOpts.padLeftPx||0) + 'px') : ((_padOnlyPx|0) > 0 ? ((_padOnlyPx|0) + 'px') : '')); }catch{}
         try{ el.style.textIndent = (indentOpts ? (((ulHangHackPx>0)? 0 : (indentOpts.textIndentPx||0)) + 'px') : ''); }catch{}
+
+        // #1972: wrap-off also needs the depth-1 list margin.
+        try{
+          if (!wrapOn && !indentOpts){
+            if ((lv1PadPx|0) > 0) el.style.paddingLeft = (lv1PadPx|0) + 'px';
+            else el.style.paddingLeft = '';
+          }
+        }catch{}
         // Code block: enforce inner padding so text stays inside the code block rectangle.
         if (isCodeRow){
           try{ el.style.paddingLeft = ((_cbTextPadLeftPx|0) + (bqLanePx|0)) + 'px'; }catch{}
@@ -15026,6 +15083,34 @@ try{
         }
       }catch{ dispLine = line; dispPrefix = 0; _mdUlSkipSpaceCol = -1; ulSrc = null; ulDisp = null; hide = false; _mdIsCodeRow = false; }
 
+      // #1972/#1973/#1974: list base left margin (1ch) in md-rich.
+      // Applies to all list depths (parent indent baseline bump) and must be stable during IME.
+      let _mdListLv1PadPx = 0;
+      try{
+        if (mdRich){
+          const ul0 = ulDisp || ulSrc || null;
+          let want = false;
+          if (ul0 && (ul0.kind==='item' || ul0.kind==='cont') && ((ul0.depth|0) >= 1)) want = true;
+          if (!want){
+            try{ if (_mdLooksLikeListMarkerLine && _mdLooksLikeListMarkerLine(line)) want = true; }catch{ want = false; }
+          }
+          if (want){
+            let chPx = 0;
+            if (wrapOn){
+              try{
+                const fs = Math.max(6, Math.round((baseFontPx||16) * (scale||1)));
+                const x1 = _wrapProbeXFromColStyled('0', 1, 1000000, fs|0, rowHeightPx|0, null);
+                if (Number.isFinite(x1) && (+x1||0) > 0) chPx = (+x1||0);
+              }catch{ chPx = 0; }
+            } else {
+              try{ _measureSpan.textContent = '0'; chPx = (+(_measureSpan.getBoundingClientRect().width||0)) * (scale||1); }catch{ chPx = 0; }
+            }
+            if (!(chPx > 0)) chPx = Math.max(1, (baseFontPx||16) * 0.60 * (scale||1));
+            _mdListLv1PadPx = Math.max(0, Math.round(chPx||10))|0;
+          }
+        }
+      }catch{ _mdListLv1PadPx = 0; }
+
       const wrapOn = (function(){ try{ return !!(_wrapEnabled && _wrapEnabled()); }catch{ return false; } })();
       let wPx = 0;
       // IMPORTANT: keep fractional CSS px. Truncating to int can create boundary drift where
@@ -15177,6 +15262,18 @@ try{
               }
             }catch{}
 
+            // #1972: list depth-1 left margin (1ch).
+            try{
+              if ((_mdListLv1PadPx|0) > 0){
+                if (indentOpts){
+                  const pl = (indentOpts && Number.isFinite(indentOpts.padLeftPx)) ? (indentOpts.padLeftPx|0) : 0;
+                  indentOpts = Object.assign({}, indentOpts, { padLeftPx: (pl|0) + (_mdListLv1PadPx|0) });
+                } else {
+                  indentOpts = { padLeftPx: (_mdListLv1PadPx|0), textIndentPx: 0 };
+                }
+              }
+            }catch{}
+
             // Code block padding: align probe x/intra with the renderer's inner padding.
             let ww = (+wPx||0);
             if (_mdIsCodeRow){
@@ -15313,6 +15410,7 @@ try{
             try{ x1 += _mdOlExtraXpxList(c|0); }catch{}
             try{ if (mdRich && _mdIsCodeRow && (_mdCodePadLeftPx|0) > 0) x1 += (_mdCodePadLeftPx|0); }catch{}
             try{ if (mdRich && (_mdBqLanePx|0) > 0) x1 += (_mdBqLanePx|0); }catch{}
+            try{ if (mdRich && (_mdListLv1PadPx|0) > 0) x1 += (_mdListLv1PadPx|0); }catch{}
           }
           const el = document.createElement('div');
           el.className='listchar';
@@ -15441,6 +15539,7 @@ try{
             try{ xEnd += _mdOlExtraXpxList(dispLine.length|0); }catch{}
             try{ if (mdRich && _mdIsCodeRow && (_mdCodePadLeftPx|0) > 0) xEnd += (_mdCodePadLeftPx|0); }catch{}
             try{ if (mdRich && (_mdBqLanePx|0) > 0) xEnd += (_mdBqLanePx|0); }catch{}
+            try{ if (mdRich && (_mdListLv1PadPx|0) > 0) xEnd += (_mdListLv1PadPx|0); }catch{}
           }
         }
         const elE = document.createElement('div');
@@ -22002,9 +22101,35 @@ try{
         return ((ch * (lv|0)) * (_mdScaleX||1)) || 0;
       }catch{ return 0; }
     };
+
+    // #1972: md-rich list depth-1 reserves 1ch margin on the left (clean display).
+    // Add the same delta to caret X so overlay caret matches shifted text.
+    const _mdListLv1PadExtraXpx = ()=>{
+      try{
+        if (!(_mdRichActive && _mdRichActive())) return 0;
+        const lines2 = _splitLines();
+        const r = Math.max(0, Math.min((lines2.length|0)-1, caretRow|0));
+        const src = String(lines2[r]||'');
+        let want = false;
+        const ul = _mdUListInfo && _mdUListInfo(src, r|0, lines2);
+        if (ul && ((ul.kind==='item') || (ul.kind==='cont')) && ((ul.depth|0) >= 1)) want = true;
+        // #1974: Fallback when list cache is stale during IME composition (esp. ordered list).
+        if (!want){
+          try{ if (_mdLooksLikeListMarkerLine && _mdLooksLikeListMarkerLine(src)) want = true; }catch{ want = false; }
+        }
+        if (!want) return 0;
+        let ch = 0;
+        try{ _measureSpan.textContent = '0'; ch = +(_measureSpan.getBoundingClientRect().width||0); }catch{ ch = 0; }
+        if (!(ch > 0)){
+          try{ ch = Math.max(1, (_mdCaretFontSizePx||16) * 0.60); }catch{ ch = 10; }
+        }
+        return ((ch * 1) * (_mdScaleX||1)) || 0;
+      }catch{ return 0; }
+    };
     try{ x += _mdOlExtraXpx(caretCol|0); }catch{}
     try{ x += _mdIcodeExtraXpx(caretColVis|0); }catch{}
     try{ x += _mdBqPadExtraXpx(); }catch{}
+    try{ x += _mdListLv1PadExtraXpx(); }catch{}
 
     // Code block left padding (wrap-off only; wrap path uses indent opts below).
     try{ if (_mdIsCodeRow && !(_wrapEnabled && _wrapEnabled()) && (_mdCodePadLeftPx|0) > 0) x += (_mdCodePadLeftPx|0); }catch{}
@@ -22088,6 +22213,7 @@ try{
         try{ x += _mdOlExtraXpx(caretCol|0); }catch{}
         try{ x += _mdIcodeExtraXpx(caretColVis|0); }catch{}
         try{ x += _mdBqPadExtraXpx(); }catch{}
+        try{ x += _mdListLv1PadExtraXpx(); }catch{}
       }
     }catch{}
   // Make caret height match the full line box
@@ -22105,6 +22231,7 @@ try{
       try{ x2 += _mdOlExtraXpx((caretCol|0) + 1); }catch{}
       try{ x2 += _mdIcodeExtraXpx((caretColVis+1)|0); }catch{}
       try{ x2 += _mdBqPadExtraXpx(); }catch{}
+      try{ x2 += _mdListLv1PadExtraXpx(); }catch{}
       try{ if (_mdIsCodeRow && !(_wrapEnabled && _wrapEnabled()) && (_mdCodePadLeftPx|0) > 0) x2 += (_mdCodePadLeftPx|0); }catch{}
       try{
         if (_wrapEnabled()){
@@ -22118,6 +22245,7 @@ try{
           try{ x2 += _mdOlExtraXpx((caretCol|0) + 1); }catch{}
           try{ x2 += _mdIcodeExtraXpx((caretColVis+1)|0); }catch{}
           try{ x2 += _mdBqPadExtraXpx(); }catch{}
+          try{ x2 += _mdListLv1PadExtraXpx(); }catch{}
         }
       }catch{}
       chW = Math.max(0, x2 - x);
