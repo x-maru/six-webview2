@@ -121,14 +121,24 @@ try{
       t = t.replace(/\r\n?/g, '\n').replace(/\n/g, ' ');
       let trimL = 0;
       let trimR = 0;
-      // Strip one leading + trailing space if both exist and there's some non-space.
-      // (CommonMark rule to allow `` ` `` patterns.)
-      if (t.length >= 2 && t[0] === ' ' && t[t.length-1] === ' ' && /\S/.test(t)){
-        t = t.slice(1, -1);
-        trimL = 1;
-        trimR = 1;
+      let spaceCollapsed = false;
+      const rawLen = (t.length|0);
+      // CommonMark: if content begins and ends with a space, remove one from both ends
+      // *unless* the content is all spaces, in which case preserve a single space.
+      // (This applies regardless of backtick delimiter length.)
+      if (t.length >= 2 && t[0] === ' ' && t[t.length-1] === ' '){
+        if (/\S/.test(t)){
+          t = t.slice(1, -1);
+          trimL = 1;
+          trimR = 1;
+        } else {
+          // All-space content: collapse to a single space.
+          // Keep trimL/trimR at 0 and let mapping logic handle the collapse.
+          t = ' ';
+          spaceCollapsed = true;
+        }
       }
-      return { text:t, trimL:(trimL|0), trimR:(trimR|0) };
+      return { text:t, trimL:(trimL|0), trimR:(trimR|0), spaceCollapsed:!!spaceCollapsed, rawLen:(rawLen|0) };
     }catch{ return { text:String(s||''), trimL:0, trimR:0 }; }
   }
   function _mdInlineCodeParse(s){
@@ -195,7 +205,17 @@ try{
         const info = _mdInlineCodeNormalizeContentInfo(raw);
         const code = String((info && info.text) || '');
         const end = (found + run)|0;
-        segs.push({ t:'code', s: code, ticks: run|0, a:(open|0), b:(end|0), trimL: (info && info.trimL)|0, trimR: (info && info.trimR)|0 });
+        segs.push({
+          t:'code',
+          s: code,
+          ticks: run|0,
+          a:(open|0),
+          b:(end|0),
+          trimL: (info && info.trimL)|0,
+          trimR: (info && info.trimR)|0,
+          spaceCollapsed: !!(info && info.spaceCollapsed),
+          rawLen: (info && Number.isFinite(info.rawLen)) ? (info.rawLen|0) : ((raw && raw.length)|0),
+        });
         i = (found + run)|0;
       }
       return segs;
@@ -236,7 +256,7 @@ try{
         }
         const a = (it.a|0), b = (it.b|0);
         const ticks = Math.max(1, (it.ticks|0) || 1);
-        const pad = Math.max(0, (ticks|0) - 1);
+        const pad = 0;
 
         // Partial selection inside code: highlight only the selected substring within the code content.
         // Map range in the original string onto the code content region (excluding backticks).
@@ -246,8 +266,24 @@ try{
           const rawEnd = (b - (ticks|0))|0;
           const rawLen = Math.max(0, (rawEnd - rawStart)|0);
           const trimL = Math.max(0, (it.trimL|0) || 0);
+          const spaceCollapsed = !!(it && it.spaceCollapsed);
+          const rawLenNorm = (it && Number.isFinite(it.rawLen)) ? Math.max(0, (it.rawLen|0)) : (rawLen|0);
           const disp = String(it.s||'');
           const dispLen = (disp.length|0);
+
+          const _rawToDisp = (xRaw)=>{
+            try{
+              const x = Math.max(0, Math.min((rawLenNorm|0), xRaw|0));
+              if (spaceCollapsed){
+                // Map raw offsets proportionally onto disp (typically 1 char).
+                if ((dispLen|0) <= 0) return 0;
+                const frac = (rawLenNorm|0) > 0 ? (x / (rawLenNorm|0)) : 0;
+                const d = Math.round(frac * (dispLen|0));
+                return Math.max(0, Math.min((dispLen|0), d|0));
+              }
+              return Math.max(0, Math.min((dispLen|0), (x - (trimL|0))|0));
+            }catch{ return 0; }
+          };
 
           if (!hasRange || re <= rawStart || rs >= rawEnd){
             inner = _mdEscHtml(disp);
@@ -255,10 +291,8 @@ try{
             // Convert selection offsets (raw) -> displayed offsets (after trim).
             const selRawS = Math.max(0, Math.min(rawLen|0, (rs - rawStart)|0));
             const selRawE = Math.max(0, Math.min(rawLen|0, (re - rawStart)|0));
-            let sDisp = Math.max(0, (selRawS - (trimL|0))|0);
-            let eDisp = Math.max(0, (selRawE - (trimL|0))|0);
-            sDisp = Math.max(0, Math.min(dispLen|0, sDisp|0));
-            eDisp = Math.max(0, Math.min(dispLen|0, eDisp|0));
+            let sDisp = _rawToDisp(selRawS|0);
+            let eDisp = _rawToDisp(selRawE|0);
             const x0 = Math.min(sDisp|0, eDisp|0);
             const x1 = Math.max(sDisp|0, eDisp|0);
 
@@ -280,6 +314,68 @@ try{
   }
   function _mdInlineCodeHtml(s){
     try{ return _mdInlineCodeHtmlWithRange(s, null, 0, 0); }catch{ return _mdEscHtml(String(s||'')); }
+  }
+
+  function _mdInlineCodeTrimCollapseInfo(s){
+    // Caret-measure helper: reflect CommonMark trim (remove one leading+trailing space inside code span)
+    // without collapsing backtick delimiter width (delimiters are accounted for by .md-icode layout).
+    // Returns { dispText, srcToDispCaret(col), dispToSrcCaret(col) }.
+    try{
+      const src = String(s||'');
+      const n = (src.length|0);
+      if (!src || src.indexOf('`') < 0 || src.indexOf(' ') < 0) return { dispText: src, srcToDispCaret:(c)=>Math.max(0, Math.min(n|0, c|0)), dispToSrcCaret:(c)=>Math.max(0, Math.min(n|0, c|0)) };
+      if (typeof _mdInlineCodeParse !== 'function') return { dispText: src, srcToDispCaret:(c)=>Math.max(0, Math.min(n|0, c|0)), dispToSrcCaret:(c)=>Math.max(0, Math.min(n|0, c|0)) };
+
+      const segs = _mdInlineCodeParse(src);
+      if (!segs || !segs.length) return { dispText: src, srcToDispCaret:(c)=>Math.max(0, Math.min(n|0, c|0)), dispToSrcCaret:(c)=>Math.max(0, Math.min(n|0, c|0)) };
+
+      // Mark exact source indices to be removed from measurement.
+      const skip = new Uint8Array(n|0);
+      let any = false;
+      for (const it of segs){
+        if (!it || it.t !== 'code') continue;
+        const a = (it.a|0);
+        const b = (it.b|0);
+        const ticks = Math.max(1, (it.ticks|0) || 1);
+        const trimL = Math.max(0, (it.trimL|0) || 0);
+        const trimR = Math.max(0, (it.trimR|0) || 0);
+        if (!(trimL > 0 && trimR > 0)) continue;
+        const contentA = (a + ticks)|0;
+        const contentB = (b - ticks)|0;
+        if (!((contentB|0) > (contentA|0))) continue;
+        const left = contentA|0;
+        const right = (contentB - 1)|0;
+        try{
+          if (left >= 0 && left < (n|0) && src[left] === ' '){ skip[left] = 1; any = true; }
+          if (right >= 0 && right < (n|0) && src[right] === ' '){ skip[right] = 1; any = true; }
+        }catch{}
+      }
+      if (!any) return { dispText: src, srcToDispCaret:(c)=>Math.max(0, Math.min(n|0, c|0)), dispToSrcCaret:(c)=>Math.max(0, Math.min(n|0, c|0)) };
+
+      // Build collapsed text + caret mapping (between characters).
+      const srcToDispCaret = new Int32Array((n|0) + 1);
+      const dispToSrcCaret = [];
+      let out = '';
+      let dispPos = 0;
+      dispToSrcCaret[0] = 0;
+      for (let i=0;i<(n|0);i++){
+        srcToDispCaret[i|0] = dispPos|0;
+        if (skip[i|0]) continue;
+        out += src[i];
+        dispPos = (dispPos + 1)|0;
+        dispToSrcCaret[dispPos|0] = ((i|0) + 1)|0;
+      }
+      srcToDispCaret[n|0] = dispPos|0;
+      if (dispToSrcCaret[(dispPos|0)] == null) dispToSrcCaret[(dispPos|0)] = n|0;
+      const dn = (out.length|0);
+      const srcToDispCaretFn = (col0)=>{ try{ const c = Math.max(0, Math.min(n|0, col0|0)); return srcToDispCaret[c|0]|0; }catch{ return Math.max(0, Math.min(n|0, col0|0)); } };
+      const dispToSrcCaretFn = (dispCol0)=>{ try{ const dc = Math.max(0, Math.min(dn|0, dispCol0|0)); return (dispToSrcCaret[dc|0]|0); }catch{ return Math.max(0, dispCol0|0); } };
+      return { dispText: out, srcToDispCaret: srcToDispCaretFn, dispToSrcCaret: dispToSrcCaretFn };
+    }catch{
+      const src = String(s||'');
+      const n = (src.length|0);
+      return { dispText: src, srcToDispCaret:(c)=>Math.max(0, Math.min(n|0, c|0)), dispToSrcCaret:(c)=>Math.max(0, Math.min(n|0, c|0)) };
+    }
   }
 
   // --- Markdown inline decorations (em/strong/del) for md-rich clean display (#1963)
@@ -1689,9 +1785,21 @@ try{
     try{
       const src = String(s||'');
       const n = src.length|0;
-      if (!src || src.indexOf('`') < 0) return { dispText: src, srcToDisp:(c)=>Math.max(0, Math.min(n|0, c|0)), dispToSrc:(c)=>Math.max(0, Math.min(n|0, c|0)) };
+      if (!src || src.indexOf('`') < 0) return {
+        dispText: src,
+        srcToDisp:(c)=>Math.max(0, Math.min(n|0, c|0)),
+        dispToSrc:(c)=>Math.max(0, Math.min(n|0, c|0)),
+        srcToDispCaret:(c)=>Math.max(0, Math.min(n|0, c|0)),
+        dispToSrcCaret:(c)=>Math.max(0, Math.min(n|0, c|0)),
+      };
       const segs = _mdInlineCodeParse(src);
-      if (!segs || !segs.length) return { dispText: src, srcToDisp:(c)=>Math.max(0, Math.min(n|0, c|0)), dispToSrc:(c)=>Math.max(0, Math.min(n|0, c|0)) };
+      if (!segs || !segs.length) return {
+        dispText: src,
+        srcToDisp:(c)=>Math.max(0, Math.min(n|0, c|0)),
+        dispToSrc:(c)=>Math.max(0, Math.min(n|0, c|0)),
+        srcToDispCaret:(c)=>Math.max(0, Math.min(n|0, c|0)),
+        dispToSrcCaret:(c)=>Math.max(0, Math.min(n|0, c|0)),
+      };
 
       const spans = []; // only code spans
       let out = '';
@@ -1712,6 +1820,8 @@ try{
             ticks:(it.ticks|0),
             trimL:(it.trimL|0),
             trimR:(it.trimR|0),
+            spaceCollapsed: !!(it.spaceCollapsed),
+            rawLen: (it && Number.isFinite(it.rawLen)) ? (it.rawLen|0) : 0,
             dispLen:(dispLen|0),
             removedLen:(removedLen|0),
           });
@@ -1720,7 +1830,13 @@ try{
         }
       }
       const dn = (out.length|0);
-      if (!spans.length) return { dispText: out, srcToDisp:(c)=>Math.max(0, Math.min(n|0, c|0)), dispToSrc:(c)=>Math.max(0, Math.min(dn|0, c|0)) };
+      if (!spans.length) return {
+        dispText: out,
+        srcToDisp:(c)=>Math.max(0, Math.min(n|0, c|0)),
+        dispToSrc:(c)=>Math.max(0, Math.min(dn|0, c|0)),
+        srcToDispCaret:(c)=>Math.max(0, Math.min(n|0, c|0)),
+        dispToSrcCaret:(c)=>Math.max(0, Math.min(dn|0, c|0)),
+      };
 
       const srcToDisp = (col0)=>{
         try{
@@ -1735,12 +1851,23 @@ try{
               const closeLen = Math.max(0, sp.ticks|0);
               const contentA = (a + openLen)|0;
               const contentB = (b - closeLen)|0;
+              const ds = sp.dispS|0;
+              const de = sp.dispE|0;
+              const dispLen = Math.max(0, (de - ds)|0);
+              if (sp.spaceCollapsed){
+                const rawLen2 = Math.max(0, (contentB - contentA)|0);
+                if ((col|0) <= (contentA|0)) return ds|0;
+                if ((col|0) >= (contentB|0)) return de|0;
+                if ((dispLen|0) <= 0 || (rawLen2|0) <= 0) return ds|0;
+                const offRaw = (col - contentA)|0;
+                const d = Math.round((offRaw * (dispLen|0)) / (rawLen2|0));
+                const mapped = (ds + (d|0))|0;
+                return Math.max(ds|0, Math.min(de|0, mapped|0));
+              }
               const trimL = Math.max(0, sp.trimL|0);
               const trimR = Math.max(0, sp.trimR|0);
               const coreA = (contentA + trimL)|0;
               const coreB = (contentB - trimR)|0;
-              const ds = sp.dispS|0;
-              const de = sp.dispE|0;
               if ((col|0) <= (coreA|0)) return ds|0;
               if ((col|0) >= (coreB|0)) return de|0;
               const off = (col - coreA)|0;
@@ -1763,8 +1890,18 @@ try{
             if ((dc|0) < (de|0)){
               const a = sp.srcA|0;
               const openLen = Math.max(0, sp.ticks|0);
-              const trimL = Math.max(0, sp.trimL|0);
               const contentA = (a + openLen)|0;
+              if (sp.spaceCollapsed){
+                const closeLen = Math.max(0, sp.ticks|0);
+                const contentB = ((sp.srcB|0) - closeLen)|0;
+                const rawLen2 = Math.max(0, (contentB - contentA)|0);
+                const dispLen = Math.max(0, (de - ds)|0);
+                if ((dispLen|0) <= 0 || (rawLen2|0) <= 0) return contentA|0;
+                const offDisp = (dc - ds)|0;
+                const offRaw = Math.round((offDisp * (rawLen2|0)) / (dispLen|0));
+                return (contentA + (offRaw|0))|0;
+              }
+              const trimL = Math.max(0, sp.trimL|0);
               const coreA = (contentA + trimL)|0;
               return (coreA + (dc - ds))|0;
             }
@@ -1774,35 +1911,45 @@ try{
         }catch{ return Math.max(0, dispCol0|0); }
       };
 
-      return { dispText: out, srcToDisp, dispToSrc };
-    }catch{ return { dispText:String(s||''), srcToDisp:(c)=>c|0, dispToSrc:(c)=>c|0 }; }
+      // srcToDisp/dispToSrc are already caret-position friendly (between characters) for our use.
+      const srcToDispCaret = (c)=>{ try{ return srcToDisp(c|0)|0; }catch{ return c|0; } };
+      const dispToSrcCaret = (c)=>{ try{ return dispToSrc(c|0)|0; }catch{ return c|0; } };
+      return { dispText: out, srcToDisp, dispToSrc, srcToDispCaret, dispToSrcCaret };
+    }catch{
+      return { dispText:String(s||''), srcToDisp:(c)=>c|0, dispToSrc:(c)=>c|0, srcToDispCaret:(c)=>c|0, dispToSrcCaret:(c)=>c|0 };
+    }
   }
 
   function _mdCleanDisplayCollapseInfo(s){
     // Match clean-display transformations used by HTML renderer for hit-testing:
     // 1) collapse inline links [text](...) -> text
-    // NOTE: inline-code rendering uses padding/margins that approximate delimiter width;
-    // for hover hit-testing, collapsing inline code can skew X mapping. Only collapse links here.
+    // 2) collapse inline code spans `code` -> code (remove delimiters + CommonMark trim)
     try{
       const opt = (arguments && arguments.length >= 2) ? arguments[1] : null;
       const collapseDecor = !(opt && opt.collapseDecor === false);
+      const collapseIcode = !(opt && opt.collapseInlineCode === false);
       const src = String(s||'');
       const n = src.length|0;
       const linkCol = _mdLinkCollapseInfo(src);
       const dispBase = String((linkCol && linkCol.dispText) || src);
       const linksBase = (linkCol && linkCol.links) ? (linkCol.links||[]) : [];
-      const decoCol = (collapseDecor && _mdInlineDecorCollapseInfo) ? _mdInlineDecorCollapseInfo(dispBase) : null;
-      const disp = String((decoCol && typeof decoCol.dispText === 'string') ? (decoCol.dispText||'') : dispBase);
+      const icodeCol = (collapseIcode && _mdInlineCodeCollapseInfo) ? _mdInlineCodeCollapseInfo(dispBase) : null;
+      const dispIcode = String((icodeCol && typeof icodeCol.dispText === 'string') ? (icodeCol.dispText||'') : dispBase);
+      const decoCol = (collapseDecor && _mdInlineDecorCollapseInfo) ? _mdInlineDecorCollapseInfo(dispIcode) : null;
+      const disp = String((decoCol && typeof decoCol.dispText === 'string') ? (decoCol.dispText||'') : dispIcode);
       const links = (function(){
         try{
-          if (!decoCol || typeof decoCol.srcToDispCaret !== 'function' || !Array.isArray(linksBase)) return linksBase;
+          if ((!icodeCol || typeof icodeCol.srcToDispCaret !== 'function') && (!decoCol || typeof decoCol.srcToDispCaret !== 'function')) return linksBase;
+          if (!Array.isArray(linksBase)) return linksBase;
           const out = [];
           for (const lk of linksBase){
             if (!lk) continue;
             const ds0 = (lk.dispStart|0);
             const de0 = (lk.dispEnd|0);
-            const ds1 = (decoCol.srcToDispCaret(ds0|0)|0);
-            const de1 = (decoCol.srcToDispCaret(de0|0)|0);
+            const dsA = (icodeCol && typeof icodeCol.srcToDispCaret === 'function') ? (icodeCol.srcToDispCaret(ds0|0)|0) : (ds0|0);
+            const deA = (icodeCol && typeof icodeCol.srcToDispCaret === 'function') ? (icodeCol.srcToDispCaret(de0|0)|0) : (de0|0);
+            const ds1 = (decoCol && typeof decoCol.srcToDispCaret === 'function') ? (decoCol.srcToDispCaret(dsA|0)|0) : (dsA|0);
+            const de1 = (decoCol && typeof decoCol.srcToDispCaret === 'function') ? (decoCol.srcToDispCaret(deA|0)|0) : (deA|0);
             out.push(Object.assign({}, lk, { dispStart:(ds1|0), dispEnd:(de1|0) }));
           }
           return out;
@@ -1813,7 +1960,8 @@ try{
         try{
           const c = Math.max(0, Math.min(n|0, col0|0));
           const d0 = (linkCol && typeof linkCol.srcToDisp === 'function') ? (linkCol.srcToDisp(c|0)|0) : (c|0);
-          return (decoCol && typeof decoCol.srcToDisp === 'function') ? (decoCol.srcToDisp(d0|0)|0) : (d0|0);
+          const d1 = (icodeCol && typeof icodeCol.srcToDisp === 'function') ? (icodeCol.srcToDisp(d0|0)|0) : (d0|0);
+          return (decoCol && typeof decoCol.srcToDisp === 'function') ? (decoCol.srcToDisp(d1|0)|0) : (d1|0);
         }catch{ return Math.max(0, Math.min(n|0, col0|0)); }
       };
       const dispToSrc = (dispCol0)=>{
@@ -1821,7 +1969,8 @@ try{
           const dn = (disp.length|0);
           const dc0 = Math.max(0, Math.min(dn|0, dispCol0|0));
           const d0 = (decoCol && typeof decoCol.dispToSrc === 'function') ? (decoCol.dispToSrc(dc0|0)|0) : (dc0|0);
-          return (linkCol && typeof linkCol.dispToSrc === 'function') ? (linkCol.dispToSrc(d0|0)|0) : (d0|0);
+          const d1 = (icodeCol && typeof icodeCol.dispToSrc === 'function') ? (icodeCol.dispToSrc(d0|0)|0) : (d0|0);
+          return (linkCol && typeof linkCol.dispToSrc === 'function') ? (linkCol.dispToSrc(d1|0)|0) : (d1|0);
         }catch{ return Math.max(0, dispCol0|0); }
       };
 
@@ -1884,7 +2033,8 @@ try{
       const srcToDispCaret = (col0)=>{
         try{
           const d0 = srcToDispCaretBase(col0|0)|0;
-          return (decoCol && typeof decoCol.srcToDispCaret === 'function') ? (decoCol.srcToDispCaret(d0|0)|0) : (d0|0);
+          const d1 = (icodeCol && typeof icodeCol.srcToDispCaret === 'function') ? (icodeCol.srcToDispCaret(d0|0)|0) : (d0|0);
+          return (decoCol && typeof decoCol.srcToDispCaret === 'function') ? (decoCol.srcToDispCaret(d1|0)|0) : (d1|0);
         }catch{ return srcToDispCaretBase(col0|0)|0; }
       };
       const dispToSrcCaret = (dispCol0)=>{
@@ -1892,7 +2042,8 @@ try{
           const dn = (disp.length|0);
           const dc0 = Math.max(0, Math.min(dn|0, dispCol0|0));
           const d0 = (decoCol && typeof decoCol.dispToSrcCaret === 'function') ? (decoCol.dispToSrcCaret(dc0|0)|0) : (dc0|0);
-          return dispToSrcCaretBase(d0|0)|0;
+          const d1 = (icodeCol && typeof icodeCol.dispToSrcCaret === 'function') ? (icodeCol.dispToSrcCaret(d0|0)|0) : (d0|0);
+          return dispToSrcCaretBase(d1|0)|0;
         }catch{ return dispToSrcCaretBase(dispCol0|0)|0; }
       };
 
@@ -2707,9 +2858,11 @@ try{
   }
 
   function _mdClampCaretForCleanOListHalfSpaces(){
-    // #1756: In clean display, the ordered-list marker uses visual-only half-spaces.
-    // Skip the source's first post-marker space so caret never stops inside the visual gap.
+    // #1756: In clean display, the ordered-list marker used visual-only half-spaces.
+    // #1977: Half-space rendering caused visible space compression and caret/input misalignment.
+    // Ordered-list markers now use full 1ch layout; no caret clamping is needed.
     try{
+      return false;
       if (!_mdWysiwygActive()) return false;
       if (!(_mdHideSymbolsForRow && _mdHideSymbolsForRow(true))) return false;
       const lines = _splitLinesRaw();
@@ -4827,7 +4980,7 @@ try{
             pad = Math.max(0, (maxDigits|0) - ((dispDigits.length|0)||1) - (slack|0));
           }
         }catch{ pad = 0; }
-        // #1756: Use visual-only half-spaces: left 0.5ch + right 0.5ch.
+        // #1977: Keep layout in full ch units to preserve caret/input mapping.
         // Keep dot alignment by adding integer pad (0..N) to the left.
         const markerOut =
           '<span class="md-olbox" style="--olpad:' + (pad|0) + '">'
@@ -21294,7 +21447,8 @@ try{
       }
     }catch{}
 
-    // #1756/#1759: In markdown clean display, skip ordered-list marker space.
+    // #1756/#1759: (legacy) ordered-list marker space clamping.
+    // #1977: Disabled (full-ch marker layout keeps caret mapping stable).
     // Do NOT collapse native range selections (mouse drag/dblclick).
     try{
       if (!_hasNativeRangeSel()){
@@ -21769,6 +21923,22 @@ try{
       }
     }catch{}
 
+    // md-rich: inline-code CommonMark trim removes 1 leading+trailing space inside code spans.
+    // That shortens the rendered line compared to the raw text that caretCol is based on, causing
+    // overlay caret to drift right (typed characters appear before caret). Mirror the trim for
+    // measurement only (keep delimiter width as-is; .md-icode accounts for it).
+    try{
+      const mdRich = !!(_mdRichActive && _mdRichActive());
+      const hide = (mdRich && !_mdIsCodeRow) ? !!(_mdHideSymbolsForRow && _mdHideSymbolsForRow(true)) : false;
+      if (mdRich && hide && !_mdIsCodeRow && line && line.indexOf('`') >= 0 && line.indexOf(' ') >= 0 && typeof _mdInlineCodeTrimCollapseInfo === 'function'){
+        const tc = _mdInlineCodeTrimCollapseInfo(String(line||''));
+        if (tc && typeof tc.dispText === 'string' && typeof tc.srcToDispCaret === 'function'){
+          caretColVis = (tc.srcToDispCaret(caretColVis|0)|0);
+          line = String(tc.dispText||'');
+        }
+      }
+    }catch{}
+
     // md-rich: compute inline-image visual widths in px (for ★ tokens in collapsed display).
     const _mdEnsureImgWidthsForCaret = (availWOverridePx)=>{
       try{
@@ -22004,80 +22174,55 @@ try{
       }catch{ return 0; }
     };
 
-    // #1847: md-rich inline-code (`code`) uses a bordered inline box (.md-icode).
-    // The box border adds extra width that is not represented in the plain-text width measurement,
-    // causing the overlay caret to drift left by a small amount per inline-code span.
-    // Compensate by adding the total border width for each *completed* inline-code span before the caret.
+    // #1847/#1981: md-rich inline-code (`code`) uses an inline box (.md-icode) with
+    // horizontal margin/padding, adding visual width that plain-text measurement does not include.
+    // Compensate by adding the extra spacing per inline-code span before/at the caret.
     const _mdIcodeExtraXpx = (colN)=>{
       try{
         if (!(_mdRichActive && _mdRichActive())) return 0;
         if (!(_mdHideSymbolsForRow && _mdHideSymbolsForRow(true))) return 0;
-        const s = String(line||'');
-        if (!s || s.indexOf('`') === -1) return 0;
-        const col = Math.max(0, Math.min((s.length|0), (colN|0)));
 
-        // Cache border extra width (L+R) in CSS px. Must be measured under #textLayer.
-        let borderPx = 0;
-        try{
-          const key = '__sixMdIcodeBorderExtraPx';
-          const cached = (window && Number.isFinite(window[key])) ? (+window[key]||0) : null;
-          if (cached != null){
-            borderPx = Math.max(0, +cached||0);
+        // Need original (pre-collapse) source + mapping.
+        const src = String(_mdDispSrcForCaret||'');
+        if (!src || src.indexOf('`') < 0) return 0;
+        if (!_mdCollapseInfoForCaret || typeof _mdCollapseInfoForCaret.srcToDispCaret !== 'function') return 0;
+
+        const colVis = Math.max(0, Math.min((String(line||'').length|0), (colN|0)));
+
+        // 1ch width (scaled)
+        _measureSpan.textContent = '0';
+        const chPx = ((_measureSpan.getBoundingClientRect().width || 0) * (_mdScaleX||1)) || 0;
+        if (!(chPx > 0)) return 0;
+
+        // With `margin: 0 0.5ch; padding: 0 0.5ch;`
+        // left extra = 1ch, right extra = 1ch.
+        const leftExtraPx = chPx;
+        const fullExtraPx = chPx * 2;
+
+        const segs = (typeof _mdInlineCodeParse === 'function') ? _mdInlineCodeParse(src) : null;
+        if (!segs || !segs.length) return 0;
+
+        const srcToDispCaret = _mdCollapseInfoForCaret.srcToDispCaret;
+        let extra = 0;
+        for (const seg of segs){
+          if (!seg || seg.t !== 'code') continue;
+          const ticks = Math.max(1, (seg.ticks|0));
+          let coreA = ((seg.a|0) + ticks)|0;
+          let coreB = ((seg.b|0) - ticks)|0;
+          if (!seg.spaceCollapsed){
+            coreA = (coreA + Math.max(0, (seg.trimL|0)))|0;
+            coreB = (coreB - Math.max(0, (seg.trimR|0)))|0;
+          }
+          const dispA = (srcToDispCaret(coreA|0)|0);
+          const dispB = (srcToDispCaret(coreB|0)|0);
+          if ((colVis|0) <= (dispA|0)) continue;
+          if ((colVis|0) < (dispB|0)){
+            extra += leftExtraPx;
           } else {
-            const host = (typeof _mdTextLayer !== 'undefined' && _mdTextLayer) ? _mdTextLayer : null;
-            if (!host) return 0;
-            const el = document.createElement('span');
-            el.className = 'md-icode';
-            el.textContent = 'x';
-            el.style.position = 'absolute';
-            el.style.left = '0';
-            el.style.top = '0';
-            el.style.visibility = 'hidden';
-            host.appendChild(el);
-            try{
-              const cs = getComputedStyle(el);
-              const bl = parseFloat(cs.borderLeftWidth||'0')||0;
-              const br = parseFloat(cs.borderRightWidth||'0')||0;
-              borderPx = Math.max(0, (bl + br));
-              try{ if (window) window[key] = borderPx; }catch{}
-            }finally{
-              try{ host.removeChild(el); }catch{}
-            }
-          }
-        }catch{ borderPx = 0; }
-        if (!(borderPx > 0)) return 0;
-
-        // Count completed inline-code spans before col (CommonMark-ish backtick runs).
-        let count = 0;
-        let i = 0;
-        while ((i|0) < (col|0)){
-          if (s[i] !== '`'){ i++; continue; }
-          let n = 1;
-          while ((i+n) < (s.length|0) && s[i+n] === '`') n++;
-          const delim = n|0;
-          let j = (i + delim)|0;
-          let matched = false;
-          while (j < (s.length|0)){
-            const k = s.indexOf('`', j|0);
-            if (k < 0) break;
-            let m = 1;
-            while ((k+m) < (s.length|0) && s[k+m] === '`') m++;
-            if ((m|0) === (delim|0)){
-              const end = (k + m)|0;
-              if ((end|0) <= (col|0)) count++;
-              i = end|0;
-              matched = true;
-              break;
-            }
-            j = (k + m)|0;
-          }
-          if (!matched){
-            // Unmatched opener; advance past it.
-            i = (i + delim)|0;
+            extra += fullExtraPx;
           }
         }
-        if (!(count > 0)) return 0;
-        return (count|0) * borderPx;
+        return extra;
       }catch{ return 0; }
     };
 
@@ -26294,13 +26439,19 @@ try{
         if ((fk|0) === 2 || (ik|0) === 2) return identity;
       }catch{}
 
-      // Collapse inline links (do not collapse inline code here).
-      // In md-rich:
-      // - clean: always collapsed
-      // - draft: also collapsed on the active row (even though other markdown symbols are shown raw)
-      // So we apply link collapsing regardless of hide, matching the rendered layer.
-      if (srcLine.indexOf('[') < 0 || srcLine.indexOf(']') < 0) return identity;
-      const col = (_mdCleanDisplayCollapseInfo && typeof _mdCleanDisplayCollapseInfo === 'function') ? _mdCleanDisplayCollapseInfo(srcLine) : null;
+      // Word motions must follow what is rendered in the text layer:
+      // - inline links are always collapsed (clean + draft)
+      // - inline code / inline decorations are collapsed only in clean display
+      const collapseInlineCode = !!hide;
+      const collapseDecor = !!hide;
+      const needsAnyCollapse =
+        ((srcLine.indexOf('[') >= 0) && (srcLine.indexOf(']') >= 0)) ||
+        (collapseInlineCode && (srcLine.indexOf('`') >= 0)) ||
+        (collapseDecor && ((srcLine.indexOf('*') >= 0) || (srcLine.indexOf('_') >= 0) || (srcLine.indexOf('~') >= 0)));
+      if (!needsAnyCollapse) return identity;
+      const col = (_mdCleanDisplayCollapseInfo && typeof _mdCleanDisplayCollapseInfo === 'function')
+        ? _mdCleanDisplayCollapseInfo(srcLine, { collapseInlineCode, collapseDecor })
+        : null;
       if (!col || typeof col.dispText !== 'string') return identity;
 
       const wordLine = String(col.dispText||'');

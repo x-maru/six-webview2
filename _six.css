@@ -691,13 +691,13 @@ body.md-rich #editor::selection {
 		inset 1px 0 0 var(--mdInlineCodeBorderUL, color-mix(in srgb, currentColor 40%, white)),
 		inset 0 -1px 0 var(--mdInlineCodeBorderBR, color-mix(in srgb, currentColor 70%, gray)),
 		inset -1px 0 0 var(--mdInlineCodeBorderBR, color-mix(in srgb, currentColor 70%, gray));
-	/* cancel backticks width:
-	   margin L/R: 0.5ch
-	   padding L/R: 0.5ch + 0.5ch * ([total ticks L+R] - 2)
-	   where total ticks = 2 * ticksPerSide, and --mdIcodePad = ticksPerSide-1
+	/* CommonMark/GFM-ish: code span content only (delimiters are not rendered).
+	   Visual policy (#1981): regardless of backtick fence length,
+	   - extend fill 0.5ch left/right (padding)
+	   - add 0.5ch margin left/right
 	*/
 	margin: 0 0.5ch;
-	padding: 0 calc((1 + (var(--mdIcodePad, 0) * 2)) * 0.5ch);
+	padding: 0 0.5ch;
 	vertical-align: baseline;
 	-webkit-box-decoration-break: clone;
 	box-decoration-break: clone;
