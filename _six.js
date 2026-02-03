@@ -15243,6 +15243,8 @@ try{
         }
       }catch{ dispLine = line; dispPrefix = 0; _mdUlSkipSpaceCol = -1; ulSrc = null; ulDisp = null; hide = false; _mdIsCodeRow = false; }
 
+      const wrapOn = (function(){ try{ return !!(_wrapEnabled && _wrapEnabled()); }catch{ return false; } })();
+
       // #1972/#1973/#1974: list base left margin (1ch) in md-rich.
       // Applies to all list depths (parent indent baseline bump) and must be stable during IME.
       let _mdListLv1PadPx = 0;
@@ -15270,8 +15272,6 @@ try{
           }
         }
       }catch{ _mdListLv1PadPx = 0; }
-
-      const wrapOn = (function(){ try{ return !!(_wrapEnabled && _wrapEnabled()); }catch{ return false; } })();
       let wPx = 0;
       // IMPORTANT: keep fractional CSS px. Truncating to int can create boundary drift where
       // glyphs still fit but probe-based positions (esp. EOL) wrap to the next line.
