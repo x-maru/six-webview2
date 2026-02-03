@@ -1787,6 +1787,7 @@ try{
       const n = src.length|0;
       if (!src || src.indexOf('`') < 0) return {
         dispText: src,
+        spans: [],
         srcToDisp:(c)=>Math.max(0, Math.min(n|0, c|0)),
         dispToSrc:(c)=>Math.max(0, Math.min(n|0, c|0)),
         srcToDispCaret:(c)=>Math.max(0, Math.min(n|0, c|0)),
@@ -1795,6 +1796,7 @@ try{
       const segs = _mdInlineCodeParse(src);
       if (!segs || !segs.length) return {
         dispText: src,
+        spans: [],
         srcToDisp:(c)=>Math.max(0, Math.min(n|0, c|0)),
         dispToSrc:(c)=>Math.max(0, Math.min(n|0, c|0)),
         srcToDispCaret:(c)=>Math.max(0, Math.min(n|0, c|0)),
@@ -1832,6 +1834,7 @@ try{
       const dn = (out.length|0);
       if (!spans.length) return {
         dispText: out,
+        spans: [],
         srcToDisp:(c)=>Math.max(0, Math.min(n|0, c|0)),
         dispToSrc:(c)=>Math.max(0, Math.min(dn|0, c|0)),
         srcToDispCaret:(c)=>Math.max(0, Math.min(n|0, c|0)),
@@ -1914,9 +1917,9 @@ try{
       // srcToDisp/dispToSrc are already caret-position friendly (between characters) for our use.
       const srcToDispCaret = (c)=>{ try{ return srcToDisp(c|0)|0; }catch{ return c|0; } };
       const dispToSrcCaret = (c)=>{ try{ return dispToSrc(c|0)|0; }catch{ return c|0; } };
-      return { dispText: out, srcToDisp, dispToSrc, srcToDispCaret, dispToSrcCaret };
+      return { dispText: out, spans, srcToDisp, dispToSrc, srcToDispCaret, dispToSrcCaret };
     }catch{
-      return { dispText:String(s||''), srcToDisp:(c)=>c|0, dispToSrc:(c)=>c|0, srcToDispCaret:(c)=>c|0, dispToSrcCaret:(c)=>c|0 };
+      return { dispText:String(s||''), spans:[], srcToDisp:(c)=>c|0, dispToSrc:(c)=>c|0, srcToDispCaret:(c)=>c|0, dispToSrcCaret:(c)=>c|0 };
     }
   }
 
@@ -1937,6 +1940,27 @@ try{
       const dispIcode = String((icodeCol && typeof icodeCol.dispText === 'string') ? (icodeCol.dispText||'') : dispBase);
       const decoCol = (collapseDecor && _mdInlineDecorCollapseInfo) ? _mdInlineDecorCollapseInfo(dispIcode) : null;
       const disp = String((decoCol && typeof decoCol.dispText === 'string') ? (decoCol.dispText||'') : dispIcode);
+
+      // Inline-code span ranges in final disp coordinates.
+      // Used by overlay renderers (e.g. listchars) that need to account for `.md-icode` box width.
+      const icodeSpans = (function(){
+        try{
+          if (!icodeCol || !Array.isArray(icodeCol.spans) || !icodeCol.spans.length) return [];
+          const mapFn = (decoCol && typeof decoCol.srcToDispCaret === 'function') ? decoCol.srcToDispCaret : null;
+          const out = [];
+          for (const sp of icodeCol.spans){
+            if (!sp) continue;
+            const ds0 = (sp.dispS|0);
+            const de0 = (sp.dispE|0);
+            const ds1 = mapFn ? (mapFn(ds0|0)|0) : (ds0|0);
+            const de1 = mapFn ? (mapFn(de0|0)|0) : (de0|0);
+            const a = Math.max(0, Math.min((disp.length|0), ds1|0));
+            const b = Math.max(a|0, Math.min((disp.length|0), de1|0));
+            if ((b|0) > (a|0)) out.push({ dispS:(a|0), dispE:(b|0) });
+          }
+          return out;
+        }catch{ return []; }
+      })();
       const links = (function(){
         try{
           if ((!icodeCol || typeof icodeCol.srcToDispCaret !== 'function') && (!decoCol || typeof decoCol.srcToDispCaret !== 'function')) return linksBase;
@@ -2047,7 +2071,7 @@ try{
         }catch{ return dispToSrcCaretBase(dispCol0|0)|0; }
       };
 
-      return { dispText: disp, links, srcToDisp, dispToSrc, srcToDispCaret, dispToSrcCaret };
+      return { dispText: disp, links, icodeSpans, srcToDisp, dispToSrc, srcToDispCaret, dispToSrcCaret };
     }catch{ return { dispText:String(s||''), links:[], srcToDisp:(c)=>c|0, dispToSrc:(c)=>c|0 }; }
   }
 
@@ -15507,6 +15531,52 @@ try{
         }catch{ return 0; }
       };
 
+      // md-rich inline code (`code`) has extra layout width (margin/padding in ch).
+      // Listchars is a separate overlay, so we must apply the same extra width for columns
+      // that occur inside/after inline-code spans.
+      let _mdIcodeChPx = 0;
+      const _mdIcodeExtraXpxList = (colN)=>{
+        try{
+          if (!mdRich) return 0;
+          const isActiveRow = (row1 === ((caretRow|0) + 1));
+          const hide = !!(_mdHideSymbolsForRow && _mdHideSymbolsForRow(!!isActiveRow));
+          if (!hide) return 0;
+          const spans = (_mdDispCollapse && Array.isArray(_mdDispCollapse.icodeSpans)) ? _mdDispCollapse.icodeSpans : null;
+          if (!spans || !spans.length) return 0;
+
+          // 1ch in px (scaled for this row)
+          let chPx = (+_mdIcodeChPx||0);
+          if (!(chPx > 0.01)){
+            if (wrapOn){
+              try{
+                const fs = Math.max(6, Math.round(baseFontPx * (scale||1)));
+                const x1 = _wrapProbeXFromColStyled('0', 1, 1000000, fs|0, rowHeightPx|0, null);
+                if (Number.isFinite(x1) && (+x1||0) > 0) chPx = (+x1||0);
+              }catch{ chPx = 0; }
+            } else {
+              try{ _measureSpan.textContent = '0'; chPx = (+(_measureSpan.getBoundingClientRect().width||0)) * (scale||1); }catch{ chPx = 0; }
+            }
+            if (!(chPx > 0.01)) chPx = Math.max(1, (baseFontPx||16) * 0.60 * (scale||1));
+            _mdIcodeChPx = chPx;
+          }
+
+          // `.md-icode` policy (#1981): margin 0.5ch + padding 0.5ch on each side.
+          const leadPx = (+chPx||0);       // before first code char
+          const fullPx = (+chPx||0) * 2;   // after code span end
+          const col = (colN|0);
+          let dx = 0;
+          for (const sp of spans){
+            if (!sp) continue;
+            const ds = (sp.dispS|0);
+            const de = (sp.dispE|0);
+            if ((col|0) < (ds|0)) break;
+            if ((col|0) < (de|0)) dx += (leadPx||0);
+            else dx += (fullPx||0);
+          }
+          return dx;
+        }catch{ return 0; }
+      };
+
       // tab expander (same logic as full render)
       const _exp = (s)=>{
         if (!s || s.indexOf('\t')===-1) return s;
@@ -15548,6 +15618,7 @@ try{
             y1 = (yBase|0) + (Math.max(0, (p.intra|0)) * Math.max(1, lh|0));
             x1 = Number.isFinite(p.x) ? Math.max(0, (+p.x||0)) : 0;
             try{ x1 += _mdOlExtraXpxList(c|0); }catch{}
+            try{ x1 += _mdIcodeExtraXpxList(c|0); }catch{}
           } else {
             _measureSpan.textContent = _exp(dispLine.slice(0,c));
             const x1b = _measureSpan.getBoundingClientRect().width;
@@ -15568,6 +15639,7 @@ try{
               }
             }catch{}
             try{ x1 += _mdOlExtraXpxList(c|0); }catch{}
+            try{ x1 += _mdIcodeExtraXpxList(c|0); }catch{}
             try{ if (mdRich && _mdIsCodeRow && (_mdCodePadLeftPx|0) > 0) x1 += (_mdCodePadLeftPx|0); }catch{}
             try{ if (mdRich && (_mdBqLanePx|0) > 0) x1 += (_mdBqLanePx|0); }catch{}
             try{ if (mdRich && (_mdListLv1PadPx|0) > 0) x1 += (_mdListLv1PadPx|0); }catch{}
@@ -15677,6 +15749,7 @@ try{
             yEnd = (yBase|0) + (intraE|0) * Math.max(1, lh|0);
             xEnd = xE;
             try{ xEnd += _mdOlExtraXpxList(len0|0); }catch{}
+            try{ xEnd += _mdIcodeExtraXpxList(len0|0); }catch{}
           } else {
             _measureSpan.textContent = _exp(dispLine);
             const xEndb = _measureSpan.getBoundingClientRect().width;
@@ -15697,6 +15770,7 @@ try{
               }
             }catch{}
             try{ xEnd += _mdOlExtraXpxList(dispLine.length|0); }catch{}
+            try{ xEnd += _mdIcodeExtraXpxList(dispLine.length|0); }catch{}
             try{ if (mdRich && _mdIsCodeRow && (_mdCodePadLeftPx|0) > 0) xEnd += (_mdCodePadLeftPx|0); }catch{}
             try{ if (mdRich && (_mdBqLanePx|0) > 0) xEnd += (_mdBqLanePx|0); }catch{}
             try{ if (mdRich && (_mdListLv1PadPx|0) > 0) xEnd += (_mdListLv1PadPx|0); }catch{}
@@ -31693,6 +31767,8 @@ try{
           // Only sub-line remainder / compensated mapping changed; keep DOM and just show it.
           try{ _listEnsureLayer && _listEnsureLayer(); }catch{}
           try{ if (_listLayer) _listLayer.style.visibility = ''; }catch{}
+          // md-rich does not use horizontal-follow transforms; ensure none is left over.
+          try{ if (_mdRichActive && _mdRichActive()){ if (_listLayer) _listLayer.style.transform = ''; } }catch{}
           try{ _listSyncHorizontalScroll && _listSyncHorizontalScroll(); }catch{}
           return;
         }
