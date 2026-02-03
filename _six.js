@@ -32684,6 +32684,34 @@ try{
                       const sc = Math.max(1, (info0.spaceCount|0));
                       const prefix = indent + marker + ' '.repeat(sc|0);
 
+                      let isEmptyItem = false;
+                      try{
+                        const rest = line0.slice(Math.min(line0.length, (markerIdx|0) + (markerLen|0)));
+                        isEmptyItem = !String(rest||'').trim();
+                      }catch{ isEmptyItem = false; }
+
+                      if (isEmptyItem){
+                        // Spec #1996: on empty list item + Enter at EOL, clear current line.
+                        try{ e.preventDefault(); }catch{}
+                        const lineStartOff = Math.max(0, (v.length|0) - (line0.length|0));
+                        const newV = v.slice(0, lineStartOff|0) + v.slice((lineStartOff|0) + (line0.length|0));
+                        editor.value = newV;
+                        const newOff = (lineStartOff|0);
+                        try{ editor.selectionStart = editor.selectionEnd = newOff; }catch{}
+                        try{ const rc1 = _rcFromOffset(newOff|0); if (rc1){ caretRow = rc1.r|0; caretCol = rc1.c|0; } }catch{ try{ caretRow = (r0|0); caretCol = 0; }catch{} }
+                        try{ _touchBufferModified(); }catch{}
+                        try{ _mdListInvalidateCache && _mdListInvalidateCache('md-list-enter-clear-eof'); }catch{}
+                        try{ _mdWrapInvalidateCache && _mdWrapInvalidateCache('md-list-enter-clear-eof'); }catch{}
+                        try{ _wrapInvalidateCache && _wrapInvalidateCache('md-list-enter-clear-eof'); }catch{}
+                        try{ _insertSegDirty = true; }catch{}
+                        try{ ensureScrolloff && ensureScrolloff(); }catch{}
+                        try{ if (_mdRenderTextLayer) _mdRenderTextLayer(); }catch{}
+                        try{ _repositionCaret && _repositionCaret(); }catch{}
+                        try{ updateGutter && updateGutter(); }catch{}
+                        try{ _scheduleListCharsRender && _scheduleListCharsRender('md-list-enter-clear-eof'); }catch{}
+                        return; // 処理済み
+                      }
+
                       try{ e.preventDefault(); }catch{}
                       const newV = v + '\n' + prefix;
                       editor.value = newV;
@@ -32691,6 +32719,8 @@ try{
                       try{ editor.selectionStart = editor.selectionEnd = newOff; }catch{}
                       try{ caretRow = (r0|0) + 1; caretCol = (prefix.length|0); }catch{}
                       try{ _touchBufferModified(); }catch{}
+                      try{ _mdListInvalidateCache && _mdListInvalidateCache('md-list-enter-eof'); }catch{}
+                      try{ _mdWrapInvalidateCache && _mdWrapInvalidateCache('md-list-enter-eof'); }catch{}
                       try{ _wrapInvalidateCache && _wrapInvalidateCache('md-list-enter-eof'); }catch{}
                       try{ _insertSegDirty = true; }catch{}
                       try{ ensureScrolloff && ensureScrolloff(); }catch{}
@@ -32743,10 +32773,18 @@ try{
                 const lines = _splitLines();
                 const r = rc ? (rc.r|0) : (caretRow|0);
                 const line = String((lines && r>=0 && r<(lines.length|0)) ? (lines[r]||'') : '');
+                const col0 = rc ? (rc.c|0) : (caretCol|0);
+                const atEol = ((col0|0) === (line.length|0));
 
                 let info = null;
                 try{ info = (typeof _mdUListInfo === 'function') ? _mdUListInfo(line, r|0, lines) : null; }catch{ info = null; }
                 if (info && info.kind === 'item' && (info.listType === 'ul' || info.listType === 'ol')){
+                  // Spec #1996:
+                  // - Only at EOL: create next sibling list item.
+                  // - If the line is effectively empty (indent + marker + whitespace only): clear current line.
+                  if (!atEol){
+                    // Non-EOL: fall through to native newline insertion.
+                  } else {
                   const markerIdx = (info.markerIdx|0);
                   const markerLen = (info.markerLen|0);
                   if ((markerIdx|0) >= 0 && (markerLen|0) > 0 && (markerIdx|0) <= line.length){
@@ -32755,6 +32793,34 @@ try{
                     const sc = Math.max(1, (info.spaceCount|0));
                     const prefix = indent + marker + ' '.repeat(sc|0);
 
+                    let isEmptyItem = false;
+                    try{
+                      const rest = line.slice(Math.min(line.length, (markerIdx|0) + (markerLen|0)));
+                      isEmptyItem = !String(rest||'').trim();
+                    }catch{ isEmptyItem = false; }
+
+                    if (isEmptyItem){
+                      // Clear the current line (break out of list).
+                      try{ e.preventDefault(); }catch{}
+                      const lineStartOff = Math.max(0, (s0|0) - (col0|0));
+                      const newV = v.slice(0, lineStartOff|0) + v.slice((lineStartOff|0) + (line.length|0));
+                      editor.value = newV;
+                      const newOff = (lineStartOff|0);
+                      try{ editor.selectionStart = editor.selectionEnd = newOff; }catch{}
+                      try{ const rc1 = _rcFromOffset(newOff|0); if (rc1){ caretRow = rc1.r|0; caretCol = rc1.c|0; } }catch{ try{ caretRow = (r|0); caretCol = 0; }catch{} }
+                      try{ _touchBufferModified(); }catch{}
+                      try{ _mdListInvalidateCache && _mdListInvalidateCache('md-list-enter-clear'); }catch{}
+                      try{ _mdWrapInvalidateCache && _mdWrapInvalidateCache('md-list-enter-clear'); }catch{}
+                      try{ _wrapInvalidateCache && _wrapInvalidateCache('md-list-enter-clear'); }catch{}
+                      try{ _insertSegDirty = true; }catch{}
+                      try{ ensureScrolloff && ensureScrolloff(); }catch{}
+                      try{ if (_mdRenderTextLayer) _mdRenderTextLayer(); }catch{}
+                      try{ _repositionCaret && _repositionCaret(); }catch{}
+                      try{ updateGutter && updateGutter(); }catch{}
+                      try{ _scheduleListCharsRender && _scheduleListCharsRender('md-list-enter-clear'); }catch{}
+                      return; // 処理済み
+                    }
+
                     try{ e.preventDefault(); }catch{}
                     const newV = v.slice(0, s0|0) + '\n' + prefix + v.slice(s0|0);
                     editor.value = newV;
@@ -32762,6 +32828,8 @@ try{
                     try{ editor.selectionStart = editor.selectionEnd = newOff; }catch{}
                     try{ caretRow = (r|0) + 1; caretCol = (prefix.length|0); }catch{}
                     try{ _touchBufferModified(); }catch{}
+                    try{ _mdListInvalidateCache && _mdListInvalidateCache('md-list-enter'); }catch{}
+                    try{ _mdWrapInvalidateCache && _mdWrapInvalidateCache('md-list-enter'); }catch{}
                     try{ _wrapInvalidateCache && _wrapInvalidateCache('md-list-enter'); }catch{}
                     try{ _insertSegDirty = true; }catch{}
                     try{ ensureScrolloff && ensureScrolloff(); }catch{}
@@ -32770,6 +32838,7 @@ try{
                     try{ updateGutter && updateGutter(); }catch{}
                     try{ _scheduleListCharsRender && _scheduleListCharsRender('md-list-enter'); }catch{}
                     return; // 処理済み
+                  }
                   }
                 }
               }
@@ -34829,9 +34898,14 @@ try{
                   const r = rc ? (rc.r|0) : (caretRow|0);
                   const lines = _splitLines();
                   const line = String((lines && r>=0 && r<(lines.length|0)) ? (lines[r]||'') : '');
+                  const col0 = rc ? (rc.c|0) : (caretCol|0);
+                  const atEol = ((col0|0) === (line.length|0));
                   let info = null;
                   try{ info = (typeof _mdUListInfo === 'function') ? _mdUListInfo(line, r|0, lines) : null; }catch{ info = null; }
                   if (info && info.kind === 'item' && (info.listType === 'ul' || info.listType === 'ol')){
+                    if (!atEol){
+                      // Spec #1996: non-EOL Enter should be a normal newline.
+                    } else {
                     const markerIdx = (info.markerIdx|0);
                     const markerLen = (info.markerLen|0);
                     if ((markerIdx|0) >= 0 && (markerLen|0) > 0 && (markerIdx|0) <= line.length){
@@ -34839,6 +34913,37 @@ try{
                       const marker = line.slice(markerIdx|0, Math.min(line.length, (markerIdx|0) + (markerLen|0)));
                       const sc = Math.max(1, (info.spaceCount|0));
                       const prefix = indent + marker + ' '.repeat(sc|0);
+
+                      let isEmptyItem = false;
+                      try{
+                        const rest = line.slice(Math.min(line.length, (markerIdx|0) + (markerLen|0)));
+                        isEmptyItem = !String(rest||'').trim();
+                      }catch{ isEmptyItem = false; }
+
+                      if (isEmptyItem){
+                        try{ e.preventDefault(); e.stopPropagation(); }catch{}
+                        const v = String(editor.value||'');
+                        const lineStartOff = Math.max(0, (s0|0) - (col0|0));
+                        const newV = v.slice(0, lineStartOff|0) + v.slice((lineStartOff|0) + (line.length|0));
+                        editor.value = newV;
+                        const newOff = (lineStartOff|0);
+                        try{ editor.selectionStart = editor.selectionEnd = newOff; }catch{}
+                        try{ const rc1 = _rcFromOffset(newOff|0); caretRow = rc1.r|0; caretCol = rc1.c|0; }catch{ caretRow = (r|0); caretCol = 0; }
+                        try{ _setCaret && _setCaret(caretRow|0, caretCol|0); }catch{}
+                        try{ _touchBufferModified(); }catch{}
+                        try{ _mdListInvalidateCache && _mdListInvalidateCache('md-list-enter-clear-kd'); }catch{}
+                        try{ _mdWrapInvalidateCache && _mdWrapInvalidateCache('md-list-enter-clear-kd'); }catch{}
+                        try{ _wrapInvalidateCache && _wrapInvalidateCache('md-list-enter-clear-kd'); }catch{}
+                        try{ _insertSegDirty = true; }catch{}
+                        try{ _insertSegIgnoreSelectUntil = Date.now() + 80; }catch{}
+                        try{ ensureScrolloff && ensureScrolloff(); }catch{}
+                        try{ if (_mdRenderTextLayer) _mdRenderTextLayer(); }catch{}
+                        try{ _repositionCaret && _repositionCaret(); }catch{}
+                        try{ updateGutter && updateGutter(); }catch{}
+                        try{ _scheduleListCharsRender && _scheduleListCharsRender('md-list-enter-clear-kd'); }catch{}
+                        try{ if (window) window.__sixSkipEnterBeforeinputUntil = Date.now() + 120; }catch{}
+                        return; // handled
+                      }
 
                       try{ e.preventDefault(); e.stopPropagation(); }catch{}
                       const v = String(editor.value||'');
@@ -34861,6 +34966,7 @@ try{
                       try{ _scheduleListCharsRender && _scheduleListCharsRender('md-list-enter-kd'); }catch{}
                       try{ if (window) window.__sixSkipEnterBeforeinputUntil = Date.now() + 120; }catch{}
                       return; // handled
+                    }
                     }
                   }
                 }
@@ -41126,15 +41232,21 @@ try{
                     if (mdEnabled && _mode === 'INSERT' && editor){
                       let ss0 = 0, se0 = 0;
                       try{ ss0 = editor.selectionStart|0; se0 = editor.selectionEnd|0; }catch{}
-                      const offIns0 = Math.max(0, Math.min((String((currentBuffer && currentBuffer() && currentBuffer().text)||editor.value||'').length|0), Math.min(ss0|0, se0|0)));
+                      const vDoc0 = String((currentBuffer && currentBuffer() && currentBuffer().text)||editor.value||'');
+                      const offIns0 = Math.max(0, Math.min((vDoc0.length|0), Math.min(ss0|0, se0|0)));
                       let rc0 = null;
                       try{ rc0 = _rcFromOffset(offIns0|0); }catch{ rc0 = null; }
                       const r0 = rc0 ? (rc0.r|0) : (caretRow|0);
+                      const c0 = rc0 ? (rc0.c|0) : (caretCol|0);
                       const lines0 = _splitLines();
                       const line0 = String((lines0 && r0>=0 && r0<(lines0.length|0)) ? (lines0[r0]||'') : '');
                       let info0 = null;
                       try{ info0 = (typeof _mdUListInfo === 'function') ? _mdUListInfo(line0, r0|0, lines0) : null; }catch{ info0 = null; }
                       if (info0 && info0.kind === 'item' && (info0.listType === 'ul' || info0.listType === 'ol')){
+                        const atEol = ((c0|0) === (line0.length|0));
+                        if (!atEol){
+                          // Spec #1996: non-EOL Enter is just a newline.
+                        } else {
                         const markerIdx = (info0.markerIdx|0);
                         const markerLen = (info0.markerLen|0);
                         if ((markerIdx|0) >= 0 && (markerLen|0) > 0 && (markerIdx|0) <= line0.length){
@@ -41143,15 +41255,44 @@ try{
                           const sc = Math.max(1, (info0.spaceCount|0));
                           const prefix = indent + marker + ' '.repeat(sc|0);
 
-                          try{ _imeBarAnchorOff = offIns0|0; }catch{}
-                          try{ _imeBarPrevText = ''; }catch{}
-                          try{ _imeBarReplaceInsertedText('\n' + prefix, 'md-list-enter'); }catch{}
-                          try{ _imeBarPrevText = ''; _imeBarAnchorOff = (editor && typeof editor.selectionStart==='number') ? (editor.selectionStart|0) : (_imeBarAnchorOff|0); }catch{}
-                          try{ _mdListInvalidateCache && _mdListInvalidateCache('md-list-enter-ime'); }catch{}
-                          try{ _mdWrapInvalidateCache && _mdWrapInvalidateCache('md-list-enter-ime'); }catch{}
-                          try{ _wrapInvalidateCache && _wrapInvalidateCache('md-list-enter-ime'); }catch{}
-                          didListEnter = true;
-                          try{ if (_optDebugKeys) _debugPush({ t:Date.now(), type:'imebar-enter-list', mode:_mode, inputType:'Enter', data:'', ctrl:!!e.ctrlKey, alt:!!e.altKey, meta:!!e.metaKey, isComp:false }); }catch{}
+                          let isEmptyItem = false;
+                          try{
+                            const rest = line0.slice(Math.min(line0.length, (markerIdx|0) + (markerLen|0)));
+                            isEmptyItem = !String(rest||'').trim();
+                          }catch{ isEmptyItem = false; }
+
+                          if (isEmptyItem){
+                            const lineStartOff = Math.max(0, (offIns0|0) - (c0|0));
+                            const newV = vDoc0.slice(0, lineStartOff|0) + vDoc0.slice((lineStartOff|0) + (line0.length|0));
+                            editor.value = newV;
+                            const newOff = (lineStartOff|0);
+                            try{ editor.setSelectionRange(newOff|0, newOff|0); }catch{ try{ editor.selectionStart = newOff|0; editor.selectionEnd = newOff|0; }catch{} }
+                            try{ const rc1 = _rcFromOffset(newOff|0); caretRow = rc1.r|0; caretCol = rc1.c|0; }catch{ try{ caretRow = (r0|0); caretCol = 0; }catch{} }
+                            try{ _setCaret && _setCaret(caretRow|0, caretCol|0, { suppressWrapDesired:true }); }catch{}
+                            try{ _touchBufferModified(); }catch{}
+                            try{ _imeBarPrevText = ''; _imeBarAnchorOff = newOff|0; }catch{}
+                            try{ _mdListInvalidateCache && _mdListInvalidateCache('md-list-enter-clear-ime'); }catch{}
+                            try{ _mdWrapInvalidateCache && _mdWrapInvalidateCache('md-list-enter-clear-ime'); }catch{}
+                            try{ _wrapInvalidateCache && _wrapInvalidateCache('md-list-enter-clear-ime'); }catch{}
+                            try{ ensureScrolloff && ensureScrolloff({ force:true }); }catch{ try{ ensureScrolloff && ensureScrolloff(); }catch{} }
+                            try{ if (_mdRenderTextLayer) _mdRenderTextLayer(); }catch{}
+                            try{ _repositionCaret && _repositionCaret({ force:true }); }catch{ try{ _repositionCaret && _repositionCaret(); }catch{} }
+                            try{ updateGutter && updateGutter({ force:true }); }catch{ try{ updateGutter && updateGutter(); }catch{} }
+                            try{ _scheduleListCharsRender && _scheduleListCharsRender('md-list-enter-clear-ime'); }catch{}
+                            didListEnter = true;
+                            try{ if (_optDebugKeys) _debugPush({ t:Date.now(), type:'imebar-enter-list-clear', mode:_mode, inputType:'Enter', data:'', ctrl:!!e.ctrlKey, alt:!!e.altKey, meta:!!e.metaKey, isComp:false }); }catch{}
+                          } else {
+                            try{ _imeBarAnchorOff = offIns0|0; }catch{}
+                            try{ _imeBarPrevText = ''; }catch{}
+                            try{ _imeBarReplaceInsertedText('\n' + prefix, 'md-list-enter'); }catch{}
+                            try{ _imeBarPrevText = ''; _imeBarAnchorOff = (editor && typeof editor.selectionStart==='number') ? (editor.selectionStart|0) : (_imeBarAnchorOff|0); }catch{}
+                            try{ _mdListInvalidateCache && _mdListInvalidateCache('md-list-enter-ime'); }catch{}
+                            try{ _mdWrapInvalidateCache && _mdWrapInvalidateCache('md-list-enter-ime'); }catch{}
+                            try{ _wrapInvalidateCache && _wrapInvalidateCache('md-list-enter-ime'); }catch{}
+                            didListEnter = true;
+                            try{ if (_optDebugKeys) _debugPush({ t:Date.now(), type:'imebar-enter-list', mode:_mode, inputType:'Enter', data:'', ctrl:!!e.ctrlKey, alt:!!e.altKey, meta:!!e.metaKey, isComp:false }); }catch{}
+                          }
+                        }
                         }
                       }
                     }
@@ -41410,15 +41551,21 @@ try{
                   if (mdEnabled && _mode === 'INSERT' && editor){
                     let ss0 = 0, se0 = 0;
                     try{ ss0 = editor.selectionStart|0; se0 = editor.selectionEnd|0; }catch{}
-                    const offIns0 = Math.max(0, Math.min((String((currentBuffer && currentBuffer() && currentBuffer().text)||editor.value||'').length|0), Math.min(ss0|0, se0|0)));
+                    const vDoc0 = String((currentBuffer && currentBuffer() && currentBuffer().text)||editor.value||'');
+                    const offIns0 = Math.max(0, Math.min((vDoc0.length|0), Math.min(ss0|0, se0|0)));
                     let rc0 = null;
                     try{ rc0 = _rcFromOffset(offIns0|0); }catch{ rc0 = null; }
                     const r0 = rc0 ? (rc0.r|0) : (caretRow|0);
+                    const c0 = rc0 ? (rc0.c|0) : (caretCol|0);
                     const lines0 = _splitLines();
                     const line0 = String((lines0 && r0>=0 && r0<(lines0.length|0)) ? (lines0[r0]||'') : '');
                     let info0 = null;
                     try{ info0 = (typeof _mdUListInfo === 'function') ? _mdUListInfo(line0, r0|0, lines0) : null; }catch{ info0 = null; }
                     if (info0 && info0.kind === 'item' && (info0.listType === 'ul' || info0.listType === 'ol')){
+                      const atEol = ((c0|0) === (line0.length|0));
+                      if (!atEol){
+                        // Spec #1996: non-EOL Enter is just a newline.
+                      } else {
                       const markerIdx = (info0.markerIdx|0);
                       const markerLen = (info0.markerLen|0);
                       if ((markerIdx|0) >= 0 && (markerLen|0) > 0 && (markerIdx|0) <= line0.length){
@@ -41426,6 +41573,34 @@ try{
                         const marker = line0.slice(markerIdx|0, Math.min(line0.length, (markerIdx|0) + (markerLen|0)));
                         const sc = Math.max(1, (info0.spaceCount|0));
                         const prefix = indent + marker + ' '.repeat(sc|0);
+
+                        let isEmptyItem = false;
+                        try{
+                          const rest = line0.slice(Math.min(line0.length, (markerIdx|0) + (markerLen|0)));
+                          isEmptyItem = !String(rest||'').trim();
+                        }catch{ isEmptyItem = false; }
+
+                        if (isEmptyItem){
+                          const lineStartOff = Math.max(0, (offIns0|0) - (c0|0));
+                          const newV = vDoc0.slice(0, lineStartOff|0) + vDoc0.slice((lineStartOff|0) + (line0.length|0));
+                          editor.value = newV;
+                          const newOff = (lineStartOff|0);
+                          try{ editor.setSelectionRange(newOff|0, newOff|0); }catch{ try{ editor.selectionStart = newOff|0; editor.selectionEnd = newOff|0; }catch{} }
+                          try{ const rc1 = _rcFromOffset(newOff|0); caretRow = rc1.r|0; caretCol = rc1.c|0; }catch{ try{ caretRow = (r0|0); caretCol = 0; }catch{} }
+                          try{ _setCaret && _setCaret(caretRow|0, caretCol|0, { suppressWrapDesired:true }); }catch{}
+                          try{ _touchBufferModified(); }catch{}
+                          try{ _imeBarPrevText = ''; _imeBarAnchorOff = newOff|0; }catch{}
+                          try{ _mdListInvalidateCache && _mdListInvalidateCache('md-list-enter-clear-ime-legacy'); }catch{}
+                          try{ _mdWrapInvalidateCache && _mdWrapInvalidateCache('md-list-enter-clear-ime-legacy'); }catch{}
+                          try{ _wrapInvalidateCache && _wrapInvalidateCache('md-list-enter-clear-ime-legacy'); }catch{}
+                          try{ ensureScrolloff && ensureScrolloff({ force:true }); }catch{ try{ ensureScrolloff && ensureScrolloff(); }catch{} }
+                          try{ if (_mdRenderTextLayer) _mdRenderTextLayer(); }catch{}
+                          try{ _repositionCaret && _repositionCaret({ force:true }); }catch{ try{ _repositionCaret && _repositionCaret(); }catch{} }
+                          try{ updateGutter && updateGutter({ force:true }); }catch{ try{ updateGutter && updateGutter(); }catch{} }
+                          try{ _scheduleListCharsRender && _scheduleListCharsRender('md-list-enter-clear-ime-legacy'); }catch{}
+                          didListEnter = true;
+                          try{ if (_optDebugKeys) _debugPush({ t:Date.now(), type:'imebar-enter-list-clear-legacy', mode:_mode, inputType:'Enter', data:'', ctrl:!!e.ctrlKey, alt:!!e.altKey, meta:!!e.metaKey, isComp:false }); }catch{}
+                        } else {
 
                         try{ _imeBarAnchorOff = offIns0|0; }catch{}
                         try{ _imeBarPrevText = ''; }catch{}
@@ -41436,6 +41611,8 @@ try{
                         try{ _wrapInvalidateCache && _wrapInvalidateCache('md-list-enter-ime-legacy'); }catch{}
                         didListEnter = true;
                         try{ if (_optDebugKeys) _debugPush({ t:Date.now(), type:'imebar-enter-list-legacy', mode:_mode, inputType:'Enter', data:'', ctrl:!!e.ctrlKey, alt:!!e.altKey, meta:!!e.metaKey, isComp:false }); }catch{}
+                        }
+                      }
                       }
                     }
                   }
