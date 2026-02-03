@@ -16821,7 +16821,7 @@ try{
         try{ if (csMeasure && csMeasure.fontFeatureSettings) _measureSpan.style.fontFeatureSettings = csMeasure.fontFeatureSettings; }catch{}
       }catch{}
 
-      // Gutter sizing: widen by ~1ch and pad numbers by ~0.5ch.
+      // Gutter sizing: widen by ~0.375ch and pad numbers by ~0.125ch.
       // Use the measured editor font (already zoomed) so 5+ digit numbers don't overflow.
       try{
         let chPx = 0;
@@ -16832,10 +16832,10 @@ try{
           }
         }catch{ chPx = 0; }
         if (Number.isFinite(chPx) && chPx > 0){
-          const ch = Math.max(1, Math.round(chPx * 2) / 2);          // snap to 0.5px
-          const half = Math.max(0, Math.round(chPx * 0.5 * 2) / 2);  // 0.5ch
-          try{ root.style.setProperty('--gwExtraPx', ch + 'px'); }catch{}
-          try{ root.style.setProperty('--gutterNumPadRightPx', half + 'px'); }catch{}
+          const extra = Math.max(1, Math.round(chPx * 0.375 * 2) / 2);   // 0.375ch
+          const padR = Math.max(0, Math.round(chPx * 0.125 * 2) / 2);    // 0.125ch
+          try{ root.style.setProperty('--gwExtraPx', extra + 'px'); }catch{}
+          try{ root.style.setProperty('--gutterNumPadRightPx', padR + 'px'); }catch{}
         }
       }catch{}
       // Compute caret vertical offset: center font box within line box
@@ -24090,6 +24090,14 @@ try{
       const lastKey = (typeof _lastKeydownForAnom==='object' && _lastKeydownForAnom && _lastKeydownForAnom.key) ? String(_lastKeydownForAnom.key) : null;
       const lastCode = (typeof _lastKeydownForAnom==='object' && _lastKeydownForAnom && _lastKeydownForAnom.code) ? String(_lastKeydownForAnom.code) : null;
       const isJK = !!(lastKey && (lastKey === 'j' || lastKey === 'k' || lastKey === 'ArrowUp' || lastKey === 'ArrowDown' || (lastKey === 'Process' && (lastCode === 'KeyJ' || lastCode === 'KeyK'))));
+
+      // Huge buffer: never do per-pixel smooth scroll for j/k driven adjustments.
+      // It causes 1-2px incremental scrolling and forces expensive overlay/gutter redraw every frame.
+      try{
+        const huge = (typeof _editorTextLen === 'function') ? ((_editorTextLen()|0) >= 200000) : false;
+        if (huge && isJK && !(opts && opts.forceAnimate)) opts.immediate = true;
+      }catch{}
+
       const vis = (typeof _visibleLinesExact === 'function') ? (_visibleLinesExact()||1) : 1;
       const deltaPx = Math.abs(targetPhysPx - cur);
       const deltaLines = Math.max(0, Math.round(deltaPx / (LINE_HEIGHT||1)));
@@ -24794,6 +24802,17 @@ try{
            // #1239: If scan-hold is active (caret mode), use smooth scroll instead of jump
            const sh = window._scanHold;
            if (window.__sixScanHoldHeld && window.__sixScanHoldHeld.size > 0 && sh && sh.mode === 'caret' && !sh.stepAnimation) {
+               // Huge buffer: do NOT do per-pixel stepping (e.g. 3px) here.
+               // It creates 1-2px/3px scroll increments and can permanently corrupt gutter layout
+               // via subpixel remainder + DOM reuse. Use a direct line-grid jump instead.
+               try{
+                 const huge0 = (typeof _editorTextLen === 'function') ? ((_editorTextLen()|0) >= 200000) : false;
+                 if (huge0){
+                   _setEditorScrollTop((newTop-1)*LINE_HEIGHT, { immediate:true, keepCaret:true });
+                   scrolled = true;
+                   return;
+                 }
+               }catch{}
                // md-rich + wrap-on (logical scroll grid): do NOT switch to scan-hold scroll mode.
                // Switching modes can pin caretRow and desync posInfo/active-row background.
                try{
@@ -24902,6 +24921,14 @@ try{
            // #1239: Smooth scroll transition for scan-hold
            const sh = window._scanHold;
            if (window.__sixScanHoldHeld && window.__sixScanHoldHeld.size > 0 && sh && sh.mode === 'caret' && !sh.stepAnimation) {
+               try{
+                 const huge0 = (typeof _editorTextLen === 'function') ? ((_editorTextLen()|0) >= 200000) : false;
+                 if (huge0){
+                   _setEditorScrollTop((newTop-1)*LINE_HEIGHT, { immediate:true, keepCaret:true });
+                   scrolled = true;
+                   return;
+                 }
+               }catch{}
                // md-rich + wrap-on: avoid switching to scan-hold scroll mode.
                try{
                  if ((_mdRichActive && _mdRichActive()) && _wrapEnabled && _wrapEnabled()){
@@ -25597,6 +25624,10 @@ try{
           // Use the first *visible* row as the anchor for subpixel remainder.
           let first = null;
           try{ first = children2.find(e=>{ try{ return !!e && (!e.style || e.style.display !== 'none'); }catch{ return true; } }); }catch{ first = children2[0]; }
+          // IMPORTANT: clear stale marginTop on all rows.
+          // When we rotate/reuse gutter rows (huge file optimization), a previous "first" row
+          // can keep a non-zero marginTop and permanently corrupt gutter layout.
+          try{ for (const el of (children2||[])){ try{ if (el && el.style) el.style.marginTop = '0px'; }catch{} } }catch{}
           if (first){
             let mt = (Math.abs(rem) > 0.01) ? (-rem) : 0;
             first.style.marginTop = (mt ? (mt + 'px') : '0px');
@@ -25693,6 +25724,109 @@ try{
         return;
       }
     }catch{}
+
+    // Plain mode (non-markdown + wrap-off): for huge files, avoid rewriting all visible rows
+    // on every 1-line scroll. Rotate existing DOM nodes and update only the entering row.
+    // This targets the reported "1行スクロール激重" in large buffers.
+    try{
+      const forcedPlain = !!(opts && opts.force);
+      const isMd = !!(_mdRichActive && _mdRichActive());
+      const wrapOff = !(_wrapEnabled && _wrapEnabled());
+      if (!isMd && wrapOff){
+        const lenNow = (function(){ try{ return _editorTextLen()|0; }catch{ return 0; } })();
+        const huge = (lenNow|0) >= 200000;
+        if (huge && !forcedPlain){
+          // state holder
+          if (!updateGutter._plain) updateGutter._plain = { top:0, vis:0, total:0, lh:0, imeReduced:0, imeBase1:0 };
+          const st = updateGutter._plain;
+
+          const visNow = _visibleLinesExact()|0;
+          const topNow = _topLine()|0;
+          const totalNow = _totalLines()|0;
+          const lhNow = (LINE_HEIGHT|0);
+          let imeReduced = 0;
+          let imeBase1 = 0;
+          try{ imeReduced = !!(document && document.body && document.body.classList && document.body.classList.contains('ime-reduced-text')); }catch{ imeReduced = 0; }
+          try{ imeBase1 = (window && Number.isFinite(window._imeReducedBaseLine1)) ? (window._imeReducedBaseLine1|0) : 0; }catch{ imeBase1 = 0; }
+
+          // Only incremental-update when viewport geometry is stable.
+          const stableGeom = ((st.vis|0) === (visNow|0)) && ((st.total|0) === (totalNow|0)) && ((st.lh|0) === (lhNow|0)) && ((st.imeReduced|0) === (imeReduced?1:0)) && ((st.imeBase1|0) === (imeBase1|0));
+          const deltaTop = ((topNow|0) - (st.top|0))|0;
+
+          const setRow = (el, ln1, total1)=>{
+            try{
+              // Ensure base styles (only height/line-height might change via zoom)
+              el.style.display = 'block';
+              el.style.height = lhNow + 'px';
+              el.style.lineHeight = lhNow + 'px';
+              el.style.position = 'relative';
+              el.style.zIndex = '1';
+            }catch{}
+            if (!ln1 || (ln1|0) < 1 || (ln1|0) > (total1|0)){
+              el.textContent = '';
+              el.style.background = 'var(--eofGutterFillColor, yellow)';
+              el.style.color = 'var(--gutterNumberColor, yellow)';
+              return;
+            }
+            const ln0 = (ln1|0);
+            const dispLn = (imeReduced && (imeBase1|0) > 0) ? (((imeBase1|0) + (ln0|0) - 1)|0) : (ln0|0);
+            el.textContent = String(dispLn|0);
+            el.style.background = '';
+            el.style.color = 'var(--gutterNumberColor, yellow)';
+          };
+
+          // Build initial children list (excluding stripe).
+          let kids = null;
+          try{ kids = Array.from(gutter.children).filter(c => !c.classList.contains('gutter-stripe')); }catch{ kids = null; }
+          const haveKids = !!(kids && kids.length);
+
+          if (haveKids && stableGeom && (deltaTop===1 || deltaTop===-1) && (visNow|0) > 0){
+            // Rotate by 1.
+            if (deltaTop === 1){
+              const first = kids[0];
+              try{ gutter.removeChild(first); gutter.appendChild(first); }catch{}
+              // Update entering bottom line
+              const lnEnter = (topNow|0) + (visNow|0) - 1;
+              setRow(first, lnEnter|0, totalNow|0);
+            } else {
+              const last = kids[kids.length-1];
+              try{ gutter.removeChild(last); gutter.insertBefore(last, kids[0]); }catch{}
+              // Update entering top line
+              const lnEnter = (topNow|0);
+              setRow(last, lnEnter|0, totalNow|0);
+            }
+
+            // Maintain subpixel remainder margin on the first visible row.
+            try{
+              gutter.style.transform = '';
+              const stPx = (editor.scrollTop||0);
+              const rem = stPx - Math.floor(stPx/(lhNow||1))*(lhNow||1);
+              const kids2 = Array.from(gutter.children).filter(c => !c.classList.contains('gutter-stripe'));
+              const first2 = kids2 && kids2[0];
+                  try{ for (const el of (kids2||[])){ try{ if (el && el.style) el.style.marginTop = '0px'; }catch{} } }catch{}
+                  if (first2){ first2.style.marginTop = Math.abs(rem) > 0.01 ? (-rem)+'px' : '0px'; }
+            }catch{}
+
+            st.top = topNow|0;
+            st.vis = visNow|0;
+            st.total = totalNow|0;
+            st.lh = lhNow|0;
+            st.imeReduced = imeReduced?1:0;
+            st.imeBase1 = imeBase1|0;
+            return;
+          }
+
+          // Refresh state baseline even if we fall back to full render.
+          st.top = topNow|0;
+          st.vis = visNow|0;
+          st.total = totalNow|0;
+          st.lh = lhNow|0;
+          st.imeReduced = imeReduced?1:0;
+          st.imeBase1 = imeBase1|0;
+        }
+      }
+    }catch{}
+
     const T = (window.THEME || {});
     // #1189: inactive mode for scroll-hold (render all line numbers as inactive)
     const inactiveMode = !!(opts && opts.inactive);
@@ -28548,7 +28682,9 @@ try{
       if (mDump){
         let arr = _debugKeyRing.slice();
         let numStr = (mDump[1]||'').trim();
-        if (numStr){ numStr = numStr.replace(/[０-９]/g, ch=> String.fromCharCode(ch.charCodeAt(0)-0xFF10+0x30)); }
+          const kids0 = Array.from(gutter.children).filter(c => !c.classList.contains('gutter-stripe'));
+          try{ for (const el of (kids0||[])){ try{ if (el && el.style) el.style.marginTop = '0px'; }catch{} } }catch{}
+          if (first){ first.style.marginTop = Math.abs(rem) > 0.01 ? (-rem)+'px' : '0px'; }
         const nArg = parseInt(numStr||'',10);
         if (Number.isFinite(nArg) && nArg>0 && nArg < arr.length){ arr = arr.slice(arr.length - nArg); }
         if (!arr.length){ toast('debugkeys: ring empty', 900); return; }
@@ -28652,7 +28788,8 @@ try{
         let arr = _rawKeyRing.slice();
         let numStr = (mDumpRaw[2]||'').trim();
         if (numStr){ numStr = numStr.replace(/[０-９]/g, ch=> String.fromCharCode(ch.charCodeAt(0)-0xFF10+0x30)); }
-        const nArg = parseInt(numStr||'',10);
+      try{ for (const el of (children||[])){ try{ if (el && el.style) el.style.marginTop = '0px'; }catch{} } }catch{}
+      if (first){ first.style.marginTop = Math.abs(rem) > 0.01 ? (-rem)+'px' : '0px'; }
         if (Number.isFinite(nArg) && nArg>0 && nArg < arr.length){ arr = arr.slice(arr.length - nArg); }
         if (!arr.length){ toast('rawkeys: ring empty', 900); return; }
         const s = _rawDump(arr);
@@ -37390,7 +37527,46 @@ try{
     const countAccBefore = (_countAcc==null?null:(_countAcc|0));
     const fromRow = (caretRow|0);
     const fromCol = (caretCol|0);
-    const n=_consumeCount();
+    let n=_consumeCount();
+    // Huge buffer: keep a stable time-based scroll speed during key-hold by
+    // dynamically increasing the step (lines per repeat) when events lag.
+    try{
+      const huge = (typeof _editorTextLen === 'function') ? ((_editorTextLen()|0) >= 200000) : false;
+      const canAccel = huge && !!e && !!e.repeat && !_visualActive && (_mode === 'NORMAL') && ((countAccBefore==null) && ((n|0) === 1));
+      if (canAccel){
+        const now = (window.performance && performance.now) ? performance.now() : Date.now();
+        const st = window.__sixJKHold || (window.__sixJKHold = { dir: 0, t: now, carry: 0 });
+        const dir = 1;
+        const msPerLine = (function(){
+          try{
+            const o = (window && window.SIX_OPTIONS) ? window.SIX_OPTIONS : null;
+            const v = o && (o.JK_MS_PER_LINE ?? o.jkMsPerLine ?? o.jk_ms_per_line);
+            const m = (typeof v === 'number') ? v : parseFloat(String(v||''));
+            return (Number.isFinite(m) && m >= 5 && m <= 200) ? m : 45;
+          }catch{ return 45; }
+        })();
+        let dt = now - (+st.t || now);
+        if (!Number.isFinite(dt) || dt < 0) dt = 0;
+        // Reset if direction changed or we paused long enough.
+        if ((st.dir|0) !== (dir|0) || dt > 260){ st.dir = dir|0; st.carry = 0; dt = 0; }
+        st.t = now;
+        st.carry = (+st.carry || 0) + (dt / msPerLine);
+        const add = Math.floor(st.carry + 1e-9);
+        if (add >= 1){
+          n = Math.max(1, Math.min(200, add|0));
+          st.carry = (st.carry - add);
+        }
+      } else {
+        // Keep timing state fresh for the next repeat burst.
+        try{
+          const now = (window.performance && performance.now) ? performance.now() : Date.now();
+          const st = window.__sixJKHold || (window.__sixJKHold = { dir: 0, t: now, carry: 0 });
+          st.dir = 1;
+          st.t = now;
+          st.carry = 0;
+        }catch{}
+      }
+    }catch{}
     try{ if (_optRawKeys){ console.debug('[vert] normal j', { key:e.key, code:e.code, trusted:!!e.isTrusted, repeat:!!e.repeat, countAccBefore, countUsed:(n|0), fromRow:fromRow+1 }); } }catch{}
     const _md = (function(){ try{ return (_mdRichEnabled && _mdRichEnabled()); }catch{ return false; } })();
     if (_md) _moveCaretVisualLines(n);
@@ -37452,7 +37628,43 @@ try{
     e.preventDefault(); try{ _debugPush({ t:Date.now(), type:'motion-exec', mode:_mode, key:(e.key==='Process'?'k':e.key), code:e.code, via:(e.key==='Process'?'Process/KeyK':(e.key==='k'?'k':'ArrowUp')) }); }catch{}
     const countAccBefore = (_countAcc==null?null:(_countAcc|0));
     const fromRow = (caretRow|0);
-    const n=_consumeCount();
+    let n=_consumeCount();
+    // Huge buffer: time-based step scaling during key-hold to keep scroll speed stable.
+    try{
+      const huge = (typeof _editorTextLen === 'function') ? ((_editorTextLen()|0) >= 200000) : false;
+      const canAccel = huge && !!e && !!e.repeat && !_visualActive && (_mode === 'NORMAL') && ((countAccBefore==null) && ((n|0) === 1));
+      if (canAccel){
+        const now = (window.performance && performance.now) ? performance.now() : Date.now();
+        const st = window.__sixJKHold || (window.__sixJKHold = { dir: 0, t: now, carry: 0 });
+        const dir = -1;
+        const msPerLine = (function(){
+          try{
+            const o = (window && window.SIX_OPTIONS) ? window.SIX_OPTIONS : null;
+            const v = o && (o.JK_MS_PER_LINE ?? o.jkMsPerLine ?? o.jk_ms_per_line);
+            const m = (typeof v === 'number') ? v : parseFloat(String(v||''));
+            return (Number.isFinite(m) && m >= 5 && m <= 200) ? m : 45;
+          }catch{ return 45; }
+        })();
+        let dt = now - (+st.t || now);
+        if (!Number.isFinite(dt) || dt < 0) dt = 0;
+        if ((st.dir|0) !== (dir|0) || dt > 260){ st.dir = dir|0; st.carry = 0; dt = 0; }
+        st.t = now;
+        st.carry = (+st.carry || 0) + (dt / msPerLine);
+        const add = Math.floor(st.carry + 1e-9);
+        if (add >= 1){
+          n = Math.max(1, Math.min(200, add|0));
+          st.carry = (st.carry - add);
+        }
+      } else {
+        try{
+          const now = (window.performance && performance.now) ? performance.now() : Date.now();
+          const st = window.__sixJKHold || (window.__sixJKHold = { dir: 0, t: now, carry: 0 });
+          st.dir = -1;
+          st.t = now;
+          st.carry = 0;
+        }catch{}
+      }
+    }catch{}
     try{ if (_optRawKeys){ console.debug('[vert] normal k', { key:e.key, code:e.code, trusted:!!e.isTrusted, repeat:!!e.repeat, countAccBefore, countUsed:(n|0), fromRow:fromRow+1 }); } }catch{}
     const _md = (function(){ try{ return (_mdRichEnabled && _mdRichEnabled()); }catch{ return false; } })();
     if (_md) _moveCaretVisualLines(-n);
@@ -38342,6 +38554,7 @@ try{
           caretDir: 0, // 1=down, -1=up
           caretLastMove: 0, // timestamp of last caret move
           caretIntervalMs: 30, // caret move interval (30ms ≈ 33 moves/sec, typical key repeat)
+          caretCarry: 0, // fractional carry for time-based batching (huge buffers)
           // promotion delay
           promotionDelayMs: 500, // 0.5s delay before starting continuous mode
           promotionTimer: null,
@@ -38414,24 +38627,24 @@ try{
           try{
             const vis = _visibleLinesExact();
             const topLine = _topLine();
+
             const linesTotal = _totalLines();
-            
             // #1245: Peek at pending count to predict true destination
             const count = (_countAcc==null?1:_countAcc);
+
+            // If a per-line speed is configured, always choose caret mode (line-grid).
+            // This avoids entering scroll mode (pixel stepping) at scrolloff boundaries.
+            try{
+              const o = (window && window.SIX_OPTIONS) ? window.SIX_OPTIONS : null;
+              if (o && (o.JK_MS_PER_LINE!=null || o.jkMsPerLine!=null || o.jk_ms_per_line!=null)){
+                if (count > 30) return 'jump';
+                return 'caret';
+              }
+            }catch{}
 
             // #1292: If count > 30, force jump mode (bypass smooth scroll checks)
             if (count > 30) return 'jump';
 
-            // scrolloff=99999 (centering): always choose caret mode for discrete motions.
-            // This prevents having to traverse wrapped visual lines in scroll mode (e.g., requiring 3 presses
-            // to pass one wrapped logical line). Continuous hold behavior is handled by caret-loop + ensureScrolloff.
-            try{ if ((scrolloff|0) >= 99999) return 'caret'; }catch{}
-            
-            // #1297: If count > 1 (and <= 30), force caret mode to enable step-by-step animation
-            // #1313: But if scrolloff is large (centering), we should prefer scroll mode immediately
-            // unless we are at boundary.
-            // Actually, if scrolloff=999, we want to scroll.
-            // If we return 'caret', _scanHoldCaretMode will run.
             // It will call ensureScrolloff. ensureScrolloff will see scrolloff=999 and scroll.
             // This is fine for single step.
             // But for continuous hold, we want smooth scroll.
@@ -38611,6 +38824,7 @@ try{
           try{
             const countAccBefore = (_countAcc==null?null:(_countAcc|0));
             const beforeRow = (caretRow|0);
+
             const beforeCol = (caretCol|0);
             const count = _consumeCount();
             // #1293: If count > 20, it's a jump. Do not multiply by delta again if count is already signed?
@@ -38743,8 +38957,43 @@ try{
           if (!_scanHold.caretDir) return; // stopped
           // #1240: If mode switched to scroll (e.g. by ensureScrolloff), stop caret loop
           if (_scanHold.mode !== 'caret') return;
-          
-          // move at configured interval (default 30ms ≈ typical key repeat rate)
+
+          // If configured, keep time-per-line stable by batching multiple lines per tick when lagging.
+          // This makes JK_MS_PER_LINE effective for scan-hold (the common hold path), regardless of size.
+          try{
+            const msPerLine = (function(){
+              try{
+                const o = (window && window.SIX_OPTIONS) ? window.SIX_OPTIONS : null;
+                const v = o && (o.JK_MS_PER_LINE ?? o.jkMsPerLine ?? o.jk_ms_per_line);
+                if (v == null) return null;
+                const m = (typeof v === 'number') ? v : parseFloat(String(v||''));
+                return (Number.isFinite(m) && m >= 5 && m <= 5000) ? m : null;
+              }catch{ return null; }
+            })();
+
+            if (msPerLine != null){
+              const now = (Number.isFinite(ts) ? ts : ((performance && performance.now) ? performance.now() : Date.now()));
+              let last = (+_scanHold.caretLastMove);
+              if (!Number.isFinite(last) || last <= 0){
+                last = now;
+                _scanHold.caretLastMove = now;
+              }
+              let dt = now - last;
+              if (!Number.isFinite(dt) || dt < 0) dt = 0;
+
+              _scanHold.caretCarry = (+_scanHold.caretCarry || 0) + (dt / (msPerLine||45));
+              const steps = Math.floor((_scanHold.caretCarry||0) + 1e-9);
+              if (steps >= 1){
+                _scanHold.caretCarry = (+_scanHold.caretCarry || 0) - steps;
+                try{ _countAcc = Math.max(1, Math.min(400, steps|0)); }catch{}
+                _scanHoldCaretMode(_scanHold.caretDir, { immediate: true });
+              }
+              if (_scanHold.mode === 'caret') _scanHold.raf = requestAnimationFrame(_scanHoldCaretLoop);
+              return;
+            }
+          }catch{}
+
+          // Normal buffers: move at configured interval (default 30ms ~ typical key repeat rate)
           const elapsed = ts - _scanHold.caretLastMove;
           if (elapsed >= _scanHold.caretIntervalMs){
             _scanHoldCaretMode(_scanHold.caretDir);
@@ -38800,6 +39049,27 @@ try{
                 } else if (_scanHold.lastCount > 9) {
                     scrollPx = 8;
                 }
+
+                // If per-line speed is configured, prefer time-based speed even in scroll mode.
+                // This keeps 30 vs 300 (ms/line) visibly different and avoids device-dependent RAF rates.
+                try{
+                  if (!_scanHold.fixedSpeed){
+                    const o = (window && window.SIX_OPTIONS) ? window.SIX_OPTIONS : null;
+                    const v = o && (o.JK_MS_PER_LINE ?? o.jkMsPerLine ?? o.jk_ms_per_line);
+                    const m = (typeof v === 'number') ? v : parseFloat(String(v||''));
+                    if (Number.isFinite(m) && m >= 5 && m <= 5000){
+                      const nowTs = (Number.isFinite(ts) ? ts : ((performance && performance.now) ? performance.now() : Date.now()));
+                      let dt = 16;
+                      if ((_scanHold.lastTs||0) > 0){
+                        dt = Math.max(1, Math.min(80, nowTs - (+_scanHold.lastTs||0)));
+                      }
+                      _scanHold.lastTs = nowTs;
+                      const lh = (typeof LINE_HEIGHT === 'number' && LINE_HEIGHT > 0) ? LINE_HEIGHT : 20;
+                      const px = (lh / (m||45)) * dt;
+                      scrollPx = Math.max(1, Math.min(80, px));
+                    }
+                  }
+                }catch{}
                 
                 try{
                   const o = (window && window.SIX_OPTIONS) ? window.SIX_OPTIONS : null;
@@ -39342,6 +39612,19 @@ try{
                               if (nextLine > topLine + vis - 1 - scrolloffVal) needScroll = true;
                           } else {
                               if (nextLine < topLine + scrolloffVal) needScroll = true;
+                          }
+
+                          if (needScroll) {
+                              // If per-line speed is configured, keep caret-mode (line-grid) even at
+                              // scrolloff boundaries. Switching to scroll mode reintroduces pixel stepping.
+                              let forceCaret = false;
+                              try{
+                                const o = (window && window.SIX_OPTIONS) ? window.SIX_OPTIONS : null;
+                                forceCaret = !!(o && (o.JK_MS_PER_LINE!=null || o.jkMsPerLine!=null || o.jk_ms_per_line!=null));
+                              }catch{}
+                              if (forceCaret) {
+                                needScroll = false;
+                              }
                           }
 
                           if (needScroll) {
