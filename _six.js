@@ -1,4 +1,4 @@
-const VERSION = '0.9.1.t';
+const VERSION = '0.9.2';
 // Build stamp (for verifying which _six.js is actually running)
 // NOTE: Intentionally ASCII-only; fullwidth variants should be treated as invalid.
 try{ window.__sixBuildTs = '2026-02-01T01:10:00Z'; }catch{}
@@ -27498,7 +27498,12 @@ try{
           };
           reAll.lastIndex = 0; let m;
           while ((m = reAll.exec(text))){
-            const start = m.index|0; const len = ((m[0]||'').length|0); if (!(len>0)) { reAll.lastIndex++; continue; }
+            const start = m.index|0;
+            const len = ((m[0]||'').length|0);
+            const isZeroLen = ((len|0) === 0);
+            // Allow zero-length matches (e.g. ^/$) like Vim, but always advance to avoid infinite loops.
+            if (isZeroLen){ try{ reAll.lastIndex = Math.max((reAll.lastIndex|0), ((start+1)|0)); }catch{} }
+            const lenForPreview = (isZeroLen ? 1 : (len|0));
             // Per-line non-g: only first per line
             let row=0; try{ row = rowFromOffAll(start)|0; }catch{}
             if (!wantGlobalPerLine){ if (seenLineFirst.has(row)) continue; seenLineFirst.add(row); }
@@ -27512,7 +27517,11 @@ try{
                   rc.lastIndex = start; // include current match
                   let cnt = 0; let mm;
                   while ((mm = rc.exec(text))){
-                    const st = (mm.index|0); const ln = ((mm[0]||'').length|0); if (!(ln>0)){ rc.lastIndex++; continue; }
+                    const st = (mm.index|0);
+                    const ln = ((mm[0]||'').length|0);
+                    const z = ((ln|0) === 0);
+                    // zero-length: countable but must advance
+                    if (z){ try{ rc.lastIndex = Math.max((rc.lastIndex|0), ((st+1)|0)); }catch{} }
                     let r0=0; try{ r0 = rowFromOffAll(st)|0; }catch{}
                     if (!wantGlobalPerLine){ if (tempSeen.has(r0)) continue; tempSeen.add(r0); }
                     cnt++;
@@ -27535,7 +27544,7 @@ try{
                 _suppressScrollDuringModal = true;
                 // Also suppress scroll snapping while modal is up
                 try{ _zoomGuardUntil = Date.now() + 2000; }catch{}
-                previewAt(start, len, text);
+                previewAt(start, lenForPreview, text);
                 const cmdLabel = ':' + (isAll? '%s' : 's') + '/' + pat + '/' + repl + '/' + flagsGiven;
                 const ch = await _subConfirmModal((countRemaining>0? (countRemaining+" matches left.\n") : '') + 'Replace this match?', { cmdLabel, canUndo: (_decStack.length>=2) });
                 if (ch==='q'){ _incPrevHide(); break; }
@@ -27589,7 +27598,8 @@ try{
                 const rep = _expandReplacement(repl, m);
                 text = text.slice(0, start) + rep + text.slice(start + len);
                 replaced++; if (firstReplaceStart<0) firstReplaceStart = start;
-                reAll.lastIndex = start + rep.length;
+                // For zero-length matches, move past inserted text (or at least 1 char)
+                reAll.lastIndex = start + Math.max(1, (rep.length|0));
               }
             }
           }
@@ -27657,7 +27667,11 @@ try{
           };
           let m; reMid.lastIndex = 0; let acceptAll=false; const _decStackSel = [];
           while ((m = reMid.exec(mid))){
-            const startInMid = m.index|0; const len = ((m[0]||'').length|0); if (!(len>0)){ reMid.lastIndex++; continue; }
+            const startInMid = m.index|0;
+            const len = ((m[0]||'').length|0);
+            const isZeroLen = ((len|0) === 0);
+            if (isZeroLen){ try{ reMid.lastIndex = Math.max((reMid.lastIndex|0), ((startInMid+1)|0)); }catch{} }
+            const lenForPreview = (isZeroLen ? 1 : (len|0));
             // Per-line non-g: only first per relative line
             let doReplace = true;
             let relRow = 0; try{ relRow = midRowFromOff(startInMid)|0; }catch{ relRow=0; }
@@ -27672,8 +27686,12 @@ try{
                   const rc = new RegExp(pat, reFlags+'g');
                   rc.lastIndex = startInMid; // include current match
                   let cnt=0; let mm; const tempSeen = new Set(seenLineFirst);
-                  while ((mm = rc.exec(mid))){ const ln = ((mm[0]||'').length|0); if (!(ln>0)){ rc.lastIndex++; continue; }
-                    const st = (mm.index|0); let rr=0; try{ rr = midRowFromOff(st)|0; }catch{}
+                  while ((mm = rc.exec(mid))){
+                    const st = (mm.index|0);
+                    const ln = ((mm[0]||'').length|0);
+                    const z = ((ln|0) === 0);
+                    if (z){ try{ rc.lastIndex = Math.max((rc.lastIndex|0), ((st+1)|0)); }catch{} }
+                    let rr=0; try{ rr = midRowFromOff(st)|0; }catch{}
                     if (!wantGlobalPerLine){ if (tempSeen.has(rr)) continue; tempSeen.add(rr); }
                     cnt++; }
                   return cnt|0;
@@ -27684,7 +27702,7 @@ try{
               try{
                 _suppressScrollDuringModal = true;
                 try{ _zoomGuardUntil = Date.now() + 2000; }catch{}
-                previewAt(absStart, len, textForPreview);
+                previewAt(absStart, lenForPreview, textForPreview);
                 const cmdLabel = ':' + 's' + '/' + pat + '/' + repl + '/' + flagsGiven;
                 const ch = await _subConfirmModal((countRemaining>0? (countRemaining+" matches left.\n") : '') + 'Replace this match?', { cmdLabel, canUndo: (_decStackSel.length>=2) });
                 if (ch==='q'){ _incPrevHide(); break; }
@@ -27729,7 +27747,7 @@ try{
                 const rep = _expandReplacement(repl, m);
                 mid = mid.slice(0, startInMid) + rep + mid.slice(startInMid + len);
                 replaced++; if (firstReplaceStart<0) firstReplaceStart = selStart + startInMid;
-                reMid.lastIndex = startInMid + rep.length;
+                reMid.lastIndex = startInMid + Math.max(1, (rep.length|0));
                 if (!wantGlobalPerLine){ seenLineFirst.add(relRow); }
               }
             }
@@ -27753,7 +27771,11 @@ try{
           let m; reLine.lastIndex = 0; let accLine = line; let acceptAll=false; let baseStartOff = (function(){ try{ return _offsetFromRC(r,0)|0; }catch{ return 0; } })();
           const _decStackLine = [];
           while ((m = reLine.exec(accLine))){
-            const startInLine = m.index|0; const len = ((m[0]||'').length|0); if (!(len>0)) { reLine.lastIndex++; continue; }
+            const startInLine = m.index|0;
+            const len = ((m[0]||'').length|0);
+            const isZeroLen = ((len|0) === 0);
+            if (isZeroLen){ try{ reLine.lastIndex = Math.max((reLine.lastIndex|0), ((startInLine+1)|0)); }catch{} }
+            const lenForPreview = (isZeroLen ? 1 : (len|0));
             // non-g per line: only first match
             let doReplace = true;
             if (!wantGlobalPerLine && reLine.lastIndex>0 && replaced>=0){
@@ -27785,7 +27807,7 @@ try{
               try{
                 _suppressScrollDuringModal = true;
                 try{ _zoomGuardUntil = Date.now() + 2000; }catch{}
-                previewAt(absStart, len, textForPreview);
+                previewAt(absStart, lenForPreview, textForPreview);
                 const cmdLabel = ':' + (isAll? '%s' : 's') + '/' + pat + '/' + repl + '/' + flagsGiven;
                 const ch = await _subConfirmModal((countRemaining>0? (countRemaining+" matches left.\n") : '') + 'Replace this match?', { cmdLabel, canUndo: (_decStackLine.length>=2) });
                 if (ch==='q'){ _incPrevHide(); break; }
@@ -27829,7 +27851,7 @@ try{
                 const rep = _expandReplacement(repl, m);
                 accLine = accLine.slice(0, startInLine) + rep + accLine.slice(startInLine + len);
                 replaced++; if (firstReplaceStart<0) firstReplaceStart = baseStartOff + startInLine;
-                reLine.lastIndex = startInLine + rep.length;
+                reLine.lastIndex = startInLine + Math.max(1, (rep.length|0));
                 if (!wantGlobalPerLine) { break; }
               }
             }
