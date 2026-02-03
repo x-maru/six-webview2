@@ -6641,9 +6641,12 @@ try{
     try{
       const now = Date.now();
       const forced = now < (_nativeCaretForceUntil|0);
-      const large = (_editorTextLen() > 200000);
       // For huge buffers, prefer native caret throughout INSERT to avoid expensive overlay caret work.
-      const want = forced || (_mode==='INSERT' && large);
+      // IMPORTANT: this is primarily for markdown-rich where overlay rendering can be very expensive.
+      // In non-markdown buffers, hiding the overlay caret breaks mode visuals (reported on _six.js).
+      const mdNow = (function(){ try{ return !!(_mdRichActive && _mdRichActive()); }catch{ return false; } })();
+      const large = mdNow && (_editorTextLen() > 200000);
+      const want = forced || (mdNow && _mode==='INSERT' && large);
       // IME bar uses its own input; native caret must be off.
       try{ if (cmdfloat && cmdfloat.dataset && cmdfloat.dataset.kind === 'ime'){ _nativeCaretForceUntil = 0; _setNativeCaretMode(false); return; } }catch{}
       _setNativeCaretMode(want);
@@ -11267,6 +11270,7 @@ try{
     return 1;
   })();
   let _cachedVisibleCount = 0;
+  let _cachedVisibleKey = '';
   let _lineLockActive = false;
   let _centerScrolloffOnce = false;
   let _mode = 'NORMAL';
@@ -15743,7 +15747,7 @@ try{
       try{ if (_wrapEnabled()) return false; }catch{}
       if (window && window._imeComposing===true) return false;
       if (document.body.classList.contains('is-scrolling')) return false;
-      try{ if (_editorTextLen() > 200000){ _listClear(); return true; } }catch{}
+      try{ if (_editorTextLen() > 8000000){ _listClear(); return true; } }catch{}
       const it = String((e && e.inputType) || '');
 
       // Enter: shift existing nodes down by one line (cheap) and re-render only the affected 2 rows.
@@ -15801,8 +15805,9 @@ try{
   function _scheduleListCharsRender(reason){
     try{
       if (!_optList){ _listClear(); return; }
-      // Large buffer throttle: listchars depends on splitLines() + many DOM nodes; skip for big docs.
-      try{ if (_editorTextLen() > 200000){ _listClear(); return; } }catch{}
+      // Large buffer throttle: listchars depends on splitLines() + many DOM nodes.
+      // 200k chars is common for real-world source files; keep listchars usable there.
+      try{ if (_editorTextLen() > 8000000){ _listClear(); return; } }catch{}
       if (_listRenderRaf) return;
       if (window && window.requestAnimationFrame){
         _listRenderRaf = requestAnimationFrame(()=>{
@@ -15841,8 +15846,8 @@ try{
         }catch{}
         return;
       }
-      // Large buffer throttle: listchars depends on splitLines() + many DOM nodes; skip for big docs regardless of mode.
-      try{ if (_editorTextLen() > 200000){ _listClear(); return; } }catch{}
+      // Large buffer throttle: listchars depends on splitLines() + many DOM nodes; skip only for truly huge docs.
+      try{ if (_editorTextLen() > 8000000){ _listClear(); return; } }catch{}
       if (!_optList){ _listClear(); return; }
       _listEnsureLayer();
       // If we hid the layer during scrolling, restore it on the first stable render.
@@ -16815,6 +16820,24 @@ try{
         _measureSpan.style.fontVariantEastAsian = 'normal';
         try{ if (csMeasure && csMeasure.fontFeatureSettings) _measureSpan.style.fontFeatureSettings = csMeasure.fontFeatureSettings; }catch{}
       }catch{}
+
+      // Gutter sizing: widen by ~1ch and pad numbers by ~0.5ch.
+      // Use the measured editor font (already zoomed) so 5+ digit numbers don't overflow.
+      try{
+        let chPx = 0;
+        try{
+          if (_measureSpan){
+            _measureSpan.textContent = '0';
+            chPx = +(_measureSpan.getBoundingClientRect().width||0);
+          }
+        }catch{ chPx = 0; }
+        if (Number.isFinite(chPx) && chPx > 0){
+          const ch = Math.max(1, Math.round(chPx * 2) / 2);          // snap to 0.5px
+          const half = Math.max(0, Math.round(chPx * 0.5 * 2) / 2);  // 0.5ch
+          try{ root.style.setProperty('--gwExtraPx', ch + 'px'); }catch{}
+          try{ root.style.setProperty('--gutterNumPadRightPx', half + 'px'); }catch{}
+        }
+      }catch{}
       // Compute caret vertical offset: center font box within line box
       const off = (LINE_HEIGHT - FONT_SIZE) / 2;
       _caretYOffset = Number.isFinite(off) ? Math.max(0, off) : 0;
@@ -17039,28 +17062,66 @@ try{
     }catch{ try{ return new URL(String(path||''), base||_htmlBaseURL()).toString(); }catch{ return String(path||''); } }
   }
 
+  let _splitLinesCache = null;
   function _splitLines(){
     try{
       const t = String(editor.value||'');
-      // 基本は \n で分割。ただし「存在しない便宜上の最終空行」は描画・行数に含めない (#495)
-      // 具体的には末尾が\nで終わっている場合でも、分割結果の末尾の空要素は1つだけ捨てる。
-      // これにより「末尾に改行あり（1つ）」のときに余分な空行を表示しない。
-      const parts = t.split(/\n/);
-      if (t.endsWith('\n') && parts.length>0){
-        // #636: 末尾 phantom 行は caret が改行直後 (offset===t.length) にある場合のみ表示。
-        // 改行文字上 (offset===t.length-1) にいるだけでは表示しない。
+      const len = (t.length|0);
+      const endsWithLF = t.endsWith('\n');
+
+      // Small buffers: keep it simple (alloc per call is fine).
+      // Large buffers: cache split results (cursor moves should not be O(N)).
+      const large = (len|0) >= 20000;
+      if (!large){
+        const parts = t.split(/\n/);
+        if (endsWithLF && parts.length>0){
+          let keepFinalBlank = false;
+          try{
+            if (_mode === 'INSERT'){
+              const caretOff = editor.selectionStart|0;
+              if (caretOff === (len|0)) keepFinalBlank = true;
+            }
+          }catch{}
+          if (!keepFinalBlank){ parts.pop(); }
+        }
+        return parts;
+      }
+
+      // Cache key: buffer ref + changeTick + (len, head, tail) to avoid stale reuse when tick is not reliable.
+      const b = (typeof currentBuffer === 'function') ? currentBuffer() : null;
+      const tick = b ? (b._changeTick|0) : -1;
+      const head = t.slice(0, 32);
+      const tail = t.slice(Math.max(0, (len|0) - 32));
+
+      let c = _splitLinesCache;
+      const ok = !!(
+        c &&
+        c.buf === b &&
+        (c.tick|0) === (tick|0) &&
+        (c.len|0) === (len|0) &&
+        c.head === head &&
+        c.tail === tail &&
+        !!c.raw &&
+        !!c.noPhantom
+      );
+      if (!ok){
+        const raw = t.split(/\n/);
+        const noPhantom = (endsWithLF && raw.length>0) ? raw.slice(0, -1) : raw;
+        c = { buf: b, tick: (tick|0), len: (len|0), head, tail, raw, noPhantom };
+        _splitLinesCache = c;
+      }
+
+      if (endsWithLF && (c.raw && c.raw.length>0)){
         let keepFinalBlank = false;
         try{
           if (_mode === 'INSERT'){
             const caretOff = editor.selectionStart|0;
-            if (caretOff === t.length){
-              keepFinalBlank = true; // caret が改行を越えて仮想行に入っている
-            }
+            if (caretOff === (len|0)) keepFinalBlank = true;
           }
         }catch{}
-        if (!keepFinalBlank){ parts.pop(); }
+        if (!keepFinalBlank) return c.noPhantom;
       }
-      return parts;
+      return c.raw;
     }catch{ return String(editor.value||'').split(/\n/); }
   }
   // (#607) 編集操作向け: 末尾空要素も含めて忠実に分割した配列を返す
@@ -19173,8 +19234,37 @@ try{
     let top = Math.floor(st / LINE_HEIGHT) + 1;
     return top|0;
   }
+
+  function _visibleLinesKeyNow(){
+    try{
+      const md = !!(_mdRichActive && _mdRichActive());
+      const h = (function(){
+        try{ if (md) return (viewport && viewport.clientHeight) ? viewport.clientHeight : (editor.clientHeight||0); }catch{}
+        return editor.clientHeight || (viewport && viewport.clientHeight) || 0;
+      })()|0;
+      let pt = 0, pb = 0;
+      try{
+        if (!md && editor && window && window.getComputedStyle){
+          const cs = window.getComputedStyle(editor);
+          pt = Math.max(0, Math.round(parseFloat(cs.paddingTop||'0')||0))|0;
+          pb = Math.max(0, Math.round(parseFloat(cs.paddingBottom||'0')||0))|0;
+          try{ if ((typeof _eofPadLines === 'function') && ((_eofPadLines()|0) > 0)) pb = 0; }catch{}
+        }
+      }catch{ pt = 0; pb = 0; }
+      const lh = (LINE_HEIGHT|0);
+      return String(md?1:0) + ':' + String(h|0) + ':' + String(pt|0) + ':' + String(pb|0) + ':' + String(lh|0);
+    }catch{ return ''; }
+  }
+
   function _visibleLinesExact(){
-    if (_cachedVisibleCount) return _cachedVisibleCount;
+    try{
+      if (_cachedVisibleCount){
+        const k = _visibleLinesKeyNow();
+        if (k && k === _cachedVisibleKey) return _cachedVisibleCount;
+        _cachedVisibleCount = 0;
+        _cachedVisibleKey = '';
+      }
+    }catch{}
     try{
       // md-rich: base on overlay viewport height (do not subtract textarea padding).
       let h = (function(){
@@ -19186,7 +19276,11 @@ try{
         if (!(_mdRichActive && _mdRichActive()) && editor && window && window.getComputedStyle){
           const cs = window.getComputedStyle(editor);
           const pt = Math.max(0, Math.round(parseFloat(cs.paddingTop||'0')||0));
-          const pb = Math.max(0, Math.round(parseFloat(cs.paddingBottom||'0')||0));
+          let pb = Math.max(0, Math.round(parseFloat(cs.paddingBottom||'0')||0));
+          // NOTE: EOF padding is implemented via paddingBottom and is part of what the user sees.
+          // If we subtract it here, gutters/overlays can under-render and leave a "no-number" strip
+          // at the bottom until the next input/scroll triggers a recalculation.
+          try{ if ((typeof _eofPadLines === 'function') && ((_eofPadLines()|0) > 0)) pb = 0; }catch{}
           const hh = (h|0) - (pt|0) - (pb|0);
           if (hh > 0) h = hh;
         }
@@ -21396,6 +21490,7 @@ try{
     // Wrapper padding adjustment is unnecessary since scrolling is on the textarea
     try{ if (viewport && viewport.style) viewport.style.paddingBottom = '0px'; }catch{}
     _cachedVisibleCount = lines;
+    try{ _cachedVisibleKey = _visibleLinesKeyNow(); }catch{ _cachedVisibleKey = ''; }
   }
 
   /*********************************************************
@@ -25510,8 +25605,10 @@ try{
         return;
       }
     }catch{}
-    // Large buffer throttle: avoid full splitLines/totalLines while actively typing.
-    try{ if (_mode==='INSERT' && !(opts && opts.force) && _editorTextLen() > 200000){ return; } }catch{}
+    // Large buffer throttle (non-markdown): avoid full splitLines/totalLines while actively typing.
+    // NOTE: 200k chars is already common for source files (e.g. _six.js) and skipping updates
+    // causes gutter/stripe/caret visuals to desync. Use a much higher threshold here.
+    try{ if (_mode==='INSERT' && !(opts && opts.force) && _editorTextLen() > 2000000){ return; } }catch{}
 
     // Wrap mode (non-markdown): render gutter per *visual* line.
     try{
@@ -25603,7 +25700,7 @@ try{
     try{
       // アニメーションスクロール中はスナップによるキャンセルを回避 (#1200)
       // #1217: scan-hold スクロール中もスナップを回避 (1px単位のスクロールを妨害しないため)
-      const noSnap = (opts && opts.noSnap) || (window && window.__sixScanHoldScrollActive);
+      let noSnap = (opts && opts.noSnap) || (window && window.__sixScanHoldScrollActive);
       if (!__six_scroll_anim && !noSnap){
         const st = (editor.scrollTop||0);
         // #1262: Disable snapping at EOF in updateGutter too
@@ -25623,11 +25720,11 @@ try{
               try{ _setEditorScrollTop((maxScroll|0), { immediate:true, keepCaret:true, physical:true }); }catch{}
             }
             // Either way, don't snap to grid here.
-            return;
+            noSnap = true;
           }
         }catch{}
 
-        if (maxScroll - st > 1.5) {
+        if (!noSnap && (maxScroll - st > 1.5)) {
             const snapped = Math.round(st/LINE_HEIGHT)*LINE_HEIGHT;
             let _changed = false;
             if (Math.abs(snapped - st) > 0.25){ try{ _setEditorScrollTop(snapped, { immediate:true }); }catch{} _changed = true; }

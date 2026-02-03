@@ -16,7 +16,11 @@
 	--lhEff: var(--lh);
 	/* Align tiled line backgrounds when scrollTop has a fractional remainder */
 	--scrollRemY: 0px;
-	--gw: calc(var(--gwBase) * var(--edScale));
+	/* Gutter width = base(px)*scale + extra(px). Extra is set by JS to ~1ch of the editor font. */
+	--gwExtraPx: 0px;
+	/* Gutter number right padding = ~0.5ch (set by JS). */
+	--gutterNumPadRightPx: calc(6px * var(--edScale));
+	--gw: calc((var(--gwBase) * var(--edScale)) + var(--gwExtraPx));
 	/* Incremental preview (search/replace highlight) */
 	--incPreviewBg: rgba(128,192,255,0.35);
 	--incPreviewOutline: rgba(128,192,255,0.55);
@@ -287,7 +291,7 @@ body.md-rich #editorViewport {
 body.md-rich #gutter {
 	background: linear-gradient(var(--gutterGradientStart, #141821), var(--gutterGradientEnd, #0f1117));
 }
-#gutter div { line-height: var(--lhEff, var(--lh)); padding-right: calc(6px * var(--edScale)); box-sizing: border-box; width: 100%; /* use line-height centering; avoid flex rounding drift; make row background span full gutter incl. padding */ }
+#gutter div { line-height: var(--lhEff, var(--lh)); padding-right: var(--gutterNumPadRightPx); box-sizing: border-box; width: 100%; /* use line-height centering; avoid flex rounding drift; make row background span full gutter incl. padding */ }
 #editor { flex: 1; background: transparent; color: var(--editorTextColor, #e6e6e6); border:0; outline:0; resize:none; line-height: var(--lhEff, var(--lh)); tab-size: var(--tabstop, 8); -moz-tab-size: var(--tabstop, 8); white-space: pre; padding: 0 2rem calc(var(--eofPadLines, 10) * var(--lhEff, var(--lh))) 0; margin: 0; box-sizing: content-box; position: relative; z-index: 2; font-size: calc(var(--editorFontBase, 20px) * var(--edScale));
 	/* Default = original order (CJK not forced first) */
 	font-family: "Sarasa Mono J", "Cascadia Code", "Cascadia Mono", "JetBrains Mono", "Fira Code", "Consolas", "Yu Gothic", "游ゴシック Light", "Meiryo", monospace !important;
