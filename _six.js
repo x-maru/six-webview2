@@ -7359,6 +7359,11 @@ try{
   // When hidden by user, the bar stays hidden while IME is OFF.
   let _imeBarUserHidden = false;
   let _imeBarSelAnchorOff = null;
+  // #1997: md-rich + IME ON selection-replace.
+  // Some IME/caret-sync paths can collapse the native selection when IME bar opens.
+  // Capture the initial selection range so the first preedit tick can still replace it.
+  let _imeBarStartReplaceA = null;
+  let _imeBarStartReplaceB = null;
 
   function _imeSetActiveSoft(on, why, e){
     try{
@@ -7552,6 +7557,28 @@ try{
       const start0 = Math.max(0, Math.min(s0.length, (_imeBarAnchorOff|0)));
       let delStart = start0;
       let delEnd = Math.max(delStart, Math.min(s0.length, (delStart + prevDoc.length)));
+
+      // #1997: If a selection existed when the IME bar opened, use that range on the first insert.
+      // This preserves the expected "replace selection" semantics even if selection got collapsed.
+      try{
+        if ((prevDoc.length|0) === 0 && (next.length|0) > 0){
+          if (typeof _imeBarStartReplaceA === 'number' && typeof _imeBarStartReplaceB === 'number'){
+            const a0 = (_imeBarStartReplaceA|0);
+            const b0 = (_imeBarStartReplaceB|0);
+            if ((a0|0) !== (b0|0)){
+              const a = Math.max(0, Math.min(s0.length, Math.min(a0|0, b0|0)));
+              const b = Math.max(0, Math.min(s0.length, Math.max(a0|0, b0|0)));
+              delStart = a|0;
+              delEnd = b|0;
+              _imeBarAnchorOff = delStart|0;
+              try{ editor.selectionStart = a|0; editor.selectionEnd = b|0; }catch{}
+              // consume once
+              _imeBarStartReplaceA = null;
+              _imeBarStartReplaceB = null;
+            }
+          }
+        }
+      }catch{}
 
       // #1684: if a selection exists when starting a new segment, replace the selection.
       try{
@@ -7750,6 +7777,7 @@ try{
       _imeBarSnapshotTaken = false;
       _imeBarSegDirty = false;
       _imeBarSegPending = false;
+      try{ _imeBarStartReplaceA = null; _imeBarStartReplaceB = null; }catch{}
       // Clear any stale fast-path caret offset from previous sessions.
       try{ if (window){ window.__sixImeBarFastSelOff = null; window.__sixImeBarFastSelAt = 0; window.__sixImeBarFastActiveUntil = 0; } }catch{}
       try{ _imeBarJustOpenedUntil = Date.now() + 260; }catch{}
@@ -7763,9 +7791,32 @@ try{
       // IME bar does not need native caret; disable it to avoid sticky underscore.
       try{ _nativeCaretForceUntil = 0; _setNativeCaretMode && _setNativeCaretMode(false); }catch{}
 
-      // Anchor at current caret (sync native selection first).
-      try{ _syncNativeSelectionToCaret && _syncNativeSelectionToCaret(); }catch{}
-      try{ _imeBarAnchorOff = (editor && typeof editor.selectionStart==='number') ? (editor.selectionStart|0) : (_offsetFromRC(caretRow|0, caretCol|0)|0); }catch{ _imeBarAnchorOff = 0; }
+      // Anchor at current caret.
+      // If a selection exists, capture it so IME preedit replaces the range (#1997).
+      // Otherwise, sync native selection to overlay caret.
+      try{
+        let ss0 = 0, se0 = 0, dir0 = 'none';
+        try{ ss0 = editor.selectionStart|0; se0 = editor.selectionEnd|0; dir0 = String(editor.selectionDirection||'none'); }catch{ ss0 = se0 = 0; dir0 = 'none'; }
+        const v0 = String(editor.value||'');
+        const a0 = Math.max(0, Math.min((v0.length|0), Math.min(ss0|0, se0|0)));
+        const b0 = Math.max(0, Math.min((v0.length|0), Math.max(ss0|0, se0|0)));
+        const hasSel = ((a0|0) !== (b0|0));
+        if (hasSel){
+          _imeBarStartReplaceA = a0|0;
+          _imeBarStartReplaceB = b0|0;
+          // Align overlay caret to the caret end of selection.
+          const caretOff0 = (dir0 === 'backward') ? (a0|0) : (b0|0);
+          try{ const rc0 = _rcFromOffset(caretOff0|0); if (rc0){ caretRow = rc0.r|0; caretCol = rc0.c|0; } }catch{}
+          // Anchor at selection start.
+          _imeBarAnchorOff = a0|0;
+        } else {
+          try{ _syncNativeSelectionToCaret && _syncNativeSelectionToCaret(); }catch{}
+          try{ _imeBarAnchorOff = (editor && typeof editor.selectionStart==='number') ? (editor.selectionStart|0) : (_offsetFromRC(caretRow|0, caretCol|0)|0); }catch{ _imeBarAnchorOff = 0; }
+        }
+      }catch{
+        try{ _syncNativeSelectionToCaret && _syncNativeSelectionToCaret(); }catch{}
+        try{ _imeBarAnchorOff = (editor && typeof editor.selectionStart==='number') ? (editor.selectionStart|0) : (_offsetFromRC(caretRow|0, caretCol|0)|0); }catch{ _imeBarAnchorOff = 0; }
+      }
 
       // Prevent accidental edits in the textarea while the IME bar is active.
       try{ _imeBarWasEditorReadOnly = !!editor.readOnly; }catch{ _imeBarWasEditorReadOnly = false; }
@@ -7798,6 +7849,7 @@ try{
       _imeBarSnapshotTaken = false;
       _imeBarSegDirty = false;
       _imeBarSegPending = false;
+      try{ _imeBarStartReplaceA = null; _imeBarStartReplaceB = null; }catch{}
       // Clear fast-path state so the next session anchors to the real caret.
       try{ if (window){ window.__sixImeBarFastSelOff = null; window.__sixImeBarFastSelAt = 0; window.__sixImeBarFastActiveUntil = 0; } }catch{}
       try{ if (cmdfloat && cmdfloat.dataset) cmdfloat.dataset.kind = 'cmd'; }catch{}
@@ -40881,20 +40933,38 @@ try{
               try{ if (window) window._imeComposing = true; }catch{}
               try{ _imeBarLastImeEvtAt = Date.now(); }catch{}
               // Anchor at current caret each composition session.
-              try{ _syncNativeSelectionToCaret && _syncNativeSelectionToCaret(); }catch{}
+              // If a selection exists, preserve selection-replace semantics (#1997).
               try{
-                let fastOff = null;
-                try{
-                  const offX = (window && Number.isFinite(window.__sixImeBarFastSelOff)) ? (window.__sixImeBarFastSelOff|0) : null;
-                  const atX = (window && Number.isFinite(window.__sixImeBarFastSelAt)) ? (window.__sixImeBarFastSelAt|0) : 0;
-                  if (offX != null && atX && (Date.now() - atX) <= 1200) fastOff = offX|0;
-                }catch{ fastOff = null; }
-                const off0 = (fastOff != null) ? (fastOff|0) : ((editor && typeof editor.selectionStart==='number') ? (editor.selectionStart|0) : (_offsetFromRC(caretRow|0, caretCol|0)|0));
-                _imeBarAnchorOff = off0|0;
-                // Collapse any stale selection to avoid full-document highlight while composing.
-                try{ _imeBarIgnoreSelectUntil = Date.now() + 250; }catch{}
-                try{ if (window){ window.__sixImeBarFastActiveUntil = Date.now() + 1200; } }catch{}
-                try{ editor.setSelectionRange(off0|0, off0|0); }catch{ try{ editor.selectionStart = editor.selectionEnd = off0|0; }catch{} }
+                let ss0 = 0, se0 = 0;
+                try{ ss0 = editor.selectionStart|0; se0 = editor.selectionEnd|0; }catch{ ss0 = se0 = (_offsetFromRC(caretRow|0, caretCol|0)|0); }
+                const v0 = String(editor.value||'');
+                const a0 = Math.max(0, Math.min((v0.length|0), Math.min(ss0|0, se0|0)));
+                const b0 = Math.max(0, Math.min((v0.length|0), Math.max(ss0|0, se0|0)));
+                const hasSel = ((a0|0) !== (b0|0));
+                if (hasSel){
+                  _imeBarStartReplaceA = a0|0;
+                  _imeBarStartReplaceB = b0|0;
+                  _imeBarAnchorOff = a0|0;
+                  try{ const rc0 = _rcFromOffset(a0|0); if (rc0){ caretRow = rc0.r|0; caretCol = rc0.c|0; } }catch{}
+                  // Collapse selection to the anchor to avoid big highlight while composing.
+                  try{ _imeBarIgnoreSelectUntil = Date.now() + 250; }catch{}
+                  try{ if (window){ window.__sixImeBarFastActiveUntil = Date.now() + 1200; window.__sixImeBarFastSelOff = null; window.__sixImeBarFastSelAt = 0; } }catch{}
+                  try{ editor.setSelectionRange(a0|0, a0|0); }catch{ try{ editor.selectionStart = editor.selectionEnd = a0|0; }catch{} }
+                } else {
+                  try{ _syncNativeSelectionToCaret && _syncNativeSelectionToCaret(); }catch{}
+                  let fastOff = null;
+                  try{
+                    const offX = (window && Number.isFinite(window.__sixImeBarFastSelOff)) ? (window.__sixImeBarFastSelOff|0) : null;
+                    const atX = (window && Number.isFinite(window.__sixImeBarFastSelAt)) ? (window.__sixImeBarFastSelAt|0) : 0;
+                    if (offX != null && atX && (Date.now() - atX) <= 1200) fastOff = offX|0;
+                  }catch{ fastOff = null; }
+                  const off0 = (fastOff != null) ? (fastOff|0) : ((editor && typeof editor.selectionStart==='number') ? (editor.selectionStart|0) : (_offsetFromRC(caretRow|0, caretCol|0)|0));
+                  _imeBarAnchorOff = off0|0;
+                  // Collapse any stale selection to avoid full-document highlight while composing.
+                  try{ _imeBarIgnoreSelectUntil = Date.now() + 250; }catch{}
+                  try{ if (window){ window.__sixImeBarFastActiveUntil = Date.now() + 1200; } }catch{}
+                  try{ editor.setSelectionRange(off0|0, off0|0); }catch{ try{ editor.selectionStart = editor.selectionEnd = off0|0; }catch{} }
+                }
               }catch{ _imeBarAnchorOff = 0; }
               try{ _positionImeBarSoft && _positionImeBarSoft(); }catch{ try{ _positionImeBar && _positionImeBar(); }catch{} }
               // Apply immediately (some IMEs don't emit compositionupdate early).
@@ -41402,8 +41472,26 @@ try{
           _imeBarComposing = true;
           try{ _imeBarLastImeEvtAt = Date.now(); }catch{}
           // Anchor at current caret each composition session.
-          try{ _syncNativeSelectionToCaret && _syncNativeSelectionToCaret(); }catch{}
-          try{ _imeBarAnchorOff = (editor && typeof editor.selectionStart==='number') ? (editor.selectionStart|0) : (_offsetFromRC(caretRow|0, caretCol|0)|0); }catch{ _imeBarAnchorOff = 0; }
+          // If a selection exists, preserve selection-replace semantics (#1997).
+          try{
+            let ss0 = 0, se0 = 0;
+            try{ ss0 = editor.selectionStart|0; se0 = editor.selectionEnd|0; }catch{ ss0 = se0 = (_offsetFromRC(caretRow|0, caretCol|0)|0); }
+            const v0 = String(editor.value||'');
+            const a0 = Math.max(0, Math.min((v0.length|0), Math.min(ss0|0, se0|0)));
+            const b0 = Math.max(0, Math.min((v0.length|0), Math.max(ss0|0, se0|0)));
+            const hasSel = ((a0|0) !== (b0|0));
+            if (hasSel){
+              _imeBarStartReplaceA = a0|0;
+              _imeBarStartReplaceB = b0|0;
+              _imeBarAnchorOff = a0|0;
+              try{ const rc0 = _rcFromOffset(a0|0); if (rc0){ caretRow = rc0.r|0; caretCol = rc0.c|0; } }catch{}
+              try{ _imeBarIgnoreSelectUntil = Date.now() + 250; }catch{}
+              try{ editor.setSelectionRange(a0|0, a0|0); }catch{ try{ editor.selectionStart = editor.selectionEnd = a0|0; }catch{} }
+            } else {
+              try{ _syncNativeSelectionToCaret && _syncNativeSelectionToCaret(); }catch{}
+              try{ _imeBarAnchorOff = (editor && typeof editor.selectionStart==='number') ? (editor.selectionStart|0) : (_offsetFromRC(caretRow|0, caretCol|0)|0); }catch{ _imeBarAnchorOff = 0; }
+            }
+          }catch{ try{ _syncNativeSelectionToCaret && _syncNativeSelectionToCaret(); }catch{} try{ _imeBarAnchorOff = (editor && typeof editor.selectionStart==='number') ? (editor.selectionStart|0) : (_offsetFromRC(caretRow|0, caretCol|0)|0); }catch{ _imeBarAnchorOff = 0; } }
           try{ _positionImeBar && _positionImeBar(); }catch{}
           // Apply immediately (some IMEs don't emit compositionupdate early).
           try{ _imeBarReplaceInsertedText(String(cmdinput.value||''), 'compstart'); }catch{}
