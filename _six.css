@@ -901,7 +901,7 @@ body.font-sarasa .listchar-eol {
 /* Markdown-rich heading weights (tweakable) */
 :root { --mdHeadingWeightH1: 780; --mdHeadingWeightH2_6: 560; --mdHeadingWeightH2_6_CJK: 640; }
 /* Allow ideographic space to expand more if needed */
-.listchar-ideospc { --controlCharScale: 1.50; --controlCharWeight: 100; }
+.listchar-ideospc { --controlCharScale: 1.10; --controlCharWeight: 250; transform-origin: center; }
 .incprev {
 	position: absolute;
 	background: var(--incPreviewBg);

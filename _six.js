@@ -15030,6 +15030,10 @@ try{
   // In markdown draft mode, only the active (caret) row shows raw symbols.
   // Track active row to refresh listchars/EOL when the caret row changes.
   let _mdDraftLastActiveRow1ForList = null;
+  // Track loose-list expansion key in draft mode.
+  // When caret enters/leaves a loose-list item, md-rich row heights can change,
+  // shifting subsequent rows; listchars must be fully re-rendered to follow.
+  let _mdDraftLastLooseKeyForList = null;
   function _listEnsureLayer(){
     try{
       if (!_listLayer){ _listLayer = document.createElement('div'); _listLayer.className='listchars-layer'; _listLayer.style.position='absolute'; _listLayer.style.left='0'; _listLayer.style.top='0'; _listLayer.style.right='0'; _listLayer.style.bottom='0'; _listLayer.style.pointerEvents='none'; _listLayer.style.zIndex='1'; }
@@ -22668,6 +22672,44 @@ try{
           const topLine = _topLine()|0;
           const lines0 = _splitLines();
           const realTotal = lines0.length|0;
+
+          // Loose-list draft expansion can change row heights for blank runs and adjacent items.
+          // When that happens, every row below shifts, so per-row patching is insufficient.
+          const _looseKey = (function(){
+            try{
+              const r = (caretRow|0);
+              const total = (lines0 && lines0.length) ? (lines0.length|0) : 0;
+              if (!(r >= 0 && r < (total|0))) return '';
+              const cur = String(lines0[r]||'');
+              const isBlank = (!cur || cur.trim()==='');
+              let g = null;
+              if (isBlank){
+                try{ g = _mdUListLooseGapInfo && _mdUListLooseGapInfo(r|0, lines0); }catch{ g = null; }
+              } else {
+                try{
+                  if ((r+1) < (total|0) && String(lines0[(r+1)|0]||'').trim()==='') g = _mdUListLooseGapInfo && _mdUListLooseGapInfo((r+1)|0, lines0);
+                }catch{ g = null; }
+                try{
+                  if (!g && r > 0 && String(lines0[(r-1)|0]||'').trim()==='') g = _mdUListLooseGapInfo && _mdUListLooseGapInfo((r-1)|0, lines0);
+                }catch{ g = null; }
+              }
+              if (!g) return '';
+              const pr = (g.prevItemRow|0);
+              const s = (g.start|0);
+              const e = (g.end|0);
+              // expansion state depends on caret position (same predicate as _mdLineLayoutInfoAtRow).
+              const exp = !!(((r|0) === (pr|0)) || (((r|0) >= (s|0)) && ((r|0) <= (e|0))));
+              return 'lg:' + pr + ':' + s + ':' + e + ':' + (exp?1:0);
+            }catch{ return ''; }
+          })();
+          if (_mdDraftLastLooseKeyForList == null) _mdDraftLastLooseKeyForList = _looseKey;
+          if (_mdDraftLastLooseKeyForList !== _looseKey){
+            _mdDraftLastLooseKeyForList = _looseKey;
+            try{ _scheduleListCharsRender && _scheduleListCharsRender('md-draft-loosegap'); }catch{ try{ _renderListChars && _renderListChars(); }catch{} }
+            // Full rerender will position all rows; skip the per-row patch below.
+            return;
+          }
+
           try{ _listRemoveRow(prevRow1); }catch{}
           try{ _renderListCharsRow(prevRow1, lines0, topLine, realTotal); }catch{}
           try{ _listRemoveRow(curRow1); }catch{}
@@ -22675,6 +22717,7 @@ try{
         }
       } else {
         _mdDraftLastActiveRow1ForList = null;
+        _mdDraftLastLooseKeyForList = null;
       }
     }catch{}
     // Persist caret (and current viewport) to the active buffer so its view state
