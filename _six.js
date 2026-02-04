@@ -2816,7 +2816,7 @@ try{
             if (info && info.kind==='item' && info.listLoose) edge = true;
           }
         }catch{}
-        if (edge && !expandedEdge){
+        if (edge){
           // #1736: Keep the logical row's wrapped lines tight (normal line-height),
           // and distribute the loose extra height as top/bottom padding for the whole block.
           // This makes multi-wrap rows look tight internally but still have loose spacing between list items.
@@ -5425,7 +5425,7 @@ try{
               if (info && info.kind==='item' && info.listLoose) edge = true;
             }
           }catch{}
-          if (edge && !expandedEdge){
+          if (edge){
             // #1736: keep wrapped lines tight; add loose extra height as block padding.
             const tightLh = (LINE_HEIGHT|0);
             const looseLh = (_mdHeadingLineHeightPxFromLevel(1)|0);
@@ -21967,28 +21967,60 @@ try{
           try{
             const isActiveRow = true;
             const hide = !!(_mdHideSymbolsForRow && _mdHideSymbolsForRow(!!isActiveRow));
-            if (hide && (fk|0) !== 2){
-              const ul = _mdUListInfo && _mdUListInfo(srcLine0, targetIdx|0, lines);
-              let ulForProbe = ul;
+            if ((fk|0) !== 2){
+              const ul0 = _mdUListInfo && _mdUListInfo(srcLine0, targetIdx|0, lines);
+              let ulForProbe = ul0;
               // Hide up to 3 leading spaces before list markers and shift caret col accordingly.
               try{
-                if (ul && ul.kind==='item'){
-                  const baseSlack = Math.max(0, Math.min(3, (ul.rootLeadSlackCols|0) || 0));
+                if (hide && ul0 && ul0.kind==='item'){
+                  const baseSlack = Math.max(0, Math.min(3, (ul0.rootLeadSlackCols|0) || 0));
                   let removed = 0;
                   try{ while ((removed|0) < (baseSlack|0) && srcLine0 && srcLine0[removed|0] === ' ') removed++; }catch{ removed = 0; }
                   if ((removed|0) > 0){
                     dispForProbe = String(dispLine||'').slice(removed|0);
                     ccForProbe = Math.max(0, (ccForProbe|0) - (removed|0));
-                    ulForProbe = Object.assign({}, ul, {
-                      indentCol: Math.max(0, (ul.indentCol|0) - (removed|0)),
-                      markerIdx: Number.isFinite(ul.markerIdx) ? Math.max(0, (ul.markerIdx|0) - (removed|0)) : undefined,
-                      contentIndentCol: Number.isFinite(ul.contentIndentCol) ? Math.max(0, (ul.contentIndentCol|0) - (removed|0)) : undefined,
-                      contentStartIdx: Number.isFinite(ul.contentStartIdx) ? Math.max(0, (ul.contentStartIdx|0) - (removed|0)) : undefined,
+                    ulForProbe = Object.assign({}, ul0, {
+                      indentCol: Math.max(0, (ul0.indentCol|0) - (removed|0)),
+                      markerIdx: Number.isFinite(ul0.markerIdx) ? Math.max(0, (ul0.markerIdx|0) - (removed|0)) : undefined,
+                      contentIndentCol: Number.isFinite(ul0.contentIndentCol) ? Math.max(0, (ul0.contentIndentCol|0) - (removed|0)) : undefined,
+                      contentStartIdx: Number.isFinite(ul0.contentStartIdx) ? Math.max(0, (ul0.contentStartIdx|0) - (removed|0)) : undefined,
                     });
                   }
                 }
               }catch{}
-              if (ulForProbe) indentOpts = _mdIndentOptsForListLine(dispForProbe, ulForProbe, wPx|0, _mdCaretFontSizePx|0, _mdCaretLineHeightPx|0);
+
+              // Compute 1ch width for this row style (used for blockquote lane + list base margin).
+              let chPx = 0;
+              try{
+                const spx = _wrapProbeXFromColStyled('0', 1, 1000000, (_mdCaretFontSizePx|0), (_mdCaretLineHeightPx|0), null);
+                if (Number.isFinite(spx) && (spx||0) > 0) chPx = (+spx||0);
+              }catch{ chPx = 0; }
+
+              // Blockquote lane (clean display only).
+              let bqLanePx = 0;
+              try{
+                if (hide && (chPx > 0.01)){
+                  const q = (_mdBlockQuotePrefixInfo && _mdBlockQuotePrefixInfo(srcLine0));
+                  const lv = (q && Number.isFinite(q.level)) ? (q.level|0) : 0;
+                  if ((lv|0) > 0) bqLanePx = (chPx * (lv|0));
+                }
+              }catch{ bqLanePx = 0; }
+
+              // List base left margin (1ch) for list rows (both clean and draft).
+              let lv1PadPx = 0;
+              try{ if (ul0 && (ul0.kind==='item' || ul0.kind==='cont') && ((ul0.depth|0) >= 1) && (chPx > 0.01)) lv1PadPx = chPx; }catch{ lv1PadPx = 0; }
+
+              if (hide && ulForProbe){
+                try{ indentOpts = _mdIndentOptsForListLine(dispForProbe, ulForProbe, wPx|0, _mdCaretFontSizePx|0, _mdCaretLineHeightPx|0); }catch{ indentOpts = null; }
+              }
+
+              // Always include reserved left pads so wrap intra matches renderer.
+              const addPad = (+bqLanePx||0) + (+lv1PadPx||0);
+              if (indentOpts){
+                if (addPad > 0.01) indentOpts = { padLeftPx: ((+indentOpts.padLeftPx||0) + addPad), textIndentPx: (+indentOpts.textIndentPx||0) };
+              } else {
+                if (addPad > 0.01) indentOpts = { padLeftPx: addPad, textIndentPx: 0 };
+              }
             }
           }catch{ indentOpts = null; }
           // Code block padding: left 0.5ch + padding 0.5ch, right 12ch + padding 0.5ch.
@@ -22599,16 +22631,60 @@ try{
       if (_wrapEnabled()){
         const c = _wrapEnsureCache(false);
         let wPx = (c && Number.isFinite(c.wPx)) ? (c.wPx||80) : _wrapAvailWidthPx();
-        // md-rich list hanging indent (only in clean display)
+        // md-rich wrap probe indent:
+        // - Clean display: reserve blockquote lanes + list base margin; apply list hanging indent.
+        // - Draft caret row: still reserve list base margin (renderer uses padding-left) so wrap boundaries match.
         let indentOpts = null;
         try{
-          if (_mdRichActive && _mdRichActive()){
+          const mdRich = !!(_mdRichActive && _mdRichActive());
+          if (mdRich){
+            const fsC = (_mdCaretFontSizePx||Math.max(6, Math.round(FONT_SIZE)))|0;
+            const lhC = (_mdCaretLineHeightPx||LINE_HEIGHT)|0;
             const hide = !!(_mdHideSymbolsForRow && _mdHideSymbolsForRow(true));
-            if (hide){
-              const lines2 = _splitLines();
-              const src = String(lines2[caretRow|0]||'');
-              const ul = _mdUListInfo && _mdUListInfo(src, caretRow|0, lines2);
-              if (ul) indentOpts = _mdIndentOptsForListLine(String(line||''), ul, wPx|0, (_mdCaretFontSizePx||Math.max(6, Math.round(FONT_SIZE)))|0, (_mdCaretLineHeightPx||LINE_HEIGHT)|0);
+
+            const lines2 = _splitLines();
+            const src = String(lines2[caretRow|0]||'');
+
+            // 1ch width for this row's style.
+            let chPx = 0;
+            try{
+              const spx = _wrapProbeXFromColStyled('0', 1, 1000000, fsC|0, lhC|0, null);
+              if (Number.isFinite(spx) && (spx||0) > 0) chPx = (+spx||0);
+            }catch{ chPx = 0; }
+
+            // Blockquote lane (clean display only; draft shows markers as raw text).
+            let bqLanePx = 0;
+            try{
+              if (hide && (chPx > 0.01)){
+                const q = (_mdBlockQuotePrefixInfo && _mdBlockQuotePrefixInfo(src));
+                const lv = (q && Number.isFinite(q.level)) ? (q.level|0) : 0;
+                if ((lv|0) > 0) bqLanePx = (chPx * (lv|0));
+              }
+            }catch{ bqLanePx = 0; }
+
+            // List base left margin (1ch) applies in both clean and draft for list rows.
+            let lv1PadPx = 0;
+            let ul = null;
+            try{
+              ul = _mdUListInfo && _mdUListInfo(src, caretRow|0, lines2);
+              if (ul && (ul.kind==='item' || ul.kind==='cont') && ((ul.depth|0) >= 1) && (chPx > 0.01)) lv1PadPx = chPx;
+            }catch{ ul = null; lv1PadPx = 0; }
+
+            // List hanging indent: only in clean display.
+            if (hide && ul){
+              try{ indentOpts = _mdIndentOptsForListLine(String(line||''), ul, wPx|0, fsC|0, lhC|0); }catch{ indentOpts = null; }
+            }
+
+            // Always include reserved left pads (bq lane + list margin) so wrap boundaries match renderer.
+            const addPad = (+bqLanePx||0) + (+lv1PadPx||0);
+            if (indentOpts){
+              if (addPad > 0.01){
+                indentOpts = { padLeftPx: ((+indentOpts.padLeftPx||0) + addPad), textIndentPx: (+indentOpts.textIndentPx||0) };
+              }
+            } else {
+              if (addPad > 0.01){
+                indentOpts = { padLeftPx: addPad, textIndentPx: 0 };
+              }
             }
           }
         }catch{ indentOpts = null; }
@@ -22666,10 +22742,27 @@ try{
           ? _wrapProbeXFromColStyled(line, caretColVis|0, wPx, (_mdCaretFontSizePx||Math.max(6, Math.round(FONT_SIZE)))|0, (_mdCaretLineHeightPx||LINE_HEIGHT)|0, indentOpts2)
           : _wrapProbeXFromCol(line, caretColVis|0, wPx);
         if (Number.isFinite(xp)) x = xp;
-        try{ x += _mdOlExtraXpx(caretCol|0); }catch{}
+        // Ordered-list marker extra X should only apply on the *first* wrapped segment.
+        // On intra>0 segments, the wrap probe already includes the post-marker padding via indentOpts.
+        // Adding it again causes a visible jump (skips a few chars) at wrap boundaries in clean mode (#2004).
+        try{
+          let apply = true;
+          try{
+            if (_mdWysiwygActive && _mdWysiwygActive() && (_mdHideSymbolsForRow && _mdHideSymbolsForRow(true))){
+              const linesRaw = _splitLinesRaw();
+              const src = String((linesRaw && linesRaw.length) ? (linesRaw[caretRow]||'') : '');
+              const ul = _mdUListInfo && _mdUListInfo(src, caretRow|0, linesRaw);
+              if (ul && ul.kind==='item' && String(ul.listType||'')==='ol'){
+                const fs0 = (_mdCaretFontSizePx||Math.max(6, Math.round(FONT_SIZE)))|0;
+                const lh0 = (_mdCaretLineHeightPx||LINE_HEIGHT)|0;
+                const intra0 = _wrapProbeIntraFromColStyled(line, caretColVis|0, wPx|0, lh0|0, fs0|0, indentOpts2) | 0;
+                apply = ((intra0|0) === 0);
+              }
+            }
+          }catch{ apply = true; }
+          if (apply) x += _mdOlExtraXpx(caretCol|0);
+        }catch{}
         try{ x += _mdIcodeExtraXpx(caretColVis|0); }catch{}
-        try{ x += _mdBqPadExtraXpx(); }catch{}
-        try{ x += _mdListLv1PadExtraXpx(); }catch{}
       }
     }catch{}
   // Make caret height match the full line box
@@ -22698,10 +22791,24 @@ try{
             ? _wrapProbeXFromColStyled(line, (caretColVis+1)|0, wPx, (_mdCaretFontSizePx||Math.max(6, Math.round(FONT_SIZE)))|0, (_mdCaretLineHeightPx||LINE_HEIGHT)|0, indentOpts2)
             : _wrapProbeXFromCol(line, (caretColVis+1)|0, wPx);
           if (Number.isFinite(xp2)) x2 = xp2;
-          try{ x2 += _mdOlExtraXpx((caretCol|0) + 1); }catch{}
+          try{
+            let apply = true;
+            try{
+              if (_mdWysiwygActive && _mdWysiwygActive() && (_mdHideSymbolsForRow && _mdHideSymbolsForRow(true))){
+                const linesRaw = _splitLinesRaw();
+                const src = String((linesRaw && linesRaw.length) ? (linesRaw[caretRow]||'') : '');
+                const ul = _mdUListInfo && _mdUListInfo(src, caretRow|0, linesRaw);
+                if (ul && ul.kind==='item' && String(ul.listType||'')==='ol'){
+                  const fs0 = (_mdCaretFontSizePx||Math.max(6, Math.round(FONT_SIZE)))|0;
+                  const lh0 = (_mdCaretLineHeightPx||LINE_HEIGHT)|0;
+                  const intra0 = _wrapProbeIntraFromColStyled(line, (caretColVis+1)|0, wPx|0, lh0|0, fs0|0, indentOpts2) | 0;
+                  apply = ((intra0|0) === 0);
+                }
+              }
+            }catch{ apply = true; }
+            if (apply) x2 += _mdOlExtraXpx((caretCol|0) + 1);
+          }catch{}
           try{ x2 += _mdIcodeExtraXpx((caretColVis+1)|0); }catch{}
-          try{ x2 += _mdBqPadExtraXpx(); }catch{}
-          try{ x2 += _mdListLv1PadExtraXpx(); }catch{}
         }
       }catch{}
       chW = Math.max(0, x2 - x);
