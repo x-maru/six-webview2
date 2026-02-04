@@ -18392,7 +18392,22 @@ try{
       const endExclusive = Math.max(start, Math.min(len, lo|0));
 
       // For clicks in the left padding/indent area, clamp to the segment start.
-      if (!(desired > (lineStartX + epsX))) return start;
+      if (!(desired > (lineStartX + epsX))){
+        // IMPORTANT: some engines attribute the wrap-boundary caret to the previous intra.
+        // If we return such a boundary here, visual-line motion (j/k in md-rich) can get
+        // stuck when desiredX is at the left edge (e.g. coming from a blank line).
+        let cand = start|0;
+        try{
+          if ((tgtIntra|0) > 0){
+            let guard = 0;
+            while (guard < 8 && (cand|0) < (endExclusive|0) && ((_intraAt(cand|0)|0) < (tgtIntra|0))){
+              cand = (cand + 1)|0;
+              guard++;
+            }
+          }
+        }catch{}
+        return cand|0;
+      }
 
       const _xAtForSearch = (col)=>{
         try{
@@ -28597,6 +28612,55 @@ try{
       try{ toast('theme = ' + (_currentThemeName() === 'ex1' ? 'ex1' : 'basic'), 1200); }catch{}
       return;
     }
+
+    // :set sarasa / :set nosarasa / :set sarasa! / :set sarasa?
+    // Global (localStorage): six.font.nosarasa = '1' disables Sarasa from the font stack.
+    if (/^:set\s+sarasa\s*$/i.test(cmd)){
+      try{ localStorage.setItem('six.font.nosarasa', '0'); }catch{}
+      try{ document.body && document.body.classList && document.body.classList.remove('font-nosarasa'); }catch{}
+      try{ _syncEditorMetrics && _syncEditorMetrics(); }catch{}
+      try{ _wrapInvalidateCache && _wrapInvalidateCache('font'); }catch{}
+      try{ _mdWrapInvalidateCache && _mdWrapInvalidateCache('font'); }catch{}
+      try{ _repositionCaret && _repositionCaret(); }catch{}
+      try{ updateGutter && updateGutter(); }catch{}
+      try{ _renderListChars && _renderListChars(); }catch{}
+      toast('sarasa: on', 900);
+      return;
+    }
+    if (/^:set\s+nosarasa\s*$/i.test(cmd)){
+      try{ localStorage.setItem('six.font.nosarasa', '1'); }catch{}
+      try{ document.body && document.body.classList && document.body.classList.add('font-nosarasa'); }catch{}
+      try{ _syncEditorMetrics && _syncEditorMetrics(); }catch{}
+      try{ _wrapInvalidateCache && _wrapInvalidateCache('font'); }catch{}
+      try{ _mdWrapInvalidateCache && _mdWrapInvalidateCache('font'); }catch{}
+      try{ _repositionCaret && _repositionCaret(); }catch{}
+      try{ updateGutter && updateGutter(); }catch{}
+      try{ _renderListChars && _renderListChars(); }catch{}
+      toast('sarasa: off', 900);
+      return;
+    }
+    if (/^:set\s+sarasa!\s*$/i.test(cmd)){
+      let off = false;
+      try{ off = !!(document.body && document.body.classList && document.body.classList.contains('font-nosarasa')); }catch{ off = false; }
+      off = !off;
+      try{ localStorage.setItem('six.font.nosarasa', off ? '1' : '0'); }catch{}
+      try{ document.body && document.body.classList && document.body.classList.toggle('font-nosarasa', !!off); }catch{}
+      try{ _syncEditorMetrics && _syncEditorMetrics(); }catch{}
+      try{ _wrapInvalidateCache && _wrapInvalidateCache('font'); }catch{}
+      try{ _mdWrapInvalidateCache && _mdWrapInvalidateCache('font'); }catch{}
+      try{ _repositionCaret && _repositionCaret(); }catch{}
+      try{ updateGutter && updateGutter(); }catch{}
+      try{ _renderListChars && _renderListChars(); }catch{}
+      toast('sarasa: ' + (off ? 'off' : 'on'), 900);
+      return;
+    }
+    if (/^:set\s+sarasa\?\s*$/i.test(cmd)){
+      let off = false;
+      try{ off = !!(document.body && document.body.classList && document.body.classList.contains('font-nosarasa')); }catch{ off = false; }
+      toast('sarasa: ' + (off ? 'off' : 'on'), 1200);
+      return;
+    }
+
     // :set visualbell / :set novisualbell / :set visualbell! / :set visualbell?
     if (/^:set\s+visualbell\s*$/i.test(cmd)){
       _optVisualBell = true; toast('visualbell: on', 900); return;
@@ -50518,6 +50582,14 @@ try{
         const hasFont = (fam)=>{ try{ return !!(document.fonts && document.fonts.check && document.fonts.check('12px "' + String(fam||'').replace(/"/g,'') + '"')); }catch{ return false; } };
         const hasSarasa = hasFont('Sarasa Mono J') || hasFont('Sarasa Mono J XLight') || hasFont('Sarasa Mono J Light') || hasFont('Sarasa Mono J SemiLight') || hasFont('Sarasa Mono J Regular');
         try{ document.body && document.body.classList && document.body.classList.toggle('font-sarasa', !!hasSarasa); }catch{}
+      }catch{}
+
+      // Runtime font preference: allow disabling Sarasa without uninstall.
+      // Stored globally (localStorage) as: six.font.nosarasa = '1' | '0'
+      try{
+        const v = String(localStorage.getItem('six.font.nosarasa')||'').trim();
+        const off = (v === '1' || /^true$/i.test(v) || /^on$/i.test(v));
+        try{ document.body && document.body.classList && document.body.classList.toggle('font-nosarasa', !!off); }catch{}
       }catch{}
 
       // Try to refresh customize file with cache-buster, then re-apply theme once more

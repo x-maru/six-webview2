@@ -259,6 +259,22 @@ body { font: var(--fontBase, 18px)/20px Consolas, 'Courier New', monospace; over
 }
 
 #pane { position: absolute; top: 2.25rem; bottom: 0; left: 0; right: 0; display:flex; }
+#pane {
+	/* Font stacks: allow runtime Sarasa ON/OFF without uninstall. */
+	--six-font-mono-stack: "Sarasa Mono J", 'SixEditorMix',
+		"Cascadia Code", "Cascadia Mono", "JetBrains Mono", "Fira Code", "Consolas",
+		"Noto Sans Mono", "Noto Sans CJK JP", "Noto Sans JP", "Noto Sans Japanese",
+		"Yu Gothic", "游ゴシック Light", "Meiryo", "MS Gothic", monospace;
+	--six-font-mono-stack-nosarasa: 'SixEditorMix',
+		"Cascadia Code", "Cascadia Mono", "JetBrains Mono", "Fira Code", "Consolas",
+		"Noto Sans Mono", "Noto Sans CJK JP", "Noto Sans JP", "Noto Sans Japanese",
+		"Yu Gothic", "游ゴシック Light", "Meiryo", "MS Gothic", monospace;
+}
+
+/* Runtime font override: simulate “Sarasa not installed”. */
+body.font-nosarasa #pane {
+	--six-font-mono-stack: var(--six-font-mono-stack-nosarasa);
+}
 #editorViewport {
 	position: relative;
 	flex: 1;
@@ -282,8 +298,8 @@ body.md-rich #editorViewport {
 		linear-gradient(var(--gutterGradientStart, #141821), var(--gutterGradientEnd, #0f1117));
 	color: var(--gutterNumberColor, #57607a); text-align:right; padding-right: 0; box-sizing:border-box;
 	font-size: calc(var(--editorFontBase, 20px) * var(--edScale));
-	/* Prefer thinner monospace faces; fall back gracefully (default = original order) */
-	font-family: "Sarasa Mono J", "Cascadia Code", "Cascadia Mono", "JetBrains Mono", "Fira Code", "Consolas", "Yu Gothic", "游ゴシック Light", "Meiryo", monospace !important;
+	/* Prefer thinner monospace faces; fall back gracefully */
+	font-family: var(--six-font-mono-stack) !important;
 	font-weight: 200 !important;
 }
 
@@ -293,11 +309,8 @@ body.md-rich #gutter {
 }
 #gutter div { line-height: var(--lhEff, var(--lh)); padding-right: var(--gutterNumPadRightPx); box-sizing: border-box; width: 100%; /* use line-height centering; avoid flex rounding drift; make row background span full gutter incl. padding */ }
 #editor { flex: 1; background: transparent; color: var(--editorTextColor, #e6e6e6); border:0; outline:0; resize:none; line-height: var(--lhEff, var(--lh)); tab-size: var(--tabstop, 8); -moz-tab-size: var(--tabstop, 8); white-space: pre; padding: 0 2rem calc(var(--eofPadLines, 10) * var(--lhEff, var(--lh))) 0; margin: 0; box-sizing: content-box; position: relative; z-index: 2; font-size: calc(var(--editorFontBase, 20px) * var(--edScale));
-	/* Keep font fallback consistent with markdown-rich (#textLayer), but still prefer Sarasa Mono J. */
-	font-family: "Sarasa Mono J", 'SixEditorMix',
-		"Cascadia Code", "Cascadia Mono", "JetBrains Mono", "Fira Code", "Consolas",
-		"Noto Sans Mono", "Noto Sans CJK JP", "Noto Sans JP", "Noto Sans Japanese",
-		"Yu Gothic", "游ゴシック Light", "Meiryo", "MS Gothic", monospace !important;
+	/* Keep font fallback consistent with markdown-rich (#textLayer). */
+	font-family: var(--six-font-mono-stack) !important;
 	font-weight: 220 !important;
 	/* Stabilize glyph metrics for measurement: disable kerning/ligatures (do not force full-width variants) */
 	font-kerning: none; font-variant-ligatures: none;
@@ -306,14 +319,14 @@ body.md-rich #gutter {
 #editor { caret-color: transparent; }
 
 /* When Sarasa is available, bump weight slightly (avoid XLight/ExtraLight selection). */
-body.font-sarasa #editor,
-body.font-sarasa #textLayer,
-body.font-sarasa #gutter {
+body.font-sarasa:not(.font-nosarasa) #editor,
+body.font-sarasa:not(.font-nosarasa) #textLayer,
+body.font-sarasa:not(.font-nosarasa) #gutter {
 	font-weight: 320 !important;
 }
 
 /* Slightly increase leading when Sarasa is available (visual breathing room). */
-body.font-sarasa { --lhTune: 1.04; }
+body.font-sarasa:not(.font-nosarasa) { --lhTune: 1.04; }
 
 /* Soft wrap (visual only) */
 body.wrap-on #editor {
@@ -476,10 +489,7 @@ body.typing-reduced-text #editor::-webkit-scrollbar-corner,
 	z-index: 2; /* above backgrounds, below textarea/caret */
 	font-size: calc(var(--editorFontBase, 20px) * var(--edScale));
 	color: var(--editorTextColor, #e6e6e6);
-	font-family: "Sarasa Mono J", 'SixEditorMix',
-		"Cascadia Code", "Cascadia Mono", "JetBrains Mono", "Fira Code", "Consolas",
-		"Noto Sans Mono", "Noto Sans CJK JP", "Noto Sans JP", "Noto Sans Japanese",
-		"Yu Gothic", "游ゴシック Light", "Meiryo", "MS Gothic", monospace !important;
+	font-family: var(--six-font-mono-stack) !important;
 	font-weight: 220 !important;
 	white-space: pre;
 	tab-size: var(--tabstop, 8);
