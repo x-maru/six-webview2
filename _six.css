@@ -293,8 +293,11 @@ body.md-rich #gutter {
 }
 #gutter div { line-height: var(--lhEff, var(--lh)); padding-right: var(--gutterNumPadRightPx); box-sizing: border-box; width: 100%; /* use line-height centering; avoid flex rounding drift; make row background span full gutter incl. padding */ }
 #editor { flex: 1; background: transparent; color: var(--editorTextColor, #e6e6e6); border:0; outline:0; resize:none; line-height: var(--lhEff, var(--lh)); tab-size: var(--tabstop, 8); -moz-tab-size: var(--tabstop, 8); white-space: pre; padding: 0 2rem calc(var(--eofPadLines, 10) * var(--lhEff, var(--lh))) 0; margin: 0; box-sizing: content-box; position: relative; z-index: 2; font-size: calc(var(--editorFontBase, 20px) * var(--edScale));
-	/* Default = original order (CJK not forced first) */
-	font-family: "Sarasa Mono J", "Cascadia Code", "Cascadia Mono", "JetBrains Mono", "Fira Code", "Consolas", "Yu Gothic", "游ゴシック Light", "Meiryo", monospace !important;
+	/* Keep font fallback consistent with markdown-rich (#textLayer), but still prefer Sarasa Mono J. */
+	font-family: "Sarasa Mono J", 'SixEditorMix',
+		"Cascadia Code", "Cascadia Mono", "JetBrains Mono", "Fira Code", "Consolas",
+		"Noto Sans Mono", "Noto Sans CJK JP", "Noto Sans JP", "Noto Sans Japanese",
+		"Yu Gothic", "游ゴシック Light", "Meiryo", "MS Gothic", monospace !important;
 	font-weight: 220 !important;
 	/* Stabilize glyph metrics for measurement: disable kerning/ligatures (do not force full-width variants) */
 	font-kerning: none; font-variant-ligatures: none;

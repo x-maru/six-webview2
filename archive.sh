@@ -41,6 +41,7 @@ FILES=(
 	six_shortcut.ico
 	install.cmd
 	README.md
+	help.*.md
 )
 
 missing=()
@@ -86,4 +87,3 @@ if [ ! -s "$ARCHIVE" ]; then
 		exit 6
 fi
 echo "SUCCESS: Created $ARCHIVE ($(du -h "$ARCHIVE" | awk '{print $1}'))" >&2
-

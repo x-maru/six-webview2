@@ -1,4 +1,4 @@
-const VERSION = '0.9.2';
+const VERSION = '0.9.2.1';
 // Build stamp (for verifying which _six.js is actually running)
 // NOTE: Intentionally ASCII-only; fullwidth variants should be treated as invalid.
 try{ window.__sixBuildTs = '2026-02-01T01:10:00Z'; }catch{}
