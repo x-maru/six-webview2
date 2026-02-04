@@ -18333,44 +18333,97 @@ try{
       const desired = Number(desiredX||0);
       const len = (s.length|0);
 
+      // Expected visual line start X (px) for this intra.
+      // NOTE: CSS text-indent applies only to the first visual line.
+      let padLeft = 0;
+      let tIndent = 0;
+      try{
+        if (indentOpts && Number.isFinite(indentOpts.padLeftPx)) padLeft = Math.max(0, (+indentOpts.padLeftPx||0));
+        if (indentOpts && Number.isFinite(indentOpts.textIndentPx)) tIndent = (+indentOpts.textIndentPx||0);
+      }catch{ padLeft = 0; tIndent = 0; }
+      const lineStartX = Math.max(0, ((tgtIntra|0) > 0) ? (padLeft|0) : ((padLeft|0) + (tIndent|0)));
+      const epsX = (function(){
+        try{
+          const fs = (Number.isFinite(fontSizePx) && (fontSizePx||0) > 0) ? (+fontSizePx||16) : 16;
+          return Math.max(1.5, Math.min(4, fs * 0.15));
+        }catch{ return 2; }
+      })();
+      const approxCh = (function(){
+        try{
+          const fs = (Number.isFinite(fontSizePx) && (fontSizePx||0) > 0) ? (+fontSizePx||16) : 16;
+          return Math.max(1, fs * 0.60);
+        }catch{ return 10; }
+      })();
+
       const _intraAt = (col)=>{ try{ return _wrapProbeIntraFromColStyled(s, col|0, ww, lineHeightPx|0, fontSizePx|0, indentOpts) | 0; }catch{ return 0; } };
       const _xAt = (col)=>{ try{ const x = _wrapProbeXFromColStyled(s, col|0, ww, fontSizePx|0, lineHeightPx|0, indentOpts); return Number.isFinite(x) ? (x||0) : 0; }catch{ return 0; } };
 
-      // Find segment [start,end] where intra==tgtIntra.
+      // Find segment [start,endExclusive] for the target intra.
+      // IMPORTANT: the boundary caret at the wrap point is semantically part of the *end* of the
+      // current visual line even if some engines attribute it to the next intra.
       let lo = 0, hi = len;
       while (lo < hi){
         const mid = (lo + hi) >> 1;
         if (_intraAt(mid) >= tgtIntra) hi = mid; else lo = mid + 1;
       }
-      const start = Math.max(0, Math.min(len, lo|0));
+      let start = Math.max(0, Math.min(len, lo|0));
+
+      // Boundary off-by-one guard:
+      // If the computed start is 1ch too far right (common at wrap boundaries under styled metrics),
+      // include the previous caret position when it visually lands at the start of this intra.
+      try{
+        if ((tgtIntra|0) > 0 && (start|0) > 0){
+          const xPrev = _xAt((start-1)|0);
+          const xStart = _xAt(start|0);
+          if (Number.isFinite(xPrev) && Number.isFinite(xStart)){
+            const prevAtStart = (+xPrev <= ((lineStartX|0) + (epsX*1.2)));
+            const startLooksNext = (+xStart >= (+xPrev + (approxCh * 0.35)));
+            const intraPrev = _intraAt((start-1)|0) | 0;
+            if (prevAtStart && startLooksNext && (intraPrev|0) <= (tgtIntra|0)) start = (start-1)|0;
+          }
+        }
+      }catch{}
+
       lo = start; hi = len;
       while (lo < hi){
         const mid = (lo + hi) >> 1;
         if (_intraAt(mid) > tgtIntra) hi = mid; else lo = mid + 1;
       }
-      // IMPORTANT: allow end==len so the caret can land at the logical EOL position
-      // (just before '\n'). Also avoid picking the *first* column of the next intra.
       const endExclusive = Math.max(start, Math.min(len, lo|0));
-      const end = (endExclusive >= len) ? len : Math.max(start, (endExclusive - 1)|0);
-      if (!(desired > 0)) return start;
 
-      let a = start, b = end;
+      // For clicks in the left padding/indent area, clamp to the segment start.
+      if (!(desired > (lineStartX + epsX))) return start;
+
+      const _xAtForSearch = (col)=>{
+        try{
+          const c = col|0;
+          if ((c|0) === (endExclusive|0) && (c|0) <= (len|0)){
+            const ic = _intraAt(c|0) | 0;
+            if ((ic|0) > (tgtIntra|0)) return (ww + (lineStartX|0));
+          }
+          return _xAt(c|0);
+        }catch{ return 0; }
+      };
+
+      let a = start, b = endExclusive;
       while (a < b){
         const mid = (a + b) >> 1;
-        if (_xAt(mid) >= desired) b = mid; else a = mid + 1;
+        if (_xAtForSearch(mid) >= desired) b = mid; else a = mid + 1;
       }
-      let cand = Math.max(start, Math.min(end, a|0));
+      let cand = Math.max(start, Math.min(endExclusive, a|0));
       const prev = Math.max(start, cand - 1);
-      const xCand = _xAt(cand);
-      const xPrev = _xAt(prev);
+      const xCand = _xAtForSearch(cand|0);
+      const xPrev = _xAtForSearch(prev|0);
       if (Math.abs(xPrev - desired) <= Math.abs(xCand - desired)) cand = prev;
 
       // Safety: ensure the chosen column stays within the intended intra.
       // This prevents a rare "can't move up" case when desiredX is huge and the boundary
       // column maps to the next intra.
       try{
-        let ic = _intraAt(cand|0);
-        if ((ic|0) > (tgtIntra|0)){
+        let ic = _intraAt(cand|0) | 0;
+        if ((cand|0) === (endExclusive|0) && (ic|0) > (tgtIntra|0)){
+          // Allowed: wrap-boundary caret (EOL of this intra).
+        } else if ((ic|0) > (tgtIntra|0)){
           while ((cand|0) > (start|0) && ((_intraAt((cand|0))|0) > (tgtIntra|0))) cand = (cand - 1)|0;
         }
       }catch{}
@@ -19057,7 +19110,22 @@ try{
           }
         }catch{}
       }
-      // NOTE: The non-md else branch that used to set paddingBottom here has been removed.
+      else {
+        // Leaving md-rich + wrap-on: restore CSS-driven EOF padding.
+        // Without this, the inline paddingBottom set during md-rich remains and can make caret/scroll
+        // mapping drift in markdown-off mode until restart (#1998).
+        try{
+          if (editor && editor.style && String(editor.style.paddingBottom||'') !== '') editor.style.paddingBottom = '';
+        }catch{}
+        try{ _mdEofPadLastPbPx = -1; }catch{}
+        try{ _mdEofPadGridLastBasePx = -1; _mdEofPadGridLastLh = -1; }catch{}
+        try{ _mdEofPadConsumePx = 0; }catch{}
+        try{ _mdEofPadLastExtraPx = 0; }catch{}
+        try{ _mdEofLastTotalPx = 0; _mdEofLastContentPx = 0; _mdEofLastLinesTotal = 0; }catch{}
+        try{ _mdEofPadExtraLines = 0; }catch{}
+        try{ _mdScrollMapFrozen = null; }catch{}
+        try{ _cachedVisibleCount = 0; _cachedVisibleKey = ''; }catch{}
+      }
       // markdown-off + wrap-on now relies exclusively on _syncEofPadGridComp() for paddingBottom.
     }catch(e){
       try{

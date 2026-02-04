@@ -65,7 +65,7 @@
 
 ## 履歴
 - 2025.11.25 v0.9 初版
-- v0.9→v1.0
+- v0.9→v0.92
   - タブをドラッグ&ドロップで入れ替えられるようにした。
   - :b popupでの一覧表示を「ファイル名　(パス名)」に変更した。
   - 右上/右下のオーバーレイパレットを普段は透明に近い半透明にして、マウスホバー時だけはっきり見えるようにした。
@@ -90,7 +90,7 @@
   - インデント操作時の幅(shiftwidth)の選択肢に'TAB'を追加した。TABコードを挿入/削除する。SIX_OPTIONSでバッファ生成時の初期値を指定できるようにした。
   - NORMALのTABが`>>`になるようにした。VISUALのTABは`>`。Shift+TABで逆。
   - INSERTのTABでshiftwidthの設定値を挿入するようにした。2なら"  ", TABなら\t。
-  - grep機能を実装した。まずはカレントバッファや外部のディレクトリ・ファイルから検索できる。
+  - grep機能を実装した。カレントバッファや外部のディレクトリ・ファイルから検索できる。
   - 検索語履歴をセッション情報に含めるようにした。上限はSIX_OPTIONS.SEARCH_TERM_IN_SESSIONで決まる。
     - 検索語履歴は`/`,`?`のほかgrepでの検索とも共有する。
   - EOF付近からのVISUALの行選択で下から上に選択を伸ばせないケースがある不具合を修正した。
@@ -98,9 +98,11 @@
   - wrapモード(折り返し表示)を実装した。行番号は論理行番号に固定。
   - `gj`,`gk`を実装した(折り返し内の見た目caret移動)。markdown onまたはoffでもINSERTモードのときは`j`,`k`を`gj`,`gk`と同じ機能にした。
   - 制御文字表示ON/OFFをバッファ毎に持つように変更した。
-  - markdownの順序付きリスト表示で、番号の自動インクリメント表示(`md_autoIncrement`)を全バッファ共通の設定としてセッション情報に保存/復元するようにした。
+  - Markdownモードを実装した。バッファ毎にON/OFFでき、WYSIWYG編集(清書)と、半WYSIWYG編集(draft)を選べる。
+    - CommonMarkをベースにしたGFM(Github Flavored Markdown)に基本的に準拠している。未実装はテーブルとTask List。
+  - Markdownの順序付きリスト表示で、番号の自動インクリメント表示(`md_autoIncrement`)を全バッファ共通の設定としてセッション情報に保存/復元するようにした。
     - `:set md_autoIncrement`, `:set nomd_autoIncrement`, `:set md_autoIncrement!`, `:set md_autoIncrement?`
-- 2025.xx.xx v1.0
+- 2026.02.04 v0.92
 
 ## ライセンス / 出典
 Vimがお手本。
