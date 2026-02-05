@@ -6004,7 +6004,8 @@ try{
               let needsWrap = true;
               try{
                 const wEffPx = (+wPx||0);
-                const colsPerLine = Math.max(1, Math.floor((wEffPx|0) / (chPx||1)));
+                // Keep width as float to avoid off-by-one wrap near the threshold during IME.
+                const colsPerLine = Math.max(1, Math.floor((wEffPx) / (chPx||1)));
                 needsWrap = (imeVisCols != null) ? ((imeVisCols|0) > (colsPerLine|0)) : true;
               }catch{ needsWrap = true; }
               if (needsWrap) indentOpts = _mdIndentOptsForListLineApprox(text, listInfoDisp, chPx);
@@ -6172,8 +6173,9 @@ try{
               const sc = (baseFontPx>0) ? (fs / baseFontPx) : 1;
               const chPx = Math.max(1, (imeChPxBase||10) * (Number.isFinite(sc) ? sc : 1));
               let wEffPx = (+wPx||0);
-              if (isCodeRow) wEffPx = Math.max(20, (wEffPx|0) - (_cbTextPadLeftPx|0) - (bqLanePx|0) - (_cbTextPadRightPx|0));
-              const colsPerLine = Math.max(1, Math.floor((wEffPx|0) / chPx));
+              // Keep width as float to avoid false wrapping when the line is just below the wrap threshold.
+              if (isCodeRow) wEffPx = Math.max(20, (wEffPx) - (_cbTextPadLeftPx|0) - (bqLanePx|0) - (_cbTextPadRightPx|0));
+              const colsPerLine = Math.max(1, Math.floor((wEffPx) / chPx));
               const n = Math.max(1, Math.ceil((visCols||0) / (colsPerLine||1))|0);
               hPx = Math.max(1, n|0) * (lh|0);
             } else {
