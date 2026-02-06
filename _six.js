@@ -1,7 +1,7 @@
 const VERSION = '0.9.2.1';
 // Build stamp (for verifying which _six.js is actually running)
 // NOTE: Intentionally ASCII-only; fullwidth variants should be treated as invalid.
-try{ window.__sixBuildTs = '2026-02-01T01:10:00Z'; }catch{}
+try{ window.__sixBuildTs = '2026-02-06T00:00:00Z'; }catch{}
 const VERSION_STR = 'vi like TextEditor "six" v' + VERSION;
 // Build sentinel (#912) - confirm script actually refreshed & executed
 try{
@@ -45,6 +45,36 @@ try{
   const viewport   = document.getElementById('editorViewport');
   const editor     = document.getElementById('editor');
   const gutter     = document.getElementById('gutter');
+
+  // Debug capture hook (#2006): if editor keydown isn't reached, still log the first keydown after enabling.
+  // Usage (DevTools): window.__sixDbgEnterIndentOnce = true
+  try{
+    window.addEventListener('keydown', (e)=>{
+      try{
+        if (!(window && window.__sixDbgEnterIndentOnce)) return;
+        // Do NOT clear the flag here; editor/beforeinput hooks may want to consume it.
+        // Instead, throttle capture logging so it doesn't spam if editor never receives events.
+        if (window.__sixDbgEnterIndentCaptureFired) return;
+        window.__sixDbgEnterIndentCaptureFired = true;
+        try{ setTimeout(()=>{ try{ window.__sixDbgEnterIndentCaptureFired = false; }catch{} }, 800); }catch{}
+        const k = String((e && e.key) || '');
+        const c = String((e && e.code) || '');
+        const kc = (typeof e.keyCode==='number') ? (e.keyCode|0) : null;
+        const wh = (typeof e.which==='number') ? (e.which|0) : null;
+        let mdEnabled = false;
+        try{ if (typeof _mdRichEnabled === 'function') mdEnabled = !!_mdRichEnabled(); }catch{}
+        try{ if (!mdEnabled){ const b0 = currentBuffer && currentBuffer(); mdEnabled = !!(b0 && b0.markdown); } }catch{}
+        const snap = {
+          key:k, code:c, keyCode:kc, which:wh,
+          mode:String(_mode||''), mdEnabled:!!mdEnabled,
+          ctrl:!!(e&&e.ctrlKey), alt:!!(e&&e.altKey), meta:!!(e&&e.metaKey), shift:!!(e&&e.shiftKey),
+          isComposing:!!(e&&e.isComposing), ime:!!(window && window._imeComposing===true),
+        };
+        try{ window.__sixLastKeydownDbg = snap; }catch{}
+        console.log('[six][dbg#2006] window-capture keydown', snap);
+      }catch{}
+    }, true);
+  }catch{}
 
   /*********************************************************
    * Markdown rich view (per-line font-size / line-height)
@@ -32695,6 +32725,56 @@ try{
     editor.addEventListener('beforeinput', (e)=>{
       try{ const M = window.SIX_IME_METRICS; if (M && window._imeComposing===true){ M.events.beforeinput++; } }catch{}
 
+      // Debug hook (#2006): one-shot snapshot for beforeinput Enter.
+      // Usage: window.__sixDbgEnterIndentOnce = true; then press Enter
+      try{
+        if (window && window.__sixDbgEnterIndentOnce && _mode === 'INSERT'){
+          const it0 = String((e && e.inputType) || '');
+          if (it0 === 'insertLineBreak' || it0 === 'insertParagraph'){
+            // Consume here as well (keydown may not fire on some IME paths).
+            try{ window.__sixDbgEnterIndentOnce = false; }catch{}
+            let mdEnabled = false;
+            try{ if (typeof _mdRichEnabled === 'function') mdEnabled = !!_mdRichEnabled(); }catch{}
+            try{ if (!mdEnabled){ const b0 = currentBuffer && currentBuffer(); mdEnabled = !!(b0 && b0.markdown); } }catch{}
+            let s0 = 0, e0 = 0;
+            try{ s0 = (editor.selectionStart|0); e0 = (editor.selectionEnd|0); }catch{}
+            let rc0 = null;
+            try{ rc0 = _rcFromOffset(s0|0); }catch{ rc0 = null; }
+            const r0 = rc0 ? (rc0.r|0) : (caretRow|0);
+            const c0 = rc0 ? (rc0.c|0) : (caretCol|0);
+            let line0 = '';
+            let ul0 = null;
+            let lead0 = '';
+            let preLen0 = 0;
+            try{
+              const lines0 = _splitLines();
+              line0 = String((lines0 && r0>=0 && r0<(lines0.length|0)) ? (lines0[r0]||'') : '');
+              try{ ul0 = (typeof _mdUListInfo==='function') ? _mdUListInfo(line0, r0|0, lines0) : null; }catch{ ul0 = null; }
+              try{ lead0 = (String(line0||'').match(/^[\t ]*/)||[''])[0]||''; }catch{ lead0 = ''; }
+              try{
+                let t0 = String(line0||'');
+                const q = (_mdBlockQuotePrefixInfo && _mdBlockQuotePrefixInfo(t0));
+                if (q && Number.isFinite(q.prefixLen) && (q.prefixLen|0) > 0) t0 = t0.slice(q.prefixLen|0);
+                preLen0 = (_mdIndentCodePrefixLen ? (_mdIndentCodePrefixLen(t0)|0) : 0)|0;
+              }catch{ preLen0 = 0; }
+            }catch{}
+            const snap = {
+              inputType: it0,
+              mode:String(_mode||''), mdEnabled:!!mdEnabled,
+              selCollapsed: ((s0|0)===(e0|0)), selS:(s0|0), selE:(e0|0),
+              row:(r0|0), col:(c0|0),
+              line: line0,
+              lead: lead0, leadLen: (lead0.length|0),
+              ulKind: (ul0&&ul0.kind)||null, ulType:(ul0&&ul0.listType)||null,
+              indentCodePrefixLen: (preLen0|0),
+              ime: !!(window && window._imeComposing===true), isComposing: !!(e && e.isComposing===true),
+            };
+            try{ window.__sixLastBeforeinputDbg = snap; }catch{}
+            console.log('[six][dbg#2006] beforeinput snapshot', snap);
+          }
+        }
+      }catch{}
+
       // Guard: if keydown fallback (#1798) already handled Enter, swallow the subsequent beforeinput.
       try{
         const itG = String((e && e.inputType) || '');
@@ -33045,6 +33125,122 @@ try{
 
       // #1798: markdown on + INSERT中のみの Enter 特殊動作（(un)ordered list item → 兄弟項目を作る）
       try{
+        // #2006: markdown on + INSERT の Enter
+        // - インデントコードブロック行: インデント以降なら継続、インデントのみ行は空行化
+        // - (un)ordered list 中の継続行(kind='cont'): インデント以降なら継続、インデントのみ行は空行化
+        // NOTE: beforeinput が本流。環境差で beforeinput が動かない場合は keydown 側に同等のフォールバックがある。
+        try{
+          const it2006 = String(e.inputType||'');
+          if (_mode==='INSERT' && (it2006==='insertLineBreak' || it2006==='insertParagraph')){
+            if (!(window && window._imeComposing===true)){
+              const mdEnabled2006 = (function(){
+                try{ if (typeof _mdRichEnabled === 'function') return !!_mdRichEnabled(); }catch{}
+                try{ const b0 = currentBuffer && currentBuffer(); return !!(b0 && b0.markdown); }catch{}
+                return false;
+              })();
+              if (mdEnabled2006 && editor){
+                const s0 = (editor.selectionStart|0);
+                const e0 = (editor.selectionEnd|0);
+                if ((s0|0) === (e0|0)){
+                  const b0 = currentBuffer();
+                  const v0 = (b0 && typeof b0.text === 'string') ? b0.text : String(editor.value||'');
+                  let rc0 = null;
+                  try{ rc0 = _rcFromOffset(s0|0); }catch{ rc0 = null; }
+                  const lines0 = _splitLines();
+                  const r0 = rc0 ? (rc0.r|0) : (caretRow|0);
+                  const line0 = String((lines0 && r0>=0 && r0<(lines0.length|0)) ? (lines0[r0]||'') : '');
+                  const col0 = rc0 ? (rc0.c|0) : (caretCol|0);
+
+                  let ul0 = null;
+                  try{ ul0 = (typeof _mdUListInfo==='function') ? _mdUListInfo(line0, r0|0, lines0) : null; }catch{ ul0 = null; }
+                  const isListCont = !!(ul0 && ul0.kind==='cont' && (ul0.listType==='ul' || ul0.listType==='ol'));
+
+                  let isIndentCode = false;
+                  try{
+                    // Prefer direct per-line rule for indented code blocks (more robust than cache state).
+                    // NOTE: This intentionally triggers on any line that *looks* like indented code.
+                    let t0 = String(line0||'');
+                    try{
+                      const q = (_mdBlockQuotePrefixInfo && _mdBlockQuotePrefixInfo(t0));
+                      if (q && Number.isFinite(q.prefixLen) && (q.prefixLen|0) > 0) t0 = t0.slice(q.prefixLen|0);
+                    }catch{}
+                    const preLen = (_mdIndentCodePrefixLen ? (_mdIndentCodePrefixLen(t0)|0) : 0)|0;
+                    isIndentCode = ((preLen|0) > 0);
+                  }catch{ isIndentCode = false; }
+
+                  // Debug hook: in DevTools set one-shot flag to log why Enter did/didn't trigger.
+                  //   window.__sixDbgEnterIndentOnce = true
+                  try{
+                    if (window && window.__sixDbgEnterIndentOnce){
+                      window.__sixDbgEnterIndentOnce = false;
+                      console.log('[six][dbg#2006] beforeinput Enter', {
+                        mode:String(_mode||''), mdEnabled:!!mdEnabled2006,
+                        row:(r0|0), col:(col0|0), line:line0,
+                        isListCont:!!isListCont, ulKind:(ul0&&ul0.kind)||null, ulType:(ul0&&ul0.listType)||null,
+                        isIndentCode:!!isIndentCode,
+                        lead:(String(line0||'').match(/^[\t ]*/)||[''])[0]||''
+                      });
+                    }
+                  }catch{}
+
+                  if (isListCont || isIndentCode){
+                    let lead = '';
+                    try{ lead = (String(line0||'').match(/^[\t ]*/)||[''])[0]||''; }catch{ lead = ''; }
+                    const leadLen = (lead.length|0);
+                    const afterIndent = ((col0|0) >= (leadLen|0));
+                    const indentOnly = (String(line0||'').trim() === '');
+
+                    if (indentOnly){
+                      // 空白だけの行は、インデントを消して通常の空行として扱う
+                      try{ e.preventDefault(); e.stopPropagation(); }catch{}
+                      const lineStartOff = Math.max(0, (s0|0) - (col0|0));
+                      const clearedV = String(v0||'').slice(0, lineStartOff|0) + String(v0||'').slice((lineStartOff|0) + (line0.length|0));
+                      const newV = String(clearedV||'').slice(0, lineStartOff|0) + '\n' + String(clearedV||'').slice(lineStartOff|0);
+                      editor.value = newV;
+                      const newOff = (lineStartOff|0) + 1;
+                      try{ editor.selectionStart = editor.selectionEnd = newOff; }catch{}
+                      try{ const rc1 = _rcFromOffset(newOff|0); if (rc1){ caretRow = rc1.r|0; caretCol = rc1.c|0; } }catch{}
+                      try{ _touchBufferModified && _touchBufferModified(); }catch{}
+                      try{ if (isListCont && _mdListInvalidateCache) _mdListInvalidateCache('md-enter-indent-clear'); }catch{}
+                      try{ _mdWrapInvalidateCache && _mdWrapInvalidateCache('md-enter-indent-clear'); }catch{}
+                      try{ _wrapInvalidateCache && _wrapInvalidateCache('md-enter-indent-clear'); }catch{}
+                      try{ _insertSegDirty = true; }catch{}
+                      try{ ensureScrolloff && ensureScrolloff(); }catch{}
+                      try{ if (_mdRenderTextLayer) _mdRenderTextLayer(); }catch{}
+                      try{ _repositionCaret && _repositionCaret(); }catch{}
+                      try{ updateGutter && updateGutter(); }catch{}
+                      try{ _scheduleListCharsRender && _scheduleListCharsRender('md-enter-indent-clear'); }catch{}
+                      return; // handled
+                    }
+
+                    if (afterIndent){
+                      // インデント以降なら、改行後も同じインデントを継続
+                      try{ e.preventDefault(); e.stopPropagation(); }catch{}
+                      const prefix = lead;
+                      const newV = String(v0||'').slice(0, s0|0) + '\n' + String(prefix||'') + String(v0||'').slice(s0|0);
+                      editor.value = newV;
+                      const newOff = (s0|0) + 1 + ((prefix && prefix.length)|0);
+                      try{ editor.selectionStart = editor.selectionEnd = newOff; }catch{}
+                      try{ const rc1 = _rcFromOffset(newOff|0); if (rc1){ caretRow = rc1.r|0; caretCol = rc1.c|0; } }catch{}
+                      try{ _touchBufferModified && _touchBufferModified(); }catch{}
+                      try{ if (isListCont && _mdListInvalidateCache) _mdListInvalidateCache('md-enter-indent'); }catch{}
+                      try{ _mdWrapInvalidateCache && _mdWrapInvalidateCache('md-enter-indent'); }catch{}
+                      try{ _wrapInvalidateCache && _wrapInvalidateCache('md-enter-indent'); }catch{}
+                      try{ _insertSegDirty = true; }catch{}
+                      try{ ensureScrolloff && ensureScrolloff(); }catch{}
+                      try{ if (_mdRenderTextLayer) _mdRenderTextLayer(); }catch{}
+                      try{ _repositionCaret && _repositionCaret(); }catch{}
+                      try{ updateGutter && updateGutter(); }catch{}
+                      try{ _scheduleListCharsRender && _scheduleListCharsRender('md-enter-indent'); }catch{}
+                      return; // handled
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }catch{}
+
         const it = String(e.inputType||'');
         if (it==='insertLineBreak' || it==='insertParagraph'){
           if (!(window && window._imeComposing===true)){
@@ -34879,6 +35075,60 @@ try{
   editor.addEventListener('keydown', (e)=>{
       try{ if (e && e.shiftKey) _shiftHeld = true; }catch{}
 
+      // Debug hook (#2006): one-shot snapshot (log first keydown after enabling).
+      // Usage (DevTools): window.__sixDbgEnterIndentOnce = true
+      try{
+        if (window && window.__sixDbgEnterIndentOnce){
+          const k0 = String((e && e.key) || '');
+          // Consume only when we actually see Enter (so capture log can happen first).
+          if (k0 === 'Enter'){
+            try{ window.__sixDbgEnterIndentOnce = false; }catch{}
+          }
+          const c0k = String((e && e.code) || '');
+          const kc0 = (typeof e.keyCode==='number') ? (e.keyCode|0) : null;
+          const wh0 = (typeof e.which==='number') ? (e.which|0) : null;
+          let mdEnabled = false;
+          try{ if (typeof _mdRichEnabled === 'function') mdEnabled = !!_mdRichEnabled(); }catch{}
+          try{ if (!mdEnabled){ const b0 = currentBuffer && currentBuffer(); mdEnabled = !!(b0 && b0.markdown); } }catch{}
+          let s0 = 0, e0 = 0;
+          try{ s0 = (editor.selectionStart|0); e0 = (editor.selectionEnd|0); }catch{}
+          let rc0 = null;
+          try{ rc0 = _rcFromOffset(s0|0); }catch{ rc0 = null; }
+          const r0 = rc0 ? (rc0.r|0) : (caretRow|0);
+          const cc0 = rc0 ? (rc0.c|0) : (caretCol|0);
+          let line0 = '';
+          let ul0 = null;
+          let lead0 = '';
+          let preLen0 = 0;
+          try{
+            const lines0 = _splitLines();
+            line0 = String((lines0 && r0>=0 && r0<(lines0.length|0)) ? (lines0[r0]||'') : '');
+            try{ ul0 = (typeof _mdUListInfo==='function') ? _mdUListInfo(line0, r0|0, lines0) : null; }catch{ ul0 = null; }
+            try{ lead0 = (String(line0||'').match(/^[\t ]*/)||[''])[0]||''; }catch{ lead0 = ''; }
+            try{
+              let t0 = String(line0||'');
+              const q = (_mdBlockQuotePrefixInfo && _mdBlockQuotePrefixInfo(t0));
+              if (q && Number.isFinite(q.prefixLen) && (q.prefixLen|0) > 0) t0 = t0.slice(q.prefixLen|0);
+              preLen0 = (_mdIndentCodePrefixLen ? (_mdIndentCodePrefixLen(t0)|0) : 0)|0;
+            }catch{ preLen0 = 0; }
+          }catch{}
+          const snap = {
+            key:k0, code:c0k, keyCode:kc0, which:wh0,
+            mode:String(_mode||''), mdEnabled:!!mdEnabled,
+            selCollapsed: ((s0|0)===(e0|0)), selS:(s0|0), selE:(e0|0),
+            row:(r0|0), col:(cc0|0),
+            line: line0,
+            lead: lead0, leadLen: (lead0.length|0),
+            ulKind: (ul0&&ul0.kind)||null, ulType:(ul0&&ul0.listType)||null,
+            indentCodePrefixLen: (preLen0|0),
+            ctrl:!!(e&&e.ctrlKey), alt:!!(e&&e.altKey), meta:!!(e&&e.metaKey), shift:!!(e&&e.shiftKey),
+            isComposing:!!(e&&e.isComposing), ime: !!(window && window._imeComposing===true),
+          };
+          try{ window.__sixLastEnterDbg = snap; }catch{}
+          console.log('[six][dbg#2006] editor keydown snapshot', snap);
+        }
+      }catch{}
+
       // Debug hook (opt-in): log raw keydown info even if Tab isn't recognized later.
       // Usage (DevTools):
       //   window.__sixDbgTabIndentOnce = true; // one-shot log for next keydown
@@ -35193,6 +35443,96 @@ try{
                   const line = String((lines && r>=0 && r<(lines.length|0)) ? (lines[r]||'') : '');
                   const col0 = rc ? (rc.c|0) : (caretCol|0);
                   const atEol = ((col0|0) === (line.length|0));
+
+                  // #2006: list 継続行 / indented code 行の Enter はインデント継続（非EOLでも）
+                  try{
+                    let ul0 = null;
+                    try{ ul0 = (typeof _mdUListInfo==='function') ? _mdUListInfo(line, r|0, lines) : null; }catch{ ul0 = null; }
+                    const isListCont = !!(ul0 && ul0.kind==='cont' && (ul0.listType==='ul' || ul0.listType==='ol'));
+                    let isIndentCode = false;
+                    try{
+                        let t0 = String(line||'');
+                        try{
+                          const q = (_mdBlockQuotePrefixInfo && _mdBlockQuotePrefixInfo(t0));
+                          if (q && Number.isFinite(q.prefixLen) && (q.prefixLen|0) > 0) t0 = t0.slice(q.prefixLen|0);
+                        }catch{}
+                        const preLen = (_mdIndentCodePrefixLen ? (_mdIndentCodePrefixLen(t0)|0) : 0)|0;
+                        isIndentCode = ((preLen|0) > 0);
+                    }catch{ isIndentCode = false; }
+
+                      // Debug hook (keydown fallback)
+                      try{
+                        if (window && window.__sixDbgEnterIndentOnce){
+                          window.__sixDbgEnterIndentOnce = false;
+                          console.log('[six][dbg#2006] keydown Enter', {
+                            mode:String(_mode||''),
+                            row:(r|0), col:(col0|0), line,
+                            isListCont:!!isListCont, ulKind:(ul0&&ul0.kind)||null, ulType:(ul0&&ul0.listType)||null,
+                            isIndentCode:!!isIndentCode,
+                            lead:(String(line||'').match(/^[\t ]*/)||[''])[0]||''
+                          });
+                        }
+                      }catch{}
+
+                    if (isListCont || isIndentCode){
+                      let lead = '';
+                      try{ lead = (String(line||'').match(/^[\t ]*/)||[''])[0]||''; }catch{ lead = ''; }
+                      const leadLen = (lead.length|0);
+                      const afterIndent = ((col0|0) >= (leadLen|0));
+                      const indentOnly = (String(line||'').trim() === '');
+
+                      if (indentOnly){
+                        try{ e.preventDefault(); e.stopPropagation(); }catch{}
+                        const v = String(editor.value||'');
+                        const lineStartOff = Math.max(0, (s0|0) - (col0|0));
+                        const clearedV = v.slice(0, lineStartOff|0) + v.slice((lineStartOff|0) + (line.length|0));
+                        const newV = clearedV.slice(0, lineStartOff|0) + '\n' + clearedV.slice(lineStartOff|0);
+                        editor.value = newV;
+                        const newOff = (lineStartOff|0) + 1;
+                        try{ editor.selectionStart = editor.selectionEnd = newOff; }catch{}
+                        try{ const rc1 = _rcFromOffset(newOff|0); caretRow = rc1.r|0; caretCol = rc1.c|0; }catch{ caretRow = (r|0) + 1; caretCol = 0; }
+                        try{ _setCaret && _setCaret(caretRow|0, caretCol|0); }catch{}
+                        try{ _touchBufferModified(); }catch{}
+                        try{ _mdListInvalidateCache && _mdListInvalidateCache('md-enter-indent-clear-kd'); }catch{}
+                        try{ _mdWrapInvalidateCache && _mdWrapInvalidateCache('md-enter-indent-clear-kd'); }catch{}
+                        try{ _wrapInvalidateCache && _wrapInvalidateCache('md-enter-indent-clear-kd'); }catch{}
+                        try{ _insertSegDirty = true; }catch{}
+                        try{ _insertSegIgnoreSelectUntil = Date.now() + 80; }catch{}
+                        try{ ensureScrolloff && ensureScrolloff(); }catch{}
+                        try{ if (_mdRenderTextLayer) _mdRenderTextLayer(); }catch{}
+                        try{ _repositionCaret && _repositionCaret(); }catch{}
+                        try{ updateGutter && updateGutter(); }catch{}
+                        try{ _scheduleListCharsRender && _scheduleListCharsRender('md-enter-indent-clear-kd'); }catch{}
+                        try{ if (window) window.__sixSkipEnterBeforeinputUntil = Date.now() + 120; }catch{}
+                        return;
+                      }
+
+                      if (afterIndent){
+                        try{ e.preventDefault(); e.stopPropagation(); }catch{}
+                        const v = String(editor.value||'');
+                        const prefix = lead;
+                        const newV = v.slice(0, s0|0) + '\n' + prefix + v.slice(s0|0);
+                        editor.value = newV;
+                        const newOff = (s0|0) + 1 + (prefix.length|0);
+                        try{ editor.selectionStart = editor.selectionEnd = newOff; }catch{}
+                        try{ const rc1 = _rcFromOffset(newOff|0); caretRow = rc1.r|0; caretCol = rc1.c|0; }catch{ caretRow = (r|0) + 1; caretCol = (prefix.length|0); }
+                        try{ _setCaret && _setCaret(caretRow|0, caretCol|0); }catch{}
+                        try{ _touchBufferModified(); }catch{}
+                        try{ _mdListInvalidateCache && _mdListInvalidateCache('md-enter-indent-kd'); }catch{}
+                        try{ _mdWrapInvalidateCache && _mdWrapInvalidateCache('md-enter-indent-kd'); }catch{}
+                        try{ _wrapInvalidateCache && _wrapInvalidateCache('md-enter-indent-kd'); }catch{}
+                        try{ _insertSegDirty = true; }catch{}
+                        try{ _insertSegIgnoreSelectUntil = Date.now() + 80; }catch{}
+                        try{ ensureScrolloff && ensureScrolloff(); }catch{}
+                        try{ if (_mdRenderTextLayer) _mdRenderTextLayer(); }catch{}
+                        try{ _repositionCaret && _repositionCaret(); }catch{}
+                        try{ updateGutter && updateGutter(); }catch{}
+                        try{ _scheduleListCharsRender && _scheduleListCharsRender('md-enter-indent-kd'); }catch{}
+                        try{ if (window) window.__sixSkipEnterBeforeinputUntil = Date.now() + 120; }catch{}
+                        return;
+                      }
+                    }
+                  }catch{}
                   let info = null;
                   try{ info = (typeof _mdUListInfo === 'function') ? _mdUListInfo(line, r|0, lines) : null; }catch{ info = null; }
                   if (info && info.kind === 'item' && (info.listType === 'ul' || info.listType === 'ol')){
@@ -41553,6 +41893,72 @@ try{
                       const line0 = String((lines0 && r0>=0 && r0<(lines0.length|0)) ? (lines0[r0]||'') : '');
                       let info0 = null;
                       try{ info0 = (typeof _mdUListInfo === 'function') ? _mdUListInfo(line0, r0|0, lines0) : null; }catch{ info0 = null; }
+
+                      // #2006: markdown on + INSERT 中の Enter（IME bar 経由）
+                      // - インデントコードブロック行 / リスト継続行(kind:cont)では、
+                      //   キャレットがインデント以降なら \n + 同じインデントを挿入（EOL不要）
+                      // - 行がインデントのみなら、インデントを消して空行化
+                      try{
+                        const isListItemLine = !!(info0 && info0.kind === 'item' && (info0.listType === 'ul' || info0.listType === 'ol'));
+                        const isListContLine = !!(info0 && info0.kind === 'cont' && (info0.listType === 'ul' || info0.listType === 'ol'));
+                        let isIndentCodeLine = false;
+                        if (!isListItemLine){
+                          let stripped0 = line0;
+                          try{
+                            const bq = (typeof _mdBlockQuotePrefixInfo === 'function') ? _mdBlockQuotePrefixInfo(line0, r0|0, lines0) : null;
+                            if (bq && (bq.prefixLen|0) > 0) stripped0 = line0.slice(bq.prefixLen|0);
+                          }catch{}
+                          try{ isIndentCodeLine = (typeof _mdIndentCodePrefixLen === 'function') ? (((_mdIndentCodePrefixLen(stripped0)||0)|0) > 0) : false; }catch{ isIndentCodeLine = false; }
+                        }
+                        if ((isListContLine || isIndentCodeLine) && (ss0|0) === (se0|0)){
+                          let lead = '';
+                          try{ lead = String((line0.match(/^[\t ]*/)||[])[0]||''); }catch{ lead = ''; }
+                          const leadLen = (lead.length|0);
+                          const indentOnly = (!String(line0||'').trim()) && (leadLen|0) > 0;
+                          const afterIndent = (c0|0) >= (leadLen|0);
+
+                          if (indentOnly){
+                            const lineStartOff = Math.max(0, (offIns0|0) - (c0|0));
+                            const lineEndOff = (lineStartOff|0) + (line0.length|0);
+                            // Clear indentation-only line WITHOUT inserting a new line.
+                            // NOTE: vDoc0.slice(lineEndOff) typically starts with the existing '\n'.
+                            // Adding another '\n' would create an extra blank line (#2007).
+                            const newV = vDoc0.slice(0, lineStartOff|0) + vDoc0.slice(lineEndOff|0);
+                            editor.value = newV;
+                            const newOff = (lineStartOff|0);
+                            try{ editor.setSelectionRange(newOff|0, newOff|0); }catch{ try{ editor.selectionStart = newOff|0; editor.selectionEnd = newOff|0; }catch{} }
+                            try{ const rc1 = _rcFromOffset(newOff|0); caretRow = rc1.r|0; caretCol = rc1.c|0; }catch{ try{ caretRow = (r0|0); caretCol = 0; }catch{} }
+                            try{ _setCaret && _setCaret(caretRow|0, caretCol|0, { suppressWrapDesired:true }); }catch{}
+                            try{ _touchBufferModified(); }catch{}
+                            try{ _imeBarPrevText = ''; _imeBarAnchorOff = newOff|0; }catch{}
+                            try{ _mdListInvalidateCache && _mdListInvalidateCache('md-enter-indent-clear-ime'); }catch{}
+                            try{ _mdWrapInvalidateCache && _mdWrapInvalidateCache('md-enter-indent-clear-ime'); }catch{}
+                            try{ _wrapInvalidateCache && _wrapInvalidateCache('md-enter-indent-clear-ime'); }catch{}
+                            try{ ensureScrolloff && ensureScrolloff({ force:true }); }catch{ try{ ensureScrolloff && ensureScrolloff(); }catch{} }
+                            try{ if (_mdRenderTextLayer) _mdRenderTextLayer(); }catch{}
+                            try{ _repositionCaret && _repositionCaret({ force:true }); }catch{ try{ _repositionCaret && _repositionCaret(); }catch{} }
+                            try{ updateGutter && updateGutter({ force:true }); }catch{ try{ updateGutter && updateGutter(); }catch{} }
+                            try{ _scheduleListCharsRender && _scheduleListCharsRender('md-enter-indent-clear-ime'); }catch{}
+                            didListEnter = true;
+                            try{ if (_optDebugKeys) _debugPush({ t:Date.now(), type:'imebar-enter-indent-clear', mode:_mode, inputType:'Enter', data:'', ctrl:!!e.ctrlKey, alt:!!e.altKey, meta:!!e.metaKey, isComp:false }); }catch{}
+                          } else if (afterIndent){
+                            try{ _imeBarAnchorOff = offIns0|0; }catch{}
+                            try{ _imeBarPrevText = ''; }catch{}
+                            try{ _imeBarReplaceInsertedText('\n' + lead, 'md-enter-indent'); }catch{}
+                            try{ _imeBarPrevText = ''; _imeBarAnchorOff = (editor && typeof editor.selectionStart==='number') ? (editor.selectionStart|0) : (_imeBarAnchorOff|0); }catch{}
+                            try{ _mdListInvalidateCache && _mdListInvalidateCache('md-enter-indent-ime'); }catch{}
+                            try{ _mdWrapInvalidateCache && _mdWrapInvalidateCache('md-enter-indent-ime'); }catch{}
+                            try{ _wrapInvalidateCache && _wrapInvalidateCache('md-enter-indent-ime'); }catch{}
+                            didListEnter = true;
+                            try{ if (_optDebugKeys) _debugPush({ t:Date.now(), type:'imebar-enter-indent', mode:_mode, inputType:'Enter', data:'', ctrl:!!e.ctrlKey, alt:!!e.altKey, meta:!!e.metaKey, isComp:false }); }catch{}
+                          }
+                        }
+                      }catch{}
+                      if (didListEnter){
+                        try{ _positionImeBar && _positionImeBar(); }catch{}
+                        return;
+                      }
+
                       if (info0 && info0.kind === 'item' && (info0.listType === 'ul' || info0.listType === 'ol')){
                         const atEol = ((c0|0) === (line0.length|0));
                         if (!atEol){
@@ -41890,6 +42296,72 @@ try{
                     const line0 = String((lines0 && r0>=0 && r0<(lines0.length|0)) ? (lines0[r0]||'') : '');
                     let info0 = null;
                     try{ info0 = (typeof _mdUListInfo === 'function') ? _mdUListInfo(line0, r0|0, lines0) : null; }catch{ info0 = null; }
+
+                    // #2006: markdown on + INSERT 中の Enter（IME bar legacy 経由）
+                    // - インデントコードブロック行 / リスト継続行(kind:cont)では、
+                    //   キャレットがインデント以降なら \n + 同じインデントを挿入（EOL不要）
+                    // - 行がインデントのみなら、インデントを消して空行化
+                    try{
+                      const isListItemLine = !!(info0 && info0.kind === 'item' && (info0.listType === 'ul' || info0.listType === 'ol'));
+                      const isListContLine = !!(info0 && info0.kind === 'cont' && (info0.listType === 'ul' || info0.listType === 'ol'));
+                      let isIndentCodeLine = false;
+                      if (!isListItemLine){
+                        let stripped0 = line0;
+                        try{
+                          const bq = (typeof _mdBlockQuotePrefixInfo === 'function') ? _mdBlockQuotePrefixInfo(line0, r0|0, lines0) : null;
+                          if (bq && (bq.prefixLen|0) > 0) stripped0 = line0.slice(bq.prefixLen|0);
+                        }catch{}
+                        try{ isIndentCodeLine = (typeof _mdIndentCodePrefixLen === 'function') ? (((_mdIndentCodePrefixLen(stripped0)||0)|0) > 0) : false; }catch{ isIndentCodeLine = false; }
+                      }
+                      if ((isListContLine || isIndentCodeLine) && (ss0|0) === (se0|0)){
+                        let lead = '';
+                        try{ lead = String((line0.match(/^[\t ]*/)||[])[0]||''); }catch{ lead = ''; }
+                        const leadLen = (lead.length|0);
+                        const indentOnly = (!String(line0||'').trim()) && (leadLen|0) > 0;
+                        const afterIndent = (c0|0) >= (leadLen|0);
+
+                        if (indentOnly){
+                          const lineStartOff = Math.max(0, (offIns0|0) - (c0|0));
+                          const lineEndOff = (lineStartOff|0) + (line0.length|0);
+                          // Clear indentation-only line WITHOUT inserting a new line.
+                          // NOTE: vDoc0.slice(lineEndOff) typically starts with the existing '\n'.
+                          // Adding another '\n' would create an extra blank line (#2007).
+                          const newV = vDoc0.slice(0, lineStartOff|0) + vDoc0.slice(lineEndOff|0);
+                          editor.value = newV;
+                          const newOff = (lineStartOff|0);
+                          try{ editor.setSelectionRange(newOff|0, newOff|0); }catch{ try{ editor.selectionStart = newOff|0; editor.selectionEnd = newOff|0; }catch{} }
+                          try{ const rc1 = _rcFromOffset(newOff|0); caretRow = rc1.r|0; caretCol = rc1.c|0; }catch{ try{ caretRow = (r0|0); caretCol = 0; }catch{} }
+                          try{ _setCaret && _setCaret(caretRow|0, caretCol|0, { suppressWrapDesired:true }); }catch{}
+                          try{ _touchBufferModified(); }catch{}
+                          try{ _imeBarPrevText = ''; _imeBarAnchorOff = newOff|0; }catch{}
+                          try{ _mdListInvalidateCache && _mdListInvalidateCache('md-enter-indent-clear-ime-legacy'); }catch{}
+                          try{ _mdWrapInvalidateCache && _mdWrapInvalidateCache('md-enter-indent-clear-ime-legacy'); }catch{}
+                          try{ _wrapInvalidateCache && _wrapInvalidateCache('md-enter-indent-clear-ime-legacy'); }catch{}
+                          try{ ensureScrolloff && ensureScrolloff({ force:true }); }catch{ try{ ensureScrolloff && ensureScrolloff(); }catch{} }
+                          try{ if (_mdRenderTextLayer) _mdRenderTextLayer(); }catch{}
+                          try{ _repositionCaret && _repositionCaret({ force:true }); }catch{ try{ _repositionCaret && _repositionCaret(); }catch{} }
+                          try{ updateGutter && updateGutter({ force:true }); }catch{ try{ updateGutter && updateGutter(); }catch{} }
+                          try{ _scheduleListCharsRender && _scheduleListCharsRender('md-enter-indent-clear-ime-legacy'); }catch{}
+                          didListEnter = true;
+                          try{ if (_optDebugKeys) _debugPush({ t:Date.now(), type:'imebar-enter-indent-clear-legacy', mode:_mode, inputType:'Enter', data:'', ctrl:!!e.ctrlKey, alt:!!e.altKey, meta:!!e.metaKey, isComp:false }); }catch{}
+                        } else if (afterIndent){
+                          try{ _imeBarAnchorOff = offIns0|0; }catch{}
+                          try{ _imeBarPrevText = ''; }catch{}
+                          try{ _imeBarReplaceInsertedText('\n' + lead, 'md-enter-indent'); }catch{}
+                          try{ _imeBarPrevText = ''; _imeBarAnchorOff = (editor && typeof editor.selectionStart==='number') ? (editor.selectionStart|0) : (_imeBarAnchorOff|0); }catch{}
+                          try{ _mdListInvalidateCache && _mdListInvalidateCache('md-enter-indent-ime-legacy'); }catch{}
+                          try{ _mdWrapInvalidateCache && _mdWrapInvalidateCache('md-enter-indent-ime-legacy'); }catch{}
+                          try{ _wrapInvalidateCache && _wrapInvalidateCache('md-enter-indent-ime-legacy'); }catch{}
+                          didListEnter = true;
+                          try{ if (_optDebugKeys) _debugPush({ t:Date.now(), type:'imebar-enter-indent-legacy', mode:_mode, inputType:'Enter', data:'', ctrl:!!e.ctrlKey, alt:!!e.altKey, meta:!!e.metaKey, isComp:false }); }catch{}
+                        }
+                      }
+                    }catch{}
+                    if (didListEnter){
+                      try{ _positionImeBar && _positionImeBar(); }catch{}
+                      return;
+                    }
+
                     if (info0 && info0.kind === 'item' && (info0.listType === 'ul' || info0.listType === 'ol')){
                       const atEol = ((c0|0) === (line0.length|0));
                       if (!atEol){
