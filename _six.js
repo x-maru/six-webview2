@@ -5336,10 +5336,7 @@ try{
         const fenceKind = (_fence && _fence.kind && row>=0 && row<total) ? (_fence.kind[row]|0) : 0;
         const isFenceRow = ((fenceKind|0) === 1);
         const indentKind = (_icode && _icode.kind && row>=0 && row<total) ? (_icode.kind[row]|0) : 0;
-        const isIndentCodeRow = ((indentKind|0) === 2);
-        const isCodeRow = ((fenceKind|0) === 2) || isIndentCodeRow;
-        const isCodeFirst = !!(((fenceKind|0)===2) && _fence && _fence.first && _fence.first[row|0]) || !!(isIndentCodeRow && _icode && _icode.first && _icode.first[row|0]);
-        const isCodeLast = !!(((fenceKind|0)===2) && _fence && _fence.last && _fence.last[row|0]) || !!(isIndentCodeRow && _icode && _icode.last && _icode.last[row|0]);
+        const isIndentCodeRowCache = ((indentKind|0) === 2);
 
         const isRefDefRow = !!(_ref && _ref.isDef && (row|0) >= 0 && (row|0) < (_ref.isDef.length|0) && _ref.isDef[row|0]);
 
@@ -5347,6 +5344,32 @@ try{
         const bqLevel = (_fence && _fence.bqLevel && row>=0 && row<total) ? (_fence.bqLevel[row|0]|0) : 0;
         const bqPre = (_fence && _fence.bqPrefixLen && row>=0 && row<total) ? (_fence.bqPrefixLen[row|0]|0) : 0;
         const srcTextMd = (((bqPre|0) > 0) ? String(srcText||'').slice(bqPre|0) : srcText);
+
+        // #2008: Indentation-only line should still render a visible margin immediately.
+        // - If in list context (prev line is list item/cont), keep list base margin even if current line has no parsed listInfo yet.
+        // - Otherwise, treat as indented-code row for rendering so codeblock margin/background appears before typing trailing text.
+        let _indentHintCut = 0;
+        let _indentHintPrevList = false;
+        try{ _indentHintCut = (_mdIndentCodePrefixLen ? (_mdIndentCodePrefixLen(srcTextMd)||0) : 0)|0; }catch{ _indentHintCut = 0; }
+        try{
+          if ((row|0) > 0){
+            const prevRaw = String(lines[(row-1)|0]||'');
+            const prevInfo = _mdUListInfo && _mdUListInfo(prevRaw, (row-1)|0, lines);
+            if (prevInfo && (prevInfo.kind==='item' || prevInfo.kind==='cont') && ((prevInfo.depth|0) >= 1)) _indentHintPrevList = true;
+            else if (_mdLooksLikeListMarkerLine && _mdLooksLikeListMarkerLine(prevRaw)) _indentHintPrevList = true;
+          }
+        }catch{ _indentHintPrevList = false; }
+
+        let isIndentCodeRow = isIndentCodeRowCache;
+        try{
+          if (!isIndentCodeRow && isBlankRow && ((_indentHintCut|0) > 0) && !_indentHintPrevList){
+            // Render-only hint: show codeblock margin/bg before any nonblank char is typed.
+            isIndentCodeRow = true;
+          }
+        }catch{}
+        const isCodeRow = ((fenceKind|0) === 2) || !!isIndentCodeRow;
+        const isCodeFirst = !!(((fenceKind|0)===2) && _fence && _fence.first && _fence.first[row|0]) || !!(isIndentCodeRowCache && _icode && _icode.first && _icode.first[row|0]);
+        const isCodeLast = !!(((fenceKind|0)===2) && _fence && _fence.last && _fence.last[row|0]) || !!(isIndentCodeRowCache && _icode && _icode.last && _icode.last[row|0]);
 
         const lv0 = (isCodeRow ? 0 : _mdHeadingLevel(srcTextMd));
         const isActiveRow = (row === (caretRow|0));
@@ -6060,6 +6083,12 @@ try{
             // #1974: Fallback detection (IME composition / deferred cache updates).
             // Must also handle quote list lines like ">1. abc".
             if (_mdLooksLikeListMarkerLine && _mdLooksLikeListMarkerLine(srcText)) lv1PadPx = (_mdListLv1PadPxBase|0);
+
+            // #2008: Indentation-only continuation line should still preserve list margin
+            // when previous line is in a list context.
+            if ((lv1PadPx|0) === 0 && isBlankRow && ((_indentHintCut|0) > 0) && _indentHintPrevList){
+              lv1PadPx = (_mdListLv1PadPxBase|0);
+            }
           }
         }catch{ lv1PadPx = 0; }
         try{
