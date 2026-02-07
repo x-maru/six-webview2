@@ -39,7 +39,7 @@ FILES=(
 	512x512.png
 	256x256.png
 	six_shortcut.ico
-	install.cmd
+	install*.cmd
 	README.md
 	help.*.md
 )

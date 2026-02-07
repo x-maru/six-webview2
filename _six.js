@@ -1,13 +1,32 @@
-const VERSION = '0.9.2.1';
+const VERSION = '0.9.3';
 // Build stamp (for verifying which _six.js is actually running)
 // NOTE: Intentionally ASCII-only; fullwidth variants should be treated as invalid.
-try{ window.__sixBuildTs = '2026-02-06T00:00:00Z'; }catch{}
+try{ window.__sixBuildTs = '2026-02-10T00:00:00Z'; }catch{}
 const VERSION_STR = 'vi like TextEditor "six" v' + VERSION;
 // Build sentinel (#912) - confirm script actually refreshed & executed
 try{
   const ts = Date.now();
   window.__sixBootTs = ts;
-  console.log('[six] _six.js build#917 loaded ts=' + ts);
+  const msg = '[six] _six.js build#918 loaded ts=' + ts;
+  try{ window.__sixBootMsg = msg; }catch{}
+  // NOTE(WebView2): DevTools is often opened after boot and/or log-level filters hide console.log.
+  // Emit both log and warn (warn tends to be visible even when Info/Verbose is filtered out).
+  try{ console && console.log && console.log(msg); }catch{}
+  try{ console && console.warn && console.warn(msg); }catch{}
+  // Also re-emit once on first user interaction so it's visible even if DevTools attaches later.
+  try{ window.__sixBootLoggedOnce = 0; }catch{}
+  try{
+    const once = (tag)=>{ try{
+      if (!window || window.__sixBootLoggedOnce) return;
+      window.__sixBootLoggedOnce = 1;
+      const m2 = (window.__sixBootMsg ? String(window.__sixBootMsg) : msg) + ' (' + String(tag||'once') + ')';
+      try{ console && console.log && console.log(m2); }catch{}
+      try{ console && console.warn && console.warn(m2); }catch{}
+    }catch{} };
+    window.addEventListener('keydown', ()=>once('keydown'), true);
+    window.addEventListener('mousedown', ()=>once('mousedown'), true);
+    window.addEventListener('focus', ()=>once('focus'), true);
+  }catch{}
 }catch{}
 // six migration oriented bootstrap (spec-aligned skeleton with file load)
 (function(){
@@ -6599,6 +6618,118 @@ try{
     }catch{}
   }
 
+  // Debug helper (opt-in): IME/scroll tracing for diagnosing 1-line scroll drift (#2011).
+  // Enable in DevTools:
+  //   window.SIX_OPTIONS = window.SIX_OPTIONS||{};
+  //   window.SIX_OPTIONS.DEBUG_IME_SCROLL = true;
+  // Optional:
+  //   window.SIX_OPTIONS.DEBUG_IME_SCROLL_STACK = true; // include stack traces (slower)
+  //   window.SIX_OPTIONS.DEBUG_IME_SCROLL_CONSOLE = true; // also console.debug()
+  function _dbgImeScrollEnabled(){
+    try{
+      const o = (window && window.SIX_OPTIONS) ? window.SIX_OPTIONS : null;
+      return !!(o && (o.DEBUG_IME_SCROLL || o.debugImeScroll || o.DEBUG_IMESCROLL || o.debugimescroll));
+    }catch{ return false; }
+  }
+  function _dbgImeScrollStack(){
+    try{
+      const o = (window && window.SIX_OPTIONS) ? window.SIX_OPTIONS : null;
+      if (!(o && (o.DEBUG_IME_SCROLL_STACK || o.debugImeScrollStack))) return null;
+      const e = new Error('dbg-ime-scroll');
+      return String(e && e.stack || '');
+    }catch{ return null; }
+  }
+  function _dbgImeScrollPush(rec){
+    try{
+      if (!_dbgImeScrollEnabled()) return;
+      if (!window.__sixImeScrollLog) window.__sixImeScrollLog = [];
+      const a = window.__sixImeScrollLog;
+      a.push(rec);
+      const max = 240;
+      if (a.length > max) a.splice(0, a.length - max);
+      try{
+        const o = (window && window.SIX_OPTIONS) ? window.SIX_OPTIONS : null;
+        if (o && (o.DEBUG_IME_SCROLL_CONSOLE || o.debugImeScrollConsole)) console.debug('[six][dbg-ime-scroll]', rec);
+      }catch{}
+    }catch{}
+  }
+
+  function _dbgImeScrollSnap(tag, extra){
+    try{
+      if (!_dbgImeScrollEnabled || !_dbgImeScrollEnabled()) return;
+      const now = Date.now();
+      const st = (editor && typeof editor.scrollTop === 'number') ? +editor.scrollTop : 0;
+      const sl = (editor && typeof editor.scrollLeft === 'number') ? +editor.scrollLeft : 0;
+      const sh = (editor && typeof editor.scrollHeight === 'number') ? +editor.scrollHeight : 0;
+      const ch = (editor && typeof editor.clientHeight === 'number') ? +editor.clientHeight : 0;
+      const md = (function(){ try{ return !!(_mdRichActive && _mdRichActive()); }catch{ return false; } })();
+      const wrap = (function(){ try{ return !!(_wrapEnabled && _wrapEnabled()); }catch{ return false; } })();
+      const ime = !!(window && window._imeComposing===true);
+
+      // md-rich + wrap-on: record effective scroll space too.
+      let eff = null;
+      let effSnap = null;
+      let effFromPhys = null;
+      try{
+        if (md && wrap){
+          if (typeof _mdEffectiveScrollTopPx === 'function'){
+            try{ eff = +_mdEffectiveScrollTopPx({ snap:false }); }catch{ eff = null; }
+            try{ effSnap = +_mdEffectiveScrollTopPx({ snap:true }); }catch{ effSnap = null; }
+          }
+          if (typeof _mdEffFromPhysPx === 'function'){
+            try{ effFromPhys = +_mdEffFromPhysPx((st|0)); }catch{ effFromPhys = null; }
+          }
+        }
+      }catch{}
+
+      const k = (typeof _lastKeydownForAnom==='object' && _lastKeydownForAnom && _lastKeydownForAnom.key) ? String(_lastKeydownForAnom.key) : null;
+      const skipUntil = (window && window.__sixSkipEnsureUntil != null) ? (+window.__sixSkipEnsureUntil || 0) : 0;
+      const rec = Object.assign({
+        t: now,
+        type: 'snap',
+        tag: String(tag||''),
+        st, sl, sh, ch,
+        mode: String(_mode||''),
+        md, wrap, ime,
+        eff: (Number.isFinite(eff) ? (eff|0) : null),
+        effSnap: (Number.isFinite(effSnap) ? (effSnap|0) : null),
+        effFromPhys: (Number.isFinite(effFromPhys) ? (effFromPhys|0) : null),
+        caretRow: (caretRow|0),
+        caretCol: (caretCol|0),
+        key: k,
+        skipEnsureUntil: skipUntil,
+      }, (extra||null));
+      _dbgImeScrollPush(rec);
+    }catch{}
+  }
+
+  // Track last programmatic scroll intent for correlating subsequent 'scroll' events.
+  try{ if (typeof window.__sixLastProgScroll === 'undefined') window.__sixLastProgScroll = null; }catch{}
+  // Keep a short queue of recent programmatic scroll intents (better correlation than a single last).
+  try{ if (typeof window.__sixProgScrollQ === 'undefined') window.__sixProgScrollQ = []; }catch{}
+  let _dbgLastScrollEvtAt = 0;
+
+  function _dbgFindRecentProgScroll(now, st, maxAgeMs, maxDistPx){
+    try{
+      const q = (window && window.__sixProgScrollQ && window.__sixProgScrollQ.length) ? window.__sixProgScrollQ : null;
+      if (!q) return null;
+      const curMode = String(_mode||'');
+      // Prefer the most recent intent (not the closest), and ignore our own hold corrections.
+      for (let i=q.length-1; i>=0; i--){
+        const p = q[i];
+        if (!p) continue;
+        if (String(p.mode||'') !== curMode) continue;
+        if (String(p.why||'') === 'mode-scroll-hold') continue;
+        const age = now - (+p.t||0);
+        if (age < 0 || age > (maxAgeMs|0)) continue;
+        const d = Math.abs((+p.to||0) - (+st||0));
+        if (Number.isFinite(maxDistPx) && maxDistPx > 0 && d > maxDistPx) continue;
+        return p;
+      }
+      return null;
+    }catch{ return null; }
+  }
+
   function _requestCaretRender(){
     try{
       if (_rafRenderScheduled) return;
@@ -6639,7 +6770,7 @@ try{
         // Exception: in wrap mode that uses *visual* scroll grid, horizontal moves can change
         // the caret's visual line and may require vertical adjustment.
         try{
-          const until = (window && window.__sixSkipEnsureUntil) ? (window.__sixSkipEnsureUntil|0) : 0;
+          const until = (window && window.__sixSkipEnsureUntil != null) ? (+window.__sixSkipEnsureUntil || 0) : 0;
           let skip = (until && Date.now() < until);
           if (skip){
             try{
@@ -6979,12 +7110,10 @@ try{
           const b = (document && document.body) ? document.body : null;
           if (b && b.classList && (b.classList.contains('md-ime-native') || b.classList.contains('ime-reduced-text'))) return;
         }catch{}
-        // Temporarily use scrolloff=1 so ensureScrolloff nudges by ~1 line at most.
-        let prevSo = null;
-        try{ prevSo = scrolloff; scrolloff = 1; }catch{ prevSo = null; }
-        try{ ensureScrolloff({ force:true, immediate:true, keepCaret:true }); }catch{}
-        try{ if (prevSo != null) scrolloff = prevSo; }catch{}
-        // Keep overlays in sync even during composition (forced one-shot).
+        // #2011: Avoid forcing ensureScrolloff() here.
+        // It can nudge scrollTop by exactly 1 line (intended for candidate visibility) but causes
+        // a visible 1-line "bounce" and can accumulate drift with mode toggles.
+        // Keep overlays in sync even during composition (forced one-shot) without scrolling.
         try{ _repositionCaret && _repositionCaret({ force:true }); }catch{}
         try{ updateGutter && updateGutter({ force:true }); }catch{}
       };
@@ -9250,6 +9379,20 @@ try{
   try{
     if (editor){
       editor.addEventListener('compositionstart', ()=>{
+        // #2011: md-rich + wrap-on uses phys<->eff mapping; composition start can change layout
+        // (scrollHeight/padding/native mode) and slip effective scroll by ~1 line.
+        // Capture eff scroll and restore it before next paint (only if physical scrollTop didn't move).
+        let __imeEffHold = null, __imeStHold = 0, __imeShHold = 0, __imeChHold = 0;
+        try{
+          const mdNow = (function(){ try{ return !!(_mdRichActive && _mdRichActive()); }catch{ return false; } })();
+          const wrapNow = (function(){ try{ return !!(_wrapEnabled && _wrapEnabled()); }catch{ return false; } })();
+          if (mdNow && wrapNow && typeof _mdEffectiveScrollTopPx === 'function' && editor && typeof editor.scrollTop === 'number'){
+            __imeEffHold = (_mdEffectiveScrollTopPx({ snap:true })|0);
+            __imeStHold = (editor.scrollTop|0);
+            try{ __imeShHold = (editor.scrollHeight|0); }catch{ __imeShHold = 0; }
+            try{ __imeChHold = (editor.clientHeight|0); }catch{ __imeChHold = 0; }
+          }
+        }catch{ __imeEffHold = null; }
         try{ window._imeComposing = true; }catch{}
         // If composition starts on the editor while IME bar is active, we are in a broken focus/IME state.
         // Force-recover to avoid sticky native caret and dead keys.
@@ -9270,6 +9413,11 @@ try{
         _imeActive = true;
         try{ _imeVisualLockUntil = 0; }catch{}
         try{ _applyCaretGradient(); }catch{}
+        // IME fast path for md-rich: show native textarea during composition.
+        // Enable this BEFORE any candidate-ensure scheduling so the ensure path can
+        // detect md-ime-native and avoid force-scroll nudges that cause 1-line drift (#2011).
+        try{ _mdImeEnterNativeMode('compositionstart', 5000); }catch{}
+
         // Predictive candidate UI can appear immediately on the first key.
         // Mark a short candidate window and nudge caret visibility (1-line scrolloff) in md-rich.
         try{
@@ -9288,8 +9436,6 @@ try{
             _setNativeCaretMode && _setNativeCaretMode(true);
           }
         }catch{}
-        // IME fast path for md-rich: show native textarea during composition.
-        try{ _mdImeEnterNativeMode('compositionstart', 5000); }catch{}
         // タイピング中の重い再描画を少し長めに抑止（IME候補表示中のフレーム落ち対策）
         try{ _typingGuardUntil = Date.now() + 200; }catch{}
         try{ _applyCaretGradient(); }catch{}
@@ -9302,6 +9448,45 @@ try{
             for (const el of nodes){ try{ if (el) el.style.visibility = 'hidden'; }catch{} }
           }
         }catch{}
+
+        // Restore effective scroll (pre-paint) if mapping slipped by ~1 line.
+        try{
+          if (Number.isFinite(__imeEffHold) && window && window.requestAnimationFrame && typeof _setEditorScrollTop === 'function' && typeof _mdEffectiveScrollTopPx === 'function'){
+            const holdEff = (__imeEffHold|0);
+            const holdSt = (__imeStHold|0);
+            const holdSh = (__imeShHold|0);
+            const holdCh = (__imeChHold|0);
+            const gen = (((window.__sixImeCompHoldGen|0) + 1)|0);
+            window.__sixImeCompHoldGen = gen|0;
+            const triesMax = 3;
+            const run = (n)=>{ try{
+              if ((window.__sixImeCompHoldGen|0) !== (gen|0)) return;
+              const mdNow2 = (function(){ try{ return !!(_mdRichActive && _mdRichActive()); }catch{ return false; } })();
+              const wrapNow2 = (function(){ try{ return !!(_wrapEnabled && _wrapEnabled()); }catch{ return false; } })();
+              if (!mdNow2 || !wrapNow2) return;
+              if (!editor || typeof editor.scrollTop !== 'number') return;
+              const stNow = (editor.scrollTop|0);
+              // If physical scroll moved, assume user/engine intentionally scrolled.
+              if ((stNow|0) !== (holdSt|0)) return;
+              let shNow = 0, chNow = 0;
+              try{ shNow = (editor.scrollHeight|0); }catch{ shNow = 0; }
+              try{ chNow = (editor.clientHeight|0); }catch{ chNow = 0; }
+              const effNow = (_mdEffectiveScrollTopPx({ snap:true })|0);
+              const lh = Math.max(1, (LINE_HEIGHT|0));
+              const dEff = Math.abs((effNow|0) - (holdEff|0));
+              const dSh = Math.abs((shNow|0) - (holdSh|0));
+              const dCh = Math.abs((chNow|0) - (holdCh|0));
+              // Require either a layout change or a near-1-line eff slip.
+              const layoutChanged = ((dSh|0)!==0) || ((dCh|0)!==0);
+              if (layoutChanged && dEff >= Math.floor(lh*0.35) && dEff <= Math.floor(lh*2.2)){
+                try{ _setEditorScrollTop((holdEff|0), { immediate:true, physical:false, keepCaret:true, why:'ime-compstart-eff-hold' }); }catch{}
+                try{ if (_dbgImeScrollEnabled && _dbgImeScrollEnabled()) _dbgImeScrollSnap && _dbgImeScrollSnap('ime-compstart-eff-hold', { effHold:(holdEff|0), effNow:(effNow|0), st:(holdSt|0), dSh:(dSh|0), dCh:(dCh|0) }); }catch{}
+              }
+              if ((n|0) < (triesMax|0)) requestAnimationFrame(()=>run((n|0)+1));
+            }catch{} };
+            requestAnimationFrame(()=>run(1));
+          }
+        }catch{}
       });
 
       // Keep markdown-rich visuals in sync while composing (rAF-throttled) (#1477)
@@ -9310,6 +9495,11 @@ try{
           if (!_mdRichEnabled()) return;
           // If IME bar is active, composition should not be happening on editor.
           try{ if (cmdfloat && cmdfloat.dataset && cmdfloat.dataset.kind === 'ime') return; }catch{}
+
+          // IME fast path for md-rich: show native textarea and skip overlay redraw.
+          // Enable this early so candidate-ensure can skip when md-ime-native is active (#2011).
+          try{ _mdImeEnterNativeMode('compositionupdate', 5000); }catch{}
+
           // Candidate UI is often updated on every keystroke; keep a short window alive.
           try{
             if (typeof window._imeCandidateUntil !== 'number') window._imeCandidateUntil = 0;
@@ -9323,9 +9513,6 @@ try{
               _setNativeCaretMode && _setNativeCaretMode(true);
             }
           }catch{}
-
-          // IME fast path for md-rich: show native textarea and skip overlay redraw.
-          try{ _mdImeEnterNativeMode('compositionupdate', 5000); }catch{}
           try{
             const sOff = (typeof editor.selectionStart==='number') ? (editor.selectionStart|0) : 0;
             const eOff = (typeof editor.selectionEnd==='number') ? (editor.selectionEnd|0) : sOff;
@@ -9343,6 +9530,18 @@ try{
 
       // 仕様(#1022): 未確定文字の確定瞬間では何もしない（IMEは継続ONとみなす）
       editor.addEventListener('compositionend',   ()=>{
+        // #2011: composition end can also slip md-rich+wrap mapping; preserve effective scroll.
+        let __imeEffHold = null, __imeStHold = 0, __imeShHold = 0, __imeChHold = 0;
+        try{
+          const mdNow = (function(){ try{ return !!(_mdRichActive && _mdRichActive()); }catch{ return false; } })();
+          const wrapNow = (function(){ try{ return !!(_wrapEnabled && _wrapEnabled()); }catch{ return false; } })();
+          if (mdNow && wrapNow && typeof _mdEffectiveScrollTopPx === 'function' && editor && typeof editor.scrollTop === 'number'){
+            __imeEffHold = (_mdEffectiveScrollTopPx({ snap:true })|0);
+            __imeStHold = (editor.scrollTop|0);
+            try{ __imeShHold = (editor.scrollHeight|0); }catch{ __imeShHold = 0; }
+            try{ __imeChHold = (editor.clientHeight|0); }catch{ __imeChHold = 0; }
+          }
+        }catch{ __imeEffHold = null; }
         try{ window._imeComposing = false; }catch{}
         try{ _mdImeRange = null; }catch{}
 
@@ -9388,6 +9587,43 @@ try{
 
         // If nothing else triggers redraw, allow native mode to exit.
         try{ setTimeout(()=>{ try{ _mdImeMaybeExitNativeMode('compositionend-timeout'); }catch{} }, 900); }catch{}
+
+        // Restore effective scroll (pre-paint) if mapping slipped by ~1 line.
+        try{
+          if (Number.isFinite(__imeEffHold) && window && window.requestAnimationFrame && typeof _setEditorScrollTop === 'function' && typeof _mdEffectiveScrollTopPx === 'function'){
+            const holdEff = (__imeEffHold|0);
+            const holdSt = (__imeStHold|0);
+            const holdSh = (__imeShHold|0);
+            const holdCh = (__imeChHold|0);
+            const gen = (((window.__sixImeCompHoldGen|0) + 1)|0);
+            window.__sixImeCompHoldGen = gen|0;
+            const triesMax = 3;
+            const run = (n)=>{ try{
+              if ((window.__sixImeCompHoldGen|0) !== (gen|0)) return;
+              const mdNow2 = (function(){ try{ return !!(_mdRichActive && _mdRichActive()); }catch{ return false; } })();
+              const wrapNow2 = (function(){ try{ return !!(_wrapEnabled && _wrapEnabled()); }catch{ return false; } })();
+              if (!mdNow2 || !wrapNow2) return;
+              if (!editor || typeof editor.scrollTop !== 'number') return;
+              const stNow = (editor.scrollTop|0);
+              if ((stNow|0) !== (holdSt|0)) return;
+              let shNow = 0, chNow = 0;
+              try{ shNow = (editor.scrollHeight|0); }catch{ shNow = 0; }
+              try{ chNow = (editor.clientHeight|0); }catch{ chNow = 0; }
+              const effNow = (_mdEffectiveScrollTopPx({ snap:true })|0);
+              const lh = Math.max(1, (LINE_HEIGHT|0));
+              const dEff = Math.abs((effNow|0) - (holdEff|0));
+              const dSh = Math.abs((shNow|0) - (holdSh|0));
+              const dCh = Math.abs((chNow|0) - (holdCh|0));
+              const layoutChanged = ((dSh|0)!==0) || ((dCh|0)!==0);
+              if (layoutChanged && dEff >= Math.floor(lh*0.35) && dEff <= Math.floor(lh*2.2)){
+                try{ _setEditorScrollTop((holdEff|0), { immediate:true, physical:false, keepCaret:true, why:'ime-compend-eff-hold' }); }catch{}
+                try{ if (_dbgImeScrollEnabled && _dbgImeScrollEnabled()) _dbgImeScrollSnap && _dbgImeScrollSnap('ime-compend-eff-hold', { effHold:(holdEff|0), effNow:(effNow|0), st:(holdSt|0), dSh:(dSh|0), dCh:(dCh|0) }); }catch{}
+              }
+              if ((n|0) < (triesMax|0)) requestAnimationFrame(()=>run((n|0)+1));
+            }catch{} };
+            requestAnimationFrame(()=>run(1));
+          }
+        }catch{}
       });
       // ASCII入力検知（INSERT中）: 最初のASCII文字で IME OFF グラデへ切替 (#1021)
       editor.addEventListener('beforeinput', (e)=>{
@@ -9654,6 +9890,30 @@ try{
           if ((top1Saved|0) > 0 && (lhSaved|0) > 0 && (lhSaved|0) !== (lhNow|0)){
             st = Math.max(0, ((top1Saved|0) - 1) * lhNow);
             return { st: st|0, why: 'lh-anchor', top1: top1Saved|0, lhSaved: lhSaved|0, lhNow: lhNow|0 };
+          }
+        }
+      }catch{}
+
+      // (C) md-rich + wrap-on: migrate legacy saved physical scrollTop to effective scroll space.
+      // Older sessions persisted editor.scrollTop (physical). New md-wrap restore expects effective px.
+      // Rule: effective scrollTop should never exceed effMax. If it does, it's almost certainly
+      // a physical value from an older session (or a stale save) and must be converted.
+      try{
+        const mdWrap = !!mdNow && !!wrapNow;
+        if (mdWrap && typeof _mdScrollMapGet === 'function' && typeof _mdEffFromPhysPx === 'function'){
+          const m = _mdScrollMapGet();
+          if (m && Number.isFinite(m.effMax) && Number.isFinite(m.physMax)){
+            const effMax = (m.effMax|0);
+            const physMax = (m.physMax|0);
+            if ((effMax|0) > 0 && (physMax|0) > 0){
+              const upper = (physMax|0) + Math.max(6, (lhNow|0) * 2);
+              if ((st|0) > (effMax|0) && (st|0) <= (upper|0)){
+                const stPhys0 = st|0;
+                st = _mdEffFromPhysPx(stPhys0|0)|0;
+                st = Math.max(0, Math.min(st|0, effMax|0));
+                return { st: st|0, why: 'mdwrap:migrate-phys', stPhys: stPhys0|0, effMax: effMax|0, physMax: physMax|0 };
+              }
+            }
           }
         }
       }catch{}
@@ -18563,8 +18823,12 @@ try{
       }catch{ ptPx = 0; }
       let clientH = 0;
       try{
-        if (viewport && (viewport.clientHeight|0) > 0) clientH = (viewport.clientHeight|0);
-        else clientH = (editor.clientHeight||0)|0;
+        // Use the actual scroll container height. scrollTop/scrollHeight are from `editor`,
+        // so physMax must be based on editor.clientHeight. Fall back only if it's not usable.
+        const eh = (editor && (editor.clientHeight|0)) ? (editor.clientHeight|0) : 0;
+        const vh = (viewport && (viewport.clientHeight|0)) ? (viewport.clientHeight|0) : 0;
+        if ((eh|0) > 0 && (vh|0) > 0) clientH = Math.min(eh|0, vh|0);
+        else clientH = (eh|0) > 0 ? (eh|0) : (vh|0);
       }catch{ clientH = (editor.clientHeight||0)|0; }
       const physMax = Math.max(0, ((editor.scrollHeight||0) - (clientH|0))|0);
       // Effective (overlay) scroll height:
@@ -18603,6 +18867,28 @@ try{
       if (_mdScrollMapFrozen && _visualActive && _mode === 'VISUAL') return _mdScrollMapFrozen;
     }catch{}
     return _mdScrollMapGetRaw();
+  }
+  function _mdEffFromPhysPxWithMap(physPx, m){
+    try{
+      if (!m) return Math.max(0, Math.round(physPx||0));
+      const p = Math.max(0, Math.round(physPx||0));
+      const physMax = (m.physMax|0);
+      const effMax = (m.effMax|0);
+      if (physMax <= 0 || effMax <= 0) return Math.max(0, Math.min(p|0, effMax|0));
+      const eff = Math.round((p * effMax) / physMax);
+      return Math.max(0, Math.min(eff|0, effMax|0));
+    }catch{ return Math.max(0, Math.round(physPx||0)); }
+  }
+  function _mdPhysFromEffPxWithMap(effPx, m){
+    try{
+      if (!m) return Math.max(0, Math.round(effPx||0));
+      const e = Math.max(0, Math.round(effPx||0));
+      const physMax = (m.physMax|0);
+      const effMax = (m.effMax|0);
+      if (physMax <= 0 || effMax <= 0) return Math.max(0, Math.min(e|0, physMax|0));
+      const phys = Math.round((e * physMax) / effMax);
+      return Math.max(0, Math.min(phys|0, physMax|0));
+    }catch{ return Math.max(0, Math.round(effPx||0)); }
   }
   function _mdEffFromPhysPx(physPx){
     try{
@@ -18873,7 +19159,12 @@ try{
       }catch{}
       // Fallback: physical
       let clientH = 0;
-      try{ clientH = (viewport && (viewport.clientHeight|0) > 0) ? (viewport.clientHeight|0) : ((editor.clientHeight||0)|0); }catch{ clientH = (editor.clientHeight||0)|0; }
+      try{
+        const eh = (editor && (editor.clientHeight|0)) ? (editor.clientHeight|0) : 0;
+        const vh = (viewport && (viewport.clientHeight|0)) ? (viewport.clientHeight|0) : 0;
+        if ((eh|0) > 0 && (vh|0) > 0) clientH = Math.min(eh|0, vh|0);
+        else clientH = (eh|0) > 0 ? (eh|0) : (vh|0);
+      }catch{ clientH = (editor.clientHeight||0)|0; }
       return Math.max(0, ((editor.scrollHeight||0) - (clientH|0))|0);
     }catch{ return 0; }
   }
@@ -19023,9 +19314,10 @@ try{
     }
   }catch{}
 
-  function _mdSyncEofPadComp(){
+  function _mdSyncEofPadComp(opts){
     try{
       if (!editor) return;
+      const __stabilizeScroll = !(opts && opts.stabilizeScroll === false);
       // Debug meta: did we enter / pass conditions / throw?
       try{
         if (_mdEofDbgEnabled && _mdEofDbgEnabled()){
@@ -19041,6 +19333,27 @@ try{
       let cacheTotalPx = 0;
       let cacheWpx = 0;
       let linesTotal = 0;
+
+      // Hold scroll state so paddingBottom adjustments don't shift the phys<->eff mapping by ~1 line.
+      // (Observed as a delayed 1-line viewport nudge on mode toggles in md-rich+wrap.)
+      let __stPhysHold = 0;
+      let __effSnapHold = null;
+      let __pbHold = -1;
+      let __holdOk = false;
+      try{
+        const mdWrapNow0 = (_mdRichEnabled && _mdRichEnabled() && _wrapEnabled && _wrapEnabled());
+        if (__stabilizeScroll && mdWrapNow0 && editor && typeof editor.scrollTop === 'number'){
+          __holdOk = true;
+          __stPhysHold = (editor.scrollTop|0);
+          try{ __effSnapHold = (typeof _mdEffectiveScrollTopPx === 'function') ? (_mdEffectiveScrollTopPx({ snap:true })|0) : null; }catch{ __effSnapHold = null; }
+          try{
+            const cs0 = getComputedStyle(editor);
+            const pb0 = parseFloat(String(cs0.paddingBottom||'0'));
+            if (Number.isFinite(pb0)) __pbHold = Math.max(0, Math.round(pb0));
+          }catch{ __pbHold = -1; }
+        }
+      }catch{ __holdOk = false; }
+
       if (_mdRichEnabled && _mdRichEnabled() && _wrapEnabled && _wrapEnabled()){
         try{
           if (_mdEofDbgEnabled && _mdEofDbgEnabled()){
@@ -19127,15 +19440,14 @@ try{
         const basePadPxEff = Math.max(0, ((basePad|0) * lh) - Math.max(0, (_mdEofPadConsumePx|0)));
         const basePb = Math.max(0, (basePadPxEff|0) + (extraPx|0));
         let targetPb = (basePb|0);
+        let curPb = (basePb|0);
         try{
-          // If baseline changed, reset to it first so remainder math is stable.
-          if ((_mdEofPadGridLastBasePx|0) !== (basePb|0) || (_mdEofPadGridLastLh|0) !== (lh|0)){
-            try{ editor.style.paddingBottom = (basePb|0) + 'px'; }catch{}
-            _mdEofPadGridLastBasePx = (basePb|0);
-            _mdEofPadGridLastLh = (lh|0);
-            _mdEofPadLastPbPx = -1;
-          }
+          const cs = window.getComputedStyle(editor);
+          const pbCur = parseFloat(String(cs.getPropertyValue('padding-bottom')||'0'));
+          if (Number.isFinite(pbCur)) curPb = Math.max(0, Math.round(pbCur));
+        }catch{ curPb = (basePb|0); }
 
+        try{
           let clientH = 0;
           try{
             if (viewport && (viewport.clientHeight|0) > 0) clientH = (viewport.clientHeight|0);
@@ -19143,20 +19455,31 @@ try{
           }catch{ clientH = (editor.clientHeight||0)|0; }
           const pm0 = Math.max(0, ((editor.scrollHeight||0) - (clientH|0))|0);
 
-          // Compute remainder against baseline max by subtracting any current extra padding.
-          let curPb = (basePb|0);
-          try{
-            const cs = window.getComputedStyle(editor);
-            const pbCur = parseFloat(String(cs.getPropertyValue('padding-bottom')||'0'));
-            if (Number.isFinite(pbCur)) curPb = Math.max(0, Math.round(pbCur));
-          }catch{ curPb = (basePb|0); }
-          const extraPb = Math.max(0, (curPb|0) - (basePb|0));
-          const pmBase = Math.max(0, (pm0|0) - (extraPb|0));
+          // Compute remainder against the *baseline* maxScrollTop that would result from basePb.
+          // We can do this without an intermediate style write by compensating for (curPb - basePb).
+          const deltaPb = ((curPb|0) - (basePb|0))|0; // can be negative
+          const pmBase = Math.max(0, ((pm0|0) - (deltaPb|0))|0);
           let rem = 0;
           try{ rem = (pmBase % (lh|0))|0; if (rem < 0) rem = (rem + (lh|0))|0; }catch{ rem = 0; }
           const comp = (rem === 0) ? 0 : ((lh|0) - rem);
           targetPb = ((basePb|0) + (comp|0))|0;
         }catch{ targetPb = (basePb|0); }
+
+        // Avoid shrinking paddingBottom during active key interactions.
+        // Shrinks can change scrollHeight/physMax by ~1 line and produce a visible 1-line nudge.
+        try{
+          let recentKey = false;
+          try{
+            const now = Date.now();
+            const lastT = (typeof _lastKeydownForAnom==='object' && _lastKeydownForAnom && Number.isFinite(_lastKeydownForAnom.t)) ? (+_lastKeydownForAnom.t) : 0;
+            if ((lastT|0) && (now - lastT) < 1200) recentKey = true;
+          }catch{ recentKey = false; }
+          if (recentKey && (targetPb|0) < (curPb|0)) targetPb = (curPb|0);
+        }catch{}
+
+        // Track baseline params (debug/consistency)
+        try{ _mdEofPadGridLastBasePx = (basePb|0); }catch{}
+        try{ _mdEofPadGridLastLh = (lh|0); }catch{}
 
         try{
           const pbI = (targetPb|0);
@@ -19164,6 +19487,53 @@ try{
             editor.style.paddingBottom = pbI + 'px';
             _mdEofPadLastPbPx = pbI|0;
             try{ _cachedVisibleCount = 0; }catch{}
+          }
+        }catch{}
+
+        // If paddingBottom change altered physMax, keep the effective scroll position stable.
+        // IMPORTANT: WebView2/Chromium can apply scrollHeight changes slightly later than the
+        // style write. An immediate physical correction can therefore use a stale mapping and
+        // still leave a 1-line drift. Apply in effective space on rAF after layout settles.
+        try{
+          if (__stabilizeScroll && __holdOk && Number.isFinite(__effSnapHold) && typeof _mdEffectiveScrollTopPx === 'function' && typeof _setEditorScrollTop === 'function'){
+            const lh = Math.max(1, (LINE_HEIGHT|0));
+            const effHold = (__effSnapHold|0);
+            const stHold0 = (__stPhysHold|0);
+            const pbFrom0 = (__pbHold|0);
+            let pbTo0 = -1;
+            try{
+              const cs1 = getComputedStyle(editor);
+              const pb1 = parseFloat(String(cs1.paddingBottom||'0'));
+              if (Number.isFinite(pb1)) pbTo0 = Math.max(0, Math.round(pb1));
+            }catch{ pbTo0 = -1; }
+
+            // Generation token to cancel stale async holds.
+            let gen = 0;
+            try{ if (window){ gen = (((window.__sixMdEofPadStabGen|0) + 1)|0); window.__sixMdEofPadStabGen = gen|0; } }catch{ gen = 0; }
+            const triesMax = 3;
+            const applyOnce = (n)=>{ try{
+              try{ if (window && (window.__sixMdEofPadStabGen|0) !== (gen|0)) return; }catch{}
+              if (!editor || typeof editor.scrollTop !== 'number') return;
+              // If physical scroll moved a lot since hold, assume a real scroll happened.
+              const stNow = (editor.scrollTop|0);
+              if (Math.abs((stNow|0) - (stHold0|0)) > Math.floor(lh*2.6)) return;
+
+              const effNowSnap = (_mdEffectiveScrollTopPx({ snap:true })|0);
+              const dEff = Math.abs((effNowSnap|0) - (effHold|0));
+              if (dEff >= Math.floor(lh*0.55) && dEff <= Math.floor(lh*2.2)){
+                try{ _setEditorScrollTop((effHold|0), { immediate:true, physical:false, keepCaret:true, why:'md-eofpad-stabilize' }); }catch{}
+                try{
+                  if (_dbgImeScrollEnabled && _dbgImeScrollEnabled()){
+                    _dbgImeScrollSnap && _dbgImeScrollSnap('md-eofpad-stabilize', { stFrom:(stHold0|0), stTo:(editor.scrollTop|0), dEff:(dEff|0), effHold:(effHold|0), effNow:(effNowSnap|0), pbFrom:(pbFrom0|0), pbTo:(pbTo0|0) });
+                  }
+                }catch{}
+              }
+              if ((n|0) < (triesMax|0) && window && window.requestAnimationFrame){
+                requestAnimationFrame(()=>applyOnce((n|0)+1));
+              }
+            }catch{} };
+
+            if (window && window.requestAnimationFrame) requestAnimationFrame(()=>applyOnce(1));
           }
         }catch{}
 
@@ -20164,11 +20534,66 @@ try{
         }
       }catch{}
       try{ _syncEofPadGridComp && _syncEofPadGridComp(); }catch{}
+
+      // md-rich + wrap-on: migrate legacy saved physical scrollTop to effective px *here*.
+      // At this point, scroll mapping (effMax/physMax) is available (after _mdSyncEofPadComp),
+      // while earlier restore computations may run before mapping is ready.
+      try{
+        const mdWrapNow = (typeof _mdRichWrapOn === 'function') ? !!_mdRichWrapOn() : !!((_mdRichActive && _mdRichActive()) && (_wrapEnabled && _wrapEnabled()));
+        if (mdWrapNow && typeof _mdEffectiveMaxScrollPx === 'function' && typeof _mdEffFromPhysPx === 'function'){
+          const effMax = (_mdEffectiveMaxScrollPx()|0);
+          if ((effMax|0) > 0 && (vs|0) > (effMax|0)){
+            const stPhys0 = (vs|0);
+            vs = _mdEffFromPhysPx(stPhys0|0)|0;
+            vs = Math.max(0, Math.min(vs|0, effMax|0));
+            try{ if (b) b.viewScrollTop = (vs|0); }catch{}
+            try{
+              const lh = Math.max(1, (LINE_HEIGHT|0));
+              if (b){ b.viewLineHeightPx = lh|0; b.viewTopLine1 = (Math.floor(Math.max(0, (vs|0)) / lh) + 1)|0; }
+            }catch{}
+            try{ _dbgRestore('switch:migrate-mdwrap-phys', { idx:(i|0), stPhys:(stPhys0|0), stEff:(vs|0), effMax:(effMax|0), vp:_dbgViewportSnapshot() }); }catch{}
+          }
+        }
+      }catch{}
       // Prepare a shared restore scroll target so both the immediate restore and the later
       // applyScroll() reinforcement use the same intent (avoid jumping away after a special-case).
-      let restoreSt = (function(){ try{ const n=Math.max(0, vs); return Math.floor(n/LINE_HEIGHT)*LINE_HEIGHT; }catch{ return Math.max(0, vs|0); } })();
+      let restoreSt = (function(){
+        try{
+          const mdWrapNow = (typeof _mdRichWrapOn === 'function') ? !!_mdRichWrapOn() : !!((_mdRichActive && _mdRichActive()) && (_wrapEnabled && _wrapEnabled()));
+          const n = Math.max(0, vs);
+          // md-rich + wrap-on uses effective scroll space which may not be perfectly LINE_HEIGHT-aligned at EOF.
+          // Flooring here can introduce an apparent "1行" drift near the effective bottom.
+          if (mdWrapNow) return Math.max(0, (n|0));
+          return Math.floor(n/LINE_HEIGHT)*LINE_HEIGHT;
+        }catch{ return Math.max(0, vs|0); }
+      })();
       let restoreScrollOpts = { immediate:true };
       let restorePinnedBottomAtEof = false;
+
+      // md-rich + wrap-on: `viewScrollTop` is persisted in effective space.
+      // However, on some startups/settling frames, old sessions or transient map states can leak a
+      // physical scrollTop into `viewScrollTop`. If we treat that as effective, it gets clamped to
+      // effMax (often by ~1 line), causing the observed 1-line drift. Normalize early.
+      try{
+        const mdWrapNow0 = (typeof _mdRichWrapOn === 'function') ? !!_mdRichWrapOn() : !!((_mdRichActive && _mdRichActive()) && (_wrapEnabled && _wrapEnabled()));
+        if (mdWrapNow0 && !(restoreScrollOpts && restoreScrollOpts.physical) && typeof _mdScrollMapGetRaw === 'function' && typeof _mdEffFromPhysPx === 'function'){
+          const m0 = _mdScrollMapGetRaw();
+          const effMax0 = (m0 && Number.isFinite(m0.effMax)) ? (m0.effMax|0) : ((typeof _mdEffectiveMaxScrollPx === 'function') ? (_mdEffectiveMaxScrollPx()|0) : -1);
+          const physMax0 = (m0 && Number.isFinite(m0.physMax)) ? (m0.physMax|0) : Math.max(0, ((editor && editor.scrollHeight)||0) - ((editor && editor.clientHeight)||0));
+          const st0 = (restoreSt|0);
+          const lh0 = Math.max(1, (LINE_HEIGHT|0));
+          if ((effMax0|0) > 0 && (physMax0|0) > 0 && (st0|0) > (effMax0|0) && (st0|0) <= ((physMax0|0) + (lh0*3))){
+            let stEff0 = _mdEffFromPhysPx(st0|0)|0;
+            stEff0 = Math.max(0, Math.min(stEff0|0, effMax0|0));
+            stEff0 = Math.floor((stEff0|0) / lh0) * lh0;
+            if ((stEff0|0) !== (st0|0)){
+              restoreSt = stEff0|0;
+              try{ if (b) b.viewScrollTop = (restoreSt|0); }catch{}
+              try{ _dbgRestore && _dbgRestore('switch:normalize-mdwrap-phys', { idx:(i|0), from:(st0|0), to:(restoreSt|0), physMax:(physMax0|0), effMax:(effMax0|0), vp:_dbgViewportSnapshot() }); }catch{}
+            }
+          }
+        }
+      }catch{}
       // Special case: markdown-off + wrap-on + EOF pad + caret at EOF.
       // Prefer restoring to the physical max AFTER compensation to avoid a clamped non-grid top half-row.
       try{
@@ -20194,7 +20619,7 @@ try{
       _centerScrolloffOnce = false;
   _repositionCaret(); updateGutter();
   // Sync native selection to overlay caret to prevent browser auto-scroll on next key/focus
-  try{ const stKeep0 = (editor && typeof editor.scrollTop==='number') ? editor.scrollTop : 0; _syncNativeSelectionToCaret(); if (editor) _setEditorScrollTop(stKeep0, { immediate:true }); }catch{}
+  try{ const stKeep0 = (editor && typeof editor.scrollTop==='number') ? editor.scrollTop : 0; _syncNativeSelectionToCaret(); if (editor) _setEditorScrollTop(stKeep0, { immediate:true, physical:true }); }catch{}
   _updateEncBtnLabel();
       // Some browsers/layouts may adjust scrollTop after content/overlays settle.
       // Re-apply saved scroll position on the next frame and shortly after to ensure it sticks.
@@ -20209,6 +20634,17 @@ try{
             try{ if (vp) vp.style.visibility = prevVis; }catch{}
             return;
           }
+
+          // If the user already started interacting after the switch, don't override their intent.
+          // This avoids a late applyScroll firing right as the first character is typed.
+          try{
+            const swAt = (_lastBufferSwitchAt|0);
+            const lk = (typeof _lastKeydownForAnom==='object' && _lastKeydownForAnom && Number.isFinite(_lastKeydownForAnom.t)) ? (+_lastKeydownForAnom.t) : 0;
+            if (swAt && lk && (lk > (swAt + 30))){
+              try{ if (__dbgImeScroll) _dbgImeScrollPush && _dbgImeScrollPush({ type:'snap', tag:'applyScroll:skip-user', t:Date.now(), st:(editor&&editor.scrollTop)|0, mode:String(_mode||''), md:!!(_mdRichActive&&_mdRichActive()), wrap:!!(_wrapEnabled&&_wrapEnabled()) }); }catch{}
+              return;
+            }
+          }catch{}
           try{ clampViewportExactLines(); }catch{}
           // After layout settles, re-sync EOF padding grid compensation.
           // Without this, a grid-aligned saved scrollTop can be clamped to a non-grid physical max,
@@ -20228,6 +20664,46 @@ try{
               try{ _mdWrapEnsureCache && _mdWrapEnsureCache(true); }catch{}
               try{ _mdSyncEofPadComp && _mdSyncEofPadComp(); }catch{}
               try{ _mdRenderTextLayer && _mdRenderTextLayer(); }catch{}
+            }
+          }catch{}
+
+          // md-rich + wrap-on: after caches/layout settle, re-check that restoreSt is still valid
+          // in effective space. If a physical scrollTop leaked into restoreSt, convert phys->eff
+          // using the *current* map so we stop clamping by ~1 line and accumulating drift.
+          try{
+            const mdWrapNow = (typeof _mdRichWrapOn === 'function') ? !!_mdRichWrapOn() : !!((_mdRichActive && _mdRichActive()) && (_wrapEnabled && _wrapEnabled()));
+            if (mdWrapNow && !(restoreScrollOpts && restoreScrollOpts.physical) && typeof _mdScrollMapGetRaw === 'function' && typeof _mdEffFromPhysPx === 'function'){
+              const m = _mdScrollMapGetRaw();
+              const effMax = (m && Number.isFinite(m.effMax)) ? (m.effMax|0) : ((typeof _mdEffectiveMaxScrollPx === 'function') ? (_mdEffectiveMaxScrollPx()|0) : -1);
+              const physMax = (m && Number.isFinite(m.physMax)) ? (m.physMax|0) : Math.max(0, ((editor && editor.scrollHeight)||0) - ((editor && editor.clientHeight)||0));
+              const st = (restoreSt|0);
+              const lh = Math.max(1, (LINE_HEIGHT|0));
+
+              if ((effMax|0) > 0){
+                // Case A: looks like physical (between effMax and physMax) => convert phys->eff.
+                if ((physMax|0) > 0 && (st|0) > (effMax|0) && (st|0) <= ((physMax|0) + (lh*3))){
+                  let eff = _mdEffFromPhysPx(st|0)|0;
+                  eff = Math.max(0, Math.min(eff|0, effMax|0));
+                  eff = Math.floor((eff|0) / lh) * lh;
+                  if ((eff|0) !== (st|0)){
+                    try{ _dbgRestore && _dbgRestore('switch:applyScroll-normalize-mdwrap-phys', { idx:(i|0), from:(st|0), to:(eff|0), physMax:(physMax|0), effMax:(effMax|0), vp:_dbgViewportSnapshot() }); }catch{}
+                    restoreSt = eff|0;
+                    try{ if (b) b.viewScrollTop = (restoreSt|0); }catch{}
+                  }
+                }
+
+                // Case B: stale effective overflows effMax (map changed) => clamp once and persist.
+                if ((restoreSt|0) > (effMax|0)){
+                  const st1 = (restoreSt|0);
+                  let cl = Math.max(0, Math.min(st1|0, effMax|0));
+                  cl = Math.floor((cl|0) / lh) * lh;
+                  if ((cl|0) !== (st1|0)){
+                    try{ _dbgRestore && _dbgRestore('switch:applyScroll-clamp-mdwrap-eff', { idx:(i|0), from:(st1|0), to:(cl|0), effMax:(effMax|0), vp:_dbgViewportSnapshot() }); }catch{}
+                    restoreSt = cl|0;
+                    try{ if (b) b.viewScrollTop = (restoreSt|0); }catch{}
+                  }
+                }
+              }
             }
           }catch{}
           // Re-assert saved caret/viewport to defeat any early-frame overrides (#715)
@@ -20282,7 +20758,40 @@ try{
               restoreScrollOpts = { immediate:true };
             }
           }catch{}
-          try{ _setEditorScrollTop(Math.max(0, restoreSt|0), restoreScrollOpts); }catch{ try{ _setEditorScrollTop(Math.max(0, restoreSt|0), { immediate:true }); }catch{} }
+
+            // md-rich + wrap-on: pin/clamp restoreSt to effective bottom *after* recompute/validate.
+            // This prevents oscillation around effMax (e.g. restoreSt=effMax+1px) that shows up as a 1-line nudge.
+            try{
+              const mdWrapNow3 = (typeof _mdRichWrapOn === 'function') ? !!_mdRichWrapOn() : !!((_mdRichActive && _mdRichActive()) && (_wrapEnabled && _wrapEnabled()));
+              if (mdWrapNow3 && !(restoreScrollOpts && restoreScrollOpts.physical)){
+                let effMax3 = -1;
+                try{
+                  const m3 = (typeof _mdScrollMapGetRaw === 'function') ? _mdScrollMapGetRaw() : null;
+                  if (m3 && Number.isFinite(m3.effMax)) effMax3 = (m3.effMax|0);
+                }catch{}
+                try{ if (effMax3 < 0 && typeof _mdEffectiveMaxScrollPx === 'function') effMax3 = (_mdEffectiveMaxScrollPx()|0); }catch{}
+                if ((effMax3|0) >= 0){
+                  const lh3 = Math.max(1, (LINE_HEIGHT|0));
+                  const st3 = (restoreSt|0);
+                  const nearEof3 = Math.max(2, Math.floor(lh3 * 0.8));
+                  let next3 = st3|0;
+                  if ((next3|0) > (effMax3|0)) next3 = effMax3|0;
+                  else if (((effMax3|0) - (next3|0)) <= (nearEof3|0)) next3 = effMax3|0;
+                  if ((next3|0) !== (st3|0)){
+                    restoreSt = next3|0;
+                    restoreScrollOpts = Object.assign({}, restoreScrollOpts||{}, { why:'applyScroll:pin-effMax' });
+                    try{ if (b) b.viewScrollTop = (restoreSt|0); }catch{}
+                  }
+                }
+              }
+            }catch{}
+
+            // Tag applyScroll-originated reassertions to make DEBUG_IME_SCROLL correlation easier.
+            try{
+              if (!restoreScrollOpts) restoreScrollOpts = { immediate:true };
+              if (!restoreScrollOpts.why) restoreScrollOpts = Object.assign({}, restoreScrollOpts, { why:'applyScroll' });
+            }catch{}
+            try{ _setEditorScrollTop(Math.max(0, restoreSt|0), restoreScrollOpts); }catch{ try{ _setEditorScrollTop(Math.max(0, restoreSt|0), { immediate:true, why:'applyScroll:fallback' }); }catch{} }
           // Final grid snap (markdown-off): prevent half-row at top if browser clamps scrollTop to a non-grid max.
           try{
             const mdNow = (function(){ try{ return _mdRichActive && _mdRichActive(); }catch{ return false; } })();
@@ -20307,7 +20816,7 @@ try{
           try{ _repositionCaret(); updateGutter(); }catch{}
           try{ _dbgRestore('switch:applied', { idx:(i|0), st:(editor&&editor.scrollTop)|0, vr:(caretRow|0), vc:(caretCol|0), vp:_dbgViewportSnapshot() }); }catch{}
           // Keep native selection aligned with caret; do not let this change scroll position
-          try{ const stKeep = (editor && typeof editor.scrollTop==='number') ? editor.scrollTop : 0; _syncNativeSelectionToCaret(); if (editor) _setEditorScrollTop(stKeep, { immediate:true }); }catch{}
+          try{ const stKeep = (editor && typeof editor.scrollTop==='number') ? editor.scrollTop : 0; _syncNativeSelectionToCaret(); if (editor) _setEditorScrollTop(stKeep, { immediate:true, physical:true }); }catch{}
 
           // Defensive: some browsers can adjust native selection after scroll/layout settles.
           // If that happens, insertion follows the native selection but overlays/posInfo follow caretRow/Col,
@@ -23699,7 +24208,7 @@ try{
     // set caret at start of deletion using offset
     try{ const rc = _rcFromOffset(startOff); _setCaret(rc.r, rc.c); }catch{ _setCaret(a.r, a.c); }
     // Keep native selection in sync to avoid later browser-driven scroll/selection surprises (e.g., on save)
-    try{ const stHold=editor.scrollTop|0, slHold=editor.scrollLeft|0; _syncNativeSelectionToCaret(); try{ _setEditorScrollTop(stHold, { immediate:true }); }catch{} editor.scrollLeft=slHold; }catch{}
+    try{ const stHold=(editor && typeof editor.scrollTop==='number')?editor.scrollTop:0, slHold=(editor && typeof editor.scrollLeft==='number')?editor.scrollLeft:0; _syncNativeSelectionToCaret(); try{ _setEditorScrollTop(stHold, { immediate:true, physical:true }); }catch{} editor.scrollLeft=slHold; }catch{}
     // Update unnamed register (charwise)
     // #539: allow caller to suppress register update (e.g., 'x' without count)
     const _updReg = !(opts && opts.updateRegister === false);
@@ -23750,7 +24259,7 @@ try{
     }
     _setCaret(newRow, newCol);
     // Sync native selection immediately after programmatic mutation
-    try{ const stHold=editor.scrollTop|0, slHold=editor.scrollLeft|0; _syncNativeSelectionToCaret(); try{ _setEditorScrollTop(stHold, { immediate:true }); }catch{} editor.scrollLeft=slHold; }catch{}
+    try{ const stHold=(editor && typeof editor.scrollTop==='number')?editor.scrollTop:0, slHold=(editor && typeof editor.scrollLeft==='number')?editor.scrollLeft:0; _syncNativeSelectionToCaret(); try{ _setEditorScrollTop(stHold, { immediate:true, physical:true }); }catch{} editor.scrollLeft=slHold; }catch{}
     try{ _regUnnamed = { text: String(deletedBlock||''), linewise: true }; }catch{}
     _touchBufferModified();
     _afterTextMutation();
@@ -24403,6 +24912,12 @@ try{
     try{
       const mdWrap = (typeof _mdRichWrapOn === 'function') ? !!_mdRichWrapOn() : !!((_mdRichActive && _mdRichActive()) && (_wrapEnabled && _wrapEnabled()));
       if (mdWrap && typeof _mdEnsureCaretInViewPx === 'function'){
+        // IME active/composing: native textarea auto-scroll can fight with pixel-based caret correction.
+        // Prefer line-based ensureScrolloff only to avoid 1-line oscillation (#2011).
+        try{
+          const imeNow = !!(window && window._imeComposing===true) || !!_imeActive;
+          if (imeNow) return;
+        }catch{}
         // During scan-hold, rely on line-based ensureScrolloff only.
         // Pixel-based correction can fight with the logical grid and cause boundary "teleport".
         try{
@@ -24447,6 +24962,8 @@ try{
       if (!editor) return;
       const cur = (editor.scrollTop||0);
 
+      const __dbgImeScroll = (typeof _dbgImeScrollEnabled === 'function') ? !!_dbgImeScrollEnabled() : false;
+
       // Some programmatic scrolls should keep the caret visible even while we treat the UI as "scrolling".
       try{
         if (opts && opts.keepCaret){
@@ -24469,17 +24986,81 @@ try{
       // Convert to physical scrollTop so the native scrollbar thumb scale matches.
       // opts.physical=true means the caller already passed a physical scrollTop.
       let targetEffPx = Math.max(0, Math.round(targetPx||0));
+      let targetEffInPx = targetEffPx|0;
+      let _dbgEffMax = null;
+      let _dbgEffClamped = false;
       let targetPhysPx = targetEffPx|0;
       try{
         const mdWrap = (typeof _mdRichWrapOn === 'function') ? !!_mdRichWrapOn() : !!((_mdRichActive && _mdRichActive()) && (_wrapEnabled && _wrapEnabled()));
         if (mdWrap && !(opts && opts.physical)){
           const effMax = (typeof _mdEffectiveMaxScrollPx === 'function') ? (_mdEffectiveMaxScrollPx()|0) : -1;
-          if (effMax >= 0) targetEffPx = Math.min(targetEffPx|0, effMax|0);
+          if (effMax >= 0){
+            _dbgEffMax = effMax|0;
+            const before = (targetEffPx|0);
+            targetEffPx = Math.min(before|0, effMax|0);
+            _dbgEffClamped = ((targetEffPx|0) !== (before|0));
+          }
           if (typeof _mdPhysFromEffPx === 'function') targetPhysPx = _mdPhysFromEffPx(targetEffPx|0)|0;
           else targetPhysPx = targetEffPx|0;
         }
       }catch{}
       targetPhysPx = Math.max(0, Math.round(targetPhysPx||0));
+
+      // Debug marker: correlate the next scroll event with this programmatic intent.
+      try{
+        if (__dbgImeScroll && window){
+          const now = Date.now();
+          const why = (opts && (opts.why != null)) ? String(opts.why) : '';
+          // Auto-stack for tiny, suspicious nudges when why isn't provided (helps root-cause #2011).
+          let stackAuto = null;
+          try{
+            if (!why){
+              const dpx = Math.abs((targetPhysPx||0) - (cur||0));
+              const lh = (typeof LINE_HEIGHT==='number' && LINE_HEIGHT>0) ? LINE_HEIGHT : 0;
+              const mdWrap = (typeof _mdRichWrapOn === 'function') ? !!_mdRichWrapOn() : !!((_mdRichActive && _mdRichActive()) && (_wrapEnabled && _wrapEnabled()));
+              const okDelta = (lh > 0) ? (dpx > 0.1 && dpx <= (lh*2 + 3)) : (dpx > 0.1 && dpx <= 60);
+              if (mdWrap && okDelta){
+                const until = (window.__sixAutoStackUntil && +window.__sixAutoStackUntil) ? +window.__sixAutoStackUntil : 0;
+                if (now >= until){
+                  window.__sixAutoStackUntil = now + 900;
+                  try{ stackAuto = (new Error('[six] progScroll(autoStack)')).stack || null; }catch{ stackAuto = 'autoStack'; }
+                }
+              }
+            }
+          }catch{ stackAuto = null; }
+          window.__sixLastProgScroll = {
+            t: now,
+            src: '_setEditorScrollTop',
+            from: +cur,
+            to: +targetPhysPx,
+            toEff: +targetEffPx,
+            effIn: +targetEffInPx,
+            effMax: (_dbgEffMax!=null ? +_dbgEffMax : null),
+            effClamped: !!_dbgEffClamped,
+            md: (function(){ try{ return !!(_mdRichActive && _mdRichActive()); }catch{ return false; } })(),
+            wrap: (function(){ try{ return !!(_wrapEnabled && _wrapEnabled()); }catch{ return false; } })(),
+            mode: String(_mode||''),
+            ime: !!(window && window._imeComposing===true),
+            immediate: !!(opts && opts.immediate),
+            keepCaret: !!(opts && opts.keepCaret),
+            physical: !!(opts && opts.physical),
+            why,
+            stack: stackAuto || ((_dbgImeScrollStack && _dbgImeScrollStack()) || null),
+            stackAuto: !!stackAuto,
+          };
+          try{
+            if (!window.__sixProgScrollQ) window.__sixProgScrollQ = [];
+            const q = window.__sixProgScrollQ;
+            q.push(window.__sixLastProgScroll);
+            // prune
+            const keepMs = 1200;
+            while (q.length > 0 && (now - (q[0] && q[0].t || 0)) > keepMs) q.shift();
+            if (q.length > 16) q.splice(0, q.length - 16);
+          }catch{}
+          try{ _dbgImeScrollPush && _dbgImeScrollPush(Object.assign({ type:'progScroll' }, window.__sixLastProgScroll)); }catch{}
+        }
+      }catch{}
+
       if (Math.abs(targetPhysPx - cur) < 0.5){ 
         editor.scrollTop = targetPhysPx; 
         if (__six_scroll_anim) { cancelAnimationFrame(__six_scroll_anim); __six_scroll_anim = null; }
@@ -24609,6 +25190,7 @@ try{
       }catch{}
 
       // 2) Refresh EOF padding compensation when it can affect max scroll range.
+      let __quitEffHold = null;
       try{
         const mdNow = (function(){ try{ return _mdRichActive && _mdRichActive(); }catch{ return false; } })();
         const wrapNow = (function(){ try{ return _wrapEnabled && _wrapEnabled(); }catch{ return false; } })();
@@ -24616,7 +25198,10 @@ try{
         if (wrapNow && (eofPad|0) > 0){
           if (mdNow){
             // md-rich + wrap-on uses effective↔physical mapping; refresh compensation.
-            try{ if (typeof _mdSyncEofPadComp === 'function') _mdSyncEofPadComp(); }catch{}
+            try{
+              if (typeof _mdEffectiveScrollTopPx === 'function') __quitEffHold = (_mdEffectiveScrollTopPx({ snap:true })|0);
+            }catch{ __quitEffHold = null; }
+            try{ if (typeof _mdSyncEofPadComp === 'function') _mdSyncEofPadComp({ stabilizeScroll:false }); }catch{}
                 // If we were animating or settling scroll earlier, we might have left is-scrolling
                 // stuck which prevents listchars from rendering at all.
                 try{ if (document && document.body && document.body.classList) document.body.classList.remove('is-scrolling'); }catch{}
@@ -24638,9 +25223,21 @@ try{
       try{ st = (editor && typeof editor.scrollTop === 'number') ? +editor.scrollTop : 0; }catch{ st = 0; }
       try{
         const mdNow = (function(){ try{ return _mdRichActive && _mdRichActive(); }catch{ return false; } })();
-        if (mdNow && typeof _mdEffectiveMaxScrollPx === 'function'){
-          const effMax = _mdEffectiveMaxScrollPx()|0;
-          if ((effMax|0) >= 0) st = Math.min(st, effMax|0);
+        if (mdNow){
+          // md-rich + wrap-on: persist in effective (overlay) scroll space.
+          // Otherwise, session stores a physical scrollTop but restore treats it as effective,
+          // causing repeated effMax clamping near EOF (1-line drift pattern).
+          try{
+            const mdWrapNow = (typeof _mdRichWrapOn === 'function') ? !!_mdRichWrapOn() : !!((_wrapEnabled && _wrapEnabled()));
+            if (mdWrapNow && typeof _mdEffectiveScrollTopPx === 'function'){
+              if (Number.isFinite(__quitEffHold)) st = +(__quitEffHold|0);
+              else st = +(_mdEffectiveScrollTopPx({ snap:true })|0);
+            }
+          }catch{}
+          if (typeof _mdEffectiveMaxScrollPx === 'function'){
+            const effMax = _mdEffectiveMaxScrollPx()|0;
+            if ((effMax|0) >= 0) st = Math.min(st, effMax|0);
+          }
         } else {
           const physMax = Math.max(0, (((editor && editor.scrollHeight) ? (editor.scrollHeight|0) : 0) - ((editor && editor.clientHeight) ? (editor.clientHeight|0) : 0))|0);
           st = Math.min(st, physMax|0);
@@ -25526,6 +26123,27 @@ try{
   // and clamp only when the viewport would exceed EOF. Persist view state afterwards.
   function _snapScrollGridPersist(){
     try{
+      const mdNowTop = (function(){ try{ return _mdRichActive && _mdRichActive(); }catch{ return false; } })();
+      const wrapNowTop = (function(){ try{ return _wrapEnabled && _wrapEnabled(); }catch{ return false; } })();
+      // md-rich + wrap-on uses effective/physical scroll mapping (variable line heights).
+      // Do NOT attempt to line-grid snap using physical scrollTop; it can cause a 1-line jump.
+      if (mdNowTop && wrapNowTop){
+        try{
+          const b = currentBuffer && currentBuffer();
+          if (b){
+            let eff = 0;
+            try{ eff = (typeof _mdEffectiveScrollTopPx === 'function') ? (+_mdEffectiveScrollTopPx({ snap:true })||0) : 0; }catch{ eff = 0; }
+            b.viewScrollTop = Math.max(0, eff|0);
+            b.viewRow = caretRow|0;
+            b.viewCol = caretCol|0;
+          }
+        }catch{}
+        try{ _syncTiledBgRemainder && _syncTiledBgRemainder(); }catch{}
+        _repositionCaret(); updateGutter();
+        try{ _scrollGuardUntil = Date.now() + 400; }catch{}
+        return;
+      }
+
       let st = (editor && typeof editor.scrollTop === 'number') ? (editor.scrollTop|0) : 0;
       const vis = Math.max(1, (function(){ try{ return _visibleLinesExact(); }catch{ return 1; } })());
       const total = (function(){ try{ return _totalLines(); }catch{ return 1; } })();
@@ -25602,7 +26220,8 @@ try{
         if (snappedY < 0) snappedY = 0;
       }
 
-      try{ if (snappedY !== st) _setEditorScrollTop(snappedY, { immediate:true }); }catch{}
+      // snappedY is derived from editor.scrollTop (physical space)
+      try{ if (snappedY !== st) _setEditorScrollTop(snappedY, { immediate:true, physical:true, why:'snap-scroll-grid' }); }catch{}
       // Persist and render
       try{ const b = currentBuffer(); if (b){ b.viewScrollTop = (editor.scrollTop||0)|0; b.viewRow = caretRow|0; b.viewCol = caretCol|0; } }catch{}
       _repositionCaret(); updateGutter();
@@ -25610,8 +26229,6 @@ try{
       try{ _scrollGuardUntil = Date.now() + 400; }catch{}
     }catch{}
   }
-
-  // Exit CMD as if Escape was pressed: close popups, restore pre-CMD view, return to prior mode,
   // and schedule a few reinforced viewport restores to suppress transient jumps.
   function _cmdExitAndRestoreView(opts){
     try{
@@ -29794,6 +30411,51 @@ try{
   function _setMode(m){
     const _prevMode = _mode;
     _mode = m;
+
+    // Generation counter: cancels stale async mode-side-effect timers.
+    let __modeGen = 0;
+    try{
+      if (window){
+        window.__sixModeGen = ((window.__sixModeGen|0) + 1)|0;
+        __modeGen = (window.__sixModeGen|0);
+      }
+    }catch{ __modeGen = 0; }
+    try{
+      if (_dbgImeScrollEnabled && _dbgImeScrollEnabled()){
+        _dbgImeScrollSnap && _dbgImeScrollSnap('setMode', { from:String(_prevMode||''), to:String(m||'') });
+        const t0 = Date.now();
+        setTimeout(()=>{ try{ _dbgImeScrollSnap('setMode+0', { from:String(_prevMode||''), to:String(m||''), dt: Date.now()-t0 }); }catch{} }, 0);
+        setTimeout(()=>{ try{ _dbgImeScrollSnap('setMode+60', { from:String(_prevMode||''), to:String(m||''), dt: Date.now()-t0 }); }catch{} }, 60);
+      }
+    }catch{}
+
+    // Guard (EXPERIMENTAL): after NORMAL<->INSERT toggles in md-rich+wrap, some engines/IME combos
+    // apply a tiny auto-scroll nudge (~1 line). Hold the current scrollTop briefly
+    // so the scroll handler can revert only those tiny, unintentional nudges.
+    try{
+      const _optModeScrollHold = !!(window && window.SIX_OPTIONS && window.SIX_OPTIONS.MODE_SCROLL_HOLD);
+      if (!_optModeScrollHold) throw 0;
+      const prev = String(_prevMode||'');
+      const next = String(m||'');
+      const isToggle = ((prev === 'NORMAL' && next === 'INSERT') || (prev === 'INSERT' && next === 'NORMAL'));
+      if (isToggle && editor && typeof editor.scrollTop === 'number'){
+        const mdNow = (function(){ try{ return !!(_mdRichActive && _mdRichActive()); }catch{ return false; } })();
+        const wrapNow = (function(){ try{ return !!(_wrapEnabled && _wrapEnabled()); }catch{ return false; } })();
+        // Only for md-rich + wrap-on case (where effective/physical mapping exists).
+        if (mdNow && wrapNow){
+          if (!window.__sixModeScrollHold) window.__sixModeScrollHold = {};
+          window.__sixModeScrollHold.until = Date.now() + 1200;
+          window.__sixModeScrollHold.t0 = Date.now();
+          window.__sixModeScrollHold.n = 0;
+          window.__sixModeScrollHold.want = null;
+          window.__sixModeScrollHold.st = +editor.scrollTop;
+          window.__sixModeScrollHold.tag = prev + '->' + next;
+          // Also suppress ensureScrolloff briefly; it can amplify nudges.
+          try{ window.__sixSkipEnsureUntil = Math.max((+window.__sixSkipEnsureUntil || 0), Date.now() + 520); }catch{}
+          try{ _dbgImeScrollSnap && _dbgImeScrollSnap('mode-scroll-hold-set', { from:prev, to:next, st:+editor.scrollTop }); }catch{}
+        }
+      }
+    }catch{}
     try{ _applyCaretGradient(); }catch{}
     if (modestatus){
       // CMDモードでは表示を変更しない（[CMD]を出さない）
@@ -29824,6 +30486,20 @@ try{
     }
     // Begin an INSERT compound edit by pushing a snapshot before edits start
     if (m==='INSERT'){
+      // #2009: Preserve scroll across mode toggles in md-rich.
+      // Some engines can scroll by ~1 line after focus/selection updates (often influenced by IME/native caret).
+      let __mdStHold = 0;
+      let __mdSlHold = 0;
+      let __mdHold = false;
+      try{
+        const mdNow = (function(){ try{ return _mdRichActive && _mdRichActive(); }catch{ return false; } })();
+        if (mdNow && editor && typeof editor.scrollTop === 'number'){
+          __mdHold = true;
+          __mdStHold = editor.scrollTop;
+          __mdSlHold = (typeof editor.scrollLeft === 'number') ? editor.scrollLeft : 0;
+        }
+      }catch{ __mdHold = false; }
+
       // #1684: entering INSERT (e.g. NORMAL->INSERT) should show IME bar as usual.
       // Clear user-hide and selection anchor.
       try{ if (typeof _imeBarUserHidden !== 'undefined') _imeBarUserHidden = false; }catch{}
@@ -29867,12 +30543,18 @@ try{
       // Keep text color consistent in INSERT (#1481)
       try{ if (editor) editor.style.color = 'var(--editorTextColor, #e6e6e6)'; }catch{}
       // If we previously hinted IME off by focus juggling, restore focus cleanly once here
-      try{ if (editor && document.activeElement !== editor){ editor.focus(); } }catch{}
+      try{
+        if (editor && document.activeElement !== editor){
+          try{ editor.focus({ preventScroll:true }); }catch{ try{ editor.focus(); }catch{} }
+        }
+      }catch{}
       // Snap scrollTop to exact line boundary proactively to avoid half-line misalignment before typing
       try{
         const st = (editor && typeof editor.scrollTop==='number') ? editor.scrollTop : 0;
         const snapped = Math.round(st/LINE_HEIGHT)*LINE_HEIGHT;
-        if (Math.abs(snapped - st) > 0.25){ editor.scrollTop = snapped; }
+        // #2009: only fix tiny subpixel drift; never snap by a large fraction of a line.
+        const diff = Math.abs(snapped - st);
+        if (diff > 0.25 && diff <= 2){ editor.scrollTop = snapped; }
       }catch{}
       if (!_suppressInsertSnapshotOnce){
         _pushUndoSnapshot('insert');
@@ -29883,26 +30565,119 @@ try{
       _insertSegPending = false;
       _insertSegIgnoreSelectUntil = 0;
       // ensure native textarea caret matches overlay caret position
-      try{ editor && editor.focus && editor.focus(); }catch{}
+      try{ editor && editor.focus && (function(){ try{ editor.focus({ preventScroll:true }); }catch{ try{ editor.focus(); }catch{} } })(); }catch{}
       // md-rich: preserve scroll position if caret is already visible; setSelectionRange can scroll unexpectedly.
       try{
         const mdRich = (function(){ try{ return _mdRichActive && _mdRichActive(); }catch{ return false; } })();
-        const keepIfVisible = mdRich && (function(){ try{ return _isCaretVisible && _isCaretVisible(); }catch{ return false; } })();
-        const stHold = keepIfVisible ? ((editor && typeof editor.scrollTop==='number') ? editor.scrollTop : 0) : 0;
-        const slHold = keepIfVisible ? ((editor && typeof editor.scrollLeft==='number') ? editor.scrollLeft : 0) : 0;
+        // #2009: On some engines (esp. after IME/native caret toggles), setSelectionRange can
+        // nudge scrollTop by ~1 line even when caret is already visible.
+        // Preserve scroll unconditionally in md-rich; entering INSERT must not drift the view.
+        const stHold = mdRich ? ((editor && typeof editor.scrollTop==='number') ? editor.scrollTop : 0) : 0;
+        const slHold = mdRich ? ((editor && typeof editor.scrollLeft==='number') ? editor.scrollLeft : 0) : 0;
+        try{ if (window) window.__sixSkipEnsureUntil = Date.now() + 260; }catch{}
         _syncNativeSelectionToCaret();
-        if (keepIfVisible){
-          try{ _setEditorScrollTop(stHold, { immediate:true }); }catch{ try{ editor.scrollTop = stHold; }catch{} }
+        if (mdRich){
+          try{ _setEditorScrollTop(stHold, { immediate:true, physical:true }); }catch{ try{ editor.scrollTop = stHold; }catch{} }
           try{ editor.scrollLeft = slHold; }catch{}
         }
       }catch{ try{ _syncNativeSelectionToCaret(); }catch{} }
+
+      // #2011/#2012: md-rich + wrap-on uses proportional phys<->eff mapping.
+      // Capture an "INSERT anchor" effective position here; we will prefer it on leave-INSERT
+      // if Escape-time capture happens after the mapping has already shifted.
+      try{
+        const mdNowA = (function(){ try{ return !!(_mdRichActive && _mdRichActive()); }catch{ return false; } })();
+        const wrapNowA = (function(){ try{ return !!(_wrapEnabled && _wrapEnabled()); }catch{ return false; } })();
+        if (mdNowA && wrapNowA && typeof _mdEffectiveScrollTopPx === 'function' && editor && typeof editor.scrollTop === 'number'){
+          const effA = (_mdEffectiveScrollTopPx({ snap:true })|0);
+          try{ if (window) window.__sixInsertEffAnchor = { t:Date.now(), eff:(effA|0), st:(editor.scrollTop|0) }; }catch{}
+        } else {
+          try{ if (window) window.__sixInsertEffAnchor = null; }catch{}
+        }
+      }catch{}
       try{ if (cmdfloat && !_imeBarActive) cmdfloat.style.display='none'; }catch{}
       try{ _syncImeBarVisibility && _syncImeBarVisibility('setMode-INSERT'); }catch{}
       // Huge markdown buffers: proactively reduce textarea content to keep native typing responsive.
       try{ _typingReducedEnter && _typingReducedEnter('setMode-INSERT'); }catch{}
+      // #2009: suppress ensureScrolloff briefly; mode toggle should not shift viewport.
+      try{ if (window) window.__sixSkipEnsureUntil = Date.now() + 260; }catch{}
+
+      // #2009: Re-apply scroll hold after all side effects, and again after next frames
+      // (selection/focus can cause async scroll after this function returns).
+      try{
+        if (__mdHold && editor){
+          try{ _setEditorScrollTop(__mdStHold, { immediate:true, physical:true }); }catch{ try{ editor.scrollTop = __mdStHold; }catch{} }
+          try{ editor.scrollLeft = __mdSlHold; }catch{}
+          if (window && window.requestAnimationFrame){
+            const st2 = __mdStHold, sl2 = __mdSlHold;
+            requestAnimationFrame(()=>{ requestAnimationFrame(()=>{ try{
+              if (!editor) return;
+              try{ _setEditorScrollTop(st2, { immediate:true, physical:true }); }catch{ try{ editor.scrollTop = st2; }catch{} }
+              try{ editor.scrollLeft = sl2; }catch{}
+            }catch{} }); });
+          } else {
+            const st2 = __mdStHold, sl2 = __mdSlHold;
+            setTimeout(()=>{ try{
+              if (!editor) return;
+              try{ _setEditorScrollTop(st2, { immediate:true, physical:true }); }catch{ try{ editor.scrollTop = st2; }catch{} }
+              try{ editor.scrollLeft = sl2; }catch{}
+            }catch{} }, 0);
+          }
+        }
+      }catch{}
   // Caret color remains baseline (IME visualization removed)
     } else {
       // NORMAL/VISUAL/CMD
+      // md-rich+wrap: hold effective scroll BEFORE any leave-INSERT side effects.
+      // Rationale: leaving INSERT can change scrollHeight (wrap/cache/IME native mode), which shifts
+      // phys<->eff mapping. If we compute eff-hold after that, we end up preserving the *shifted*
+      // effective position (still looks like a 1-line jump). Capture it early.
+      let __leaveInsertEffHold = null;
+      let __leaveInsertMdWrap = false;
+      try{
+        if (_prevMode==='INSERT' && (m==='NORMAL' || m==='VISUAL')){
+          const md0 = (function(){ try{ return !!(_mdRichActive && _mdRichActive()); }catch{ return false; } })();
+          const wrap0 = (function(){ try{ return !!(_wrapEnabled && _wrapEnabled()); }catch{ return false; } })();
+          if (md0 && wrap0 && typeof _mdEffectiveScrollTopPx === 'function'){
+            __leaveInsertMdWrap = true;
+            // Prefer keydown(Escape)-captured eff (pre side-effects), if fresh.
+            let effPre = null;
+            try{
+              const rec = (window && window.__sixLeaveInsertEffHold) ? window.__sixLeaveInsertEffHold : null;
+              const age = rec ? (Date.now() - (+rec.t||0)) : 999999;
+              if (rec && Number.isFinite(rec.eff) && age >= 0 && age < 1400) effPre = (rec.eff|0);
+            }catch{ effPre = null; }
+            try{ if (window) window.__sixLeaveInsertEffHold = null; }catch{}
+
+            let effAnchor = null;
+            try{
+              const a = (window && window.__sixInsertEffAnchor) ? window.__sixInsertEffAnchor : null;
+              const ageA = a ? (Date.now() - (+a.t||0)) : 999999;
+              if (a && Number.isFinite(a.eff) && ageA >= 0 && ageA < 600000) effAnchor = (a.eff|0);
+            }catch{ effAnchor = null; }
+            try{ if (window) window.__sixInsertEffAnchor = null; }catch{}
+
+            let effPick = null;
+            if (Number.isFinite(effAnchor)) effPick = (effAnchor|0);
+            if (Number.isFinite(effPre)){
+              if (Number.isFinite(effAnchor)){
+                const lh = Math.max(1, (LINE_HEIGHT|0));
+                const d = Math.abs((effPre|0) - (effAnchor|0));
+                // If Esc-time capture matches anchor closely, use it; if it's ~1 line off, prefer anchor.
+                if (d <= Math.max(2, Math.floor(lh*0.45))) effPick = (effPre|0);
+                else if (d >= Math.floor(lh*0.65) && d <= Math.floor(lh*1.8)) effPick = (effAnchor|0);
+                else effPick = (effPre|0);
+              } else {
+                effPick = (effPre|0);
+              }
+            }
+            __leaveInsertEffHold = (Number.isFinite(effPick) ? (effPick|0) : (_mdEffectiveScrollTopPx({ snap:true })|0));
+
+            try{ if (_dbgImeScrollEnabled && _dbgImeScrollEnabled()) _dbgImeScrollSnap && _dbgImeScrollSnap('leave-insert-eff-pick', { effPre:(Number.isFinite(effPre)?(effPre|0):null), effAnchor:(Number.isFinite(effAnchor)?(effAnchor|0):null), effPick:(__leaveInsertEffHold|0) }); }catch{}
+          }
+        }
+      }catch{ __leaveInsertEffHold = null; __leaveInsertMdWrap = false; }
+
       // Leaving INSERT: restore full textarea if we were in typing-reduced-text mode.
       try{ _typingReducedExit && _typingReducedExit('setMode-exit'); }catch{}
 
@@ -29955,6 +30730,51 @@ try{
       // OS IME も確実に閉じる（Esc等でINSERT離脱時）
       try{ if (_prevMode==='INSERT' && (m==='NORMAL' || m==='VISUAL')){ _imePost('off'); } }catch{}
       try{ _syncImeBarVisibility && _syncImeBarVisibility('setMode-nonINSERT'); }catch{}
+      // #2009: suppress ensureScrolloff briefly; mode toggle should not shift viewport.
+      try{ if (window) window.__sixSkipEnsureUntil = Date.now() + 260; }catch{}
+
+      // #2009: After leaving INSERT in md-rich, selection/focus can still scroll; stabilize scrollTop.
+      try{
+        const mdNow = (function(){ try{ return _mdRichActive && _mdRichActive(); }catch{ return false; } })();
+        if (mdNow && editor && typeof editor.scrollTop === 'number'){
+          const wrapNow = (function(){ try{ return !!(_wrapEnabled && _wrapEnabled()); }catch{ return false; } })();
+          const stHold2 = editor.scrollTop;
+          const slHold2 = (typeof editor.scrollLeft === 'number') ? editor.scrollLeft : 0;
+          let effHold2 = null;
+          try{
+            if (__leaveInsertMdWrap && Number.isFinite(__leaveInsertEffHold)){
+              effHold2 = (__leaveInsertEffHold|0);
+            } else if (wrapNow && typeof _mdEffectiveScrollTopPx === 'function'){
+              effHold2 = (_mdEffectiveScrollTopPx({ snap:true })|0);
+            }
+          }catch{ effHold2 = null; }
+          if (window && window.requestAnimationFrame){
+            requestAnimationFrame(()=>{ requestAnimationFrame(()=>{ try{
+              if (!editor) return;
+              const gen = (__modeGen|0);
+              const apply = ()=>{ try{
+                // Cancel if mode changed since this _setMode call.
+                try{ if ((window && (window.__sixModeGen|0) !== (gen|0)) || (_mode !== m)) return; }catch{}
+                if (!editor) return;
+                try{
+                  if (wrapNow && Number.isFinite(effHold2) && typeof _setEditorScrollTop === 'function'){
+                    // Hold in effective space to resist scrollHeight-driven mapping shifts.
+                    _setEditorScrollTop((effHold2|0), { immediate:true, physical:false, why:'mode-eff-hold' });
+                  } else {
+                    _setEditorScrollTop(stHold2, { immediate:true, physical:true });
+                  }
+                }catch{ try{ editor.scrollTop = stHold2; }catch{} }
+                try{ editor.scrollLeft = slHold2; }catch{}
+              }catch{} };
+              apply();
+              try{ setTimeout(apply, 0); }catch{}
+              try{ setTimeout(apply, 60); }catch{}
+              try{ setTimeout(apply, 180); }catch{}
+              try{ editor.scrollLeft = slHold2; }catch{}
+            }catch{} }); });
+          }
+        }
+      }catch{}
     }
     // Show/hide floating command bar for CMD mode
     try{
@@ -32901,6 +33721,94 @@ try{
         }
       }catch{}
 
+      // #2012/#2011: md-rich + wrap-on で「INSERT 最初の 1 文字目」だけ 1 行スクロールすることがある。
+      // そのスクロールは beforeinput 内（または直後）で起きるケースがあり、input イベント側の
+      // hold だけだと捕まえられないため、ここで事前に scrollTop を保持して小さな自動スクロールを戻す。
+      try{
+        if (_mode === 'INSERT' && editor && typeof editor.scrollTop === 'number'){
+          const it0 = String((e && e.inputType) || '');
+          const isEdit0 = !!(it0 && (it0.startsWith('insert') || it0.startsWith('delete')));
+          const isComp0 = !!(e && e.isComposing===true) || !!(window && window._imeComposing===true);
+          if (isEdit0 && !isComp0){
+            const mdNow0 = (function(){ try{ return !!(_mdRichActive && _mdRichActive()); }catch{ return false; } })();
+            const wrapNow0 = (function(){ try{ return !!(_wrapEnabled && _wrapEnabled()); }catch{ return false; } })();
+            if (mdNow0 && wrapNow0){
+              const st0 = +editor.scrollTop;
+              let eff0 = NaN;
+              let mHold = null;
+              try{
+                const rec = (window && window.__sixMdWrapPreEditHold) ? window.__sixMdWrapPreEditHold : null;
+                const now = Date.now();
+                const okT = !!(rec && Number.isFinite(rec.t) && (now - (+rec.t||0)) <= 220);
+                const okSt = !!(rec && Number.isFinite(rec.st) && Math.abs((+rec.st||0) - (st0||0)) <= 1);
+                const okM = !!(rec && rec.m && Number.isFinite(rec.m.physMax) && Number.isFinite(rec.m.effMax));
+                if (okT && okSt && okM){
+                  mHold = rec.m;
+                  eff0 = +_mdEffFromPhysPxWithMap(st0|0, mHold);
+                }
+              }catch{ mHold = null; eff0 = NaN; }
+              try{ if (window) window.__sixMdWrapPreEditHold = null; }catch{}
+              if (!Number.isFinite(eff0)){
+                try{ if (typeof _mdEffectiveScrollTopPx === 'function') eff0 = +_mdEffectiveScrollTopPx({ snap:false }); }catch{ eff0 = NaN; }
+              }
+              const t0 = Date.now();
+              // Suppress ensureScrolloff briefly; it can amplify/lock in the 1-line nudge.
+              try{ if (window) window.__sixSkipEnsureUntil = Math.max((+window.__sixSkipEnsureUntil || 0), Date.now() + 1200); }catch{}
+              try{
+                if (_dbgImeScrollEnabled && _dbgImeScrollEnabled()){
+                  _dbgImeScrollSnap && _dbgImeScrollSnap('first-beforeinput-hold-set', { it:String(it0||''), st:(st0||0), eff:(Number.isFinite(eff0)?eff0:null) });
+                }
+              }catch{}
+
+              const restore = (phase)=>{ try{
+                if (!editor || typeof editor.scrollTop !== 'number') return;
+                if ((Date.now() - (t0||0)) > 1800) return;
+                const st1 = +editor.scrollTop;
+                const lh = Math.max(1, (LINE_HEIGHT|0));
+
+                // If physical scroll moved meaningfully, assume intent/ensureScrolloff; don't fight it.
+                if (Math.abs((st1||0) - (st0||0)) >= (0.55*lh)) return;
+
+                // Prefer effective-space stabilization if available.
+                let effNow = NaN;
+                try{ if (typeof _mdEffectiveScrollTopPx === 'function') effNow = +_mdEffectiveScrollTopPx({ snap:false }); }catch{ effNow = NaN; }
+                if (Number.isFinite(eff0) && Number.isFinite(effNow) && typeof _mdPhysFromEffPx === 'function'){
+                  const dEff = effNow - eff0;
+                  if (Math.abs(dEff) >= (0.65*lh) && Math.abs(dEff) <= (1.8*lh)){
+                    const wantPhys = (+_mdPhysFromEffPx(Math.max(0, Math.round(eff0)))||0);
+                    if (Number.isFinite(wantPhys) && Math.abs((wantPhys||0) - (st1||0)) > 0.5){
+                      try{ _setEditorScrollTop(wantPhys, { immediate:true, physical:true, why:'first-beforeinput-hold-eff' }); }catch{ try{ editor.scrollTop = wantPhys; }catch{} }
+                    }
+                    try{
+                      if (_dbgImeScrollEnabled && _dbgImeScrollEnabled()){
+                        _dbgImeScrollSnap && _dbgImeScrollSnap('beforeinput-map-restore-eff', { phase:String(phase||''), it:String(it0||''), stFrom:st1, stTo:wantPhys, effFrom:effNow, effTo:eff0, dEff, lh });
+                      }
+                    }catch{}
+                    return;
+                  }
+                }
+
+                const dPhys = st1 - st0;
+                if (Math.abs(dPhys) >= (0.65*lh) && Math.abs(dPhys) <= (1.8*lh)){
+                  try{ _setEditorScrollTop(st0, { immediate:true, physical:true, why:'beforeinput-map-hold' }); }catch{ try{ editor.scrollTop = st0; }catch{} }
+                  try{
+                    if (_dbgImeScrollEnabled && _dbgImeScrollEnabled()){
+                      _dbgImeScrollSnap && _dbgImeScrollSnap('beforeinput-map-restore', { phase:String(phase||''), it:String(it0||''), from:st1, to:st0, d:dPhys, lh });
+                    }
+                  }catch{}
+                }
+              }catch{} };
+
+              try{ if (window && window.requestAnimationFrame) requestAnimationFrame(()=>restore('rAF')); }catch{}
+              try{ setTimeout(()=>restore('t80'), 80); }catch{}
+              try{ setTimeout(()=>restore('t240'), 240); }catch{}
+              try{ setTimeout(()=>restore('t520'), 520); }catch{}
+              try{ setTimeout(()=>restore('t900'), 900); }catch{}
+            }
+          }
+        }
+      }catch{}
+
       // INSERT開幕直後: 編集が始まるまでのカーソル移動は undo 対象にしない。
       // ただし、開幕スナップショット(kind='insert')の caret が「INSERT突入位置」のままだと、
       // 1回目の Ctrl+Z で「編集の取り消し + カーソル移動まで巻き戻る」ように見える。
@@ -33435,6 +34343,98 @@ try{
       const __dbgPerf = !!(window && window.SIX_OPTIONS && (window.SIX_OPTIONS.DEBUG_PERF || window.SIX_OPTIONS.debugperf));
       try{
       if (_mode === 'INSERT'){
+        // #2012: some engines auto-scroll by ~1 line on the first committed character
+        // (non-IME too). Preserve *effective* scroll position for that first input only in md-rich+wrap.
+        let __firstInputScrollHold = null;
+        try{
+          const isFirstEdit = !_insertSegDirty;
+          if (isFirstEdit && editor && typeof editor.scrollTop === 'number'){
+            const mdNow = (function(){ try{ return !!(_mdRichActive && _mdRichActive()); }catch{ return false; } })();
+            const wrapNow = (function(){ try{ return !!(_wrapEnabled && _wrapEnabled()); }catch{ return false; } })();
+            if (mdNow && wrapNow){
+              // Prefer the INSERT anchor captured at mode entry / real user scroll.
+              // This survives mapping shifts caused by scrollHeight changes during the first input.
+              try{
+                if (typeof _mdEffectiveScrollTopPx === 'function' && typeof _setEditorScrollTop === 'function'){
+                  const a = (window && window.__sixInsertEffAnchor) ? window.__sixInsertEffAnchor : null;
+                  const ageA = a ? (Date.now() - (+a.t||0)) : 999999;
+                  const effAnchor = (a && Number.isFinite(a.eff) && ageA >= 0 && ageA < 600000) ? (a.eff|0) : null;
+                  if (Number.isFinite(effAnchor)){
+                    const lh = Math.max(1, (LINE_HEIGHT|0));
+                    const effNowSnap = (_mdEffectiveScrollTopPx({ snap:true })|0);
+                    const dEff = Math.abs((effNowSnap|0) - (effAnchor|0));
+                    if (dEff >= Math.floor(lh*0.65) && dEff <= Math.floor(lh*1.8)){
+                      // Run synchronously in this input event to avoid visible flicker.
+                      try{ _setEditorScrollTop((effAnchor|0), { immediate:true, physical:false, keepCaret:true, why:'first-input-anchor-stabilize' }); }catch{}
+                    }
+                  }
+                }
+              }catch{}
+
+              let eff0 = NaN;
+              try{ if (typeof _mdEffectiveScrollTopPx === 'function') eff0 = +_mdEffectiveScrollTopPx({ snap:false }); }catch{ eff0 = NaN; }
+              __firstInputScrollHold = { st: +editor.scrollTop, eff: eff0, t: Date.now(), it: String((e && e.inputType) || ''), ch: (e && typeof e.data === 'string') ? String(e.data||'') : '' };
+              // Schedule immediately so early-return fast paths still get the restore chance.
+              try{
+                const hold = __firstInputScrollHold;
+                if (hold && !hold._scheduled){
+                  hold._scheduled = true;
+                  try{
+                    if (_dbgImeScrollEnabled && _dbgImeScrollEnabled()){
+                      _dbgImeScrollSnap && _dbgImeScrollSnap('first-input-hold-set', { it:String(hold.it||''), ch:String(hold.ch||''), st:(hold.st||0), t:(hold.t||0) });
+                    }
+                  }catch{}
+                  const st0 = +hold.st;
+                  const effHold0 = (typeof hold.eff === 'number' && Number.isFinite(hold.eff)) ? +hold.eff : NaN;
+                  const t0 = +hold.t;
+                  const restore = (phase)=>{
+                    try{
+                      if (!editor || typeof editor.scrollTop !== 'number') return;
+                      if ((Date.now() - (t0||0)) > 1800) return;
+                      const st1 = +editor.scrollTop;
+                      const lh = Math.max(1, (LINE_HEIGHT|0));
+
+                      // Prefer effective-space stabilization (mapping can change without physical scroll).
+                      let effNow = NaN;
+                      try{ if (typeof _mdEffectiveScrollTopPx === 'function') effNow = +_mdEffectiveScrollTopPx({ snap:false }); }catch{ effNow = NaN; }
+                      if (Number.isFinite(effHold0) && Number.isFinite(effNow) && typeof _mdPhysFromEffPx === 'function'){
+                        const dEff = effNow - effHold0;
+                        if (Math.abs(dEff) >= (0.65*lh) && Math.abs(dEff) <= (1.6*lh)){
+                          const wantPhys = (+_mdPhysFromEffPx(Math.max(0, Math.round(effHold0)))||0);
+                          if (Number.isFinite(wantPhys) && Math.abs((wantPhys||0) - (st1||0)) > 0.5){
+                            try{ _setEditorScrollTop(wantPhys, { immediate:true, physical:true, why:'first-input-hold-eff' }); }catch{ try{ editor.scrollTop = wantPhys; }catch{} }
+                          }
+                          try{
+                            if (_dbgImeScrollEnabled && _dbgImeScrollEnabled()){
+                              _dbgImeScrollSnap && _dbgImeScrollSnap('first-input-scroll-restore-eff', { phase:String(phase||''), it:String(hold.it||''), ch:String(hold.ch||''), stFrom:st1, stTo:wantPhys, effFrom:effNow, effTo:effHold0, dEff, lh });
+                            }
+                          }catch{}
+                          return;
+                        }
+                      }
+
+                      // Fallback: physical-space nudge revert.
+                      const dPhys = st1 - st0;
+                      if (Math.abs(dPhys) >= (0.65*lh) && Math.abs(dPhys) <= (1.6*lh)){
+                        try{ _setEditorScrollTop(st0, { immediate:true, physical:true, why:'first-input-hold' }); }catch{ try{ editor.scrollTop = st0; }catch{} }
+                        try{
+                          if (_dbgImeScrollEnabled && _dbgImeScrollEnabled()){
+                            _dbgImeScrollSnap && _dbgImeScrollSnap('first-input-scroll-restore', { phase:String(phase||''), it:String(hold.it||''), ch:String(hold.ch||''), from:st1, to:st0, d:dPhys, lh });
+                          }
+                        }catch{}
+                      }
+                    }catch{}
+                  };
+                  try{ if (window && window.requestAnimationFrame) requestAnimationFrame(()=>restore('rAF')); }catch{}
+                  try{ setTimeout(()=>restore('t60'), 60); }catch{}
+                  try{ setTimeout(()=>restore('t180'), 180); }catch{}
+                  try{ setTimeout(()=>restore('t320'), 320); }catch{}
+                  try{ setTimeout(()=>restore('t520'), 520); }catch{}
+                }
+              }catch{}
+            }
+          }
+        }catch{ __firstInputScrollHold = null; }
         // If md-ime-native is active (textarea visible; overlay hidden), avoid any extra per-input work.
         // We rebuild md-rich overlays once after the burst/INSERT ends.
         try{
@@ -33854,6 +34854,7 @@ try{
           }
         }
       }catch{}
+
       } finally {
         try{
           if (__dbgPerf){
@@ -34723,6 +35724,155 @@ try{
     try{ _requestCaretRender && _requestCaretRender(); }catch{}
     try{ _updatePosInfo && _updatePosInfo(); }catch{}
   });
+
+  // md-rich+wrap: update INSERT effective-scroll anchor on real scroll.
+  // (This must run even when DEBUG_IME_SCROLL is off.)
+  try{
+    editor.addEventListener('scroll', ()=>{ try{
+      if (_mode !== 'INSERT') return;
+      const mdNow = (function(){ try{ return !!(_mdRichActive && _mdRichActive()); }catch{ return false; } })();
+      const wrapNow = (function(){ try{ return !!(_wrapEnabled && _wrapEnabled()); }catch{ return false; } })();
+      if (!mdNow || !wrapNow) return;
+      if (typeof _mdEffectiveScrollTopPx !== 'function') return;
+      const st = (editor && typeof editor.scrollTop === 'number') ? (editor.scrollTop|0) : 0;
+      const eff = (_mdEffectiveScrollTopPx({ snap:true })|0);
+      try{ if (window) window.__sixInsertEffAnchor = { t:Date.now(), eff:(eff|0), st:(st|0) }; }catch{}
+    }catch{} }, { passive:true });
+  }catch{}
+
+  // Debug (opt-in): capture editor scroll events and correlate with last programmatic intent.
+  try{
+    editor.addEventListener('scroll', ()=>{
+      try{
+        if (!_dbgImeScrollEnabled || !_dbgImeScrollEnabled()) return;
+        const now = Date.now();
+        // Rate-limit to keep logs usable.
+        if ((now - (_dbgLastScrollEvtAt|0)) < 18) return;
+        _dbgLastScrollEvtAt = now;
+        const st = (editor && typeof editor.scrollTop === 'number') ? +editor.scrollTop : 0;
+        const sl = (editor && typeof editor.scrollLeft === 'number') ? +editor.scrollLeft : 0;
+        const md = (function(){ try{ return !!(_mdRichActive && _mdRichActive()); }catch{ return false; } })();
+        const wrap = (function(){ try{ return !!(_wrapEnabled && _wrapEnabled()); }catch{ return false; } })();
+        const ime = !!(window && window._imeComposing===true);
+
+        // md-rich + wrap-on: also capture effective scroll space (physical st may stay constant).
+        let eff = null;
+        let effSnap = null;
+        let effFromPhys = null;
+        try{
+          if (md && wrap){
+            if (typeof _mdEffectiveScrollTopPx === 'function'){
+              try{ eff = +_mdEffectiveScrollTopPx({ snap:false }); }catch{ eff = null; }
+              try{ effSnap = +_mdEffectiveScrollTopPx({ snap:true }); }catch{ effSnap = null; }
+            }
+            if (typeof _mdEffFromPhysPx === 'function'){
+              try{ effFromPhys = +_mdEffFromPhysPx((st|0)); }catch{ effFromPhys = null; }
+            }
+          }
+        }catch{}
+        // Find the best matching recent programmatic scroll intent.
+        let prog = null;
+        try{
+          const q = (window && window.__sixProgScrollQ && window.__sixProgScrollQ.length) ? window.__sixProgScrollQ : null;
+          if (q){
+            let best = null;
+            let bestScore = 1e18;
+            for (let i=q.length-1; i>=0; i--){
+              const p = q[i];
+              if (!p) continue;
+              const age = now - (+p.t||0);
+              if (age < 0 || age > 800) continue;
+              // Score: closeness to target + slight age penalty
+              const d = Math.abs((+p.to||0) - st);
+              const score = d + (age * 0.02);
+              if (score < bestScore){ bestScore = score; best = p; }
+              if (d <= 0.5) break;
+            }
+            if (best) prog = best;
+          }
+        }catch{}
+        const k = (typeof _lastKeydownForAnom==='object' && _lastKeydownForAnom && _lastKeydownForAnom.key) ? String(_lastKeydownForAnom.key) : null;
+
+        // Fix (#2011-ish): cancel tiny, unintended auto scroll nudges that happen
+        // right after mode toggles in md-rich+wrap.
+        try{
+          const hold = (window && window.__sixModeScrollHold) ? window.__sixModeScrollHold : null;
+          const until = hold ? (+hold.until || 0) : 0;
+          if (hold && until && now < until){
+            const lhRaw = (typeof LINE_HEIGHT==='number') ? (+LINE_HEIGHT||0) : 0;
+            const lh = (lhRaw > 0 ? lhRaw : 0);
+            const holdTarget = (typeof hold.st === 'number') ? +hold.st : NaN;
+            // Prefer the most recent (non-hold) programmatic target near current st.
+            const maxDist = (lh > 0) ? Math.max((lh * 2.6 + 8), 70) : 70;
+            const recent = _dbgFindRecentProgScroll ? _dbgFindRecentProgScroll(now, st, 420, maxDist) : null;
+            const progTarget = (recent && typeof recent.to === 'number') ? +recent.to : ((prog && typeof prog.to === 'number') ? +prog.to : NaN);
+            const want = (hold && typeof hold.want === 'number' && Number.isFinite(hold.want)) ? +hold.want : NaN;
+            const target = Number.isFinite(want) ? want : (Number.isFinite(progTarget) ? progTarget : holdTarget);
+            const delta = Number.isFinite(target) ? Math.abs(st - target) : 0;
+
+            // Only revert small nudges (about 1-2 lines). Don't fight legitimate large scroll adjustments.
+            // Avoid fighting wheel/trackpad scrolls: require a recent keydown or explicit toggle keys.
+            let lastKeyAge = 999999;
+            try{
+              const lastT = (typeof _lastKeydownForAnom==='object' && _lastKeydownForAnom && Number.isFinite(_lastKeydownForAnom.t)) ? (+_lastKeydownForAnom.t) : 0;
+              lastKeyAge = lastT ? (now - lastT) : 999999;
+            }catch{ lastKeyAge = 999999; }
+            const keyOk = (k === 'Escape' || k === 'i' || k === 'Process' || k === 'F12');
+            const recentKeyOk = (lastKeyAge >= 0 && lastKeyAge <= 240);
+            // If LINE_HEIGHT isn't ready yet, fall back to a conservative px threshold.
+            const maxNudge = (lh > 0) ? Math.max((lh * 2.25 + 6), 60) : 60;
+
+            // Limit how many times we fight back to avoid infinite loops.
+            let n = 0;
+            try{ n = (hold.n|0); }catch{ n = 0; }
+            const t0 = hold ? (+hold.t0||0) : 0;
+            const ageHold = t0 ? (now - t0) : 0;
+            const canRetry = (n < 6) && (ageHold >= 0 && ageHold <= 1800);
+
+            if (canRetry && (keyOk || recentKeyOk) && Number.isFinite(target) && delta > 0.01 && delta <= maxNudge){
+              try{ hold.n = (n + 1)|0; hold.want = +target; }catch{}
+              try{ _dbgImeScrollSnap && _dbgImeScrollSnap('mode-scroll-hold-restore', { from: st, to: target, delta, lh, key:k, holdTag: String(hold.tag||''), progTo: (Number.isFinite(progTarget)?progTarget:null), n:(n+1)|0 }); }catch{}
+              // Keep hold alive briefly to handle the common two-phase auto-scroll (nudge after our correction).
+              try{ hold.until = Math.max((+hold.until||0), now + 420); }catch{}
+
+              const apply = ()=>{ try{
+                if (!editor) return;
+                const curSt = (typeof editor.scrollTop === 'number') ? +editor.scrollTop : 0;
+                const d2 = Math.abs(curSt - target);
+                if (d2 > 0.01 && d2 <= maxDist){
+                  try{ _setEditorScrollTop(target, { immediate:true, keepCaret:true, physical:true, why:'mode-scroll-hold' }); }
+                  catch{ try{ editor.scrollTop = target; }catch{} }
+                }
+              }catch{} };
+
+              // Apply immediately and reinforce a couple times.
+              apply();
+              try{ setTimeout(apply, 0); }catch{}
+              try{ setTimeout(apply, 60); }catch{}
+              try{ setTimeout(apply, 180); }catch{}
+              return;
+            }
+          }
+        }catch{}
+
+        let stack = null;
+        try{ stack = (_dbgImeScrollStack && _dbgImeScrollStack()) || null; }catch{ stack = null; }
+        _dbgImeScrollPush && _dbgImeScrollPush({
+          t:now,
+          type:'scroll',
+          st, sl,
+          mode:String(_mode||''),
+          md, wrap, ime,
+          eff: (Number.isFinite(eff) ? (eff|0) : null),
+          effSnap: (Number.isFinite(effSnap) ? (effSnap|0) : null),
+          effFromPhys: (Number.isFinite(effFromPhys) ? (effFromPhys|0) : null),
+          key:k,
+          prog,
+          stack
+        });
+      }catch{}
+    }, { passive:true });
+  }catch{}
     // IME composition events — #522: NORMAL/VISUAL では未確定の表示は許可するが、確定は捨てる
     let _imeComposing = false;
     let _blockedComposition = false;
@@ -34756,11 +35906,37 @@ try{
     let _imeReducedStartOff = 0;
     let _imeReducedEndOff = 0;
     editor.addEventListener('compositionstart', (e)=>{
+      // md-rich: IME composition can trigger a native textarea auto-scroll by ~1 line
+      // (browser trying to reveal caret/preedit). Lock scroll briefly to avoid drift (#2011).
+      let __mdCompStHold = 0;
+      let __mdCompSlHold = 0;
+      let __mdCompHold = false;
+      try{
+        const mdNow = (function(){ try{ return _mdRichActive && _mdRichActive(); }catch{ return false; } })();
+        if (mdNow && editor && typeof editor.scrollTop === 'number'){
+          __mdCompHold = true;
+          __mdCompStHold = +editor.scrollTop;
+          __mdCompSlHold = (typeof editor.scrollLeft === 'number') ? +editor.scrollLeft : 0;
+          try{ if (window) window.__sixSkipEnsureUntil = Date.now() + 480; }catch{}
+        }
+      }catch{ __mdCompHold = false; }
+
+      try{
+        _dbgImeScrollSnap && _dbgImeScrollSnap('compositionstart', { data: (e && e.data!=null) ? String(e.data) : null, mdHold: !!__mdCompHold, stHold: +__mdCompStHold });
+        if (_dbgImeScrollEnabled && _dbgImeScrollEnabled()){
+          const t0 = Date.now();
+          setTimeout(()=>{ try{ _dbgImeScrollSnap('compositionstart+0', { dt: Date.now()-t0 }); }catch{} }, 0);
+          setTimeout(()=>{ try{ _dbgImeScrollSnap('compositionstart+60', { dt: Date.now()-t0 }); }catch{} }, 60);
+          setTimeout(()=>{ try{ _dbgImeScrollSnap('compositionstart+180', { dt: Date.now()-t0 }); }catch{} }, 180);
+        }
+      }catch{}
+
       _imeComposing = true; _lastCompStartTs = Date.now();
       try{ window._imeComposing = true; }catch{}
       // Reset reduced-text visual state at start (safety)
       try{ document.body.classList.remove('ime-reduced-text'); }catch{}
       try{ editor && editor.classList && editor.classList.remove('ime-reduced-text'); }catch{}
+
       try{
         const imeKeyMode = String((window && window.SIX_OPTIONS && window.SIX_OPTIONS.imeSwitchKey) || '').toLowerCase();
 
@@ -34813,8 +35989,9 @@ try{
               try{ const b0 = currentBuffer && currentBuffer(); if (b0 && typeof b0.text==='string') return b0.text; }catch{}
               try{ return String(editor.value||''); }catch{ return ''; }
             })();
-            // Make native IME cost bounded: in markdown-rich, always reduce to a small fixed window.
-            // This targets preedit paint lag (partial characters appearing late) that depends on textarea size.
+            // Reduced-text IME mode is a last-resort perf hack.
+            // NOTE: In markdown-rich, reducing textarea content can cause visible scroll jumps at
+            // composition start/end. Prefer keeping full text unless the buffer is huge (#2011).
             const mdRich0 = (function(){ try{ return !!(_mdRichEnabled && _mdRichEnabled()); }catch{ return false; } })();
             const wrapOn0 = (function(){ try{ return !!(_wrapEnabled && _wrapEnabled()); }catch{ return false; } })();
             const len0 = (fullText0.length|0);
@@ -34823,8 +36000,9 @@ try{
             // - vertical scrollbar can disappear (scrollHeight shrinks)
             // - posInfo / line numbers become relative to the reduced subset
             // - view can jump by several lines at composition start
-            // Keep markdown-rich behavior (always reduce) but make non-md reduction much rarer.
-            const thresh = mdRich0 ? 0 : 200000;
+            // Reduce only for huge buffers (for both md-rich and non-md).
+            // If you need always-on reduction for IME perf, consider re-enabling via a dedicated option.
+            const thresh = 200000;
             if (len0 > (thresh|0)){
               const off0 = Math.max(0, Math.min(fullText0.length|0, _imeSelOff0|0));
               let startOff = off0;
@@ -34886,15 +36064,36 @@ try{
               editor.value = subsetText;
               const newOffset = Math.max(0, Math.min(subsetText.length|0, (off0 - startOff)|0));
               editor.selectionStart = editor.selectionEnd = newOffset;
-              // Keep caret visible in the reduced window (cheap: scan only the reduced subset).
+              // Keep caret visible in the reduced window.
+              // In markdown-rich, preserve the caret's on-screen line position across the overlay->native
+              // switch to avoid 1-line scroll "bounce" at composition start/end (#2011).
               try{
                 const lh = (typeof LINE_HEIGHT==='number' && LINE_HEIGHT>0) ? LINE_HEIGHT : 20;
                 const vis = Math.max(1, Math.floor(((editor && editor.clientHeight)||0) / lh));
                 let subRow = 0;
                 for (let i=0, n=Math.min(newOffset|0, subsetText.length|0); i<n; i++) if (subsetText.charCodeAt(i)===10) subRow++;
-                let topLineNew = (subRow - Math.floor(vis/2))|0;
-                if (topLineNew < 0) topLineNew = 0;
-                editor.scrollTop = (topLineNew * lh)|0;
+
+                if (mdRich0){
+                  let topLineOrig = Math.max(0, Math.floor((_imeOrigScrollTop|0) / lh))|0;
+                  let caretLineInView = ((caretRow|0) - (topLineOrig|0))|0;
+                  if ((caretLineInView|0) < 0) caretLineInView = 0;
+                  if ((caretLineInView|0) > ((vis|0) - 1)) caretLineInView = Math.max(0, (vis|0) - 1);
+
+                  // Clamp desired top line to reduced subset's scrollable range.
+                  let subNl = 0;
+                  for (let i=0, n=(subsetText.length|0); i<n; i++) if (subsetText.charCodeAt(i)===10) subNl++;
+                  const subRows = (subNl|0) + 1;
+                  const maxTop = Math.max(0, (subRows|0) - (vis|0))|0;
+
+                  let topLineNew = ((subRow|0) - (caretLineInView|0))|0;
+                  if ((topLineNew|0) < 0) topLineNew = 0;
+                  if ((topLineNew|0) > (maxTop|0)) topLineNew = maxTop|0;
+                  editor.scrollTop = (topLineNew * lh)|0;
+                } else {
+                  let topLineNew = (subRow - Math.floor(vis/2))|0;
+                  if (topLineNew < 0) topLineNew = 0;
+                  editor.scrollTop = (topLineNew * lh)|0;
+                }
               }catch{}
               try{ editor.scrollLeft = _imeOrigScrollLeft|0; }catch{}
               _imeReducedText = true;
@@ -34907,8 +36106,48 @@ try{
         }
         try{ if (_optDebugKeys) _debugPush({ t:Date.now(), type:'compositionstart', mode:_mode, compData:e.data, ctrl:e.ctrlKey, alt:e.altKey, meta:e.metaKey, isComp:true }); }catch{}
       }catch{}
+
+      // Re-apply scroll hold after the browser had a chance to nudge scrollTop.
+      try{
+        if (__mdCompHold && editor){
+          const st0 = +__mdCompStHold;
+          const sl0 = +__mdCompSlHold;
+          const t0 = Date.now();
+          const apply = ()=>{ try{
+            if (!editor) return;
+            if (!(window && window._imeComposing===true)) return;
+            // Only undo small, unintended scroll nudges (typically 1 line).
+            const stNow = (typeof editor.scrollTop === 'number') ? +editor.scrollTop : 0;
+            const lh = (typeof LINE_HEIGHT==='number' && LINE_HEIGHT>0) ? LINE_HEIGHT : 20;
+            if (Math.abs(stNow - st0) <= (lh*2 + 2)){
+              try{ _setEditorScrollTop(st0, { immediate:true, keepCaret:true, physical:true, why:'md-ime-lock' }); }
+              catch{ try{ editor.scrollTop = st0; }catch{} }
+              try{ editor.scrollLeft = sl0; }catch{}
+            }
+            // Keep ensureScrolloff suppressed briefly while lock is active.
+            try{ if (window) window.__sixSkipEnsureUntil = Date.now() + 480; }catch{}
+          }catch{} };
+          // Apply in multiple timing buckets to catch async auto-scroll.
+          try{ setTimeout(()=>{ try{ if ((Date.now()-t0) < 220) apply(); }catch{} }, 0); }catch{}
+          try{ setTimeout(()=>{ try{ if ((Date.now()-t0) < 220) apply(); }catch{} }, 60); }catch{}
+          try{
+            if (window && window.requestAnimationFrame){
+              requestAnimationFrame(()=>{ requestAnimationFrame(()=>{ try{ if ((Date.now()-t0) < 220) apply(); }catch{} }); });
+            }
+          }catch{}
+        }
+      }catch{}
     });
     editor.addEventListener('compositionend', (e)=>{
+      try{
+        _dbgImeScrollSnap && _dbgImeScrollSnap('compositionend', { data: (e && e.data!=null) ? String(e.data) : null, reduced: !!_imeReducedText, blocked: !!_blockedComposition });
+        if (_dbgImeScrollEnabled && _dbgImeScrollEnabled()){
+          const t0 = Date.now();
+          setTimeout(()=>{ try{ _dbgImeScrollSnap('compositionend+0', { dt: Date.now()-t0 }); }catch{} }, 0);
+          setTimeout(()=>{ try{ _dbgImeScrollSnap('compositionend+60', { dt: Date.now()-t0 }); }catch{} }, 60);
+          setTimeout(()=>{ try{ _dbgImeScrollSnap('compositionend+220', { dt: Date.now()-t0 }); }catch{} }, 220);
+        }
+      }catch{}
       try{
         if (_blockedComposition){
           // 確定は破棄：バッファ内容で強制復元し、選択も戻す
@@ -34958,6 +36197,15 @@ try{
       try{ _requestCaretRender && _requestCaretRender(); }catch{}
       try{ if (_optDebugKeys) _debugPush({ t:Date.now(), type:'compositionend', mode:_mode, compData:e.data, ctrl:e.ctrlKey, alt:e.altKey, meta:e.metaKey, isComp:false }); }catch{}
       try{ setTimeout(()=>{ try{ _refreshCaretMode('post-composition#2'); }catch{} }, 260); }catch{}
+
+      // md-rich: suppress ensureScrolloff briefly after compositionend as well.
+      // Some engines apply a delayed scroll adjustment after IME commit.
+      try{
+        const mdNow = (function(){ try{ return _mdRichActive && _mdRichActive(); }catch{ return false; } })();
+        if (mdNow){
+          try{ if (window) window.__sixSkipEnsureUntil = Date.now() + 520; }catch{}
+        }
+      }catch{}
     });
     editor.addEventListener('compositionupdate', (e)=>{
       try{
@@ -35103,6 +36351,29 @@ try{
 
   editor.addEventListener('keydown', (e)=>{
       try{ if (e && e.shiftKey) _shiftHeld = true; }catch{}
+
+      // #2011/#2012: Pre-capture effective scroll at the earliest possible point on Escape.
+      // Some engines can report isComposing=true spuriously or return early in other guards;
+      // we still want the pre-shift eff for INSERT->NORMAL stabilization.
+      try{
+        if (_mode === 'INSERT'){
+          const esc0 = (typeof _isEsc === 'function') ? !!_isEsc(e) : (e && (e.key === 'Escape' || e.key === 'Esc'));
+          if (esc0){
+            const mdNow0 = (function(){ try{ return !!(_mdRichActive && _mdRichActive()); }catch{ return false; } })();
+            const wrapNow0 = (function(){ try{ return !!(_wrapEnabled && _wrapEnabled()); }catch{ return false; } })();
+            if (mdNow0 && wrapNow0 && typeof _mdEffectiveScrollTopPx === 'function'){
+              const effSnap0 = (_mdEffectiveScrollTopPx({ snap:true })|0);
+              try{
+                if (!window.__sixLeaveInsertEffHold) window.__sixLeaveInsertEffHold = {};
+                window.__sixLeaveInsertEffHold.t = Date.now();
+                window.__sixLeaveInsertEffHold.eff = (effSnap0|0);
+                window.__sixLeaveInsertEffHold.key = 'Escape';
+              }catch{}
+              try{ if (_dbgImeScrollEnabled && _dbgImeScrollEnabled()) _dbgImeScrollSnap && _dbgImeScrollSnap('leave-insert-eff-pre', { effSnap:(effSnap0|0) }); }catch{}
+            }
+          }
+        }
+      }catch{}
 
       // Debug hook (#2006): one-shot snapshot (log first keydown after enabling).
       // Usage (DevTools): window.__sixDbgEnterIndentOnce = true
@@ -35256,6 +36527,35 @@ try{
               }catch{ return; }
             }
           }catch{ return; }
+        }
+      }catch{}
+
+      // (leave-insert-eff-pre capture is intentionally at the top of this handler)
+
+      // #2011/#2012: md-rich + wrap-on can change scrollHeight/physMax on native edits
+      // (e.g., wrapping changes) without changing editor.scrollTop, which shifts the proportional
+      // phys<->eff mapping by ~1 line. Capture the *pre-edit* map here (keydown happens before
+      // beforeinput mutates the textarea) so beforeinput can restore the effective position.
+      try{
+        if (_mode === 'INSERT' && editor && typeof editor.scrollTop === 'number'){
+          const mdNow = (function(){ try{ return !!(_mdRichActive && _mdRichActive()); }catch{ return false; } })();
+          const wrapNow = (function(){ try{ return !!(_wrapEnabled && _wrapEnabled()); }catch{ return false; } })();
+          const isComp = !!(e && e.isComposing===true) || !!(window && window._imeComposing===true);
+          if (mdNow && wrapNow && !isComp && !(e && (e.ctrlKey||e.altKey||e.metaKey))){
+            const k = String((e && e.key) || '');
+            const isEditKey = (
+              (k && k.length === 1) ||
+              k === 'Backspace' || k === 'Delete' || k === 'Enter'
+            );
+            if (isEditKey && k !== 'Escape' && k !== 'Process'){
+              const st0 = (editor.scrollTop|0);
+              let m0 = null;
+              try{ if (typeof _mdScrollMapGetRaw === 'function') m0 = _mdScrollMapGetRaw(); }catch{ m0 = null; }
+              if (m0 && Number.isFinite(m0.physMax) && Number.isFinite(m0.effMax)){
+                try{ if (window) window.__sixMdWrapPreEditHold = { t:Date.now(), st:(st0|0), m:m0 }; }catch{}
+              }
+            }
+          }
         }
       }catch{}
 
@@ -38427,7 +39727,15 @@ try{
         const msPerLine = (function(){
           try{
             const o = (window && window.SIX_OPTIONS) ? window.SIX_OPTIONS : null;
-            const v = o && (o.JK_MS_PER_LINE ?? o.jkMsPerLine ?? o.jk_ms_per_line);
+            const v = (function(){
+              try{
+                if (!o) return null;
+                if (o.JK_MS_PER_LINE != null) return o.JK_MS_PER_LINE;
+                if (o.jkMsPerLine != null) return o.jkMsPerLine;
+                if (o.jk_ms_per_line != null) return o.jk_ms_per_line;
+                return null;
+              }catch{ return null; }
+            })();
             const m = (typeof v === 'number') ? v : parseFloat(String(v||''));
             return (Number.isFinite(m) && m >= 5 && m <= 200) ? m : 45;
           }catch{ return 45; }
@@ -38527,7 +39835,15 @@ try{
         const msPerLine = (function(){
           try{
             const o = (window && window.SIX_OPTIONS) ? window.SIX_OPTIONS : null;
-            const v = o && (o.JK_MS_PER_LINE ?? o.jkMsPerLine ?? o.jk_ms_per_line);
+            const v = (function(){
+              try{
+                if (!o) return null;
+                if (o.JK_MS_PER_LINE != null) return o.JK_MS_PER_LINE;
+                if (o.jkMsPerLine != null) return o.jkMsPerLine;
+                if (o.jk_ms_per_line != null) return o.jk_ms_per_line;
+                return null;
+              }catch{ return null; }
+            })();
             const m = (typeof v === 'number') ? v : parseFloat(String(v||''));
             return (Number.isFinite(m) && m >= 5 && m <= 200) ? m : 45;
           }catch{ return 45; }
@@ -39851,7 +41167,15 @@ try{
             const msPerLine = (function(){
               try{
                 const o = (window && window.SIX_OPTIONS) ? window.SIX_OPTIONS : null;
-                const v = o && (o.JK_MS_PER_LINE ?? o.jkMsPerLine ?? o.jk_ms_per_line);
+                const v = (function(){
+                  try{
+                    if (!o) return null;
+                    if (o.JK_MS_PER_LINE != null) return o.JK_MS_PER_LINE;
+                    if (o.jkMsPerLine != null) return o.jkMsPerLine;
+                    if (o.jk_ms_per_line != null) return o.jk_ms_per_line;
+                    return null;
+                  }catch{ return null; }
+                })();
                 if (v == null) return null;
                 const m = (typeof v === 'number') ? v : parseFloat(String(v||''));
                 return (Number.isFinite(m) && m >= 5 && m <= 5000) ? m : null;
@@ -39942,7 +41266,15 @@ try{
                 try{
                   if (!_scanHold.fixedSpeed){
                     const o = (window && window.SIX_OPTIONS) ? window.SIX_OPTIONS : null;
-                    const v = o && (o.JK_MS_PER_LINE ?? o.jkMsPerLine ?? o.jk_ms_per_line);
+                    const v = (function(){
+                      try{
+                        if (!o) return null;
+                        if (o.JK_MS_PER_LINE != null) return o.JK_MS_PER_LINE;
+                        if (o.jkMsPerLine != null) return o.jkMsPerLine;
+                        if (o.jk_ms_per_line != null) return o.jk_ms_per_line;
+                        return null;
+                      }catch{ return null; }
+                    })();
                     const m = (typeof v === 'number') ? v : parseFloat(String(v||''));
                     if (Number.isFinite(m) && m >= 5 && m <= 5000){
                       const nowTs = (Number.isFinite(ts) ? ts : ((performance && performance.now) ? performance.now() : Date.now()));
@@ -41429,6 +42761,25 @@ try{
 
               const esc = (typeof _isEsc === 'function') ? _isEsc(e) : (e && e.key === 'Escape');
               if (!esc) return;
+
+              // #2011/#2012: If Esc is handled here (never reaches editor keydown), pre-capture
+              // the current effective scroll position so INSERT->NORMAL can stabilize the pre-shift eff.
+              try{
+                if (_mode === 'INSERT'){
+                  const mdNow0 = (function(){ try{ return !!(_mdRichActive && _mdRichActive()); }catch{ return false; } })();
+                  const wrapNow0 = (function(){ try{ return !!(_wrapEnabled && _wrapEnabled()); }catch{ return false; } })();
+                  if (mdNow0 && wrapNow0 && typeof _mdEffectiveScrollTopPx === 'function'){
+                    const effSnap0 = (_mdEffectiveScrollTopPx({ snap:true })|0);
+                    try{
+                      if (!window.__sixLeaveInsertEffHold) window.__sixLeaveInsertEffHold = {};
+                      window.__sixLeaveInsertEffHold.t = Date.now();
+                      window.__sixLeaveInsertEffHold.eff = (effSnap0|0);
+                      window.__sixLeaveInsertEffHold.key = 'Escape(emergency)';
+                    }catch{}
+                    try{ if (_dbgImeScrollEnabled && _dbgImeScrollEnabled()) _dbgImeScrollSnap && _dbgImeScrollSnap('leave-insert-eff-pre', { effSnap:(effSnap0|0), src:'emergency-esc' }); }catch{}
+                  }
+                }
+              }catch{}
 
               // If colorpicker is waiting, Esc cancels it first.
               try{

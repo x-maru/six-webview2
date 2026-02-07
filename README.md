@@ -38,6 +38,42 @@
 - prompt#666あたりの、"XYZ␊a"のaをNORMALの`s`や`cl`でcaretがXに飛んでしまい␊が消失する現象がなかなか修正完了しないので「既知の不具合」としてペンディング中。
 - BOMの判定がうまく行かない(ことの方が多い)。_six.jsなどVS Codeで見るとBOMらしいけどsixではBOMなしと判定される
 
+## Troubleshooting: markdown+wrap の「意図しない 1 行スクロール」(#2011/#2012)
+
+### 現象
+- markdown on + wrap on のとき、
+  - IME の未確定開始/確定、または
+  - INSERT で最初の 1 文字確定
+ で `scrollTop` がちょうど 1 行ぶん動くように見える。
+
+### 再現手順(最小)
+1) `:set md` と `:set wrap` を有効
+2) ある程度長いファイルで、中間付近へ移動
+3) NORMAL で `i` → 1 文字入力 → `Esc` を数回
+4) IME 版は IME ON の状態で同様に実行（未確定開始/確定のタイミングを見る）
+
+### デバッグログの有効化
+DevTools で以下を実行（普段は OFF 推奨）:
+```js
+window.SIX_OPTIONS = window.SIX_OPTIONS || {};
+window.SIX_OPTIONS.DEBUG_IME_SCROLL = true;
+window.SIX_OPTIONS.DEBUG_IME_SCROLL_STACK = true; // 重いので必要な時だけ
+```
+
+### ログの取り方
+直近だけ見たいとき:
+```js
+copy(window.__sixImeScrollLog.slice(-80));
+```
+
+### ログの見方（最低限）
+- `type:'scroll'` が実際のスクロールイベント。
+- `type:'progScroll'` が six のプログラム起因スクロール。
+- `progScroll.effClamped:true` は「effective 値が effMax でクランプされた」を意味する。
+  - `effClamped:false` なら、その `effIn` は *意図した effective 入力*で clamping は起きていない。
+- 1 行スクロールの疑いは、`scroll.st` の差分がだいたい `LINE_HEIGHT` 付近のもの。
+
+
 ## 使い方
 ```
 ./six_wrap.ps1
@@ -64,7 +100,7 @@
 
 ## 履歴
 - 2025.11.25 v0.9 初版
-- v0.9→v0.92
+- v0.9→v0.9.3
   - タブをドラッグ&ドロップで入れ替えられるようにした。
   - :b popupでの一覧表示を「ファイル名　(パス名)」に変更した。
   - 右上/右下のオーバーレイパレットを普段は透明に近い半透明にして、マウスホバー時だけはっきり見えるようにした。
@@ -101,7 +137,7 @@
     - CommonMarkをベースにしたGFM(Github Flavored Markdown)に基本的に準拠している。未実装はテーブルとTask List。
   - Markdownの順序付きリスト表示で、番号の自動インクリメント表示(`md_autoIncrement`)を全バッファ共通の設定としてセッション情報に保存/復元するようにした。
     - `:set md_autoIncrement`, `:set nomd_autoIncrement`, `:set md_autoIncrement!`, `:set md_autoIncrement?`
-- 2026.02.04 v0.92
+- 2026.02.15 v0.9.3 (prompt#2013前)
 
 ## ライセンス / 出典
 Vimがお手本。
