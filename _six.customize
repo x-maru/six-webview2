@@ -38,7 +38,7 @@ window.SIX_OPTIONS = {
   jkScrollDirection: 'reverse', // `Alt+j`がPageDown方向のスクロールになるのが'normal'(デフォルト)
   altScrollSpeedPxPerMs: 0.3,    // `Alt+j`/`Alt+k`のスピード。0.5でだいたい500px/s
   md_autoIncrement: true,
-  JK_MS_PER_LINE: 120  / `j`,`k`長押しでのスクロール速度。値を小さくすると速く(粗く)なる
+  JK_MS_PER_LINE: 120  // `j`,`k`長押しでのスクロール速度。値を小さくすると速く(粗く)なる
 };
 
 // Theme definition (色指定。基本的に全項目必須で、未定義時に代替は一切せず一律yellowとする)
